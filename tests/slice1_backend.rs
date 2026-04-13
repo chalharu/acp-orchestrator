@@ -153,8 +153,7 @@ async fn expect_next_event(stream: &mut SseStream) -> Result<StreamEvent> {
     let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
         .await
         .context("timed out waiting for SSE event")?;
-    let next = next.context("SSE stream ended unexpectedly")?;
-    next
+    next.context("SSE stream ended unexpectedly")?
 }
 
 struct TestServer {

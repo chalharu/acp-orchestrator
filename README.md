@@ -36,8 +36,8 @@ cargo run --bin acp -- chat --new
 Type a prompt, wait for the streamed assistant reply, and leave the REPL with
 `/quit`.
 
-The current slice uses a mock conversation engine behind an HTTP + SSE backend
-so the CLI contract can be exercised before ACP worker integration lands.
+The current slice uses a mock conversation engine behind an HTTP + SSE backend.
+This keeps the CLI contract testable before ACP worker integration lands.
 
 If you want a long-running backend for repeated manual experiments, start it in
 one terminal:

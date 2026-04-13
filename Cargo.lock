@@ -7,6 +7,8 @@ name = "acp-cli"
 version = "0.1.0"
 dependencies = [
  "acp-contracts",
+ "acp-mock",
+ "acp-web-backend",
  "chrono",
  "clap",
  "dirs",
@@ -35,6 +37,7 @@ dependencies = [
  "acp-contracts",
  "axum",
  "clap",
+ "reqwest",
  "snafu",
  "tokio",
  "tracing",

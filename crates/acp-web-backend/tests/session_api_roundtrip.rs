@@ -1,15 +1,15 @@
-use std::{pin::Pin, time::Duration};
+use std::{future::pending, pin::Pin, time::Duration};
 
 use acp_contracts::{
     CreateSessionResponse, MessageRole, PromptRequest, StreamEvent, StreamEventPayload,
 };
 use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
-use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown};
+use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
 use anyhow::{Context, Result};
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, StatusCode};
-use tokio::{net::TcpListener, sync::oneshot, time::sleep};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle, time::sleep};
 
 type SseStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
@@ -151,6 +151,160 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_url: String::new(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+    let mut events = stack.open_events("alice", &session.session.id).await?;
+
+    let snapshot = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        snapshot.payload,
+        StreamEventPayload::SessionSnapshot { .. }
+    ));
+
+    stack
+        .submit_prompt("alice", &session.session.id, "history please")
+        .await?;
+    let _ = expect_next_event(&mut events).await?;
+    let _ = expect_next_event(&mut events).await?;
+
+    let history = stack.session_history("alice", &session.session.id).await?;
+    assert_eq!(history.messages.len(), 2);
+    assert!(matches!(history.messages[0].role, MessageRole::User));
+    assert_eq!(history.messages[0].text, "history please");
+    assert!(matches!(history.messages[1].role, MessageRole::Assistant));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_url: "http://127.0.0.1:9".to_string(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+    let mut events = stack.open_events("alice", &session.session.id).await?;
+
+    let snapshot = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        snapshot.payload,
+        StreamEventPayload::SessionSnapshot { .. }
+    ));
+
+    stack
+        .submit_prompt("alice", &session.session.id, "this will fail")
+        .await?;
+
+    let user_message = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        user_message.payload,
+        StreamEventPayload::ConversationMessage { message }
+            if matches!(message.role, MessageRole::User)
+    ));
+
+    let status = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        status.payload,
+        StreamEventPayload::Status { message } if message.starts_with("mock request failed:")
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_url: "http://127.0.0.1:9".to_string(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+    let mut events = stack.open_events("alice", &session.session.id).await?;
+
+    for index in 0..80 {
+        stack
+            .submit_prompt("alice", &session.session.id, &format!("prompt {index}"))
+            .await?;
+    }
+    sleep(Duration::from_millis(200)).await;
+
+    let snapshot = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        snapshot.payload,
+        StreamEventPayload::SessionSnapshot { .. }
+    ));
+
+    let resumed = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        resumed.payload,
+        StreamEventPayload::ConversationMessage { .. } | StreamEventPayload::Status { .. }
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_mock_server_reports_health() -> Result<()> {
+    let client = Client::builder().build().context("building test client")?;
+    let (base_url, handle) = spawn_direct_mock_server().await?;
+
+    wait_for_health(&client, &base_url).await?;
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_backend_server_reports_health() -> Result<()> {
+    let client = Client::builder().build().context("building test client")?;
+    let (base_url, handle) = spawn_direct_backend_server("http://127.0.0.1:9".to_string()).await?;
+
+    wait_for_health(&client, &base_url).await?;
+
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
+    let client = Client::builder().build().context("building test client")?;
+    let (base_url, shutdown, handle) = spawn_graceful_mock_server().await?;
+
+    wait_for_health(&client, &base_url).await?;
+    let _ = shutdown.send(());
+    handle
+        .await
+        .context("joining graceful mock task")?
+        .context("mock server should stop cleanly")?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn graceful_backend_server_shutdown_completes_cleanly() -> Result<()> {
+    let client = Client::builder().build().context("building test client")?;
+    let (base_url, shutdown, handle) =
+        spawn_graceful_backend_server("http://127.0.0.1:9".to_string()).await?;
+
+    wait_for_health(&client, &base_url).await?;
+    let _ = shutdown.send(());
+    handle
+        .await
+        .context("joining graceful backend task")?
+        .context("backend server should stop cleanly")?;
+
+    Ok(())
+}
+
 async fn expect_next_event(stream: &mut SseStream) -> Result<StreamEvent> {
     let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
         .await
@@ -167,27 +321,30 @@ struct TestStack {
 
 impl TestStack {
     async fn spawn(mut backend_config: ServerConfig) -> Result<Self> {
-        let mock_listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("binding mock listener")?;
-        let mock_address = mock_listener.local_addr().context("reading mock address")?;
-        let (mock_shutdown_tx, mock_shutdown_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            let shutdown = async move {
-                let _ = mock_shutdown_rx.await;
-            };
-            if let Err(error) =
-                serve_mock_with_shutdown(mock_listener, MockConfig::default(), shutdown).await
-            {
-                eprintln!("test mock stopped: {error}");
-            }
-        });
-
-        let mock_url = format!("http://{mock_address}");
         let client = Client::builder().build().context("building test client")?;
-        wait_for_health(&client, &mock_url).await?;
+        let mut mock_shutdown = None;
+        if backend_config.mock_url.is_empty() {
+            let mock_listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .context("binding mock listener")?;
+            let mock_address = mock_listener.local_addr().context("reading mock address")?;
+            let (mock_shutdown_tx, mock_shutdown_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = mock_shutdown_rx.await;
+                };
+                if let Err(error) =
+                    serve_mock_with_shutdown(mock_listener, MockConfig::default(), shutdown).await
+                {
+                    eprintln!("test mock stopped: {error}");
+                }
+            });
 
-        backend_config.mock_url = mock_url;
+            backend_config.mock_url = format!("http://{mock_address}");
+            wait_for_health(&client, &backend_config.mock_url).await?;
+            mock_shutdown = Some(mock_shutdown_tx);
+        }
+
         let state = AppState::new(backend_config).context("building backend state")?;
         let backend_listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -200,7 +357,8 @@ impl TestStack {
             let shutdown = async move {
                 let _ = backend_shutdown_rx.await;
             };
-            if let Err(error) = serve_with_shutdown(backend_listener, state, shutdown).await {
+            if let Err(error) = serve_backend_with_shutdown(backend_listener, state, shutdown).await
+            {
                 eprintln!("test backend stopped: {error}");
             }
         });
@@ -212,7 +370,7 @@ impl TestStack {
             backend_url,
             client,
             backend_shutdown: Some(backend_shutdown_tx),
-            mock_shutdown: Some(mock_shutdown_tx),
+            mock_shutdown,
         })
     }
 
@@ -260,6 +418,26 @@ impl TestStack {
             .error_for_status()
             .context("close session returned an error")?;
         Ok(())
+    }
+
+    async fn session_history(
+        &self,
+        token: &str,
+        session_id: &str,
+    ) -> Result<acp_contracts::SessionHistoryResponse> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/sessions/{session_id}/history",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("loading test history")?
+            .error_for_status()
+            .context("history request returned an error")?;
+        response.json().await.context("decoding history response")
     }
 
     async fn open_events(&self, token: &str, session_id: &str) -> Result<SseStream> {
@@ -311,4 +489,82 @@ async fn wait_for_health(client: &Client, base_url: &str) -> Result<()> {
     Err(anyhow::anyhow!(
         "health check did not succeed for {health_url}"
     ))
+}
+
+async fn spawn_direct_mock_server() -> Result<(String, JoinHandle<std::io::Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding direct mock listener")?;
+    let address = listener
+        .local_addr()
+        .context("reading direct mock address")?;
+    let handle = tokio::spawn(async move {
+        serve_mock_with_shutdown(listener, MockConfig::default(), pending()).await
+    });
+
+    Ok((format!("http://{address}"), handle))
+}
+
+async fn spawn_direct_backend_server(
+    mock_url: String,
+) -> Result<(String, JoinHandle<std::io::Result<()>>)> {
+    let state = AppState::new(ServerConfig {
+        session_cap: 8,
+        mock_url,
+    })
+    .context("building direct backend state")?;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding direct backend listener")?;
+    let address = listener
+        .local_addr()
+        .context("reading direct backend address")?;
+    let handle =
+        tokio::spawn(async move { serve_backend_with_shutdown(listener, state, pending()).await });
+
+    Ok((format!("http://{address}"), handle))
+}
+
+async fn spawn_graceful_mock_server()
+-> Result<(String, oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding graceful mock listener")?;
+    let address = listener
+        .local_addr()
+        .context("reading graceful mock address")?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let shutdown = async move {
+            let _ = shutdown_rx.await;
+        };
+        serve_mock_with_shutdown(listener, MockConfig::default(), shutdown).await
+    });
+
+    Ok((format!("http://{address}"), shutdown_tx, handle))
+}
+
+async fn spawn_graceful_backend_server(
+    mock_url: String,
+) -> Result<(String, oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)> {
+    let state = AppState::new(ServerConfig {
+        session_cap: 8,
+        mock_url,
+    })
+    .context("building graceful backend state")?;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("binding graceful backend listener")?;
+    let address = listener
+        .local_addr()
+        .context("reading graceful backend address")?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let shutdown = async move {
+            let _ = shutdown_rx.await;
+        };
+        serve_backend_with_shutdown(listener, state, shutdown).await
+    });
+
+    Ok((format!("http://{address}"), shutdown_tx, handle))
 }

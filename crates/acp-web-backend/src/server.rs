@@ -75,12 +75,6 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
-    let address = listener.local_addr()?;
-    info!("starting web backend on {address}");
-    axum::serve(listener, app(state)).await
-}
-
 pub async fn serve_with_shutdown<F>(
     listener: TcpListener,
     state: AppState,
@@ -187,12 +181,8 @@ async fn stream_session_events(
     let initial_event = stream::once(async move {
         Ok::<Event, Infallible>(to_sse_event(StreamEvent::snapshot(snapshot)))
     });
-    let updates = BroadcastStream::new(receiver).filter_map(|result| async move {
-        match result {
-            Ok(event) => Some(Ok::<Event, Infallible>(to_sse_event(event))),
-            Err(_) => None,
-        }
-    });
+    let updates = BroadcastStream::new(receiver)
+        .filter_map(|result| async move { result.ok().map(to_sse_event).map(Ok) });
 
     let stream: SseStream = Box::pin(initial_event.chain(updates));
 
@@ -221,10 +211,8 @@ fn dispatch_assistant_request(mock_client: MockClient, pending: PendingPrompt) {
 
 fn to_sse_event(event: StreamEvent) -> Event {
     let sequence = event.sequence.to_string();
-    let payload = match serde_json::to_string(&event) {
-        Ok(payload) => payload,
-        Err(_) => "{\"kind\":\"status\",\"message\":\"failed to serialize event\"}".to_string(),
-    };
+    let payload =
+        serde_json::to_string(&event).expect("stream events should always serialize successfully");
 
     Event::default()
         .event(event.event_name())
@@ -279,6 +267,144 @@ impl From<SessionStoreError> for AppError {
             SessionStoreError::SessionCapReached => {
                 Self::TooManyRequests(error.message().to_string())
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_server_config_points_to_the_local_mock() {
+        let config = ServerConfig::default();
+
+        assert_eq!(config.session_cap, 8);
+        assert_eq!(config.mock_url, "http://127.0.0.1:8090");
+    }
+
+    #[test]
+    fn app_errors_map_to_the_expected_status_codes() {
+        let cases = [
+            (
+                AppError::Unauthorized("auth".to_string()),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                AppError::Forbidden("forbidden".to_string()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                AppError::NotFound("missing".to_string()),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::BadRequest("bad".to_string()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::Conflict("conflict".to_string()),
+                StatusCode::CONFLICT,
+            ),
+            (
+                AppError::TooManyRequests("too many".to_string()),
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                AppError::Internal("internal".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (error, expected_status) in cases {
+            let response = error.into_response();
+            assert_eq!(response.status(), expected_status);
+        }
+    }
+
+    #[test]
+    fn auth_errors_become_unauthorized_responses() {
+        let missing: AppError = AuthError::MissingAuthorization.into();
+        let invalid: AppError = AuthError::InvalidAuthorization.into();
+
+        assert!(matches!(
+            missing,
+            AppError::Unauthorized(message) if message == "missing bearer token"
+        ));
+        assert!(matches!(
+            invalid,
+            AppError::Unauthorized(message) if message == "invalid bearer token"
+        ));
+    }
+
+    #[test]
+    fn session_store_errors_map_to_matching_http_categories() {
+        let cases = [
+            (
+                SessionStoreError::NotFound,
+                "session not found",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                SessionStoreError::Forbidden,
+                "session owner mismatch",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                SessionStoreError::Closed,
+                "session already closed",
+                StatusCode::CONFLICT,
+            ),
+            (
+                SessionStoreError::EmptyPrompt,
+                "prompt must not be empty",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                SessionStoreError::SessionCapReached,
+                "session cap reached for principal",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ];
+
+        for (source, message, expected_status) in cases {
+            let error: AppError = match source.clone() {
+                SessionStoreError::NotFound => SessionStoreError::NotFound.into(),
+                SessionStoreError::Forbidden => SessionStoreError::Forbidden.into(),
+                SessionStoreError::Closed => SessionStoreError::Closed.into(),
+                SessionStoreError::EmptyPrompt => SessionStoreError::EmptyPrompt.into(),
+                SessionStoreError::SessionCapReached => SessionStoreError::SessionCapReached.into(),
+            };
+            let response = error.into_response();
+            assert_eq!(response.status(), expected_status);
+
+            let converted: AppError = match source {
+                SessionStoreError::NotFound => SessionStoreError::NotFound.into(),
+                SessionStoreError::Forbidden => SessionStoreError::Forbidden.into(),
+                SessionStoreError::Closed => SessionStoreError::Closed.into(),
+                SessionStoreError::EmptyPrompt => SessionStoreError::EmptyPrompt.into(),
+                SessionStoreError::SessionCapReached => SessionStoreError::SessionCapReached.into(),
+            };
+
+            assert!(
+                matches!(
+                    converted,
+                    AppError::NotFound(ref value) if expected_status == StatusCode::NOT_FOUND && value == message
+                ) || matches!(
+                    converted,
+                    AppError::Forbidden(ref value) if expected_status == StatusCode::FORBIDDEN && value == message
+                ) || matches!(
+                    converted,
+                    AppError::Conflict(ref value) if expected_status == StatusCode::CONFLICT && value == message
+                ) || matches!(
+                    converted,
+                    AppError::BadRequest(ref value) if expected_status == StatusCode::BAD_REQUEST && value == message
+                ) || matches!(
+                    converted,
+                    AppError::TooManyRequests(ref value)
+                        if expected_status == StatusCode::TOO_MANY_REQUESTS && value == message
+                )
+            );
         }
     }
 }

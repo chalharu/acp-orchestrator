@@ -341,3 +341,148 @@ impl SessionHandle {
         let _ = self.sender.send(event);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_history_includes_completed_replies() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        pending.complete_with_reply("hello back".to_string()).await;
+
+        let history = store
+            .session_history("alice", &session.id)
+            .await
+            .expect("session history should load");
+
+        assert_eq!(history.len(), 2);
+        assert!(matches!(history[0].role, MessageRole::User));
+        assert_eq!(history[0].text, "hello");
+        assert!(matches!(history[1].role, MessageRole::Assistant));
+        assert_eq!(history[1].text, "hello back");
+    }
+
+    #[tokio::test]
+    async fn empty_prompts_are_rejected() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+
+        let error = store
+            .submit_prompt("alice", &session.id, "   ".to_string())
+            .await
+            .err()
+            .expect("empty prompt should fail");
+
+        assert_eq!(error, SessionStoreError::EmptyPrompt);
+        assert_eq!(error.message(), "prompt must not be empty");
+    }
+
+    #[tokio::test]
+    async fn pending_prompts_can_broadcast_status_updates() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let (_snapshot, mut receiver) = store
+            .session_events("alice", &session.id)
+            .await
+            .expect("subscribing should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        let user_event = receiver.recv().await.expect("user event should arrive");
+        assert!(matches!(
+            user_event.payload,
+            StreamEventPayload::ConversationMessage { message }
+                if matches!(message.role, MessageRole::User)
+        ));
+
+        pending.complete_with_status("mock request failed").await;
+
+        let status_event = receiver.recv().await.expect("status event should arrive");
+        assert!(matches!(
+            status_event.payload,
+            StreamEventPayload::Status { message } if message == "mock request failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_status_updates_are_ignored_after_session_close() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let (_snapshot, mut receiver) = store
+            .session_events("alice", &session.id)
+            .await
+            .expect("subscribing should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        let _ = receiver.recv().await.expect("user event should arrive");
+        let _ = store
+            .close_session("alice", &session.id)
+            .await
+            .expect("closing should succeed");
+        let closed_event = receiver.recv().await.expect("close event should arrive");
+        assert!(matches!(
+            closed_event.payload,
+            StreamEventPayload::SessionClosed { .. }
+        ));
+
+        pending.complete_with_status("should be ignored").await;
+
+        let no_follow_up =
+            tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await;
+        assert!(
+            no_follow_up.is_err(),
+            "no extra status event should be broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_sessions_reject_new_prompts_and_second_closes() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        store
+            .close_session("alice", &session.id)
+            .await
+            .expect("closing should succeed");
+
+        let prompt_error = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .err()
+            .expect("closed sessions should reject prompts");
+        assert_eq!(prompt_error, SessionStoreError::Closed);
+        assert_eq!(prompt_error.message(), "session already closed");
+
+        let close_error = store
+            .close_session("alice", &session.id)
+            .await
+            .expect_err("closing twice should fail");
+        assert_eq!(close_error, SessionStoreError::Closed);
+    }
+}

@@ -120,3 +120,33 @@ impl StreamEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_closed_events_use_the_closed_event_name() {
+        let event = StreamEvent {
+            sequence: 7,
+            payload: StreamEventPayload::SessionClosed {
+                session_id: "s_test".to_string(),
+                reason: "closed by user".to_string(),
+            },
+        };
+
+        assert_eq!(event.event_name(), "session.closed");
+    }
+
+    #[test]
+    fn status_helper_builds_a_status_event() {
+        let event = StreamEvent::status(9, "mock request failed");
+
+        assert_eq!(event.event_name(), "status");
+        assert_eq!(event.sequence, 9);
+        assert!(matches!(
+            event.payload,
+            StreamEventPayload::Status { message } if message == "mock request failed"
+        ));
+    }
+}

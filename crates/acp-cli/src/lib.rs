@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use acp_contracts::{
@@ -212,11 +212,11 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
     let events_url = format!("{server_url}/api/v1/sessions/{}/events", session.id);
     let event_client = client.clone();
     let auth_token = args.auth_token.clone();
-    let event_task = tokio::spawn(async move {
-        if let Err(error) = stream_events(event_client, events_url, auth_token).await {
-            eprintln!("[status] event stream ended: {error}");
-        }
-    });
+    let event_task = tokio::spawn(stream_events_to_stderr(
+        event_client,
+        events_url,
+        auth_token,
+    ));
 
     loop {
         let Some(line) = read_prompt_line().await? else {
@@ -459,6 +459,12 @@ async fn stream_events(client: Client, events_url: String, auth_token: String) -
     Ok(())
 }
 
+async fn stream_events_to_stderr(client: Client, events_url: String, auth_token: String) {
+    if let Err(error) = stream_events(client, events_url, auth_token).await {
+        eprintln!("[status] event stream ended: {error}");
+    }
+}
+
 fn render_event(event: &StreamEvent) {
     match &event.payload {
         StreamEventPayload::SessionSnapshot { session } => {
@@ -490,12 +496,21 @@ fn render_message(role: MessageRole, text: &str) {
 }
 
 fn recent_sessions_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("ACP_RECENT_SESSIONS_PATH") {
+    recent_sessions_path_from(
+        std::env::var_os("ACP_RECENT_SESSIONS_PATH"),
+        dirs::data_local_dir(),
+    )
+}
+
+fn recent_sessions_path_from(
+    explicit_path: Option<OsString>,
+    data_local_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = explicit_path {
         return Ok(PathBuf::from(path));
     }
 
-    let mut directory =
-        dirs::data_local_dir().ok_or_else(|| MissingRecentSessionDirectorySnafu.build())?;
+    let mut directory = data_local_dir.ok_or_else(|| MissingRecentSessionDirectorySnafu.build())?;
     directory.push("acp-orchestrator");
     directory.push("recent-sessions.json");
     Ok(directory)
@@ -514,13 +529,21 @@ fn load_recent_sessions() -> Result<Vec<RecentSessionEntry>> {
 
 fn save_recent_sessions(entries: &[RecentSessionEntry]) -> Result<()> {
     let path = recent_sessions_path()?;
-    if let Some(parent) = path.parent() {
-        let parent = parent.to_path_buf();
-        fs::create_dir_all(&parent).context(CreateRecentSessionsDirectorySnafu { path: parent })?;
-    }
+    create_recent_sessions_parent(&path)?;
 
     let serialized = serde_json::to_string_pretty(entries).context(SerializeRecentSessionsSnafu)?;
     fs::write(&path, serialized).context(WriteRecentSessionsSnafu { path })?;
+    Ok(())
+}
+
+fn create_recent_sessions_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let parent = parent.to_path_buf();
+        fs::create_dir_all(&parent).context(CreateRecentSessionsDirectorySnafu { path: parent })?;
+    }
     Ok(())
 }
 
@@ -536,4 +559,170 @@ fn remove_recent_session(session_id: &str) -> Result<()> {
     let mut entries = load_recent_sessions()?;
     entries.retain(|entry| entry.session_id != session_id);
     save_recent_sessions(&entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use chrono::TimeZone;
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+    #[tokio::test]
+    async fn ensure_success_uses_http_reason_when_error_body_is_not_json() {
+        let url = spawn_raw_http_server(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nbad gateway",
+        )
+        .await;
+        let client = Client::builder().build().expect("client should build");
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .expect("request should succeed");
+
+        let error = ensure_success(response, "open event stream")
+            .await
+            .expect_err("plain text errors should fail");
+
+        assert!(matches!(
+            error,
+            CliError::HttpStatus { action, status, message }
+                if action == "open event stream"
+                    && status == StatusCode::BAD_GATEWAY
+                    && message == "Bad Gateway"
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_events_finishes_when_the_server_closes_the_stream() {
+        let url = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"sequence\":1,\"kind\":\"status\",\"message\":\"done\"}\n\n",
+        )
+        .await;
+        let client = Client::builder().build().expect("client should build");
+
+        stream_events(client, url, "developer".to_string())
+            .await
+            .expect("single-event streams should complete cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_events_surfaces_event_stream_read_errors() {
+        let url = spawn_raw_http_server_bytes(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: \xff\n\n"
+                .to_vec(),
+        )
+        .await;
+        let client = Client::builder().build().expect("client should build");
+
+        let error = stream_events(client, url, "developer".to_string())
+            .await
+            .expect_err("invalid event streams should fail");
+
+        assert!(matches!(error, CliError::ReadEventStream { .. }));
+    }
+
+    #[tokio::test]
+    async fn stream_events_to_stderr_returns_after_stream_failures() {
+        let url = spawn_raw_http_server_bytes(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: \xff\n\n"
+                .to_vec(),
+        )
+        .await;
+        let client = Client::builder().build().expect("client should build");
+
+        stream_events_to_stderr(client, url, "developer".to_string()).await;
+    }
+
+    #[test]
+    fn render_event_covers_all_display_variants() {
+        let created_at = Utc
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp should be valid");
+        let snapshot = SessionSnapshot {
+            id: "s_test".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 2,
+            messages: vec![acp_contracts::ConversationMessage {
+                id: "m_test".to_string(),
+                role: MessageRole::Assistant,
+                text: "hello".to_string(),
+                created_at,
+            }],
+        };
+
+        render_event(&StreamEvent {
+            sequence: 2,
+            payload: StreamEventPayload::SessionSnapshot { session: snapshot },
+        });
+        render_event(&StreamEvent {
+            sequence: 3,
+            payload: StreamEventPayload::SessionClosed {
+                session_id: "s_test".to_string(),
+                reason: "done".to_string(),
+            },
+        });
+        render_event(&StreamEvent::status(4, "working"));
+    }
+
+    #[test]
+    fn recent_sessions_path_uses_the_explicit_path_first() {
+        let path = recent_sessions_path_from(
+            Some(OsString::from("/tmp/acp-test.json")),
+            Some(PathBuf::from("/ignored")),
+        )
+        .expect("explicit paths should win");
+
+        assert_eq!(path, PathBuf::from("/tmp/acp-test.json"));
+    }
+
+    #[test]
+    fn recent_sessions_path_falls_back_to_the_local_data_directory() {
+        let path = recent_sessions_path_from(None, Some(PathBuf::from("/tmp/local-data")))
+            .expect("fallback data dir should work");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/local-data/acp-orchestrator/recent-sessions.json")
+        );
+    }
+
+    #[test]
+    fn recent_sessions_path_requires_a_data_directory_when_no_override_is_set() {
+        let error =
+            recent_sessions_path_from(None, None).expect_err("missing data dir should fail");
+
+        assert!(matches!(error, CliError::MissingRecentSessionDirectory));
+    }
+
+    #[test]
+    fn create_recent_sessions_parent_skips_paths_without_a_directory_component() {
+        create_recent_sessions_parent(Path::new(""))
+            .expect("empty paths should not require directory creation");
+    }
+
+    async fn spawn_raw_http_server(response: &'static str) -> String {
+        spawn_raw_http_server_bytes(response.as_bytes().to_vec()).await
+    }
+
+    async fn spawn_raw_http_server_bytes(payload: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("server should bind");
+        let address = listener
+            .local_addr()
+            .expect("server address should be readable");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            stream
+                .write_all(&payload)
+                .await
+                .expect("response should write");
+        });
+
+        format!("http://{address}")
+    }
 }

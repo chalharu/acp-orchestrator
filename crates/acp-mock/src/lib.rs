@@ -34,12 +34,6 @@ pub fn app(config: MockConfig) -> Router {
         .with_state(MockState { config })
 }
 
-pub async fn serve(listener: TcpListener, config: MockConfig) -> std::io::Result<()> {
-    let address = listener.local_addr()?;
-    info!("starting acp mock on {address}");
-    axum::serve(listener, app(config)).await
-}
-
 pub async fn serve_with_shutdown<F>(
     listener: TcpListener,
     config: MockConfig,
@@ -89,5 +83,27 @@ fn truncate(value: &str, max_len: usize) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_uses_the_expected_delay() {
+        assert_eq!(
+            MockConfig::default().response_delay,
+            Duration::from_millis(120)
+        );
+    }
+
+    #[test]
+    fn long_prompts_are_truncated_in_mock_replies() {
+        let prompt = "word ".repeat(80);
+        let reply = reply_for(&prompt);
+
+        assert!(reply.contains("...`"));
+        assert!(reply.starts_with("mock assistant: I received `"));
     }
 }

@@ -1,13 +1,17 @@
 use std::{
     env,
     ffi::OsString,
+    future::{Future, pending},
     path::PathBuf,
+    pin::Pin,
     process::{ExitStatus, Stdio},
     time::Duration,
 };
 
-use acp_mock::{MockConfig, serve as serve_mock};
-use acp_web_backend::{AppState, MockClientError, ServerConfig, serve as serve_backend};
+use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
+use acp_web_backend::{
+    AppState, MockClientError, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown,
+};
 use reqwest::Client;
 use snafu::prelude::*;
 use tokio::{
@@ -129,11 +133,9 @@ struct SpawnedService {
     base_url: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run_with_args(args: Vec<OsString>) -> Result<()> {
     init_tracing();
 
-    let args = env::args_os().collect::<Vec<_>>();
     if args.get(1).and_then(|arg| arg.to_str()) == Some("__internal-role") {
         let role = args
             .get(2)
@@ -194,6 +196,11 @@ async fn main() -> Result<()> {
     terminate_child(&mut mock, "acp mock").await?;
 
     ensure_success("cli frontend", cli_status)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    run_with_args(env::args_os().collect()).await
 }
 
 fn init_tracing() {
@@ -317,8 +324,18 @@ async fn wait_for_health(
     role: &'static str,
     base_url: &str,
 ) -> Result<()> {
+    wait_for_health_with_timeout(client, child, role, base_url, Duration::from_secs(15)).await
+}
+
+async fn wait_for_health_with_timeout(
+    client: &Client,
+    child: &mut Child,
+    role: &'static str,
+    base_url: &str,
+    timeout: Duration,
+) -> Result<()> {
     let health_url = format!("{base_url}/healthz");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + timeout;
 
     loop {
         if let Some(status) = child.try_wait().context(CheckChildStatusSnafu { role })? {
@@ -392,6 +409,7 @@ async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
     let mut host = "127.0.0.1".to_string();
     let mut port = 8090u16;
     let mut response_delay_ms = 120u64;
+    let mut exit_after_ms = None;
     let args = to_strings("acp mock", role_args)?;
     let mut iter = args.into_iter();
 
@@ -401,6 +419,9 @@ async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
             "--port" => port = parse_u16("acp mock", &mut iter, "--port")?,
             "--response-delay-ms" => {
                 response_delay_ms = parse_u64("acp mock", &mut iter, "--response-delay-ms")?
+            }
+            "--exit-after-ms" => {
+                exit_after_ms = Some(parse_u64("acp mock", &mut iter, "--exit-after-ms")?)
             }
             other => {
                 return InvalidInternalArgumentsSnafu {
@@ -421,14 +442,20 @@ async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
     let address = listener.local_addr().context(ReadMockBoundAddressSnafu)?;
     println!("acp mock listening on http://{address}");
 
-    serve_mock(
-        listener,
-        MockConfig {
-            response_delay: Duration::from_millis(response_delay_ms),
-        },
-    )
-    .await
-    .context(RunMockSnafu)
+    let config = MockConfig {
+        response_delay: Duration::from_millis(response_delay_ms),
+    };
+
+    let shutdown: Pin<Box<dyn Future<Output = ()> + Send>> =
+        if let Some(exit_after_ms) = exit_after_ms {
+            Box::pin(sleep(Duration::from_millis(exit_after_ms)))
+        } else {
+            Box::pin(pending())
+        };
+
+    serve_mock_with_shutdown(listener, config, shutdown)
+        .await
+        .context(RunMockSnafu)
 }
 
 async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
@@ -436,6 +463,7 @@ async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
     let mut port = 8080u16;
     let mut session_cap = 8usize;
     let mut mock_url = None;
+    let mut exit_after_ms = None;
     let args = to_strings("web backend", role_args)?;
     let mut iter = args.into_iter();
 
@@ -447,6 +475,9 @@ async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
                 session_cap = parse_usize("web backend", &mut iter, "--session-cap")?
             }
             "--mock-url" => mock_url = Some(next_value("web backend", &mut iter, "--mock-url")?),
+            "--exit-after-ms" => {
+                exit_after_ms = Some(parse_u64("web backend", &mut iter, "--exit-after-ms")?)
+            }
             other => {
                 return InvalidInternalArgumentsSnafu {
                     role: "web backend",
@@ -482,7 +513,14 @@ async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
     })
     .context(BuildBackendStateSnafu)?;
 
-    serve_backend(listener, state)
+    let shutdown: Pin<Box<dyn Future<Output = ()> + Send>> =
+        if let Some(exit_after_ms) = exit_after_ms {
+            Box::pin(sleep(Duration::from_millis(exit_after_ms)))
+        } else {
+            Box::pin(pending())
+        };
+
+    serve_backend_with_shutdown(listener, state, shutdown)
         .await
         .context(RunBackendSnafu)
 }
@@ -553,4 +591,338 @@ fn parse_usize(
             role,
             message: format!("`{flag}` expects a usize value"),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn forwarded_cli_args_defaults_to_chat_new() {
+        let args = vec![OsString::from("acp")];
+
+        assert_eq!(
+            forwarded_cli_args(&args),
+            vec![OsString::from("chat"), OsString::from("--new")]
+        );
+    }
+
+    #[test]
+    fn forwarded_cli_args_preserves_explicit_arguments() {
+        let args = vec![
+            OsString::from("acp"),
+            OsString::from("session"),
+            OsString::from("list"),
+        ];
+
+        assert_eq!(
+            forwarded_cli_args(&args),
+            vec![OsString::from("session"), OsString::from("list")]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_args_requires_an_internal_role_name() {
+        let error = run_with_args(vec![
+            OsString::from("acp"),
+            OsString::from("__internal-role"),
+        ])
+        .await
+        .expect_err("missing internal role should fail");
+
+        assert!(matches!(error, LauncherError::MissingInternalRole));
+    }
+
+    #[tokio::test]
+    async fn read_startup_url_rejects_empty_stdout() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(":")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("child should spawn");
+
+        let error = read_startup_url(&mut child, "test role")
+            .await
+            .expect_err("empty stdout should fail");
+
+        assert!(matches!(
+            error,
+            LauncherError::InvalidStartupLine { line, .. } if line == "<empty>"
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_startup_url_rejects_invalid_stdout() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("printf 'ready\\n'")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("child should spawn");
+
+        let error = read_startup_url(&mut child, "test role")
+            .await
+            .expect_err("invalid stdout should fail");
+
+        assert!(matches!(
+            error,
+            LauncherError::InvalidStartupLine { line, .. } if line == "ready"
+        ));
+    }
+
+    #[tokio::test]
+    async fn wait_for_health_detects_exited_children() {
+        let client = Client::builder()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .expect("client should build");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("child should spawn");
+
+        let error = wait_for_health(&client, &mut child, "test role", "http://127.0.0.1:9")
+            .await
+            .expect_err("exited child should fail");
+
+        assert!(matches!(error, LauncherError::ChildExitedEarly { .. }));
+    }
+
+    #[tokio::test]
+    async fn wait_for_health_times_out_when_child_stays_running() {
+        let client = Client::builder()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .expect("client should build");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 1")
+            .spawn()
+            .expect("child should spawn");
+
+        let error = wait_for_health_with_timeout(
+            &client,
+            &mut child,
+            "test role",
+            "http://127.0.0.1:9",
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("running child should time out");
+
+        assert!(matches!(error, LauncherError::WaitForHealth { .. }));
+        terminate_child(&mut child, "test role")
+            .await
+            .expect("timeout child should terminate cleanly");
+    }
+
+    #[tokio::test]
+    async fn terminate_child_returns_for_already_exited_processes() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("child should spawn");
+        let _ = child.wait().await.expect("child should exit");
+
+        terminate_child(&mut child, "test role")
+            .await
+            .expect("already exited child should be ignored");
+    }
+
+    #[test]
+    fn ensure_success_rejects_non_zero_exit_codes() {
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 3")
+            .status()
+            .expect("status should be available");
+
+        let error = ensure_success("cli frontend", status).expect_err("non-zero exits should fail");
+
+        assert!(matches!(
+            error,
+            LauncherError::ChildExit {
+                role: "cli frontend",
+                code: Some(3)
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_internal_role_reports_unknown_roles() {
+        let error = run_internal_role(OsString::from("unknown"), Vec::new())
+            .await
+            .expect_err("unknown roles should fail");
+
+        assert!(matches!(
+            error,
+            LauncherError::UnknownInternalRole { role } if role == "unknown"
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_internal_role_wraps_cli_errors() {
+        let error = run_internal_role(
+            OsString::from("cli"),
+            vec![OsString::from("chat"), OsString::from("--new")],
+        )
+        .await
+        .expect_err("invalid cli invocation should fail");
+
+        assert!(matches!(error, LauncherError::RunCli { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_mock_role_validates_arguments() {
+        let error = run_mock_role(vec![OsString::from("--unexpected")])
+            .await
+            .expect_err("unexpected args should fail");
+        assert!(matches!(
+            error,
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+
+        let error = run_mock_role(vec![OsString::from("--port"), OsString::from("nope")])
+            .await
+            .expect_err("invalid ports should fail");
+        assert!(matches!(
+            error,
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_mock_role_can_shutdown_cleanly() {
+        run_mock_role(vec![
+            OsString::from("--port"),
+            OsString::from("0"),
+            OsString::from("--response-delay-ms"),
+            OsString::from("1"),
+            OsString::from("--exit-after-ms"),
+            OsString::from("50"),
+        ])
+        .await
+        .expect("mock role should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn run_mock_role_can_start_without_a_test_shutdown() {
+        let handle = tokio::spawn(run_mock_role(vec![
+            OsString::from("--port"),
+            OsString::from("0"),
+            OsString::from("--response-delay-ms"),
+            OsString::from("1"),
+        ]));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn run_backend_role_validates_arguments() {
+        let error = run_backend_role(vec![OsString::from("--unexpected")])
+            .await
+            .expect_err("unexpected args should fail");
+        assert!(matches!(
+            error,
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+
+        let error = run_backend_role(Vec::new())
+            .await
+            .expect_err("missing mock url should fail");
+        assert!(matches!(
+            error,
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+
+        let error = run_backend_role(vec![
+            OsString::from("--session-cap"),
+            OsString::from("nope"),
+        ])
+        .await
+        .expect_err("invalid session caps should fail");
+        assert!(matches!(
+            error,
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_backend_role_can_shutdown_cleanly() {
+        run_backend_role(vec![
+            OsString::from("--port"),
+            OsString::from("0"),
+            OsString::from("--mock-url"),
+            OsString::from("http://127.0.0.1:9"),
+            OsString::from("--exit-after-ms"),
+            OsString::from("50"),
+        ])
+        .await
+        .expect("backend role should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn run_backend_role_can_start_without_a_test_shutdown() {
+        let handle = tokio::spawn(run_backend_role(vec![
+            OsString::from("--port"),
+            OsString::from("0"),
+            OsString::from("--mock-url"),
+            OsString::from("http://127.0.0.1:9"),
+        ]));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn to_strings_rejects_non_utf8_arguments() {
+        let error = to_strings("test role", vec![OsString::from_vec(vec![0xFF])])
+            .expect_err("non UTF-8 arguments should fail");
+
+        assert!(matches!(
+            error,
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn helper_parsers_validate_input() {
+        let mut missing = Vec::<String>::new().into_iter();
+        assert!(matches!(
+            next_value("test role", &mut missing, "--host")
+                .expect_err("missing values should fail"),
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+
+        let mut invalid_u16 = vec!["nope".to_string()].into_iter();
+        assert!(matches!(
+            parse_u16("test role", &mut invalid_u16, "--port")
+                .expect_err("invalid u16 should fail"),
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+
+        let mut invalid_u64 = vec!["nope".to_string()].into_iter();
+        assert!(matches!(
+            parse_u64("test role", &mut invalid_u64, "--delay")
+                .expect_err("invalid u64 should fail"),
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+
+        let mut invalid_usize = vec!["nope".to_string()].into_iter();
+        assert!(matches!(
+            parse_usize("test role", &mut invalid_usize, "--session-cap")
+                .expect_err("invalid usize should fail"),
+            LauncherError::InvalidInternalArguments { .. }
+        ));
+    }
 }

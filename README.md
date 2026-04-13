@@ -12,7 +12,7 @@ started to outgrow `copilot-sandbox-container`.
 - establish the target architecture for the ACP-backed backend / Web / CLI stack
 - define the session orchestration and worker supervision model
 - grow implementation work in a repository scoped to the orchestrator itself
-- ship the slice 1 backend + CLI reference implementation that keeps feedback loops short
+- ship the feedback-first backend + CLI reference implementation that keeps feedback loops short
 
 ## Documents
 
@@ -25,29 +25,42 @@ The repository is currently design-first. The architecture document under
 The feedback-first CLI document explains how to ship the first user-visible CLI
 slice before the full Ratatui frontend is ready.
 
-## Slice 1 quick start
+## Current workspace layout
 
-Run the first user-visible CLI slice directly from the repository root:
+- `cargo run` launches the feedback-first stack from the repo root
+- `crates/acp-cli` provides the CLI frontend
+- `crates/acp-web-backend` provides the HTTP + SSE backend
+- `crates/acp-mock` provides the ACP mock service
+- `crates/acp-contracts` holds the shared wire contracts
+
+## Quick start
+
+Run the full local stack directly from the repository root:
 
 ```bash
-cargo run --bin acp -- chat --new
+cargo run
 ```
 
-Type a prompt, wait for the streamed assistant reply, and leave the REPL with
-`/quit`.
+This starts the ACP mock, the web backend, and the CLI frontend as child
+processes, then hands terminal I/O to the CLI frontend. Type a prompt, wait for
+the streamed assistant reply, and leave the REPL with `/quit`.
 
-The current slice uses a mock conversation engine behind an HTTP + SSE backend.
-This keeps the CLI contract testable before ACP worker integration lands.
+## Run each component directly
 
-If you want a long-running backend for repeated manual experiments, start it in
-one terminal:
+Start the ACP mock:
 
 ```bash
-cargo run --bin acp -- serve
+cargo run -p acp-mock -- --port 8090
 ```
 
-Then point the chat command at it from another terminal:
+Start the web backend:
 
 ```bash
-cargo run --bin acp -- chat --new --server-url http://127.0.0.1:8080
+cargo run -p acp-web-backend -- --port 8080 --mock-url http://127.0.0.1:8090
+```
+
+Run the CLI frontend against that backend:
+
+```bash
+cargo run -p acp-cli -- chat --new --server-url http://127.0.0.1:8080
 ```

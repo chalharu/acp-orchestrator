@@ -1,4 +1,9 @@
+# yaml-language-server: $schema=./linter-service.schema.json
 linters:
+  lizard:
+    disabled: false
+    languages:
+      - rust
   textlint:
     disabled: false
     preset_packages:

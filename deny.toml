@@ -4,7 +4,7 @@ multiple-versions = "allow"
 [licenses]
 version = 2
 allow = [
-  "AGPL-3.0-or-later",
+  "AGPL-3.0-only",
   "Apache-2.0",
   "BSD-3-Clause",
   "BSL-1.0",

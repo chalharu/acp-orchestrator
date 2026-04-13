@@ -68,6 +68,17 @@ pub struct ErrorResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssistantReplyRequest {
+    pub session_id: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssistantReplyResponse {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StreamEvent {
     pub sequence: u64,
     #[serde(flatten)]
@@ -85,7 +96,7 @@ pub enum StreamEventPayload {
 
 impl StreamEvent {
     pub fn event_name(&self) -> &'static str {
-        match self.payload {
+        match &self.payload {
             StreamEventPayload::SessionSnapshot { .. } => "session.snapshot",
             StreamEventPayload::ConversationMessage { .. } => "conversation.message",
             StreamEventPayload::SessionClosed { .. } => "session.closed",

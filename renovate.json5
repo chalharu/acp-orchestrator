@@ -8,7 +8,7 @@
     ":disableRateLimiting",
   ],
 
-  enabledManagers: ["dockerfile", "github-actions", "custom.regex"],
+  enabledManagers: ["cargo", "dockerfile", "github-actions", "custom.regex"],
 
   labels: ["dependencies", "renovate"],
   dependencyDashboard: true,

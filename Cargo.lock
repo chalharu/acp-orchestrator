@@ -3,11 +3,10 @@
 version = 4
 
 [[package]]
-name = "acp-orchestrator"
+name = "acp-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "axum",
+ "acp-contracts",
  "chrono",
  "clap",
  "dirs",
@@ -15,6 +14,60 @@ dependencies = [
  "futures-util",
  "reqwest",
  "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "acp-contracts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
+name = "acp-mock"
+version = "0.1.0"
+dependencies = [
+ "acp-contracts",
+ "axum",
+ "clap",
+ "snafu",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "acp-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "acp-cli",
+ "acp-mock",
+ "acp-web-backend",
+ "reqwest",
+ "snafu",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "acp-web-backend"
+version = "0.1.0"
+dependencies = [
+ "acp-contracts",
+ "acp-mock",
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "eventsource-stream",
+ "futures-util",
+ "reqwest",
  "serde_json",
  "snafu",
  "tokio",

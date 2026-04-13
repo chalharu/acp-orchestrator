@@ -1,19 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
+use acp_contracts::{
+    ConversationMessage, MessageRole, SessionSnapshot, SessionStatus, StreamEvent,
+    StreamEventPayload,
+};
 use chrono::{DateTime, Utc};
-use tokio::{
-    sync::{Mutex, RwLock, broadcast},
-    time::sleep,
-};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
-
-use crate::{
-    mock_engine,
-    models::{
-        ConversationMessage, MessageRole, SessionSnapshot, SessionStatus, StreamEvent,
-        StreamEventPayload,
-    },
-};
 
 #[derive(Debug, Clone)]
 pub struct SessionStore {
@@ -21,7 +14,6 @@ pub struct SessionStore {
     create_session_lock: Arc<Mutex<()>>,
     closed_session_limit: usize,
     session_cap: usize,
-    assistant_delay: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,14 +37,45 @@ impl SessionStoreError {
     }
 }
 
+pub struct PendingPrompt {
+    handle: Arc<SessionHandle>,
+    session_id: String,
+    prompt_text: String,
+}
+
+impl PendingPrompt {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn prompt_text(&self) -> &str {
+        &self.prompt_text
+    }
+
+    pub async fn complete_with_reply(self, text: String) {
+        if let Ok(event) = self
+            .handle
+            .append_message(MessageRole::Assistant, text)
+            .await
+        {
+            self.handle.broadcast(event);
+        }
+    }
+
+    pub async fn complete_with_status(self, message: impl Into<String>) {
+        if let Ok(event) = self.handle.append_status(message.into()).await {
+            self.handle.broadcast(event);
+        }
+    }
+}
+
 impl SessionStore {
-    pub fn new(session_cap: usize, assistant_delay: Duration) -> Self {
+    pub fn new(session_cap: usize) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             create_session_lock: Arc::new(Mutex::new(())),
             closed_session_limit: 32,
             session_cap,
-            assistant_delay,
         }
     }
 
@@ -117,7 +140,7 @@ impl SessionStore {
         owner: &str,
         session_id: &str,
         text: String,
-    ) -> Result<(), SessionStoreError> {
+    ) -> Result<PendingPrompt, SessionStoreError> {
         if text.trim().is_empty() {
             return Err(SessionStoreError::EmptyPrompt);
         }
@@ -128,19 +151,11 @@ impl SessionStore {
             .await?;
         handle.broadcast(user_event);
 
-        let handle_for_assistant = handle.clone();
-        let assistant_delay = self.assistant_delay;
-        tokio::spawn(async move {
-            sleep(assistant_delay).await;
-            if let Ok(event) = handle_for_assistant
-                .append_message(MessageRole::Assistant, mock_engine::reply_for(&text))
-                .await
-            {
-                handle_for_assistant.broadcast(event);
-            }
-        });
-
-        Ok(())
+        Ok(PendingPrompt {
+            handle,
+            session_id: session_id.to_string(),
+            prompt_text: text,
+        })
     }
 
     pub async fn close_session(
@@ -287,6 +302,16 @@ impl SessionHandle {
             sequence: data.latest_sequence,
             payload: StreamEventPayload::ConversationMessage { message },
         })
+    }
+
+    async fn append_status(&self, message: String) -> Result<StreamEvent, SessionStoreError> {
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+
+        data.latest_sequence += 1;
+        Ok(StreamEvent::status(data.latest_sequence, message))
     }
 
     async fn close(&self, reason: &str) -> Result<StreamEvent, SessionStoreError> {

@@ -1,17 +1,14 @@
 use std::{
     error::Error as StdError,
+    ffi::OsString,
     fs,
     io::{self, Write},
     path::PathBuf,
 };
 
-use acp_orchestrator::{
-    AppState, ServerConfig,
-    models::{
-        CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole, PromptRequest,
-        PromptResponse, StreamEvent, StreamEventPayload,
-    },
-    serve, serve_with_shutdown,
+use acp_contracts::{
+    CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole, PromptRequest,
+    PromptResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
 };
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -20,13 +17,12 @@ use futures_util::{StreamExt, pin_mut};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
-use tokio::{net::TcpListener, sync::oneshot};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-type Result<T, E = CliError> = std::result::Result<T, E>;
+pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
 #[derive(Debug, Snafu)]
-enum CliError {
+pub enum CliError {
     #[snafu(display("choose either `--new` or `--session <id>`"))]
     ChatModeRequired,
 
@@ -35,35 +31,16 @@ enum CliError {
     ))]
     MissingServerUrl { command: &'static str },
 
-    #[snafu(display("building HTTP client failed"))]
+    #[snafu(display("building the HTTP client failed"))]
     BuildHttpClient { source: reqwest::Error },
 
-    #[snafu(display("binding backend on {host}:{port} failed"))]
-    BindBackend {
-        source: std::io::Error,
-        host: String,
-        port: u16,
-    },
-
-    #[snafu(display("reading bound backend address failed"))]
-    ReadBoundAddress { source: std::io::Error },
-
-    #[snafu(display("running backend failed"))]
-    RunBackend { source: std::io::Error },
-
-    #[snafu(display("binding embedded backend failed"))]
-    BindEmbeddedBackend { source: std::io::Error },
-
-    #[snafu(display("reading embedded backend address failed"))]
-    ReadEmbeddedBackendAddress { source: std::io::Error },
-
-    #[snafu(display("joining prompt reader task failed"))]
+    #[snafu(display("joining the prompt reader task failed"))]
     JoinPromptReader { source: tokio::task::JoinError },
 
-    #[snafu(display("flushing prompt failed"))]
+    #[snafu(display("flushing the prompt failed"))]
     FlushPrompt { source: std::io::Error },
 
-    #[snafu(display("reading prompt line failed"))]
+    #[snafu(display("reading a prompt line failed"))]
     ReadPromptLine { source: std::io::Error },
 
     #[snafu(display("{action} request failed"))]
@@ -79,45 +56,45 @@ enum CliError {
         message: String,
     },
 
-    #[snafu(display("decoding {action} response failed"))]
+    #[snafu(display("decoding the {action} response failed"))]
     DecodeResponse {
         source: reqwest::Error,
         action: &'static str,
     },
 
-    #[snafu(display("reading event stream failed"))]
+    #[snafu(display("reading the event stream failed"))]
     ReadEventStream {
         source: Box<dyn StdError + Send + Sync + 'static>,
     },
 
-    #[snafu(display("decoding stream event failed"))]
+    #[snafu(display("decoding the stream event failed"))]
     DecodeStreamEvent { source: serde_json::Error },
 
     #[snafu(display("unable to determine a recent-session cache directory"))]
     MissingRecentSessionDirectory,
 
-    #[snafu(display("reading recent-session cache from {} failed", path.display()))]
+    #[snafu(display("reading the recent-session cache from {} failed", path.display()))]
     ReadRecentSessions {
         source: std::io::Error,
         path: PathBuf,
     },
 
-    #[snafu(display("parsing recent-session cache from {} failed", path.display()))]
+    #[snafu(display("parsing the recent-session cache from {} failed", path.display()))]
     ParseRecentSessions {
         source: serde_json::Error,
         path: PathBuf,
     },
 
-    #[snafu(display("creating recent-session cache directory {} failed", path.display()))]
+    #[snafu(display("creating the recent-session cache directory {} failed", path.display()))]
     CreateRecentSessionsDirectory {
         source: std::io::Error,
         path: PathBuf,
     },
 
-    #[snafu(display("serializing recent-session cache failed"))]
+    #[snafu(display("serializing the recent-session cache failed"))]
     SerializeRecentSessions { source: serde_json::Error },
 
-    #[snafu(display("writing recent-session cache to {} failed", path.display()))]
+    #[snafu(display("writing the recent-session cache to {} failed", path.display()))]
     WriteRecentSessions {
         source: std::io::Error,
         path: PathBuf,
@@ -126,7 +103,7 @@ enum CliError {
 
 #[derive(Parser, Debug)]
 #[command(name = "acp")]
-#[command(about = "ACP Orchestrator slice 1 CLI")]
+#[command(about = "ACP Orchestrator CLI frontend")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -134,21 +111,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    Serve(ServeArgs),
     Chat(ChatArgs),
     Session(SessionArgs),
-}
-
-#[derive(Args, Debug)]
-struct ServeArgs {
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    #[arg(long, default_value_t = 8080)]
-    port: u16,
-    #[arg(long, default_value_t = 8)]
-    session_cap: usize,
-    #[arg(long, default_value_t = 120)]
-    assistant_delay_ms: u64,
 }
 
 #[derive(Args, Debug)]
@@ -191,13 +155,15 @@ struct RecentSessionEntry {
     last_used_at: DateTime<Utc>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run_with_args<I, T>(args: I) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     init_tracing();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(args);
     match cli.command {
-        Command::Serve(args) => run_serve(args).await,
         Command::Chat(args) => run_chat(args).await,
         Command::Session(args) => run_session(args).await,
     }
@@ -214,53 +180,18 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn run_serve(args: ServeArgs) -> Result<()> {
-    let listener = TcpListener::bind((args.host.as_str(), args.port))
-        .await
-        .context(BindBackendSnafu {
-            host: args.host.clone(),
-            port: args.port,
-        })?;
-    let address = listener.local_addr().context(ReadBoundAddressSnafu)?;
-    println!("slice1 backend listening on http://{address}");
-
-    serve(
-        listener,
-        AppState::new(ServerConfig {
-            session_cap: args.session_cap,
-            assistant_delay: std::time::Duration::from_millis(args.assistant_delay_ms),
-        }),
-    )
-    .await
-    .context(RunBackendSnafu)
-}
-
 async fn run_chat(args: ChatArgs) -> Result<()> {
     ensure!(args.new || args.session_id.is_some(), ChatModeRequiredSnafu);
 
     let client = Client::builder().build().context(BuildHttpClientSnafu)?;
-
-    let backend = if args.new {
-        resolve_backend(args.server_url.clone()).await?
-    } else {
-        let server_url = args.server_url.clone().ok_or_else(|| {
-            MissingServerUrlSnafu {
-                command: "reattach",
-            }
-            .build()
-        })?;
-        ResolvedBackend {
-            base_url: server_url,
-            embedded: None,
-        }
-    };
+    let server_url = require_server_url("chat", args.server_url.clone())?;
 
     let session = if args.new {
-        create_session(&client, &backend.base_url, &args.auth_token).await?
+        create_session(&client, &server_url, &args.auth_token).await?
     } else {
         get_session(
             &client,
-            &backend.base_url,
+            &server_url,
             &args.auth_token,
             args.session_id
                 .as_deref()
@@ -271,17 +202,14 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
 
     record_recent_session(&RecentSessionEntry {
         session_id: session.id.clone(),
-        server_url: backend.base_url.clone(),
+        server_url: server_url.clone(),
         last_used_at: Utc::now(),
     })?;
 
     println!("session: {}", session.id);
-    println!("connected to backend: {}", backend.base_url);
-    if backend.embedded.is_some() {
-        println!("[status] started an embedded slice1 backend for this chat session");
-    }
+    println!("connected to backend: {server_url}");
 
-    let events_url = format!("{}/api/v1/sessions/{}/events", backend.base_url, session.id);
+    let events_url = format!("{server_url}/api/v1/sessions/{}/events", session.id);
     let event_client = client.clone();
     let auth_token = args.auth_token.clone();
     let event_task = tokio::spawn(async move {
@@ -306,14 +234,7 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
             continue;
         }
 
-        submit_prompt(
-            &client,
-            &backend.base_url,
-            &args.auth_token,
-            &session.id,
-            trimmed,
-        )
-        .await?;
+        submit_prompt(&client, &server_url, &args.auth_token, &session.id, trimmed).await?;
     }
 
     event_task.abort();
@@ -341,12 +262,7 @@ async fn run_session(args: SessionArgs) -> Result<()> {
             Ok(())
         }
         SessionCommand::Close(args) => {
-            let server_url = args.server_url.ok_or_else(|| {
-                MissingServerUrlSnafu {
-                    command: "closing a session",
-                }
-                .build()
-            })?;
+            let server_url = require_server_url("closing a session", args.server_url)?;
             let client = Client::builder().build().context(BuildHttpClientSnafu)?;
             close_session(&client, &server_url, &args.auth_token, &args.session_id).await?;
             remove_recent_session(&args.session_id)?;
@@ -356,27 +272,31 @@ async fn run_session(args: SessionArgs) -> Result<()> {
     }
 }
 
+fn require_server_url(command: &'static str, server_url: Option<String>) -> Result<String> {
+    server_url.ok_or_else(|| MissingServerUrlSnafu { command }.build())
+}
+
 async fn handle_repl_command(command: &str) -> Result<bool> {
     match command {
         "/help" => {
             println!("/help");
             println!("/quit");
-            println!("/cancel (planned for slice 2)");
-            println!("/approve <request-id> (planned for slice 2)");
-            println!("/deny <request-id> (planned for slice 2)");
+            println!("/cancel (planned)");
+            println!("/approve <request-id> (planned)");
+            println!("/deny <request-id> (planned)");
             Ok(false)
         }
         "/quit" => Ok(true),
         value if value.starts_with("/cancel") => {
-            println!("[status] `/cancel` is planned for slice 2.");
+            println!("[status] `/cancel` is planned.");
             Ok(false)
         }
         value if value.starts_with("/approve ") => {
-            println!("[status] `/approve` is planned for slice 2.");
+            println!("[status] `/approve` is planned.");
             Ok(false)
         }
         value if value.starts_with("/deny ") => {
-            println!("[status] `/deny` is planned for slice 2.");
+            println!("[status] `/deny` is planned.");
             Ok(false)
         }
         _ => {
@@ -406,27 +326,11 @@ async fn read_prompt_line() -> Result<Option<String>> {
     .context(JoinPromptReaderSnafu)?
 }
 
-async fn resolve_backend(server_url: Option<String>) -> Result<ResolvedBackend> {
-    if let Some(server_url) = server_url {
-        return Ok(ResolvedBackend {
-            base_url: server_url,
-            embedded: None,
-        });
-    }
-
-    let embedded = EmbeddedBackend::spawn().await?;
-    let base_url = embedded.base_url.clone();
-    Ok(ResolvedBackend {
-        base_url,
-        embedded: Some(embedded),
-    })
-}
-
 async fn create_session(
     client: &Client,
     base_url: &str,
     auth_token: &str,
-) -> Result<acp_orchestrator::SessionSnapshot> {
+) -> Result<SessionSnapshot> {
     let response = client
         .post(format!("{base_url}/api/v1/sessions"))
         .bearer_auth(auth_token)
@@ -447,7 +351,7 @@ async fn get_session(
     base_url: &str,
     auth_token: &str,
     session_id: &str,
-) -> Result<acp_orchestrator::SessionSnapshot> {
+) -> Result<SessionSnapshot> {
     let response = client
         .get(format!("{base_url}/api/v1/sessions/{session_id}"))
         .bearer_auth(auth_token)
@@ -632,52 +536,4 @@ fn remove_recent_session(session_id: &str) -> Result<()> {
     let mut entries = load_recent_sessions()?;
     entries.retain(|entry| entry.session_id != session_id);
     save_recent_sessions(&entries)
-}
-
-struct ResolvedBackend {
-    base_url: String,
-    embedded: Option<EmbeddedBackend>,
-}
-
-struct EmbeddedBackend {
-    base_url: String,
-    shutdown: Option<oneshot::Sender<()>>,
-}
-
-impl EmbeddedBackend {
-    async fn spawn() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context(BindEmbeddedBackendSnafu)?;
-        let address = listener
-            .local_addr()
-            .context(ReadEmbeddedBackendAddressSnafu)?;
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        tokio::spawn(async move {
-            let shutdown = async move {
-                let _ = shutdown_rx.await;
-            };
-
-            if let Err(error) =
-                serve_with_shutdown(listener, AppState::new(ServerConfig::default()), shutdown)
-                    .await
-            {
-                eprintln!("[status] embedded backend stopped: {error}");
-            }
-        });
-
-        Ok(Self {
-            base_url: format!("http://{address}"),
-            shutdown: Some(shutdown_tx),
-        })
-    }
-}
-
-impl Drop for EmbeddedBackend {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-    }
 }

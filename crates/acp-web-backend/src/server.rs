@@ -1,5 +1,9 @@
 use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use acp_contracts::{
+    CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse, PromptRequest,
+    PromptResponse, SessionHistoryResponse, StreamEvent,
+};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -17,11 +21,8 @@ use tracing::info;
 
 use crate::{
     auth::{AuthError, extract_principal},
-    models::{
-        CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse, PromptRequest,
-        PromptResponse, SessionHistoryResponse, StreamEvent,
-    },
-    sessions::{SessionStore, SessionStoreError},
+    mock_client::{MockClient, MockClientError},
+    sessions::{PendingPrompt, SessionStore, SessionStoreError},
 };
 
 type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
@@ -29,14 +30,14 @@ type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub session_cap: usize,
-    pub assistant_delay: Duration,
+    pub mock_url: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             session_cap: 8,
-            assistant_delay: Duration::from_millis(120),
+            mock_url: "http://127.0.0.1:8090".to_string(),
         }
     }
 }
@@ -44,16 +45,15 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone)]
 pub struct AppState {
     store: Arc<SessionStore>,
+    mock_client: MockClient,
 }
 
 impl AppState {
-    pub fn new(config: ServerConfig) -> Self {
-        Self {
-            store: Arc::new(SessionStore::new(
-                config.session_cap,
-                config.assistant_delay,
-            )),
-        }
+    pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
+        Ok(Self {
+            store: Arc::new(SessionStore::new(config.session_cap)),
+            mock_client: MockClient::new(config.mock_url)?,
+        })
     }
 }
 
@@ -77,7 +77,7 @@ pub fn app(state: AppState) -> Router {
 
 pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
     let address = listener.local_addr()?;
-    info!("starting slice1 backend on {address}");
+    info!("starting web backend on {address}");
     axum::serve(listener, app(state)).await
 }
 
@@ -90,7 +90,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let address = listener.local_addr()?;
-    info!("starting slice1 backend on {address}");
+    info!("starting web backend on {address}");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown)
         .await
@@ -150,10 +150,11 @@ async fn post_message(
     Json(request): Json<PromptRequest>,
 ) -> Result<Json<PromptResponse>, AppError> {
     let principal = extract_principal(&headers)?;
-    state
+    let pending = state
         .store
         .submit_prompt(&principal.id, &session_id, request.text)
         .await?;
+    dispatch_assistant_request(state.mock_client.clone(), pending);
 
     Ok(Json(PromptResponse { accepted: true }))
 }
@@ -200,6 +201,22 @@ async fn stream_session_events(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+fn dispatch_assistant_request(mock_client: MockClient, pending: PendingPrompt) {
+    let session_id = pending.session_id().to_string();
+    let prompt = pending.prompt_text().to_string();
+
+    tokio::spawn(async move {
+        match mock_client.request_reply(&session_id, &prompt).await {
+            Ok(reply) => pending.complete_with_reply(reply).await,
+            Err(error) => {
+                pending
+                    .complete_with_status(format!("mock request failed: {error}"))
+                    .await;
+            }
+        }
+    });
 }
 
 fn to_sse_event(event: StreamEvent) -> Event {

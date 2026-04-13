@@ -1094,12 +1094,15 @@ browser 向け配信では CSP、`X-Content-Type-Options: nosniff`、strict same
 
 ### 9.1 画面構成
 
-- Session list pane
+- Recent session pane
 - Transcript pane
 - Composer
 - Slash command palette
 - Tool activity panel
 - Connection / worker state badge
+
+Recent session pane は backend 上の session 全件一覧ではなく、この browser から
+作成または attach した session への shortcut を表示する UI とします。
 
 ### 9.2 状態管理
 
@@ -1115,6 +1118,7 @@ state は次の 3 層に分けます。
   - pane selection
   - scroll position
   - draft input
+  - browser storage に保持する recent session shortcut
 
 ### 9.3 仮想スクロールを採る理由
 

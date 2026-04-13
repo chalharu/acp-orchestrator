@@ -17,6 +17,9 @@ started to outgrow `copilot-sandbox-container`.
 
 - `docs/README.md`
 - `docs/explanation/acp-web-cli-architecture.md`
+- `docs/explanation/cli-feedback-first-mvp.md`
 
 The repository is currently design-first. The architecture document under
 `docs/explanation/acp-web-cli-architecture.md` is the primary starting point.
+The feedback-first CLI document explains how to ship the first user-visible CLI
+slice before the full Ratatui frontend is ready.

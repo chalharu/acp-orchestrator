@@ -1,0 +1,32 @@
+{
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true,
+    "defaultBranch": "main"
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "**/*.js",
+      "**/*.mjs",
+      "**/*.cjs",
+      "**/*.jsx",
+      "**/*.ts",
+      "**/*.mts",
+      "**/*.cts",
+      "**/*.tsx",
+      "**/*.json",
+      "**/*.jsonc",
+      "!!**/.git",
+      "!!**/node_modules",
+      "!!**/build",
+      "!!**/dist",
+      "!!**/target",
+      "!!**/.tmp",
+      "!!**/.venv",
+      "!!**/coverage",
+      "!!**/docs/_build"
+    ]
+  }
+}

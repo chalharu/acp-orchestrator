@@ -1,9 +1,8 @@
 use std::ffi::OsString;
 
-use acp_app_support::{init_tracing, shutdown_signal};
+use acp_app_support::{ListenerSetupError, RuntimeListenArgs, bind_listener, shutdown_signal};
 use clap::Parser;
 use snafu::prelude::*;
-use tokio::net::TcpListener;
 
 use crate::{AppState, MockClientError, ServerConfig, serve_with_shutdown};
 
@@ -14,15 +13,8 @@ pub enum BackendAppError {
     #[snafu(display("parsing backend CLI arguments failed: {source}"))]
     ParseArgs { source: clap::Error },
 
-    #[snafu(display("binding the web backend on {host}:{port} failed"))]
-    Bind {
-        source: std::io::Error,
-        host: String,
-        port: u16,
-    },
-
-    #[snafu(display("reading the bound backend address failed"))]
-    ReadBoundAddress { source: std::io::Error },
+    #[snafu(transparent)]
+    Setup { source: ListenerSetupError },
 
     #[snafu(display("building backend state failed"))]
     BuildState { source: MockClientError },
@@ -35,29 +27,20 @@ pub enum BackendAppError {
 #[command(name = "acp-web-backend")]
 #[command(about = "ACP Orchestrator web backend")]
 struct Cli {
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    #[command(flatten)]
+    listen: RuntimeListenArgs,
     #[arg(long, default_value_t = 8080)]
     port: u16,
     #[arg(long, default_value_t = 8)]
     session_cap: usize,
     #[arg(long, env = "ACP_MOCK_URL")]
     mock_url: String,
-    #[arg(long, hide = true)]
-    exit_after_ms: Option<u64>,
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    init_tracing();
-
-    let listener = TcpListener::bind((cli.host.as_str(), cli.port))
+    let listener = bind_listener(&cli.listen.host, cli.port, "web backend", "web backend")
         .await
-        .context(BindSnafu {
-            host: cli.host.clone(),
-            port: cli.port,
-        })?;
-    let address = listener.local_addr().context(ReadBoundAddressSnafu)?;
-    println!("web backend listening on http://{address}");
+        .map_err(|source| BackendAppError::Setup { source })?;
 
     let state = AppState::new(ServerConfig {
         session_cap: cli.session_cap,
@@ -65,7 +48,7 @@ async fn run(cli: Cli) -> Result<()> {
     })
     .context(BuildStateSnafu)?;
 
-    serve_with_shutdown(listener, state, shutdown_signal(cli.exit_after_ms))
+    serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms))
         .await
         .context(RunSnafu)
 }
@@ -147,8 +130,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            BackendAppError::Bind {
-                port: bound_port, ..
+            BackendAppError::Setup {
+                source: ListenerSetupError::Bind {
+                    port: bound_port, ..
+                }
             } if bound_port == port
         ));
     }

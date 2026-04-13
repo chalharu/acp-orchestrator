@@ -237,19 +237,41 @@ pub enum AppError {
     Internal(String),
 }
 
+impl AppError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Unauthorized(message) => message,
+            Self::Forbidden(message) => message,
+            Self::NotFound(message) => message,
+            Self::BadRequest(message) => message,
+            Self::Conflict(message) => message,
+            Self::TooManyRequests(message) => message,
+            Self::Internal(message) => message,
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, error) = match self {
-            Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
-            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message),
-            Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
-            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            Self::Conflict(message) => (StatusCode::CONFLICT, message),
-            Self::TooManyRequests(message) => (StatusCode::TOO_MANY_REQUESTS, message),
-            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
-        };
-
-        (status, Json(ErrorResponse { error })).into_response()
+        (
+            self.status_code(),
+            Json(ErrorResponse {
+                error: self.message().to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -296,36 +318,43 @@ mod tests {
             (
                 AppError::Unauthorized("auth".to_string()),
                 StatusCode::UNAUTHORIZED,
+                "auth",
             ),
             (
                 AppError::Forbidden("forbidden".to_string()),
                 StatusCode::FORBIDDEN,
+                "forbidden",
             ),
             (
                 AppError::NotFound("missing".to_string()),
                 StatusCode::NOT_FOUND,
+                "missing",
             ),
             (
                 AppError::BadRequest("bad".to_string()),
                 StatusCode::BAD_REQUEST,
+                "bad",
             ),
             (
                 AppError::Conflict("conflict".to_string()),
                 StatusCode::CONFLICT,
+                "conflict",
             ),
             (
                 AppError::TooManyRequests("too many".to_string()),
                 StatusCode::TOO_MANY_REQUESTS,
+                "too many",
             ),
             (
                 AppError::Internal("internal".to_string()),
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
             ),
         ];
 
-        for (error, expected_status) in cases {
-            let response = error.into_response();
-            assert_eq!(response.status(), expected_status);
+        for (error, expected_status, expected_message) in cases {
+            assert_eq!(error.status_code(), expected_status);
+            assert_eq!(error.message(), expected_message);
         }
     }
 
@@ -376,30 +405,9 @@ mod tests {
 
         for (source, expected_status, expected_message) in cases {
             let error: AppError = source.into();
-            assert!(
-                matches!(
-                    error,
-                    AppError::NotFound(ref message)
-                        if expected_status == StatusCode::NOT_FOUND && message == expected_message
-                ) || matches!(
-                    error,
-                    AppError::Forbidden(ref message)
-                        if expected_status == StatusCode::FORBIDDEN && message == expected_message
-                ) || matches!(
-                    error,
-                    AppError::Conflict(ref message)
-                        if expected_status == StatusCode::CONFLICT && message == expected_message
-                ) || matches!(
-                    error,
-                    AppError::BadRequest(ref message)
-                        if expected_status == StatusCode::BAD_REQUEST && message == expected_message
-                ) || matches!(
-                    error,
-                    AppError::TooManyRequests(ref message)
-                        if expected_status == StatusCode::TOO_MANY_REQUESTS
-                            && message == expected_message
-                )
-            );
+
+            assert_eq!(error.status_code(), expected_status);
+            assert_eq!(error.message(), expected_message);
         }
     }
 

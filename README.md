@@ -20,9 +20,9 @@ started to outgrow `copilot-sandbox-container`.
 - `docs/explanation/cli-feedback-first-mvp.md`
 
 The architecture document under `docs/explanation/acp-web-cli-architecture.md`
-explains the long-term shape of the stack, and the feedback-first CLI document
-captures why the repo keeps a minimal user-visible slice working throughout
-development.
+explains the long-term shape of the stack.
+The feedback-first CLI document captures why the repo keeps a minimal
+user-visible slice working throughout development.
 
 ## Current workspace layout
 

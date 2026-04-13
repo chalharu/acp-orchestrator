@@ -7,16 +7,44 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use clap::Args;
 #[cfg(feature = "test-helpers")]
 use reqwest::Client;
+use snafu::prelude::*;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
+    net::TcpListener,
     process::Child,
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub type BoxError = Box<dyn StdError + Send + Sync>;
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+#[derive(Debug, Args, Clone)]
+pub struct RuntimeListenArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    #[arg(long, hide = true)]
+    pub exit_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Snafu)]
+pub enum ListenerSetupError {
+    #[snafu(display("binding the {service_name} on {host}:{port} failed"))]
+    Bind {
+        source: io::Error,
+        service_name: &'static str,
+        host: String,
+        port: u16,
+    },
+
+    #[snafu(display("reading the bound {service_name} address failed"))]
+    ReadBoundAddress {
+        source: io::Error,
+        service_name: &'static str,
+    },
+}
 
 pub fn init_tracing() {
     let _ = tracing_subscriber::registry()
@@ -27,6 +55,26 @@ pub fn init_tracing() {
         )
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .try_init();
+}
+
+pub async fn bind_listener(
+    host: &str,
+    port: u16,
+    service_name: &'static str,
+    startup_label: &'static str,
+) -> Result<TcpListener, ListenerSetupError> {
+    init_tracing();
+
+    let listener = TcpListener::bind((host, port)).await.context(BindSnafu {
+        service_name,
+        host: host.to_string(),
+        port,
+    })?;
+    let address = listener
+        .local_addr()
+        .context(ReadBoundAddressSnafu { service_name })?;
+    println!("{startup_label} listening on http://{address}");
+    Ok(listener)
 }
 
 pub fn shutdown_signal(exit_after_ms: Option<u64>) -> ShutdownSignal {
@@ -171,6 +219,37 @@ mod tests {
             .expect_err("unexpected startup lines should fail");
 
         assert!(error.to_string().contains("unexpected startup line"));
+    }
+
+    #[tokio::test]
+    async fn bind_listener_reports_successful_binding() {
+        let listener = bind_listener("127.0.0.1", 0, "test service", "test service")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should expose its address");
+
+        assert!(address.port() > 0);
+    }
+
+    #[tokio::test]
+    async fn bind_listener_reports_bind_failures() {
+        let occupied = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let port = occupied
+            .local_addr()
+            .expect("listener should expose its address")
+            .port();
+
+        let error = bind_listener("127.0.0.1", port, "test service", "test service")
+            .await
+            .expect_err("occupied ports should fail");
+
+        assert!(
+            matches!(error, ListenerSetupError::Bind { port: bound_port, .. } if bound_port == port)
+        );
     }
 
     #[cfg(feature = "test-helpers")]

@@ -1,9 +1,8 @@
 use std::{ffi::OsString, time::Duration};
 
-use acp_app_support::{init_tracing, shutdown_signal};
+use acp_app_support::{ListenerSetupError, RuntimeListenArgs, bind_listener, shutdown_signal};
 use clap::Parser;
 use snafu::prelude::*;
-use tokio::net::TcpListener;
 
 use crate::{MockConfig, serve_with_shutdown};
 
@@ -14,15 +13,8 @@ pub enum MockAppError {
     #[snafu(display("parsing mock CLI arguments failed: {source}"))]
     ParseArgs { source: clap::Error },
 
-    #[snafu(display("binding the mock server on {host}:{port} failed"))]
-    Bind {
-        source: std::io::Error,
-        host: String,
-        port: u16,
-    },
-
-    #[snafu(display("reading the bound mock address failed"))]
-    ReadBoundAddress { source: std::io::Error },
+    #[snafu(transparent)]
+    Setup { source: ListenerSetupError },
 
     #[snafu(display("running the mock server failed"))]
     Run { source: std::io::Error },
@@ -32,33 +24,24 @@ pub enum MockAppError {
 #[command(name = "acp-mock")]
 #[command(about = "ACP mock service")]
 struct Cli {
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    #[command(flatten)]
+    listen: RuntimeListenArgs,
     #[arg(long, default_value_t = 8090)]
     port: u16,
     #[arg(long, default_value_t = 120)]
     response_delay_ms: u64,
-    #[arg(long, hide = true)]
-    exit_after_ms: Option<u64>,
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    init_tracing();
-
-    let listener = TcpListener::bind((cli.host.as_str(), cli.port))
+    let listener = bind_listener(&cli.listen.host, cli.port, "mock server", "acp mock")
         .await
-        .context(BindSnafu {
-            host: cli.host.clone(),
-            port: cli.port,
-        })?;
-    let address = listener.local_addr().context(ReadBoundAddressSnafu)?;
-    println!("acp mock listening on http://{address}");
+        .map_err(|source| MockAppError::Setup { source })?;
 
     let config = MockConfig {
         response_delay: Duration::from_millis(cli.response_delay_ms),
     };
 
-    serve_with_shutdown(listener, config, shutdown_signal(cli.exit_after_ms))
+    serve_with_shutdown(listener, config, shutdown_signal(cli.listen.exit_after_ms))
         .await
         .context(RunSnafu)
 }
@@ -136,6 +119,13 @@ mod tests {
         .await
         .expect_err("occupied ports should fail");
 
-        assert!(matches!(error, MockAppError::Bind { port: bound_port, .. } if bound_port == port));
+        assert!(matches!(
+            error,
+            MockAppError::Setup {
+                source: ListenerSetupError::Bind {
+                    port: bound_port, ..
+                }
+            } if bound_port == port
+        ));
     }
 }

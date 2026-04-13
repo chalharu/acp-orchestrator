@@ -6,7 +6,9 @@ version = 4
 name = "acp-app-support"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "reqwest",
+ "snafu",
  "tokio",
  "tracing-subscriber",
 ]

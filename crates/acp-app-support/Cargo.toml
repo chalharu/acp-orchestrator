@@ -9,6 +9,8 @@ default = []
 test-helpers = ["dep:reqwest"]
 
 [dependencies]
+clap.workspace = true
 reqwest = { workspace = true, optional = true }
+snafu.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true

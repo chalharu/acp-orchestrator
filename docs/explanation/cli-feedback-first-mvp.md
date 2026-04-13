@@ -89,7 +89,7 @@ session-scoped API を崩さずに復帰導線を先に提供できます。
 - stream 切断時は自動でごまかさず、原因を表示して明示的に再 attach させる
 - 初期版では follow mode 固定とし、複雑な scroll 制御は持ち込まない
 
-表示イメージ:
+表示イメージは次の通りです。
 
 ```text
 $ acp chat --new

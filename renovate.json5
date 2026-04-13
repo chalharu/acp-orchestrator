@@ -1,0 +1,116 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  extends: [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    ":disableRateLimiting",
+  ],
+
+  enabledManagers: ["dockerfile", "github-actions", "custom.regex"],
+
+  labels: ["dependencies", "renovate"],
+  dependencyDashboard: true,
+  prCreation: "immediate",
+  rebaseWhen: "behind-base-branch",
+  timezone: "Asia/Tokyo",
+  automergeStrategy: "auto",
+  pruneStaleBranches: false,
+  separateMajorMinor: true,
+  separateMinorPatch: true,
+  separateMultipleMajor: true,
+  separateMultipleMinor: true,
+  automerge: true,
+  platformAutomerge: false,
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["dependencies", "renovate", "security"],
+    automerge: true,
+    automergeType: "pr",
+    platformAutomerge: true,
+  },
+
+  packageRules: [
+    {
+      description: "Give each target version or digest its own Renovate branch",
+      matchUpdateTypes: ["digest", "major", "minor", "patch", "pin", "pinDigest"],
+      branchTopic:
+        "{{{depNameSanitized}}}{{#if newVersion}}__v{{{newVersion}}}{{/if}}{{#if newDigestShort}}__d{{{newDigestShort}}}{{/if}}",
+    },
+    {
+      description: "Opt most dependency updates into a 3-day merge gate via labels",
+      matchPackageNames: ["!@github/copilot"],
+      matchUpdateTypes: ["digest", "major", "minor", "patch", "pin", "pinDigest"],
+      addLabels: ["renovate-gate-wait-3d"],
+    },
+    {
+      description: "Opt @github/copilot into a 1-day merge gate via labels",
+      matchPackageNames: ["@github/copilot"],
+      matchUpdateTypes: ["digest", "major", "minor", "patch", "pin", "pinDigest"],
+      addLabels: ["renovate-gate-wait-1d"],
+    },
+    {
+      description: "Expose custom separateMultiplePatch handling on patch PRs",
+      matchUpdateTypes: ["patch"],
+      addLabels: ["renovate-gate-separate-multiple-patch"],
+    },
+    {
+      description: "Override the helper preset for actions/* GitHub Actions",
+      matchManagers: ["github-actions"],
+      matchPackageNames: ["/^actions\\/.+$/"],
+      pinDigests: false,
+    },
+    {
+      description: "Keep setup-kind manually pinned while the upstream v0.6.2 tag points at the wrong commit",
+      matchManagers: ["github-actions"],
+      matchPackageNames: ["engineerd/setup-kind"],
+      enabled: false,
+    },
+  ],
+
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^containers\\/control-plane\\/config\\/external-skills\\.yaml$/"],
+      matchStrings: [
+        "- repository:\\s*(?<depName>\\S+)\\s+ref:\\s*(?<currentDigest>[a-f0-9]{40})\\s+# renovate: datasource=(?<datasource>\\S+) currentValue=(?<currentValue>\\S+)",
+      ],
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: [
+        "/^scripts\\/(lint|test-github-hooks|lib-biome-hook-image)\\.sh$/",
+      ],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+[a-z_]+=\"\\$\\{[A-Z0-9_]+:-[^:@\"}]+:(?<currentValue>[^@\"}]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\\}\"",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+[a-z_]+=\"\\$\\{[A-Z0-9_]+:-(?<currentValue>[A-Za-z0-9._-]+)\\}\"",
+      ],
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: [
+        "/^containers\\/control-plane\\/Dockerfile$/",
+      ],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+ARG [A-Z0-9_]+=(?<currentValue>\\S+)",
+      ],
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: [
+        "/^(deploy\\/helm\\/control-plane\\/values\\.yaml|deploy\\/kubernetes\\/control-plane\\.example\\/common\\/configmap-control-plane-env\\.yaml)$/",
+      ],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+CONTROL_PLANE_BIOME_HOOK_IMAGE:\\s+\"?[^:@\\s\"]+:(?<currentValue>[^@\\s\"]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\"?",
+      ],
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^(deploy\\/kubernetes\\/control-plane\\.example\\.yaml|scripts\\/test-kind\\.sh)$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+image:\\s+[^:@\\s]+:(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?",
+      ],
+    },
+  ],
+}

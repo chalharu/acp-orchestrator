@@ -1263,9 +1263,10 @@ Web と CLI の候補内容をそろえます。
     - composer
     - virtual scroll
 5. CLI MVP
-    - transcript
-    - input
-    - slash completion
+   - transcript
+   - input
+   - slash completion
+   - 初期の利用者確認は install/package より `cargo run --bin acp -- ...` を優先する
 6. resilience
      - reconnect
      - `loadSession` 対応時の recovery

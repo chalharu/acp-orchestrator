@@ -1,4 +1,4 @@
-use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 use acp_contracts::{
     CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse, PromptRequest,
@@ -21,11 +21,9 @@ use tracing::info;
 
 use crate::{
     auth::{AuthError, extract_principal},
-    mock_client::{MockClient, MockClientError},
+    mock_client::{MockClient, MockClientError, ReplyProvider},
     sessions::{PendingPrompt, SessionStore, SessionStoreError},
 };
-
-type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -45,15 +43,25 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone)]
 pub struct AppState {
     store: Arc<SessionStore>,
-    mock_client: MockClient,
+    reply_provider: Arc<dyn ReplyProvider>,
 }
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
-        Ok(Self {
-            store: Arc::new(SessionStore::new(config.session_cap)),
-            mock_client: MockClient::new(config.mock_url)?,
-        })
+        Ok(Self::with_dependencies(
+            Arc::new(SessionStore::new(config.session_cap)),
+            Arc::new(MockClient::new(config.mock_url)?),
+        ))
+    }
+
+    pub fn with_dependencies(
+        store: Arc<SessionStore>,
+        reply_provider: Arc<dyn ReplyProvider>,
+    ) -> Self {
+        Self {
+            store,
+            reply_provider,
+        }
     }
 }
 
@@ -61,17 +69,17 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/sessions", post(create_session))
-        .route("/api/v1/sessions/:session_id", get(get_session))
+        .route("/api/v1/sessions/{session_id}", get(get_session))
         .route(
-            "/api/v1/sessions/:session_id/history",
+            "/api/v1/sessions/{session_id}/history",
             get(get_session_history),
         )
         .route(
-            "/api/v1/sessions/:session_id/events",
+            "/api/v1/sessions/{session_id}/events",
             get(stream_session_events),
         )
-        .route("/api/v1/sessions/:session_id/messages", post(post_message))
-        .route("/api/v1/sessions/:session_id/close", post(close_session))
+        .route("/api/v1/sessions/{session_id}/messages", post(post_message))
+        .route("/api/v1/sessions/{session_id}/close", post(close_session))
         .with_state(state)
 }
 
@@ -148,7 +156,7 @@ async fn post_message(
         .store
         .submit_prompt(&principal.id, &session_id, request.text)
         .await?;
-    dispatch_assistant_request(state.mock_client.clone(), pending);
+    dispatch_assistant_request(state.reply_provider.clone(), pending);
 
     Ok(Json(PromptResponse { accepted: true }))
 }
@@ -171,7 +179,7 @@ async fn stream_session_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Sse<SseStream>, AppError> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     let principal = extract_principal(&headers)?;
     let (snapshot, receiver) = state
         .store
@@ -184,21 +192,19 @@ async fn stream_session_events(
     let updates = BroadcastStream::new(receiver)
         .filter_map(|result| async move { result.ok().map(to_sse_event).map(Ok) });
 
-    let stream: SseStream = Box::pin(initial_event.chain(updates));
-
-    Ok(Sse::new(stream).keep_alive(
+    Ok(Sse::new(initial_event.chain(updates)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
 }
 
-fn dispatch_assistant_request(mock_client: MockClient, pending: PendingPrompt) {
+fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: PendingPrompt) {
     let session_id = pending.session_id().to_string();
     let prompt = pending.prompt_text().to_string();
 
     tokio::spawn(async move {
-        match mock_client.request_reply(&session_id, &prompt).await {
+        match reply_provider.request_reply(&session_id, &prompt).await {
             Ok(reply) => pending.complete_with_reply(reply).await,
             Err(error) => {
                 pending
@@ -274,6 +280,7 @@ impl From<SessionStoreError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock_client::ReplyFuture;
 
     #[test]
     fn default_server_config_points_to_the_local_mock() {
@@ -342,69 +349,117 @@ mod tests {
         let cases = [
             (
                 SessionStoreError::NotFound,
-                "session not found",
                 StatusCode::NOT_FOUND,
+                "session not found",
             ),
             (
                 SessionStoreError::Forbidden,
-                "session owner mismatch",
                 StatusCode::FORBIDDEN,
+                "session owner mismatch",
             ),
             (
                 SessionStoreError::Closed,
-                "session already closed",
                 StatusCode::CONFLICT,
+                "session already closed",
             ),
             (
                 SessionStoreError::EmptyPrompt,
-                "prompt must not be empty",
                 StatusCode::BAD_REQUEST,
+                "prompt must not be empty",
             ),
             (
                 SessionStoreError::SessionCapReached,
-                "session cap reached for principal",
                 StatusCode::TOO_MANY_REQUESTS,
+                "session cap reached for principal",
             ),
         ];
 
-        for (source, message, expected_status) in cases {
-            let error: AppError = match source.clone() {
-                SessionStoreError::NotFound => SessionStoreError::NotFound.into(),
-                SessionStoreError::Forbidden => SessionStoreError::Forbidden.into(),
-                SessionStoreError::Closed => SessionStoreError::Closed.into(),
-                SessionStoreError::EmptyPrompt => SessionStoreError::EmptyPrompt.into(),
-                SessionStoreError::SessionCapReached => SessionStoreError::SessionCapReached.into(),
-            };
-            let response = error.into_response();
-            assert_eq!(response.status(), expected_status);
-
-            let converted: AppError = match source {
-                SessionStoreError::NotFound => SessionStoreError::NotFound.into(),
-                SessionStoreError::Forbidden => SessionStoreError::Forbidden.into(),
-                SessionStoreError::Closed => SessionStoreError::Closed.into(),
-                SessionStoreError::EmptyPrompt => SessionStoreError::EmptyPrompt.into(),
-                SessionStoreError::SessionCapReached => SessionStoreError::SessionCapReached.into(),
-            };
-
+        for (source, expected_status, expected_message) in cases {
+            let error: AppError = source.into();
             assert!(
                 matches!(
-                    converted,
-                    AppError::NotFound(ref value) if expected_status == StatusCode::NOT_FOUND && value == message
+                    error,
+                    AppError::NotFound(ref message)
+                        if expected_status == StatusCode::NOT_FOUND && message == expected_message
                 ) || matches!(
-                    converted,
-                    AppError::Forbidden(ref value) if expected_status == StatusCode::FORBIDDEN && value == message
+                    error,
+                    AppError::Forbidden(ref message)
+                        if expected_status == StatusCode::FORBIDDEN && message == expected_message
                 ) || matches!(
-                    converted,
-                    AppError::Conflict(ref value) if expected_status == StatusCode::CONFLICT && value == message
+                    error,
+                    AppError::Conflict(ref message)
+                        if expected_status == StatusCode::CONFLICT && message == expected_message
                 ) || matches!(
-                    converted,
-                    AppError::BadRequest(ref value) if expected_status == StatusCode::BAD_REQUEST && value == message
+                    error,
+                    AppError::BadRequest(ref message)
+                        if expected_status == StatusCode::BAD_REQUEST && message == expected_message
                 ) || matches!(
-                    converted,
-                    AppError::TooManyRequests(ref value)
-                        if expected_status == StatusCode::TOO_MANY_REQUESTS && value == message
+                    error,
+                    AppError::TooManyRequests(ref message)
+                        if expected_status == StatusCode::TOO_MANY_REQUESTS
+                            && message == expected_message
                 )
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_reply_provider_handles_prompt_dispatch() {
+        let store = Arc::new(SessionStore::new(4));
+        let state = AppState::with_dependencies(
+            store.clone(),
+            Arc::new(StaticReplyProvider {
+                reply: "injected reply".to_string(),
+            }),
+        );
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer alice".parse().expect("authorization should parse"),
+        );
+
+        let _ = post_message(
+            State(state),
+            Path(session.id.clone()),
+            headers,
+            Json(PromptRequest {
+                text: "hello".to_string(),
+            }),
+        )
+        .await
+        .expect("prompt submission should succeed");
+
+        let history = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let history = store
+                    .session_history("alice", &session.id)
+                    .await
+                    .expect("session history should load");
+                if history.len() == 2 {
+                    return history;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("assistant reply should be recorded");
+
+        assert_eq!(history[1].text, "injected reply");
+    }
+
+    #[derive(Debug)]
+    struct StaticReplyProvider {
+        reply: String,
+    }
+
+    impl ReplyProvider for StaticReplyProvider {
+        fn request_reply<'a>(&'a self, _session_id: &'a str, _prompt: &'a str) -> ReplyFuture<'a> {
+            let reply = self.reply.clone();
+            Box::pin(async move { Ok(reply) })
         }
     }
 }

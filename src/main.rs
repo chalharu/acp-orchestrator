@@ -1,26 +1,19 @@
 use std::{
     env,
     ffi::OsString,
-    future::{Future, pending},
     path::PathBuf,
-    pin::Pin,
     process::{ExitStatus, Stdio},
     time::Duration,
 };
 
-use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
-use acp_web_backend::{
-    AppState, MockClientError, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown,
-};
+use acp_app_support::init_tracing;
 use reqwest::Client;
 use snafu::prelude::*;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    net::TcpListener,
     process::{Child, Command},
     time::{Instant, sleep},
 };
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
 
@@ -92,40 +85,14 @@ enum LauncherError {
     #[snafu(display("unknown internal role `{role}`"))]
     UnknownInternalRole { role: String },
 
-    #[snafu(display("invalid internal arguments for {role}: {message}"))]
-    InvalidInternalArguments { role: &'static str, message: String },
-
-    #[snafu(display("binding the mock child on {host}:{port} failed"))]
-    BindMock {
-        source: std::io::Error,
-        host: String,
-        port: u16,
-    },
-
-    #[snafu(display("reading the bound mock child address failed"))]
-    ReadMockBoundAddress { source: std::io::Error },
-
-    #[snafu(display("binding the backend child on {host}:{port} failed"))]
-    BindBackend {
-        source: std::io::Error,
-        host: String,
-        port: u16,
-    },
-
-    #[snafu(display("reading the bound backend child address failed"))]
-    ReadBackendBoundAddress { source: std::io::Error },
-
-    #[snafu(display("building the backend child state failed"))]
-    BuildBackendState { source: MockClientError },
-
-    #[snafu(display("running the mock child failed"))]
-    RunMock { source: std::io::Error },
-
-    #[snafu(display("running the backend child failed"))]
-    RunBackend { source: std::io::Error },
-
     #[snafu(display("running the cli child failed: {message}"))]
     RunCli { message: String },
+
+    #[snafu(display("running the mock child failed: {message}"))]
+    RunMock { message: String },
+
+    #[snafu(display("running the backend child failed: {message}"))]
+    RunBackend { message: String },
 }
 
 struct SpawnedService {
@@ -201,17 +168,6 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     run_with_args(env::args_os().collect()).await
-}
-
-fn init_tracing() {
-    let _ = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .without_time(),
-        )
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .try_init();
 }
 
 fn forwarded_cli_args(all_args: &[OsString]) -> Vec<OsString> {
@@ -406,199 +362,26 @@ async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<(
 }
 
 async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
-    let mut host = "127.0.0.1".to_string();
-    let mut port = 8090u16;
-    let mut response_delay_ms = 120u64;
-    let mut exit_after_ms = None;
-    let args = to_strings("acp mock", role_args)?;
-    let mut iter = args.into_iter();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--host" => host = next_value("acp mock", &mut iter, "--host")?,
-            "--port" => port = parse_u16("acp mock", &mut iter, "--port")?,
-            "--response-delay-ms" => {
-                response_delay_ms = parse_u64("acp mock", &mut iter, "--response-delay-ms")?
-            }
-            "--exit-after-ms" => {
-                exit_after_ms = Some(parse_u64("acp mock", &mut iter, "--exit-after-ms")?)
-            }
-            other => {
-                return InvalidInternalArgumentsSnafu {
-                    role: "acp mock",
-                    message: format!("unexpected argument `{other}`"),
-                }
-                .fail();
-            }
-        }
-    }
-
-    let listener = TcpListener::bind((host.as_str(), port))
+    let args = std::iter::once(OsString::from("acp-mock")).chain(role_args);
+    acp_mock::run_with_args(args)
         .await
-        .context(BindMockSnafu {
-            host: host.clone(),
-            port,
-        })?;
-    let address = listener.local_addr().context(ReadMockBoundAddressSnafu)?;
-    println!("acp mock listening on http://{address}");
-
-    let config = MockConfig {
-        response_delay: Duration::from_millis(response_delay_ms),
-    };
-
-    let shutdown: Pin<Box<dyn Future<Output = ()> + Send>> =
-        if let Some(exit_after_ms) = exit_after_ms {
-            Box::pin(sleep(Duration::from_millis(exit_after_ms)))
-        } else {
-            Box::pin(pending())
-        };
-
-    serve_mock_with_shutdown(listener, config, shutdown)
-        .await
-        .context(RunMockSnafu)
+        .map_err(|error| LauncherError::RunMock {
+            message: error.to_string(),
+        })
 }
 
 async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
-    let mut host = "127.0.0.1".to_string();
-    let mut port = 8080u16;
-    let mut session_cap = 8usize;
-    let mut mock_url = None;
-    let mut exit_after_ms = None;
-    let args = to_strings("web backend", role_args)?;
-    let mut iter = args.into_iter();
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--host" => host = next_value("web backend", &mut iter, "--host")?,
-            "--port" => port = parse_u16("web backend", &mut iter, "--port")?,
-            "--session-cap" => {
-                session_cap = parse_usize("web backend", &mut iter, "--session-cap")?
-            }
-            "--mock-url" => mock_url = Some(next_value("web backend", &mut iter, "--mock-url")?),
-            "--exit-after-ms" => {
-                exit_after_ms = Some(parse_u64("web backend", &mut iter, "--exit-after-ms")?)
-            }
-            other => {
-                return InvalidInternalArgumentsSnafu {
-                    role: "web backend",
-                    message: format!("unexpected argument `{other}`"),
-                }
-                .fail();
-            }
-        }
-    }
-
-    let mock_url = mock_url.ok_or_else(|| {
-        InvalidInternalArgumentsSnafu {
-            role: "web backend",
-            message: "missing `--mock-url`".to_string(),
-        }
-        .build()
-    })?;
-
-    let listener = TcpListener::bind((host.as_str(), port))
+    let args = std::iter::once(OsString::from("acp-web-backend")).chain(role_args);
+    acp_web_backend::run_with_args(args)
         .await
-        .context(BindBackendSnafu {
-            host: host.clone(),
-            port,
-        })?;
-    let address = listener
-        .local_addr()
-        .context(ReadBackendBoundAddressSnafu)?;
-    println!("web backend listening on http://{address}");
-
-    let state = AppState::new(ServerConfig {
-        session_cap,
-        mock_url,
-    })
-    .context(BuildBackendStateSnafu)?;
-
-    let shutdown: Pin<Box<dyn Future<Output = ()> + Send>> =
-        if let Some(exit_after_ms) = exit_after_ms {
-            Box::pin(sleep(Duration::from_millis(exit_after_ms)))
-        } else {
-            Box::pin(pending())
-        };
-
-    serve_backend_with_shutdown(listener, state, shutdown)
-        .await
-        .context(RunBackendSnafu)
-}
-
-fn to_strings(role: &'static str, args: Vec<OsString>) -> Result<Vec<String>> {
-    args.into_iter()
-        .map(|arg| {
-            arg.into_string()
-                .map_err(|value| LauncherError::InvalidInternalArguments {
-                    role,
-                    message: format!("non-UTF-8 argument: {:?}", value),
-                })
-        })
-        .collect()
-}
-
-fn next_value(
-    role: &'static str,
-    iter: &mut impl Iterator<Item = String>,
-    flag: &'static str,
-) -> Result<String> {
-    iter.next().ok_or_else(|| {
-        InvalidInternalArgumentsSnafu {
-            role,
-            message: format!("missing value for `{flag}`"),
-        }
-        .build()
-    })
-}
-
-fn parse_u16(
-    role: &'static str,
-    iter: &mut impl Iterator<Item = String>,
-    flag: &'static str,
-) -> Result<u16> {
-    let value = next_value(role, iter, flag)?;
-    value
-        .parse::<u16>()
-        .map_err(|_| LauncherError::InvalidInternalArguments {
-            role,
-            message: format!("`{flag}` expects a u16 value"),
-        })
-}
-
-fn parse_u64(
-    role: &'static str,
-    iter: &mut impl Iterator<Item = String>,
-    flag: &'static str,
-) -> Result<u64> {
-    let value = next_value(role, iter, flag)?;
-    value
-        .parse::<u64>()
-        .map_err(|_| LauncherError::InvalidInternalArguments {
-            role,
-            message: format!("`{flag}` expects a u64 value"),
-        })
-}
-
-fn parse_usize(
-    role: &'static str,
-    iter: &mut impl Iterator<Item = String>,
-    flag: &'static str,
-) -> Result<usize> {
-    let value = next_value(role, iter, flag)?;
-    value
-        .parse::<usize>()
-        .map_err(|_| LauncherError::InvalidInternalArguments {
-            role,
-            message: format!("`{flag}` expects a usize value"),
+        .map_err(|error| LauncherError::RunBackend {
+            message: error.to_string(),
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt;
 
     #[test]
     fn forwarded_cli_args_defaults_to_chat_new() {
@@ -783,18 +566,12 @@ mod tests {
         let error = run_mock_role(vec![OsString::from("--unexpected")])
             .await
             .expect_err("unexpected args should fail");
-        assert!(matches!(
-            error,
-            LauncherError::InvalidInternalArguments { .. }
-        ));
+        assert!(matches!(error, LauncherError::RunMock { .. }));
 
         let error = run_mock_role(vec![OsString::from("--port"), OsString::from("nope")])
             .await
             .expect_err("invalid ports should fail");
-        assert!(matches!(
-            error,
-            LauncherError::InvalidInternalArguments { .. }
-        ));
+        assert!(matches!(error, LauncherError::RunMock { .. }));
     }
 
     #[tokio::test]
@@ -830,18 +607,12 @@ mod tests {
         let error = run_backend_role(vec![OsString::from("--unexpected")])
             .await
             .expect_err("unexpected args should fail");
-        assert!(matches!(
-            error,
-            LauncherError::InvalidInternalArguments { .. }
-        ));
+        assert!(matches!(error, LauncherError::RunBackend { .. }));
 
         let error = run_backend_role(Vec::new())
             .await
             .expect_err("missing mock url should fail");
-        assert!(matches!(
-            error,
-            LauncherError::InvalidInternalArguments { .. }
-        ));
+        assert!(matches!(error, LauncherError::RunBackend { .. }));
 
         let error = run_backend_role(vec![
             OsString::from("--session-cap"),
@@ -849,10 +620,7 @@ mod tests {
         ])
         .await
         .expect_err("invalid session caps should fail");
-        assert!(matches!(
-            error,
-            LauncherError::InvalidInternalArguments { .. }
-        ));
+        assert!(matches!(error, LauncherError::RunBackend { .. }));
     }
 
     #[tokio::test]
@@ -881,48 +649,5 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.abort();
         let _ = handle.await;
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn to_strings_rejects_non_utf8_arguments() {
-        let error = to_strings("test role", vec![OsString::from_vec(vec![0xFF])])
-            .expect_err("non UTF-8 arguments should fail");
-
-        assert!(matches!(
-            error,
-            LauncherError::InvalidInternalArguments { .. }
-        ));
-    }
-
-    #[test]
-    fn helper_parsers_validate_input() {
-        let mut missing = Vec::<String>::new().into_iter();
-        assert!(matches!(
-            next_value("test role", &mut missing, "--host")
-                .expect_err("missing values should fail"),
-            LauncherError::InvalidInternalArguments { .. }
-        ));
-
-        let mut invalid_u16 = vec!["nope".to_string()].into_iter();
-        assert!(matches!(
-            parse_u16("test role", &mut invalid_u16, "--port")
-                .expect_err("invalid u16 should fail"),
-            LauncherError::InvalidInternalArguments { .. }
-        ));
-
-        let mut invalid_u64 = vec!["nope".to_string()].into_iter();
-        assert!(matches!(
-            parse_u64("test role", &mut invalid_u64, "--delay")
-                .expect_err("invalid u64 should fail"),
-            LauncherError::InvalidInternalArguments { .. }
-        ));
-
-        let mut invalid_usize = vec!["nope".to_string()].into_iter();
-        assert!(matches!(
-            parse_usize("test role", &mut invalid_usize, "--session-cap")
-                .expect_err("invalid usize should fail"),
-            LauncherError::InvalidInternalArguments { .. }
-        ));
     }
 }

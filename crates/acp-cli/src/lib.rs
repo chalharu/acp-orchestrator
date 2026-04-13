@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use acp_app_support::init_tracing;
 use acp_contracts::{
     CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole, PromptRequest,
     PromptResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
@@ -17,7 +18,6 @@ use futures_util::{StreamExt, pin_mut};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
@@ -167,17 +167,6 @@ where
         Command::Chat(args) => run_chat(args).await,
         Command::Session(args) => run_session(args).await,
     }
-}
-
-fn init_tracing() {
-    let _ = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .without_time(),
-        )
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .try_init();
 }
 
 async fn run_chat(args: ChatArgs) -> Result<()> {

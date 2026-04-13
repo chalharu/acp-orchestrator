@@ -1,0 +1,14 @@
+[package]
+name = "acp-app-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+test-helpers = ["dep:reqwest"]
+
+[dependencies]
+reqwest = { workspace = true, optional = true }
+tokio.workspace = true
+tracing-subscriber.workspace = true

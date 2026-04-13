@@ -1,5 +1,6 @@
 use std::{future::pending, pin::Pin, time::Duration};
 
+use acp_app_support::wait_for_health;
 use acp_contracts::{
     CreateSessionResponse, MessageRole, PromptRequest, StreamEvent, StreamEventPayload,
 };
@@ -255,7 +256,7 @@ async fn direct_mock_server_reports_health() -> Result<()> {
     let client = Client::builder().build().context("building test client")?;
     let (base_url, handle) = spawn_direct_mock_server().await?;
 
-    wait_for_health(&client, &base_url).await?;
+    wait_for_stack_health(&client, &base_url).await?;
 
     handle.abort();
     let _ = handle.await;
@@ -267,7 +268,7 @@ async fn direct_backend_server_reports_health() -> Result<()> {
     let client = Client::builder().build().context("building test client")?;
     let (base_url, handle) = spawn_direct_backend_server("http://127.0.0.1:9".to_string()).await?;
 
-    wait_for_health(&client, &base_url).await?;
+    wait_for_stack_health(&client, &base_url).await?;
 
     handle.abort();
     let _ = handle.await;
@@ -279,7 +280,7 @@ async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
     let client = Client::builder().build().context("building test client")?;
     let (base_url, shutdown, handle) = spawn_graceful_mock_server().await?;
 
-    wait_for_health(&client, &base_url).await?;
+    wait_for_stack_health(&client, &base_url).await?;
     let _ = shutdown.send(());
     handle
         .await
@@ -295,7 +296,7 @@ async fn graceful_backend_server_shutdown_completes_cleanly() -> Result<()> {
     let (base_url, shutdown, handle) =
         spawn_graceful_backend_server("http://127.0.0.1:9".to_string()).await?;
 
-    wait_for_health(&client, &base_url).await?;
+    wait_for_stack_health(&client, &base_url).await?;
     let _ = shutdown.send(());
     handle
         .await
@@ -341,7 +342,7 @@ impl TestStack {
             });
 
             backend_config.mock_url = format!("http://{mock_address}");
-            wait_for_health(&client, &backend_config.mock_url).await?;
+            wait_for_stack_health(&client, &backend_config.mock_url).await?;
             mock_shutdown = Some(mock_shutdown_tx);
         }
 
@@ -364,7 +365,7 @@ impl TestStack {
         });
 
         let backend_url = format!("http://{backend_address}");
-        wait_for_health(&client, &backend_url).await?;
+        wait_for_stack_health(&client, &backend_url).await?;
 
         Ok(Self {
             backend_url,
@@ -474,21 +475,10 @@ impl Drop for TestStack {
     }
 }
 
-async fn wait_for_health(client: &Client, base_url: &str) -> Result<()> {
-    let health_url = format!("{base_url}/healthz");
-
-    for _ in 0..50 {
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    Err(anyhow::anyhow!(
-        "health check did not succeed for {health_url}"
-    ))
+async fn wait_for_stack_health(client: &Client, base_url: &str) -> Result<()> {
+    wait_for_health(client, base_url, 50, Duration::from_millis(50))
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 async fn spawn_direct_mock_server() -> Result<(String, JoinHandle<std::io::Result<()>>)> {

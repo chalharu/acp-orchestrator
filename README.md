@@ -9,10 +9,9 @@ started to outgrow `copilot-sandbox-container`.
 
 ## Current focus
 
-- establish the target architecture for the ACP-backed backend / Web / CLI stack
-- define the session orchestration and worker supervision model
-- grow implementation work in a repository scoped to the orchestrator itself
-- ship the feedback-first backend + CLI reference implementation that keeps feedback loops short
+- keep the `cargo run` launcher path ready for quick end-user feedback
+- iterate on the CLI / backend / mock services independently inside the workspace
+- harden the reference implementation with coverage, linting, and hosted quality checks
 
 ## Documents
 
@@ -20,10 +19,10 @@ started to outgrow `copilot-sandbox-container`.
 - `docs/explanation/acp-web-cli-architecture.md`
 - `docs/explanation/cli-feedback-first-mvp.md`
 
-The repository is currently design-first. The architecture document under
-`docs/explanation/acp-web-cli-architecture.md` is the primary starting point.
-The feedback-first CLI document explains how to ship the first user-visible CLI
-slice before the full Ratatui frontend is ready.
+The architecture document under `docs/explanation/acp-web-cli-architecture.md`
+explains the long-term shape of the stack, and the feedback-first CLI document
+captures why the repo keeps a minimal user-visible slice working throughout
+development.
 
 ## Current workspace layout
 
@@ -32,6 +31,10 @@ slice before the full Ratatui frontend is ready.
 - `crates/acp-web-backend` provides the HTTP + SSE backend
 - `crates/acp-mock` provides the ACP mock service
 - `crates/acp-contracts` holds the shared wire contracts
+- `crates/acp-app-support` holds shared launcher/runtime/test support code
+
+This split keeps the root package focused on the easiest local entrypoint while
+letting each service stay testable and runnable on its own.
 
 ## Quick start
 

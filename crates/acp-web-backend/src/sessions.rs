@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use acp_contracts::{
     ConversationMessage, MessageRole, SessionSnapshot, SessionStatus, StreamEvent,
@@ -41,6 +44,7 @@ pub struct PendingPrompt {
     handle: Arc<SessionHandle>,
     session_id: String,
     prompt_text: String,
+    prompt_order: u64,
 }
 
 impl PendingPrompt {
@@ -53,18 +57,26 @@ impl PendingPrompt {
     }
 
     pub async fn complete_with_reply(self, text: String) {
-        if let Ok(event) = self
+        if let Ok(events) = self
             .handle
-            .append_message(MessageRole::Assistant, text)
+            .complete_prompt(self.prompt_order, PromptCompletion::Reply(text))
             .await
         {
-            self.handle.broadcast(event);
+            for event in events {
+                self.handle.broadcast(event);
+            }
         }
     }
 
     pub async fn complete_with_status(self, message: impl Into<String>) {
-        if let Ok(event) = self.handle.append_status(message.into()).await {
-            self.handle.broadcast(event);
+        if let Ok(events) = self
+            .handle
+            .complete_prompt(self.prompt_order, PromptCompletion::Status(message.into()))
+            .await
+        {
+            for event in events {
+                self.handle.broadcast(event);
+            }
         }
     }
 }
@@ -146,15 +158,14 @@ impl SessionStore {
         }
 
         let handle = self.authorized_handle(owner, session_id).await?;
-        let user_event = handle
-            .append_message(MessageRole::User, text.clone())
-            .await?;
+        let (user_event, prompt_order) = handle.submit_user_prompt(text.clone()).await?;
         handle.broadcast(user_event);
 
         Ok(PendingPrompt {
             handle,
             session_id: session_id.to_string(),
             prompt_text: text,
+            prompt_order,
         })
     }
 
@@ -232,12 +243,21 @@ struct SessionHandle {
 }
 
 #[derive(Debug)]
+enum PromptCompletion {
+    Reply(String),
+    Status(String),
+}
+
+#[derive(Debug)]
 struct SessionData {
     id: String,
     owner: String,
     status: SessionStatus,
     closed_at: Option<DateTime<Utc>>,
     latest_sequence: u64,
+    next_prompt_order: u64,
+    next_completion_order: u64,
+    pending_completions: BTreeMap<u64, PromptCompletion>,
     messages: Vec<ConversationMessage>,
 }
 
@@ -252,6 +272,9 @@ impl SessionHandle {
                 status: SessionStatus::Active,
                 closed_at: None,
                 latest_sequence: 0,
+                next_prompt_order: 0,
+                next_completion_order: 0,
+                pending_completions: BTreeMap::new(),
                 messages: Vec::new(),
             }),
         }
@@ -279,16 +302,51 @@ impl SessionHandle {
         self.data.lock().await.closed_at
     }
 
-    async fn append_message(
+    async fn submit_user_prompt(
         &self,
-        role: MessageRole,
         text: String,
-    ) -> Result<StreamEvent, SessionStoreError> {
+    ) -> Result<(StreamEvent, u64), SessionStoreError> {
         let mut data = self.data.lock().await;
         if data.status == SessionStatus::Closed {
             return Err(SessionStoreError::Closed);
         }
 
+        let prompt_order = data.next_prompt_order;
+        data.next_prompt_order += 1;
+        let event = Self::message_event(&mut data, MessageRole::User, text);
+        Ok((event, prompt_order))
+    }
+
+    async fn complete_prompt(
+        &self,
+        prompt_order: u64,
+        completion: PromptCompletion,
+    ) -> Result<Vec<StreamEvent>, SessionStoreError> {
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+
+        data.pending_completions.insert(prompt_order, completion);
+        let mut events = Vec::new();
+        loop {
+            let next_completion_order = data.next_completion_order;
+            let Some(completion) = data.pending_completions.remove(&next_completion_order) else {
+                break;
+            };
+            data.next_completion_order += 1;
+            events.push(match completion {
+                PromptCompletion::Reply(text) => {
+                    Self::message_event(&mut data, MessageRole::Assistant, text)
+                }
+                PromptCompletion::Status(message) => Self::status_event(&mut data, message),
+            });
+        }
+
+        Ok(events)
+    }
+
+    fn message_event(data: &mut SessionData, role: MessageRole, text: String) -> StreamEvent {
         data.latest_sequence += 1;
         let message = ConversationMessage {
             id: format!("m_{}", Uuid::new_v4().simple()),
@@ -298,20 +356,15 @@ impl SessionHandle {
         };
         data.messages.push(message.clone());
 
-        Ok(StreamEvent {
+        StreamEvent {
             sequence: data.latest_sequence,
             payload: StreamEventPayload::ConversationMessage { message },
-        })
+        }
     }
 
-    async fn append_status(&self, message: String) -> Result<StreamEvent, SessionStoreError> {
-        let mut data = self.data.lock().await;
-        if data.status == SessionStatus::Closed {
-            return Err(SessionStoreError::Closed);
-        }
-
+    fn status_event(data: &mut SessionData, message: String) -> StreamEvent {
         data.latest_sequence += 1;
-        Ok(StreamEvent::status(data.latest_sequence, message))
+        StreamEvent::status(data.latest_sequence, message)
     }
 
     async fn close(&self, reason: &str) -> Result<StreamEvent, SessionStoreError> {
@@ -322,6 +375,7 @@ impl SessionHandle {
 
         data.status = SessionStatus::Closed;
         data.closed_at = Some(Utc::now());
+        data.pending_completions.clear();
         data.latest_sequence += 1;
 
         Ok(StreamEvent {
@@ -370,6 +424,75 @@ mod tests {
         assert_eq!(history[0].text, "hello");
         assert!(matches!(history[1].role, MessageRole::Assistant));
         assert_eq!(history[1].text, "hello back");
+    }
+
+    #[tokio::test]
+    async fn assistant_replies_follow_prompt_submission_order() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let first = store
+            .submit_prompt("alice", &session.id, "first".to_string())
+            .await
+            .expect("first prompt submission should succeed");
+        let second = store
+            .submit_prompt("alice", &session.id, "second".to_string())
+            .await
+            .expect("second prompt submission should succeed");
+
+        second
+            .complete_with_reply("reply for second".to_string())
+            .await;
+
+        let history = store
+            .session_history("alice", &session.id)
+            .await
+            .expect("session history should load");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].text, "first");
+        assert_eq!(history[1].text, "second");
+
+        first
+            .complete_with_reply("reply for first".to_string())
+            .await;
+
+        let history = store
+            .session_history("alice", &session.id)
+            .await
+            .expect("session history should load");
+        assert_eq!(history.len(), 4);
+        assert!(matches!(history[2].role, MessageRole::Assistant));
+        assert_eq!(history[2].text, "reply for first");
+        assert!(matches!(history[3].role, MessageRole::Assistant));
+        assert_eq!(history[3].text, "reply for second");
+    }
+
+    #[tokio::test]
+    async fn pending_replies_are_ignored_after_session_close() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        store
+            .close_session("alice", &session.id)
+            .await
+            .expect("closing the session should succeed");
+        pending.complete_with_reply("late reply".to_string()).await;
+
+        let history = store
+            .session_history("alice", &session.id)
+            .await
+            .expect("session history should load");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].text, "hello");
     }
 
     #[tokio::test]

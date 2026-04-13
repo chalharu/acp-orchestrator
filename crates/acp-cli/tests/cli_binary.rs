@@ -1,10 +1,11 @@
 use std::{
     fs, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
+use acp_app_support::{unique_temp_json_path, wait_for_health};
 use acp_contracts::{MessageRole, SessionHistoryResponse};
 use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
@@ -34,7 +35,7 @@ async fn chat_and_session_commands_roundtrip_against_a_backend() -> Result<()> {
     let client = Client::builder().build()?;
     let (mock_url, mock_shutdown) = spawn_mock_server().await?;
     let (backend_url, backend_shutdown) = spawn_backend_server(mock_url).await?;
-    wait_for_health(&client, &backend_url).await?;
+    wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
 
     let mut chat = Command::new(env!("CARGO_BIN_EXE_acp-cli"))
         .args(["chat", "--new", "--server-url", &backend_url])
@@ -158,7 +159,7 @@ async fn chat_command_reports_usage_and_http_errors() -> Result<()> {
     let client = Client::builder().build()?;
     let (mock_url, mock_shutdown) = spawn_mock_server().await?;
     let (backend_url, backend_shutdown) = spawn_backend_server(mock_url).await?;
-    wait_for_health(&client, &backend_url).await?;
+    wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
 
     let missing_session = Command::new(env!("CARGO_BIN_EXE_acp-cli"))
         .args([
@@ -185,7 +186,7 @@ async fn chat_exits_cleanly_on_immediate_eof() -> Result<()> {
     let client = Client::builder().build()?;
     let (mock_url, mock_shutdown) = spawn_mock_server().await?;
     let (backend_url, backend_shutdown) = spawn_backend_server(mock_url).await?;
-    wait_for_health(&client, &backend_url).await?;
+    wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_acp-cli"))
         .args(["chat", "--new", "--server-url", &backend_url])
@@ -208,14 +209,10 @@ async fn chat_exits_cleanly_on_immediate_eof() -> Result<()> {
 }
 
 fn unique_recent_sessions_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after the epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("acp-cli-{label}-{nanos}.json"))
+    unique_temp_json_path("acp-cli", label)
 }
 
-fn read_recent_session_id(path: &PathBuf) -> Result<String> {
+fn read_recent_session_id(path: &Path) -> Result<String> {
     let entries: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     Ok(entries[0]["session_id"]
         .as_str()
@@ -259,18 +256,4 @@ async fn spawn_backend_server(mock_url: String) -> Result<(String, oneshot::Send
     });
 
     Ok((format!("http://{address}"), shutdown_tx))
-}
-
-async fn wait_for_health(client: &Client, base_url: &str) -> Result<()> {
-    let health_url = format!("{base_url}/healthz");
-    for _ in 0..100 {
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(io::Error::other(format!("health check did not succeed for {health_url}")).into())
 }

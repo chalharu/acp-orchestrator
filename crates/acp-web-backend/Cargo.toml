@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+acp-app-support.workspace = true
 acp-contracts.workspace = true
 axum.workspace = true
 chrono.workspace = true
@@ -16,10 +17,10 @@ snafu.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+acp-app-support = { workspace = true, features = ["test-helpers"] }
 acp-mock = { path = "../acp-mock" }
 anyhow = "1.0.102"
 eventsource-stream.workspace = true

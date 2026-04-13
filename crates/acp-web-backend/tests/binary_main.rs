@@ -1,15 +1,10 @@
-use std::{io, process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration};
 
+use acp_app_support::{read_startup_url, wait_for_health};
 use acp_contracts::HealthResponse;
 use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
 use reqwest::Client;
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    net::TcpListener,
-    process::{Child, Command},
-    sync::oneshot,
-    time::{sleep, timeout},
-};
+use tokio::{net::TcpListener, process::Command, sync::oneshot, time::timeout};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -28,9 +23,9 @@ async fn backend_binary_serves_health_checks() -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
-    let base_url = read_startup_url(&mut child).await?;
+    let base_url = read_startup_url(&mut child, "web backend listening on ").await?;
 
-    wait_for_health(&client, &base_url).await?;
+    wait_for_health(&client, &base_url, 100, Duration::from_millis(20)).await?;
 
     let health: HealthResponse = client
         .get(format!("{base_url}/healthz"))
@@ -62,33 +57,4 @@ async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {
     });
 
     Ok((format!("http://{address}"), shutdown_tx))
-}
-
-async fn read_startup_url(child: &mut Child) -> Result<String> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("missing child stdout"))?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    Ok(line
-        .trim()
-        .strip_prefix("web backend listening on ")
-        .ok_or_else(|| io::Error::other(format!("unexpected startup line: {}", line.trim())))?
-        .to_string())
-}
-
-async fn wait_for_health(client: &Client, base_url: &str) -> Result<()> {
-    let health_url = format!("{base_url}/healthz");
-    for _ in 0..100 {
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    Err(io::Error::other(format!("health check did not succeed for {health_url}")).into())
 }

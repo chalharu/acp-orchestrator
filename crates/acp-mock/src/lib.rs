@@ -1,3 +1,5 @@
+pub mod runtime;
+
 use std::{future::Future, time::Duration};
 
 use acp_contracts::{AssistantReplyRequest, AssistantReplyResponse, HealthResponse};
@@ -8,6 +10,8 @@ use axum::{
 };
 use tokio::{net::TcpListener, time::sleep};
 use tracing::info;
+
+pub use runtime::{MockAppError, run_with_args};
 
 #[derive(Debug, Clone)]
 pub struct MockConfig {

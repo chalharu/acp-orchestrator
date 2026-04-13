@@ -7,6 +7,7 @@ default-run = "acp"
 
 [workspace]
 members = [
+  "crates/acp-app-support",
   "crates/acp-cli",
   "crates/acp-contracts",
   "crates/acp-mock",
@@ -20,16 +21,17 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+acp-app-support = { path = "crates/acp-app-support" }
 acp-contracts = { path = "crates/acp-contracts" }
-axum = { version = "0.7.9", features = ["macros"] }
+axum = { version = "0.8.8", features = ["macros"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive", "env"] }
-dirs = "5.0.1"
+dirs = "6.0.0"
 eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
-reqwest = { version = "0.12.28", default-features = false, features = [
+reqwest = { version = "0.13.2", default-features = false, features = [
   "json",
-  "rustls-tls",
+  "rustls",
   "stream",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -42,6 +44,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.23.0", features = ["serde", "v4"] }
 
 [dependencies]
+acp-app-support.workspace = true
 acp-cli = { path = "crates/acp-cli" }
 acp-mock = { path = "crates/acp-mock" }
 acp-web-backend = { path = "crates/acp-web-backend" }
@@ -54,3 +57,6 @@ tracing-subscriber.workspace = true
 [[bin]]
 name = "acp"
 path = "src/main.rs"
+
+[dev-dependencies]
+acp-contracts.workspace = true

@@ -1,7 +1,7 @@
 # ACP Orchestrator
 
-ACP Orchestrator is the new home for the ACP-focused orchestration layer that
-sits in front of `copilot --acp --port <port>` and serves shared backend
+ACP Orchestrator is the new home for the ACP-focused orchestration layer.
+It sits in front of `copilot --acp --port <port>` and serves shared backend
 contracts to Web and CLI clients.
 
 This repository extracts ACP-specific design and implementation work that had

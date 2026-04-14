@@ -5,9 +5,9 @@ use std::{
     time::Duration,
 };
 
-use acp_app_support::{unique_temp_json_path, wait_for_health};
+use acp_app_support::{unique_temp_json_path, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{MessageRole, SessionHistoryResponse};
-use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
+use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
 use reqwest::Client;
 use serde_json::Value;
@@ -113,8 +113,8 @@ impl TestStack {
     async fn spawn(label: &str) -> Result<Self> {
         let recent_path = unique_recent_sessions_path(label);
         let client = Client::builder().build()?;
-        let (mock_url, mock_shutdown) = spawn_mock_server().await?;
-        let (backend_url, backend_shutdown) = spawn_backend_server(mock_url).await?;
+        let (mock_address, mock_shutdown) = spawn_mock_server().await?;
+        let (backend_url, backend_shutdown) = spawn_backend_server(mock_address).await?;
         wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
 
         Ok(Self {
@@ -288,22 +288,19 @@ async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {
     let address = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    tokio::spawn(async move {
-        let shutdown = async move {
-            let _ = shutdown_rx.await;
-        };
-        serve_mock_with_shutdown(listener, MockConfig::default(), shutdown)
-            .await
-            .expect("mock server should stop cleanly");
+    spawn_with_shutdown_task(listener, MockConfig::default(), async move {
+        let _ = shutdown_rx.await;
     });
 
-    Ok((format!("http://{address}"), shutdown_tx))
+    wait_for_tcp_connect(&address.to_string(), 100, Duration::from_millis(20)).await?;
+
+    Ok((address.to_string(), shutdown_tx))
 }
 
-async fn spawn_backend_server(mock_url: String) -> Result<(String, oneshot::Sender<()>)> {
+async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::Sender<()>)> {
     let state = AppState::new(ServerConfig {
         session_cap: 8,
-        mock_url,
+        mock_address,
     })?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

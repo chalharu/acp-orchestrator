@@ -28,14 +28,14 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub session_cap: usize,
-    pub mock_url: String,
+    pub mock_address: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             session_cap: 8,
-            mock_url: "http://127.0.0.1:8090".to_string(),
+            mock_address: "127.0.0.1:8090".to_string(),
         }
     }
 }
@@ -50,7 +50,7 @@ impl AppState {
     pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
         Ok(Self::with_dependencies(
             Arc::new(SessionStore::new(config.session_cap)),
-            Arc::new(MockClient::new(config.mock_url)?),
+            Arc::new(MockClient::new(config.mock_address)?),
         ))
     }
 
@@ -309,7 +309,7 @@ mod tests {
         let config = ServerConfig::default();
 
         assert_eq!(config.session_cap, 8);
-        assert_eq!(config.mock_url, "http://127.0.0.1:8090");
+        assert_eq!(config.mock_address, "127.0.0.1:8090");
     }
 
     #[test]

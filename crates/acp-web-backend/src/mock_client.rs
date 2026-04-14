@@ -1,10 +1,19 @@
-use std::time::Duration;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    env,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
-use std::{future::Future, pin::Pin};
-
-use acp_contracts::{AssistantReplyRequest, AssistantReplyResponse, ErrorResponse};
-use reqwest::{Client, StatusCode};
+use agent_client_protocol::{self as acp, Agent as _};
 use snafu::prelude::*;
+use tokio::net::TcpStream;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
 pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
@@ -16,53 +25,101 @@ pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
 
 #[derive(Debug, Clone)]
 pub struct MockClient {
-    base_url: String,
-    client: Client,
+    mock_address: String,
+    request_timeout: Duration,
+    working_dir: PathBuf,
+    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    session_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Debug, Snafu)]
 pub enum MockClientError {
-    #[snafu(display("building the mock HTTP client failed"))]
-    BuildHttpClient { source: reqwest::Error },
+    #[snafu(display("reading the current working directory failed"))]
+    ReadCurrentDirectory { source: std::io::Error },
 
-    #[snafu(display("sending the mock reply request failed"))]
-    SendRequest { source: reqwest::Error },
+    #[snafu(display("connecting to the mock ACP transport at {address} failed"))]
+    Connect {
+        source: std::io::Error,
+        address: String,
+    },
 
-    #[snafu(display("the mock service returned HTTP {status}: {message}"))]
-    HttpStatus { status: StatusCode, message: String },
+    #[snafu(display("initializing the mock ACP client failed"))]
+    Initialize { source: acp::Error },
 
-    #[snafu(display("decoding the mock reply failed"))]
-    DecodeResponse { source: reqwest::Error },
+    #[snafu(display("creating a mock ACP session failed"))]
+    CreateSession { source: acp::Error },
+
+    #[snafu(display("loading a mock ACP session failed"))]
+    LoadSession { source: acp::Error },
+
+    #[snafu(display("sending the mock ACP prompt failed"))]
+    SendPrompt { source: acp::Error },
+
+    #[snafu(display("building the mock ACP runtime failed"))]
+    BuildRuntime { source: std::io::Error },
+
+    #[snafu(display("joining the mock ACP task failed"))]
+    JoinTask { source: tokio::task::JoinError },
+
+    #[snafu(display("the mock ACP request timed out after {timeout:?}"))]
+    TimedOut { timeout: Duration },
 }
 
 impl MockClient {
-    pub fn new(base_url: String) -> Result<Self> {
-        Self::with_timeout(base_url, DEFAULT_REQUEST_TIMEOUT)
+    pub fn new(mock_address: String) -> Result<Self> {
+        Self::with_timeout(mock_address, DEFAULT_REQUEST_TIMEOUT)
     }
 
-    fn with_timeout(base_url: String, request_timeout: Duration) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(request_timeout)
-            .build()
-            .context(BuildHttpClientSnafu)?;
-
-        Ok(Self { base_url, client })
+    fn with_timeout(mock_address: String, request_timeout: Duration) -> Result<Self> {
+        let working_dir = env::current_dir().context(ReadCurrentDirectorySnafu)?;
+        Ok(Self {
+            mock_address,
+            request_timeout,
+            working_dir,
+            upstream_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        })
     }
 
     pub async fn request_reply(&self, session_id: &str, prompt: &str) -> Result<String> {
-        let response = self
-            .client
-            .post(format!("{}/v1/reply", self.base_url))
-            .json(&AssistantReplyRequest {
-                session_id: session_id.to_string(),
-                prompt: prompt.to_string(),
-            })
-            .send()
+        let backend_session_id = session_id.to_string();
+        let prompt = prompt.to_string();
+        let mock_address = self.mock_address.clone();
+        let working_dir = self.working_dir.clone();
+        let request_timeout = self.request_timeout;
+        let upstream_sessions = self.upstream_sessions.clone();
+        let session_lock = self.session_lock(&backend_session_id).await;
+        let _serial = session_lock.lock().await;
+
+        tokio::task::spawn_blocking(move || {
+            drive_acp_roundtrip_blocking(
+                mock_address,
+                working_dir,
+                backend_session_id,
+                prompt,
+                request_timeout,
+                upstream_sessions,
+            )
+        })
+        .await
+        .context(JoinTaskSnafu)?
+    }
+
+    async fn session_lock(&self, backend_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut session_locks = self.session_locks.lock().await;
+        session_locks
+            .entry(backend_session_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    #[cfg(test)]
+    async fn mapped_session_id(&self, backend_session_id: &str) -> Option<String> {
+        self.upstream_sessions
+            .lock()
             .await
-            .context(SendRequestSnafu)?;
-        let response = ensure_success(response).await?;
-        let payload: AssistantReplyResponse = response.json().await.context(DecodeResponseSnafu)?;
-        Ok(payload.text)
+            .get(backend_session_id)
+            .cloned()
     }
 }
 
@@ -72,65 +129,232 @@ impl ReplyProvider for MockClient {
     }
 }
 
-async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
+async fn drive_acp_roundtrip(
+    mock_address: String,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    prompt: String,
+    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+) -> Result<String> {
+    let stream = TcpStream::connect(&mock_address)
+        .await
+        .context(ConnectSnafu {
+            address: mock_address.clone(),
+        })?;
+    let (reader, writer) = stream.into_split();
+    let client = BackendAcpClient::new();
+    let local_set = tokio::task::LocalSet::new();
+
+    local_set
+        .run_until(async move {
+            let (conn, handle_io) = acp::ClientSideConnection::new(
+                client.clone(),
+                writer.compat_write(),
+                reader.compat(),
+                |future| {
+                    tokio::task::spawn_local(future);
+                },
+            );
+            let io_task = tokio::task::spawn_local(handle_io);
+            initialize_connection(&conn).await?;
+            let session_id = if let Some(session_id) = upstream_sessions
+                .lock()
+                .await
+                .get(&backend_session_id)
+                .cloned()
+            {
+                conn.load_session(acp::LoadSessionRequest::new(
+                    session_id.clone(),
+                    working_dir.clone(),
+                ))
+                .await
+                .context(LoadSessionSnafu)?;
+                session_id
+            } else {
+                let session = conn
+                    .new_session(acp::NewSessionRequest::new(working_dir))
+                    .await
+                    .context(CreateSessionSnafu)?;
+                let session_id = session.session_id.to_string();
+                upstream_sessions
+                    .lock()
+                    .await
+                    .insert(backend_session_id, session_id.clone());
+                session_id
+            };
+            conn.prompt(acp::PromptRequest::new(session_id, vec![prompt.into()]))
+                .await
+                .context(SendPromptSnafu)?;
+            client.wait_for_first_chunk().await;
+            io_task.abort();
+            let _ = io_task.await;
+            Ok(client.reply_text())
+        })
+        .await
+}
+
+fn drive_acp_roundtrip_blocking(
+    mock_address: String,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    prompt: String,
+    request_timeout: Duration,
+    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+) -> Result<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context(BuildRuntimeSnafu)?;
+
+    runtime.block_on(async move {
+        tokio::time::timeout(
+            request_timeout,
+            drive_acp_roundtrip(
+                mock_address,
+                working_dir,
+                backend_session_id,
+                prompt,
+                upstream_sessions,
+            ),
+        )
+        .await
+        .map_err(|_| MockClientError::TimedOut {
+            timeout: request_timeout,
+        })?
+    })
+}
+
+async fn initialize_connection(conn: &acp::ClientSideConnection) -> Result<()> {
+    conn.initialize(
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
+            acp::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
+                .title("ACP Web Backend"),
+        ),
+    )
+    .await
+    .context(InitializeSnafu)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct BackendAcpClient {
+    collected: Rc<RefCell<String>>,
+    saw_first_chunk: Rc<Cell<bool>>,
+    first_chunk: Rc<tokio::sync::Notify>,
+}
+
+impl BackendAcpClient {
+    fn new() -> Self {
+        Self {
+            collected: Rc::new(RefCell::new(String::new())),
+            saw_first_chunk: Rc::new(Cell::new(false)),
+            first_chunk: Rc::new(tokio::sync::Notify::new()),
+        }
     }
 
-    let message = match response.json::<ErrorResponse>().await {
-        Ok(payload) => payload.error,
-        Err(_) => status
-            .canonical_reason()
-            .unwrap_or("request failed")
-            .to_string(),
-    };
+    async fn wait_for_first_chunk(&self) {
+        if !self.saw_first_chunk.get() {
+            self.first_chunk.notified().await;
+        }
+    }
 
-    HttpStatusSnafu { status, message }.fail()
+    fn reply_text(&self) -> String {
+        self.collected.borrow().clone()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl acp::Client for BackendAcpClient {
+    async fn request_permission(
+        &self,
+        _args: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse> {
+        Err(acp::Error::method_not_found())
+    }
+
+    async fn session_notification(
+        &self,
+        args: acp::SessionNotification,
+    ) -> acp::Result<(), acp::Error> {
+        if let acp::SessionUpdate::AgentMessageChunk(chunk) = args.update {
+            self.collected
+                .borrow_mut()
+                .push_str(&content_text(chunk.content));
+            if !self.saw_first_chunk.replace(true) {
+                self.first_chunk.notify_waiters();
+            }
+        }
+        Ok(())
+    }
+}
+
+fn content_text(content: acp::ContentBlock) -> String {
+    match content {
+        acp::ContentBlock::Text(text) => text.text,
+        acp::ContentBlock::Image(_) => "<image>".to_string(),
+        acp::ContentBlock::Audio(_) => "<audio>".to_string(),
+        acp::ContentBlock::ResourceLink(link) => link.uri,
+        acp::ContentBlock::Resource(_) => "<resource>".to_string(),
+        _ => "<unsupported>".to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        Router,
-        http::{StatusCode, header::CONTENT_TYPE},
-        routing::post,
-    };
-    use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+    use acp_app_support::wait_for_tcp_connect;
+    use acp_mock::{MockConfig, spawn_with_shutdown_task};
+    use tokio::{net::TcpListener, sync::oneshot};
 
     #[tokio::test]
-    async fn request_reply_surfaces_json_error_messages() {
-        let (base_url, shutdown_tx) = spawn_error_server(
-            StatusCode::BAD_GATEWAY,
-            "application/json",
-            r#"{"error":"mock backend unavailable"}"#,
-        )
-        .await;
-        let client = MockClient::new(base_url).expect("client construction should succeed");
+    async fn request_reply_collects_text_from_acp_mock() {
+        let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+        let client = MockClient::new(mock_address).expect("client construction should succeed");
 
-        let error = client
+        let reply = client
             .request_reply("s_test", "hello")
             .await
-            .expect_err("error response should fail");
+            .expect("mock ACP replies should succeed");
 
-        assert!(matches!(
-            error,
-            MockClientError::HttpStatus { status, message }
-                if status == StatusCode::BAD_GATEWAY && message == "mock backend unavailable"
-        ));
+        assert!(reply.starts_with("mock assistant:"));
 
-        let _ = shutdown_tx.shutdown.send(());
-        shutdown_tx
-            .handle
-            .await
-            .expect("test server task should join");
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
-    async fn request_reply_times_out_for_stalled_servers() {
-        let (base_url, shutdown_tx) = spawn_delayed_server(Duration::from_millis(200)).await;
-        let client = MockClient::with_timeout(base_url, Duration::from_millis(20))
+    async fn request_reply_reuses_upstream_sessions_for_the_same_backend_session() {
+        let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+        let client = MockClient::new(mock_address).expect("client construction should succeed");
+
+        client
+            .request_reply("s_alpha", "first prompt")
+            .await
+            .expect("first replies should succeed");
+        client
+            .request_reply("s_alpha", "second prompt")
+            .await
+            .expect("reused sessions should succeed");
+        client
+            .request_reply("s_beta", "third prompt")
+            .await
+            .expect("second backend sessions should succeed");
+
+        assert_eq!(
+            client.mapped_session_id("s_alpha").await.as_deref(),
+            Some("mock_0")
+        );
+        assert_eq!(
+            client.mapped_session_id("s_beta").await.as_deref(),
+            Some("mock_1")
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn request_reply_times_out_for_slow_mock_agents() {
+        let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(200)).await;
+        let client = MockClient::with_timeout(mock_address, Duration::from_millis(20))
             .expect("client construction should succeed");
 
         let error = client
@@ -138,136 +362,47 @@ mod tests {
             .await
             .expect_err("stalled responses should time out");
 
-        assert!(matches!(error, MockClientError::SendRequest { .. }));
+        assert!(matches!(error, MockClientError::TimedOut { .. }));
 
-        let _ = shutdown_tx.shutdown.send(());
-        shutdown_tx
-            .handle
-            .await
-            .expect("test server task should join");
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
-    async fn request_reply_succeeds_when_the_server_recovers_before_timeout() {
-        let (base_url, shutdown_tx) = spawn_delayed_server(Duration::from_millis(20)).await;
-        let client = MockClient::with_timeout(base_url, Duration::from_millis(200))
+    async fn request_reply_reports_connect_failures() {
+        let client = MockClient::with_timeout("127.0.0.1:9".to_string(), Duration::from_millis(20))
             .expect("client construction should succeed");
-
-        let reply = client
-            .request_reply("s_test", "hello")
-            .await
-            .expect("responses within the timeout should succeed");
-
-        assert_eq!(reply, "late");
-
-        let _ = shutdown_tx.shutdown.send(());
-        shutdown_tx
-            .handle
-            .await
-            .expect("test server task should join");
-    }
-
-    #[tokio::test]
-    async fn request_reply_falls_back_to_http_reason_for_non_json_errors() {
-        let (base_url, shutdown_tx) =
-            spawn_error_server(StatusCode::BAD_GATEWAY, "text/plain", "bad gateway").await;
-        let client = MockClient::new(base_url).expect("client construction should succeed");
 
         let error = client
             .request_reply("s_test", "hello")
             .await
-            .expect_err("error response should fail");
+            .expect_err("unreachable mock transports should fail");
 
-        assert!(matches!(
-            error,
-            MockClientError::HttpStatus { status, message }
-                if status == StatusCode::BAD_GATEWAY && message == "Bad Gateway"
-        ));
-
-        let _ = shutdown_tx.shutdown.send(());
-        shutdown_tx
-            .handle
-            .await
-            .expect("test server task should join");
+        assert!(matches!(error, MockClientError::Connect { .. }));
     }
 
-    async fn spawn_error_server(
-        status: StatusCode,
-        content_type: &'static str,
-        body: &'static str,
-    ) -> (String, TestServer) {
+    async fn spawn_mock_server(delay: Duration) -> (String, oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("test server should bind");
+            .expect("listener should bind");
         let address = listener
             .local_addr()
-            .expect("test server address should be readable");
+            .expect("listener should expose its address");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let router = Router::new().route(
-            "/v1/reply",
-            post(move || async move { (status, [(CONTENT_TYPE, content_type)], body) }),
+
+        spawn_with_shutdown_task(
+            listener,
+            MockConfig {
+                response_delay: delay,
+            },
+            async move {
+                let _ = shutdown_rx.await;
+            },
         );
 
-        let handle = tokio::spawn(async move {
-            let shutdown = async move {
-                let _ = shutdown_rx.await;
-            };
-            axum::serve(listener, router)
-                .with_graceful_shutdown(shutdown)
-                .await
-                .expect("test server should stop cleanly");
-        });
-
-        (
-            format!("http://{address}"),
-            TestServer {
-                shutdown: shutdown_tx,
-                handle,
-            },
-        )
-    }
-
-    async fn spawn_delayed_server(delay: Duration) -> (String, TestServer) {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        wait_for_tcp_connect(&address.to_string(), 20, Duration::from_millis(10))
             .await
-            .expect("test server should bind");
-        let address = listener
-            .local_addr()
-            .expect("test server address should be readable");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let router = Router::new().route(
-            "/v1/reply",
-            post(move || async move {
-                tokio::time::sleep(delay).await;
-                (
-                    StatusCode::OK,
-                    [(CONTENT_TYPE, "application/json")],
-                    r#"{"text":"late"}"#,
-                )
-            }),
-        );
+            .expect("mock server should accept TCP connections");
 
-        let handle = tokio::spawn(async move {
-            let shutdown = async move {
-                let _ = shutdown_rx.await;
-            };
-            axum::serve(listener, router)
-                .with_graceful_shutdown(shutdown)
-                .await
-                .expect("test server should stop cleanly");
-        });
-
-        (
-            format!("http://{address}"),
-            TestServer {
-                shutdown: shutdown_tx,
-                handle,
-            },
-        )
-    }
-
-    struct TestServer {
-        shutdown: oneshot::Sender<()>,
-        handle: JoinHandle<()>,
+        (address.to_string(), shutdown_tx)
     }
 }

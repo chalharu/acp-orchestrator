@@ -59,7 +59,7 @@ cargo run -p acp-mock -- --port 8090
 Start the web backend:
 
 ```bash
-cargo run -p acp-web-backend -- --port 8080 --mock-url http://127.0.0.1:8090
+cargo run -p acp-web-backend -- --port 8080 --mock-address 127.0.0.1:8090
 ```
 
 Run the CLI frontend against that backend:

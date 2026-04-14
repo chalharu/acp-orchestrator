@@ -1,15 +1,15 @@
 pub mod runtime;
 
-use std::{future::Future, time::Duration};
+use std::{cell::Cell, future::Future, rc::Rc, time::Duration};
 
-use acp_contracts::{AssistantReplyRequest, AssistantReplyResponse, HealthResponse};
-use axum::{
-    Json, Router,
-    extract::State,
-    routing::{get, post},
+use agent_client_protocol::{self as acp, Client as _};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, oneshot},
+    time::sleep,
 };
-use tokio::{net::TcpListener, time::sleep};
-use tracing::info;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tracing::{error, info};
 
 pub use runtime::{MockAppError, run_with_args};
 
@@ -26,16 +26,115 @@ impl Default for MockConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-struct MockState {
+#[derive(Debug)]
+struct MockServerState {
     config: MockConfig,
+    next_session_id: Cell<u64>,
 }
 
-pub fn app(config: MockConfig) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/v1/reply", post(reply))
-        .with_state(MockState { config })
+impl MockServerState {
+    fn new(config: MockConfig) -> Self {
+        Self {
+            config,
+            next_session_id: Cell::new(0),
+        }
+    }
+
+    fn next_session_id(&self) -> String {
+        let next = self.next_session_id.get();
+        self.next_session_id.set(next + 1);
+        format!("mock_{next}")
+    }
+}
+
+type QueuedSessionNotification = (acp::SessionNotification, oneshot::Sender<()>);
+
+struct MockAgent {
+    state: Rc<MockServerState>,
+    session_update_tx: mpsc::UnboundedSender<QueuedSessionNotification>,
+}
+
+impl MockAgent {
+    fn new(
+        state: Rc<MockServerState>,
+        session_update_tx: mpsc::UnboundedSender<QueuedSessionNotification>,
+    ) -> Self {
+        Self {
+            state,
+            session_update_tx,
+        }
+    }
+
+    async fn send_reply(&self, session_id: String, text: String) -> Result<(), acp::Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.session_update_tx
+            .send((
+                acp::SessionNotification::new(
+                    session_id,
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(text.into())),
+                ),
+                ack_tx,
+            ))
+            .map_err(|_| acp::Error::internal_error())?;
+        ack_rx.await.map_err(|_| acp::Error::internal_error())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl acp::Agent for MockAgent {
+    async fn initialize(
+        &self,
+        _arguments: acp::InitializeRequest,
+    ) -> Result<acp::InitializeResponse, acp::Error> {
+        Ok(
+            acp::InitializeResponse::new(acp::ProtocolVersion::V1).agent_info(
+                acp::Implementation::new("acp-mock", env!("CARGO_PKG_VERSION")).title("ACP Mock"),
+            ),
+        )
+    }
+
+    async fn authenticate(
+        &self,
+        _arguments: acp::AuthenticateRequest,
+    ) -> Result<acp::AuthenticateResponse, acp::Error> {
+        Ok(acp::AuthenticateResponse::default())
+    }
+
+    async fn new_session(
+        &self,
+        _arguments: acp::NewSessionRequest,
+    ) -> Result<acp::NewSessionResponse, acp::Error> {
+        Ok(acp::NewSessionResponse::new(self.state.next_session_id()))
+    }
+
+    async fn load_session(
+        &self,
+        _arguments: acp::LoadSessionRequest,
+    ) -> Result<acp::LoadSessionResponse, acp::Error> {
+        Ok(acp::LoadSessionResponse::new())
+    }
+
+    async fn prompt(
+        &self,
+        arguments: acp::PromptRequest,
+    ) -> Result<acp::PromptResponse, acp::Error> {
+        let prompt = prompt_text(&arguments.prompt);
+        sleep(self.state.config.response_delay).await;
+        self.send_reply(arguments.session_id.to_string(), reply_for(&prompt))
+            .await?;
+        Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+    }
+
+    async fn cancel(&self, _args: acp::CancelNotification) -> Result<(), acp::Error> {
+        Ok(())
+    }
+
+    async fn set_session_mode(
+        &self,
+        _args: acp::SetSessionModeRequest,
+    ) -> Result<acp::SetSessionModeResponse, acp::Error> {
+        Ok(acp::SetSessionModeResponse::default())
+    }
 }
 
 pub async fn serve_with_shutdown<F>(
@@ -48,33 +147,100 @@ where
 {
     let address = listener.local_addr()?;
     info!("starting acp mock on {address}");
-    axum::serve(listener, app(config))
-        .with_graceful_shutdown(shutdown)
+
+    let state = Rc::new(MockServerState::new(config));
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+        .run_until(async move {
+            tokio::pin!(shutdown);
+
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown => return Ok(()),
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted?;
+                        let state = state.clone();
+                        tokio::task::spawn_local(async move {
+                            if let Err(error) = handle_connection(stream, state).await {
+                                error!("mock ACP connection failed: {error}");
+                            }
+                        });
+                    }
+                }
+            }
+        })
         .await
 }
 
-async fn healthz() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
+pub fn spawn_with_shutdown_task<F>(
+    listener: TcpListener,
+    config: MockConfig,
+    shutdown: F,
+) -> tokio::task::JoinHandle<std::io::Result<()>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move { serve_with_shutdown(listener, config, shutdown).await })
     })
 }
 
-async fn reply(
-    State(state): State<MockState>,
-    Json(request): Json<AssistantReplyRequest>,
-) -> Json<AssistantReplyResponse> {
-    sleep(state.config.response_delay).await;
+async fn handle_connection(
+    stream: TcpStream,
+    state: Rc<MockServerState>,
+) -> Result<(), acp::Error> {
+    let (reader, writer) = stream.into_split();
+    let (session_update_tx, mut session_update_rx) = mpsc::unbounded_channel();
+    let (conn, handle_io) = acp::AgentSideConnection::new(
+        MockAgent::new(state, session_update_tx),
+        writer.compat_write(),
+        reader.compat(),
+        |future| {
+            tokio::task::spawn_local(future);
+        },
+    );
 
-    Json(AssistantReplyResponse {
-        text: reply_for(&request.prompt),
-    })
+    tokio::task::spawn_local(async move {
+        while let Some((notification, ack_tx)) = session_update_rx.recv().await {
+            let result = conn.session_notification(notification).await;
+            if let Err(error) = result {
+                error!("sending mock ACP session update failed: {error}");
+                break;
+            }
+            let _ = ack_tx.send(());
+        }
+    });
+
+    handle_io.await
+}
+
+fn prompt_text(prompt: &[acp::ContentBlock]) -> String {
+    prompt
+        .iter()
+        .map(content_text)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn content_text(content: &acp::ContentBlock) -> String {
+    match content {
+        acp::ContentBlock::Text(text) => text.text.clone(),
+        acp::ContentBlock::Image(_) => "<image>".to_string(),
+        acp::ContentBlock::Audio(_) => "<audio>".to_string(),
+        acp::ContentBlock::ResourceLink(link) => link.uri.clone(),
+        acp::ContentBlock::Resource(_) => "<resource>".to_string(),
+        _ => "<unsupported>".to_string(),
+    }
 }
 
 pub fn reply_for(prompt: &str) -> String {
     let compact = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
 
     format!(
-        "mock assistant: I received `{}`. This flow still uses a mock ACP worker, but the backend-to-mock round-trip succeeded.",
+        "mock assistant: I received `{}`. The backend-to-mock ACP round-trip succeeded.",
         truncate(&compact, 120)
     )
 }
@@ -93,6 +259,49 @@ fn truncate(value: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::Agent as _;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_agent_supports_control_plane_requests() {
+        let state = Rc::new(MockServerState::new(MockConfig::default()));
+        let (session_update_tx, _session_update_rx) = mpsc::unbounded_channel();
+        let agent = MockAgent::new(state, session_update_tx);
+
+        let authenticate = agent
+            .authenticate(acp::AuthenticateRequest::new("local"))
+            .await
+            .expect("authenticate requests should succeed");
+        assert_eq!(authenticate, acp::AuthenticateResponse::default());
+
+        let session = agent
+            .new_session(acp::NewSessionRequest::new("/tmp"))
+            .await
+            .expect("new sessions should succeed");
+        assert_eq!(session.session_id.to_string(), "mock_0");
+
+        let loaded = agent
+            .load_session(acp::LoadSessionRequest::new(
+                session.session_id.clone(),
+                "/tmp",
+            ))
+            .await
+            .expect("load session requests should succeed");
+        assert_eq!(loaded, acp::LoadSessionResponse::new());
+
+        agent
+            .cancel(acp::CancelNotification::new(session.session_id.clone()))
+            .await
+            .expect("cancel notifications should succeed");
+
+        let mode = agent
+            .set_session_mode(acp::SetSessionModeRequest::new(
+                session.session_id,
+                "default",
+            ))
+            .await
+            .expect("set session mode requests should succeed");
+        assert_eq!(mode, acp::SetSessionModeResponse::default());
+    }
 
     #[test]
     fn default_config_uses_the_expected_delay() {
@@ -103,11 +312,23 @@ mod tests {
     }
 
     #[test]
+    fn prompt_text_formats_binary_placeholders_and_resource_links() {
+        let prompt = vec![
+            acp::ContentBlock::Image(acp::ImageContent::new("aGVsbG8=", "image/png")),
+            acp::ContentBlock::Audio(acp::AudioContent::new("aGVsbG8=", "audio/wav")),
+            acp::ContentBlock::ResourceLink(acp::ResourceLink::new("guide", "file:///guide.md")),
+        ];
+
+        assert_eq!(prompt_text(&prompt), "<image> <audio> file:///guide.md");
+    }
+
+    #[test]
     fn long_prompts_are_truncated_in_mock_replies() {
         let prompt = "word ".repeat(80);
         let reply = reply_for(&prompt);
 
         assert!(reply.contains("...`"));
         assert!(reply.starts_with("mock assistant: I received `"));
+        assert!(reply.contains("ACP round-trip succeeded"));
     }
 }

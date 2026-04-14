@@ -13,7 +13,7 @@ use reqwest::Client;
 use snafu::prelude::*;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     process::Child,
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -62,6 +62,7 @@ pub async fn bind_listener(
     port: u16,
     service_name: &'static str,
     startup_label: &'static str,
+    startup_prefix: &'static str,
 ) -> Result<TcpListener, ListenerSetupError> {
     init_tracing();
 
@@ -73,7 +74,7 @@ pub async fn bind_listener(
     let address = listener
         .local_addr()
         .context(ReadBoundAddressSnafu { service_name })?;
-    println!("{startup_label} listening on http://{address}");
+    println!("{startup_label} listening on {startup_prefix}{address}");
     Ok(listener)
 }
 
@@ -126,6 +127,25 @@ pub fn unique_temp_json_path(prefix: &str, label: &str) -> PathBuf {
         .expect("system time should be after the epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{label}-{nanos}.json"))
+}
+
+pub async fn wait_for_tcp_connect(
+    address: &str,
+    attempts: usize,
+    delay: Duration,
+) -> Result<(), BoxError> {
+    for _ in 0..attempts {
+        if let Ok(stream) = TcpStream::connect(address).await {
+            drop(stream);
+            return Ok(());
+        }
+        tokio::time::sleep(delay).await;
+    }
+
+    Err(io::Error::other(format!(
+        "TCP service did not accept connections at {address}"
+    ))
+    .into())
 }
 
 #[cfg(test)]
@@ -223,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listener_reports_successful_binding() {
-        let listener = bind_listener("127.0.0.1", 0, "test service", "test service")
+        let listener = bind_listener("127.0.0.1", 0, "test service", "test service", "")
             .await
             .expect("listener should bind");
         let address = listener
@@ -243,12 +263,44 @@ mod tests {
             .expect("listener should expose its address")
             .port();
 
-        let error = bind_listener("127.0.0.1", port, "test service", "test service")
+        let error = bind_listener("127.0.0.1", port, "test service", "test service", "")
             .await
             .expect_err("occupied ports should fail");
 
         assert!(
             matches!(error, ListenerSetupError::Bind { port: bound_port, .. } if bound_port == port)
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_tcp_connect_succeeds_when_the_listener_is_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should expose its address");
+        let handle = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        wait_for_tcp_connect(&address.to_string(), 10, Duration::from_millis(5))
+            .await
+            .expect("TCP wait should succeed");
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn wait_for_tcp_connect_reports_failures_after_exhausting_retries() {
+        let error = wait_for_tcp_connect("127.0.0.1:9", 2, Duration::from_millis(1))
+            .await
+            .expect_err("unreachable TCP services should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TCP service did not accept connections")
         );
     }
 

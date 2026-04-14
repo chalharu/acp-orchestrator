@@ -97,7 +97,7 @@ enum LauncherError {
 
 struct SpawnedService {
     child: Child,
-    base_url: String,
+    endpoint: String,
 }
 
 async fn run_with_args(args: Vec<OsString>) -> Result<()> {
@@ -121,7 +121,7 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     let SpawnedService {
         child: mut mock,
-        base_url: mock_url,
+        endpoint: mock_address,
     } = spawn_background_role(
         &current_executable,
         "acp mock",
@@ -130,11 +130,10 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
         &[],
     )
     .await?;
-    wait_for_health(&client, &mut mock, "acp mock", &mock_url).await?;
 
     let SpawnedService {
         child: mut backend,
-        base_url: backend_url,
+        endpoint: backend_url,
     } = spawn_background_role(
         &current_executable,
         "web backend",
@@ -142,8 +141,8 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
         vec![
             "--port".into(),
             "0".into(),
-            "--mock-url".into(),
-            mock_url.clone().into(),
+            "--mock-address".into(),
+            mock_address.clone().into(),
         ],
         &[],
     )
@@ -194,8 +193,8 @@ async fn spawn_background_role(
     let mut child = command
         .spawn()
         .context(SpawnChildSnafu { role: role_label })?;
-    let base_url = read_startup_url(&mut child, role_label).await?;
-    Ok(SpawnedService { child, base_url })
+    let endpoint = read_startup_url(&mut child, role_label).await?;
+    Ok(SpawnedService { child, endpoint })
 }
 
 async fn spawn_foreground_role(
@@ -590,16 +589,19 @@ mod tests {
 
     #[tokio::test]
     async fn run_mock_role_can_start_without_a_test_shutdown() {
-        let handle = tokio::spawn(run_mock_role(vec![
-            OsString::from("--port"),
-            OsString::from("0"),
-            OsString::from("--response-delay-ms"),
-            OsString::from("1"),
-        ]));
+        let local_set = tokio::task::LocalSet::new();
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            local_set.run_until(run_mock_role(vec![
+                OsString::from("--port"),
+                OsString::from("0"),
+                OsString::from("--response-delay-ms"),
+                OsString::from("1"),
+            ])),
+        )
+        .await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        handle.abort();
-        let _ = handle.await;
+        assert!(result.is_err(), "mock role should keep running");
     }
 
     #[tokio::test]
@@ -611,7 +613,7 @@ mod tests {
 
         let error = run_backend_role(Vec::new())
             .await
-            .expect_err("missing mock url should fail");
+            .expect_err("missing mock address should fail");
         assert!(matches!(error, LauncherError::RunBackend { .. }));
 
         let error = run_backend_role(vec![
@@ -628,8 +630,8 @@ mod tests {
         run_backend_role(vec![
             OsString::from("--port"),
             OsString::from("0"),
-            OsString::from("--mock-url"),
-            OsString::from("http://127.0.0.1:9"),
+            OsString::from("--mock-address"),
+            OsString::from("127.0.0.1:9"),
             OsString::from("--exit-after-ms"),
             OsString::from("50"),
         ])
@@ -642,8 +644,8 @@ mod tests {
         let handle = tokio::spawn(run_backend_role(vec![
             OsString::from("--port"),
             OsString::from("0"),
-            OsString::from("--mock-url"),
-            OsString::from("http://127.0.0.1:9"),
+            OsString::from("--mock-address"),
+            OsString::from("127.0.0.1:9"),
         ]));
 
         tokio::time::sleep(Duration::from_millis(50)).await;

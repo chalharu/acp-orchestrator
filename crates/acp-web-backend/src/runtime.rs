@@ -33,18 +33,24 @@ struct Cli {
     port: u16,
     #[arg(long, default_value_t = 8)]
     session_cap: usize,
-    #[arg(long, env = "ACP_MOCK_URL")]
-    mock_url: String,
+    #[arg(long, env = "ACP_MOCK_ADDRESS")]
+    mock_address: String,
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let listener = bind_listener(&cli.listen.host, cli.port, "web backend", "web backend")
-        .await
-        .map_err(|source| BackendAppError::Setup { source })?;
+    let listener = bind_listener(
+        &cli.listen.host,
+        cli.port,
+        "web backend",
+        "web backend",
+        "http://",
+    )
+    .await
+    .map_err(|source| BackendAppError::Setup { source })?;
 
     let state = AppState::new(ServerConfig {
         session_cap: cli.session_cap,
-        mock_url: cli.mock_url,
+        mock_address: cli.mock_address,
     })
     .context(BuildStateSnafu)?;
 
@@ -73,8 +79,8 @@ mod tests {
             "acp-web-backend",
             "--port",
             "0",
-            "--mock-url",
-            "http://127.0.0.1:9",
+            "--mock-address",
+            "127.0.0.1:9",
             "--exit-after-ms",
             "50",
         ])
@@ -88,8 +94,8 @@ mod tests {
             "acp-web-backend",
             "--port",
             "0",
-            "--mock-url",
-            "http://127.0.0.1:9",
+            "--mock-address",
+            "127.0.0.1:9",
         ]));
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -98,10 +104,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_args_requires_a_mock_url() {
+    async fn run_with_args_requires_a_mock_address() {
         let error = run_with_args(["acp-web-backend"])
             .await
-            .expect_err("missing mock URLs should fail");
+            .expect_err("missing mock addresses should fail");
 
         assert!(matches!(error, BackendAppError::ParseArgs { .. }));
     }
@@ -120,8 +126,8 @@ mod tests {
             "acp-web-backend",
             "--port",
             &port.to_string(),
-            "--mock-url",
-            "http://127.0.0.1:9",
+            "--mock-address",
+            "127.0.0.1:9",
             "--exit-after-ms",
             "1",
         ])

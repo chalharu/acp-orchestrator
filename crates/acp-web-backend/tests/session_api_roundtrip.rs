@@ -1,10 +1,10 @@
 use std::{future::pending, pin::Pin, time::Duration};
 
-use acp_app_support::wait_for_health;
+use acp_app_support::{wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
     CreateSessionResponse, MessageRole, PromptRequest, StreamEvent, StreamEventPayload,
 };
-use acp_mock::{MockConfig, serve_with_shutdown as serve_mock_with_shutdown};
+use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
 use anyhow::{Context, Result};
 use eventsource_stream::Eventsource;
@@ -18,7 +18,7 @@ type SseStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_url: String::new(),
+        mock_address: String::new(),
     })
     .await?;
 
@@ -60,7 +60,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
 async fn session_lookup_rejects_different_principal() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_url: String::new(),
+        mock_address: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -84,7 +84,7 @@ async fn session_lookup_rejects_different_principal() -> Result<()> {
 async fn session_creation_enforces_principal_session_cap() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 1,
-        mock_url: String::new(),
+        mock_address: String::new(),
     })
     .await?;
 
@@ -107,7 +107,7 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
 async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 128,
-        mock_url: String::new(),
+        mock_address: String::new(),
     })
     .await?;
 
@@ -156,7 +156,7 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
 async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_url: String::new(),
+        mock_address: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -187,7 +187,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
 async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_url: "http://127.0.0.1:9".to_string(),
+        mock_address: "127.0.0.1:9".to_string(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -223,7 +223,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
 async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_url: "http://127.0.0.1:9".to_string(),
+        mock_address: "127.0.0.1:9".to_string(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -252,21 +252,23 @@ async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
 }
 
 #[tokio::test]
-async fn direct_mock_server_reports_health() -> Result<()> {
-    let client = Client::builder().build().context("building test client")?;
-    let (base_url, handle) = spawn_direct_mock_server().await?;
+async fn direct_mock_server_accepts_tcp_connections() -> Result<()> {
+    let (address, shutdown, handle) = spawn_direct_mock_server().await?;
 
-    wait_for_stack_health(&client, &base_url).await?;
+    wait_for_stack_tcp(&address).await?;
 
-    handle.abort();
-    let _ = handle.await;
+    let _ = shutdown.send(());
+    handle
+        .await
+        .context("joining direct mock task")?
+        .context("mock server should stop cleanly")?;
     Ok(())
 }
 
 #[tokio::test]
 async fn direct_backend_server_reports_health() -> Result<()> {
     let client = Client::builder().build().context("building test client")?;
-    let (base_url, handle) = spawn_direct_backend_server("http://127.0.0.1:9".to_string()).await?;
+    let (base_url, handle) = spawn_direct_backend_server("127.0.0.1:9".to_string()).await?;
 
     wait_for_stack_health(&client, &base_url).await?;
 
@@ -277,10 +279,9 @@ async fn direct_backend_server_reports_health() -> Result<()> {
 
 #[tokio::test]
 async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
-    let client = Client::builder().build().context("building test client")?;
-    let (base_url, shutdown, handle) = spawn_graceful_mock_server().await?;
+    let (address, shutdown, handle) = spawn_graceful_mock_server().await?;
 
-    wait_for_stack_health(&client, &base_url).await?;
+    wait_for_stack_tcp(&address).await?;
     let _ = shutdown.send(());
     handle
         .await
@@ -294,7 +295,7 @@ async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
 async fn graceful_backend_server_shutdown_completes_cleanly() -> Result<()> {
     let client = Client::builder().build().context("building test client")?;
     let (base_url, shutdown, handle) =
-        spawn_graceful_backend_server("http://127.0.0.1:9".to_string()).await?;
+        spawn_graceful_backend_server("127.0.0.1:9".to_string()).await?;
 
     wait_for_stack_health(&client, &base_url).await?;
     let _ = shutdown.send(());
@@ -324,25 +325,18 @@ impl TestStack {
     async fn spawn(mut backend_config: ServerConfig) -> Result<Self> {
         let client = Client::builder().build().context("building test client")?;
         let mut mock_shutdown = None;
-        if backend_config.mock_url.is_empty() {
+        if backend_config.mock_address.is_empty() {
             let mock_listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .context("binding mock listener")?;
             let mock_address = mock_listener.local_addr().context("reading mock address")?;
             let (mock_shutdown_tx, mock_shutdown_rx) = oneshot::channel();
-            tokio::spawn(async move {
-                let shutdown = async move {
-                    let _ = mock_shutdown_rx.await;
-                };
-                if let Err(error) =
-                    serve_mock_with_shutdown(mock_listener, MockConfig::default(), shutdown).await
-                {
-                    eprintln!("test mock stopped: {error}");
-                }
+            spawn_with_shutdown_task(mock_listener, MockConfig::default(), async move {
+                let _ = mock_shutdown_rx.await;
             });
 
-            backend_config.mock_url = format!("http://{mock_address}");
-            wait_for_stack_health(&client, &backend_config.mock_url).await?;
+            backend_config.mock_address = mock_address.to_string();
+            wait_for_stack_tcp(&backend_config.mock_address).await?;
             mock_shutdown = Some(mock_shutdown_tx);
         }
 
@@ -481,26 +475,34 @@ async fn wait_for_stack_health(client: &Client, base_url: &str) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-async fn spawn_direct_mock_server() -> Result<(String, JoinHandle<std::io::Result<()>>)> {
+async fn wait_for_stack_tcp(address: &str) -> Result<()> {
+    wait_for_tcp_connect(address, 50, Duration::from_millis(50))
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+async fn spawn_direct_mock_server()
+-> Result<(String, oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("binding direct mock listener")?;
     let address = listener
         .local_addr()
         .context("reading direct mock address")?;
-    let handle = tokio::spawn(async move {
-        serve_mock_with_shutdown(listener, MockConfig::default(), pending()).await
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handle = spawn_with_shutdown_task(listener, MockConfig::default(), async move {
+        let _ = shutdown_rx.await;
     });
 
-    Ok((format!("http://{address}"), handle))
+    Ok((address.to_string(), shutdown_tx, handle))
 }
 
 async fn spawn_direct_backend_server(
-    mock_url: String,
+    mock_address: String,
 ) -> Result<(String, JoinHandle<std::io::Result<()>>)> {
     let state = AppState::new(ServerConfig {
         session_cap: 8,
-        mock_url,
+        mock_address,
     })
     .context("building direct backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -524,22 +526,19 @@ async fn spawn_graceful_mock_server()
         .local_addr()
         .context("reading graceful mock address")?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let handle = tokio::spawn(async move {
-        let shutdown = async move {
-            let _ = shutdown_rx.await;
-        };
-        serve_mock_with_shutdown(listener, MockConfig::default(), shutdown).await
+    let handle = spawn_with_shutdown_task(listener, MockConfig::default(), async move {
+        let _ = shutdown_rx.await;
     });
 
-    Ok((format!("http://{address}"), shutdown_tx, handle))
+    Ok((address.to_string(), shutdown_tx, handle))
 }
 
 async fn spawn_graceful_backend_server(
-    mock_url: String,
+    mock_address: String,
 ) -> Result<(String, oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)> {
     let state = AppState::new(ServerConfig {
         session_cap: 8,
-        mock_url,
+        mock_address,
     })
     .context("building graceful backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")

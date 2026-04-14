@@ -6,13 +6,13 @@ license.workspace = true
 
 [dependencies]
 acp-app-support.workspace = true
-acp-contracts.workspace = true
-axum.workspace = true
+agent-client-protocol.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 snafu.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 acp-app-support = { workspace = true, features = ["test-helpers"] }
-reqwest.workspace = true

@@ -33,7 +33,7 @@ struct Cli {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let listener = bind_listener(&cli.listen.host, cli.port, "mock server", "acp mock")
+    let listener = bind_listener(&cli.listen.host, cli.port, "mock server", "acp mock", "")
         .await
         .map_err(|source| MockAppError::Setup { source })?;
 
@@ -77,17 +77,20 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_args_can_start_without_a_test_shutdown() {
-        let handle = tokio::spawn(run_with_args([
-            "acp-mock",
-            "--port",
-            "0",
-            "--response-delay-ms",
-            "1",
-        ]));
+        let local_set = tokio::task::LocalSet::new();
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            local_set.run_until(run_with_args([
+                "acp-mock",
+                "--port",
+                "0",
+                "--response-delay-ms",
+                "1",
+            ])),
+        )
+        .await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        handle.abort();
-        let _ = handle.await;
+        assert!(result.is_err(), "mock server should keep running");
     }
 
     #[tokio::test]

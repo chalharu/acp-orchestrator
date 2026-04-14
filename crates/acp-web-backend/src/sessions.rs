@@ -889,8 +889,7 @@ mod tests {
         let error = store
             .submit_prompt("alice", &session.id, "   ".to_string())
             .await
-            .err()
-            .expect("empty prompt should fail");
+            .expect_err("empty prompt should fail");
 
         assert_eq!(error, SessionStoreError::EmptyPrompt);
         assert_eq!(error.message(), "prompt must not be empty");
@@ -1228,8 +1227,7 @@ mod tests {
         let prompt_error = store
             .submit_prompt("alice", &session.id, "hello".to_string())
             .await
-            .err()
-            .expect("closed sessions should reject prompts");
+            .expect_err("closed sessions should reject prompts");
         assert_eq!(prompt_error, SessionStoreError::Closed);
         assert_eq!(prompt_error.message(), "session already closed");
 

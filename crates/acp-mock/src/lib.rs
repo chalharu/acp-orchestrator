@@ -561,6 +561,89 @@ mod tests {
     }
 
     #[test]
+    fn finalizing_permission_requests_acknowledges_successful_notifications() {
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        assert!(finalize_permission_request(
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Cancelled,
+            )),
+            ack_tx,
+        ));
+        let response = ack_rx
+            .blocking_recv()
+            .expect("permission responses should be forwarded")
+            .expect("forwarded responses should stay successful");
+        assert!(matches!(
+            response.outcome,
+            acp::RequestPermissionOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn finalizing_permission_requests_stop_after_receiver_drop() {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        drop(ack_rx);
+
+        assert!(!finalize_permission_request(
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Cancelled,
+            )),
+            ack_tx,
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_agent_permission_requests_include_expected_options() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let state = Rc::new(MockServerState::new(MockConfig::default()));
+                let (session_update_tx, _session_update_rx) = mpsc::unbounded_channel();
+                let (permission_request_tx, mut permission_request_rx) = mpsc::unbounded_channel();
+                let agent = MockAgent::new(state, session_update_tx, permission_request_tx);
+
+                let request_task = tokio::task::spawn_local(async move {
+                    agent
+                        .request_permission("mock_0".to_string())
+                        .await
+                        .expect("permission requests should resolve")
+                });
+
+                let (request, ack_tx) = permission_request_rx
+                    .recv()
+                    .await
+                    .expect("permission requests should be queued");
+                assert_eq!(request.session_id.to_string(), "mock_0");
+                assert_eq!(request.tool_call.tool_call_id.to_string(), "tool_0");
+                assert_eq!(
+                    request.tool_call.fields.title.as_deref(),
+                    Some("read_text_file README.md")
+                );
+                assert_eq!(request.options.len(), 2);
+                assert_eq!(request.options[0].option_id.to_string(), "allow_once");
+                assert_eq!(request.options[1].option_id.to_string(), "reject_once");
+
+                ack_tx
+                    .send(Ok(acp::RequestPermissionResponse::new(
+                        acp::RequestPermissionOutcome::Selected(
+                            acp::SelectedPermissionOutcome::new("allow_once"),
+                        ),
+                    )))
+                    .expect("permission request outcomes should be delivered");
+
+                let response = request_task
+                    .await
+                    .expect("permission request task should finish");
+                assert!(matches!(
+                    response.outcome,
+                    acp::RequestPermissionOutcome::Selected(selected)
+                        if selected.option_id.to_string() == "allow_once"
+                ));
+            })
+            .await;
+    }
+
+    #[test]
     fn default_config_uses_the_expected_delay() {
         assert_eq!(
             MockConfig::default().response_delay,

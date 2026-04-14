@@ -759,6 +759,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_without_output_releases_queued_follow_up_events() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let (_snapshot, mut receiver) = store
+            .session_events("alice", &session.id)
+            .await
+            .expect("subscribing should succeed");
+        let first = store
+            .submit_prompt("alice", &session.id, "first".to_string())
+            .await
+            .expect("first prompt submission should succeed");
+        let second = store
+            .submit_prompt("alice", &session.id, "second".to_string())
+            .await
+            .expect("second prompt submission should succeed");
+
+        let _ = receiver
+            .recv()
+            .await
+            .expect("first user event should arrive");
+        let _ = receiver
+            .recv()
+            .await
+            .expect("second user event should arrive");
+
+        second
+            .complete_with_reply("reply for second".to_string())
+            .await;
+        let no_assistant =
+            tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await;
+        assert!(
+            no_assistant.is_err(),
+            "later replies should stay queued until earlier prompts complete"
+        );
+
+        first.complete_without_output().await;
+
+        let assistant_event = receiver
+            .recv()
+            .await
+            .expect("queued assistant reply should be broadcast");
+        assert!(matches!(
+            assistant_event.payload,
+            StreamEventPayload::ConversationMessage { message }
+                if matches!(message.role, MessageRole::Assistant)
+                    && message.text == "reply for second"
+        ));
+    }
+
+    #[tokio::test]
     async fn pending_replies_are_ignored_after_session_close() {
         let store = SessionStore::new(4);
         let session = store
@@ -955,6 +1008,47 @@ mod tests {
                 .await
                 .expect("cancelling should succeed")
         );
+        assert_eq!(
+            resolution.wait().await,
+            PermissionResolutionOutcome::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_sessions_cancel_active_turns_and_pending_permissions() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "permission please".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        let mut cancel_rx = pending
+            .start_turn()
+            .await
+            .expect("starting the turn should succeed");
+        let resolution = pending
+            .register_permission_request(
+                "read_text_file README.md".to_string(),
+                "allow_once".to_string(),
+                "reject_once".to_string(),
+            )
+            .await
+            .expect("permission registration should succeed");
+
+        store
+            .close_session("alice", &session.id)
+            .await
+            .expect("closing the session should succeed");
+
+        cancel_rx
+            .changed()
+            .await
+            .expect("closing the session should cancel the active turn");
+        assert!(*cancel_rx.borrow());
         assert_eq!(
             resolution.wait().await,
             PermissionResolutionOutcome::Cancelled

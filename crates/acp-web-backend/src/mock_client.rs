@@ -486,6 +486,37 @@ mod tests {
         assert!(matches!(error, MockClientError::Connect { .. }));
     }
 
+    #[tokio::test]
+    async fn request_reply_reports_session_runtime_failures_after_sessions_close() {
+        let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+        let client = MockClient::new(mock_address).expect("client construction should succeed");
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+        store
+            .close_session("alice", &session.id)
+            .await
+            .expect("closing the session should succeed");
+
+        let error = client
+            .request_reply(pending)
+            .await
+            .expect_err("closed sessions should surface turn runtime failures");
+
+        assert!(matches!(
+            error,
+            MockClientError::TurnRuntime { message } if message == "session already closed"
+        ));
+
+        let _ = shutdown_tx.send(());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn backend_acp_client_collects_agent_message_chunks() {
         let client = BackendAcpClient::new(test_pending_prompt("alice", "hello").await);

@@ -89,6 +89,14 @@
     },
     {
       customType: "regex",
+      managerFilePatterns: ["/^\\.github\\/workflows\\/.*\\.ya?ml$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+cargo install \\S+ --locked --version =(?<currentValue>\\S+)",
+      ],
+      versioningTemplate: "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
+    },
+    {
+      customType: "regex",
       managerFilePatterns: [
         "/^containers\\/control-plane\\/Dockerfile$/",
       ],
@@ -111,6 +119,14 @@
       matchStrings: [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+image:\\s+[^:@\\s]+:(?<currentValue>[^@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?",
       ],
+    },
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^rust-toolchain\\.toml$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+channel = \"(?<currentValue>[^\"]+)\"",
+      ],
+      versioningTemplate: "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
     },
   ],
 }

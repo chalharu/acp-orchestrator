@@ -16,8 +16,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       CARGO_TERM_COLOR: always
-      CHEF_WORKSPACE: ${{ runner.temp }}/cargo-chef-workspace
-      LLVM_COV_TARGET_DIR: ${{ github.workspace }}/target/llvm-cov-target
     permissions:
       contents: read
       pull-requests: read
@@ -45,22 +43,26 @@ jobs:
           cargo install cargo-llvm-cov --locked --version =0.8.5
       - name: Prepare Rust build recipe
         run: |
-          rm -rf "${CHEF_WORKSPACE}"
-          git worktree add --detach "${CHEF_WORKSPACE}" HEAD
-          cd "${CHEF_WORKSPACE}"
+          chef_workspace="${RUNNER_TEMP}/cargo-chef-workspace"
+          rm -rf "${chef_workspace}"
+          git worktree add --detach "${chef_workspace}" HEAD
+          cd "${chef_workspace}"
           cargo chef prepare --recipe-path recipe.json
       - name: Warm Rust dependency cache
         run: |
-          cd "${CHEF_WORKSPACE}"
+          chef_workspace="${RUNNER_TEMP}/cargo-chef-workspace"
+          llvm_cov_target_dir="${GITHUB_WORKSPACE}/target/llvm-cov-target"
+          cd "${chef_workspace}"
           eval "$(cargo llvm-cov show-env --sh)"
-          export CARGO_TARGET_DIR="${LLVM_COV_TARGET_DIR}"
+          export CARGO_TARGET_DIR="${llvm_cov_target_dir}"
           export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=mold -C debuginfo=0"
           cargo chef cook --workspace --all-targets --recipe-path recipe.json
       - name: Clean up cargo-chef worktree
         if: always()
         run: |
-          if [ -d "${CHEF_WORKSPACE}" ]; then
-            git worktree remove --force "${CHEF_WORKSPACE}"
+          chef_workspace="${RUNNER_TEMP}/cargo-chef-workspace"
+          if [ -d "${chef_workspace}" ]; then
+            git worktree remove --force "${chef_workspace}"
           fi
       - name: Generate coverage report
         run: |

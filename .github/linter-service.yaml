@@ -1,4 +1,9 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/chalharu/linter-service/refs/heads/main/.github/linter-service.schema.json
 linters:
+  lizard:
+    disabled: false
+    languages:
+      - rust
   textlint:
     disabled: false
     preset_packages:

@@ -1266,7 +1266,7 @@ Web と CLI の候補内容をそろえます。
    - transcript
    - input
    - slash completion
-   - 初期の利用者確認は install/package より `cargo run --bin acp -- ...` を優先する
+   - 初期の利用者確認は install/package より root の `cargo run` を優先する
 6. resilience
      - reconnect
      - `loadSession` 対応時の recovery

@@ -1,0 +1,24 @@
+[package]
+name = "acp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+acp-app-support.workspace = true
+acp-contracts.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+eventsource-stream.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+acp-app-support = { workspace = true, features = ["test-helpers"] }
+acp-mock = { path = "../acp-mock" }
+acp-web-backend = { path = "../acp-web-backend" }

@@ -1,0 +1,76 @@
+name: SonarCloud
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  sonarcloud:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TERM_COLOR: always
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-all-crates: "true"
+          workspaces: |
+            . -> target
+            . -> target/llvm-cov-target
+      - name: Install Rust coverage tooling
+        run: |
+          rustup component add llvm-tools-preview
+          # renovate: datasource=crate depName=cargo-chef versioning=cargo
+          cargo install cargo-chef --locked --version =0.1.77
+          # renovate: datasource=crate depName=cargo-llvm-cov versioning=cargo
+          cargo install cargo-llvm-cov --locked --version =0.8.5
+      - name: Warm Rust dependency cache
+        run: |
+          chef_workspace="${RUNNER_TEMP}/cargo-chef-workspace"
+          llvm_cov_target_dir="${GITHUB_WORKSPACE}/target/llvm-cov-target"
+          cleanup() {
+            cd "${GITHUB_WORKSPACE}"
+            if [ -d "${chef_workspace}" ]; then
+              git worktree remove --force "${chef_workspace}"
+            fi
+          }
+          trap cleanup EXIT
+          rm -rf "${chef_workspace}"
+          git worktree add --detach "${chef_workspace}" HEAD
+          cd "${chef_workspace}"
+          cargo chef prepare --recipe-path recipe.json
+          eval "$(cargo llvm-cov show-env --sh)"
+          export CARGO_TARGET_DIR="${llvm_cov_target_dir}"
+          export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=mold -C debuginfo=0"
+          cargo chef cook --workspace --all-targets --recipe-path recipe.json
+      - name: Generate coverage report
+        run: |
+          mkdir -p coverage
+          export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=mold -C debuginfo=0"
+          cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1
+          workspace_root="${PWD%/}/"
+          sed -i "s#^SF:${workspace_root}#SF:#" coverage/lcov.info
+      - name: Run SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

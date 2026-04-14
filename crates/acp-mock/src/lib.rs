@@ -209,7 +209,7 @@ async fn handle_connection(
     state: Rc<MockServerState>,
 ) -> Result<(), acp::Error> {
     let (reader, writer) = stream.into_split();
-    let (session_update_tx, mut session_update_rx) = mpsc::unbounded_channel();
+    let (session_update_tx, session_update_rx) = mpsc::unbounded_channel();
     let (conn, handle_io) = acp::AgentSideConnection::new(
         MockAgent::new(state, session_update_tx),
         writer.compat_write(),

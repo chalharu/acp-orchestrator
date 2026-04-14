@@ -1,0 +1,508 @@
+use super::*;
+use acp_app_support::{init_tracing, unique_temp_json_path};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    process::Command,
+    sync::Mutex,
+};
+
+static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[test]
+fn launcher_state_path_uses_temp_dir_without_data_dir() {
+    let path = launcher_state_path_from(None, None);
+
+    assert_eq!(
+        path,
+        std::env::temp_dir().join("acp-orchestrator-launcher-stack.json")
+    );
+}
+
+#[tokio::test]
+async fn shutdown_terminates_optional_mock_children() {
+    let mut stack = LauncherStack::ephemeral(
+        spawn_sleep_child().await,
+        Some(spawn_sleep_child().await),
+        "http://127.0.0.1:1".to_string(),
+    );
+
+    stack
+        .shutdown()
+        .await
+        .expect("ephemeral launcher stacks should shut down cleanly");
+
+    assert!(stack.ephemeral_children.is_none());
+}
+
+#[tokio::test]
+async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
+    let _guard = ENV_LOCK.lock().await;
+    // SAFETY: the test holds a process-wide mutex while mutating the environment.
+    unsafe {
+        std::env::set_var("ACP_SERVER_URL", "http://127.0.0.1:8080");
+    }
+    let args = LauncherArgs {
+        acp_server: None,
+        cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+    };
+
+    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args)
+        .await
+        .expect("explicit ACP_SERVER_URL should skip launcher-managed services");
+
+    assert!(stack.backend_url().is_none());
+    assert!(!stack.bundled_mock());
+    // SAFETY: the test holds a process-wide mutex while mutating the environment.
+    unsafe {
+        std::env::remove_var("ACP_SERVER_URL");
+    }
+}
+
+#[test]
+fn launcher_lock_drop_tolerates_non_file_paths() {
+    init_tracing();
+    let path = unique_temp_json_path("acp-launcher-lock", "drop-directory");
+    fs::create_dir_all(&path).expect("lock path directory should be creatable");
+
+    drop(LauncherLock { path });
+}
+
+#[tokio::test]
+async fn prepare_persistent_stack_times_out_when_the_lock_stays_busy() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "busy-lock");
+    let lock_path = launcher_lock_path_from(&state_path);
+    let lock = try_acquire_launcher_lock(&lock_path)
+        .expect("creating the launcher lock should succeed")
+        .expect("the lock should be acquired");
+
+    let error = prepare_persistent_bundled_stack_with_retry(
+        Path::new("/bin/true"),
+        &state_path,
+        1,
+        Duration::ZERO,
+        Duration::from_secs(3600),
+    )
+    .await
+    .expect_err("busy launcher locks should eventually time out");
+
+    drop(lock);
+    assert!(matches!(
+        error,
+        crate::LauncherError::WaitForLauncherLock { .. }
+    ));
+}
+
+#[tokio::test]
+async fn prepare_persistent_stack_clears_stale_locks_before_timing_out() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "stale-lock");
+    let lock_path = launcher_lock_path_from(&state_path);
+    fs::write(&lock_path, []).expect("stale lock files should be creatable");
+
+    let error = prepare_persistent_bundled_stack_with_retry(
+        Path::new("/bin/true"),
+        &state_path,
+        1,
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await
+    .expect_err("without reusable state the launcher should still time out");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::WaitForLauncherLock { .. }
+    ));
+    assert!(!lock_path.exists());
+}
+
+#[tokio::test]
+async fn prepare_persistent_stack_uses_the_final_reuse_check() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "final-reuse");
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock listener should bind");
+    save_launcher_state(
+        &state_path,
+        &LauncherState {
+            backend_url: backend_url.clone(),
+            mock_address: Some(
+                mock_listener
+                    .local_addr()
+                    .expect("mock listener address should be readable")
+                    .to_string(),
+            ),
+        },
+    )
+    .expect("launcher state should save");
+
+    let stack = prepare_persistent_bundled_stack_with_retry(
+        Path::new("/bin/true"),
+        &state_path,
+        0,
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await
+    .expect("the final reuse check should return the healthy stack");
+
+    health_task.abort();
+    assert_eq!(stack.backend_url(), Some(backend_url.as_str()));
+}
+
+#[tokio::test]
+async fn spawn_or_reuse_locked_stack_reuses_existing_state() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "locked-reuse");
+    let lock_path = launcher_lock_path_from(&state_path);
+    let lock = try_acquire_launcher_lock(&lock_path)
+        .expect("creating the launcher lock should succeed")
+        .expect("the lock should be acquired");
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock listener should bind");
+    save_launcher_state(
+        &state_path,
+        &LauncherState {
+            backend_url: backend_url.clone(),
+            mock_address: Some(
+                mock_listener
+                    .local_addr()
+                    .expect("mock listener address should be readable")
+                    .to_string(),
+            ),
+        },
+    )
+    .expect("launcher state should save");
+
+    let stack = spawn_or_reuse_locked_stack(Path::new("/bin/true"), &state_path, lock)
+        .await
+        .expect("the existing healthy stack should be reused");
+
+    health_task.abort();
+    assert_eq!(stack.backend_url(), Some(backend_url.as_str()));
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_clears_invalid_json_without_a_lock() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "invalid-json");
+    fs::write(&state_path, "{invalid").expect("invalid launcher state should write");
+
+    assert_eq!(
+        reusable_launcher_state(&state_path)
+            .await
+            .expect("invalid json should be ignored"),
+        None
+    );
+    assert!(!state_path.exists());
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_keeps_invalid_json_while_the_lock_exists() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "invalid-json-locked");
+    let lock_path = launcher_lock_path_from(&state_path);
+    fs::write(&state_path, "{invalid").expect("invalid launcher state should write");
+    fs::write(&lock_path, []).expect("launcher lock should write");
+
+    assert_eq!(
+        reusable_launcher_state(&state_path)
+            .await
+            .expect("invalid json should be ignored while locked"),
+        None
+    );
+    assert!(state_path.exists());
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_propagates_non_parse_read_errors() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "read-error");
+    fs::create_dir_all(&state_path).expect("state path directory should be creatable");
+
+    let error = reusable_launcher_state(&state_path)
+        .await
+        .expect_err("non-parse read failures should still be surfaced");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::ReadLauncherState { .. }
+    ));
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_treats_invalid_backend_urls_as_unhealthy() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "invalid-backend-url");
+    let mock_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock listener should bind");
+    save_launcher_state(
+        &state_path,
+        &LauncherState {
+            backend_url: "://invalid".to_string(),
+            mock_address: Some(
+                mock_listener
+                    .local_addr()
+                    .expect("mock listener address should be readable")
+                    .to_string(),
+            ),
+        },
+    )
+    .expect("launcher state should save");
+
+    assert_eq!(
+        reusable_launcher_state(&state_path)
+            .await
+            .expect("invalid backend urls should be ignored"),
+        None
+    );
+    assert!(state_path.exists());
+}
+
+#[test]
+fn warn_and_maybe_clear_invalid_launcher_state_tolerates_directory_paths() {
+    init_tracing();
+    let state_path = unique_temp_json_path("acp-launcher-state", "invalid-directory");
+    fs::create_dir_all(&state_path).expect("state path directory should be creatable");
+
+    warn_and_maybe_clear_invalid_launcher_state(
+        &state_path,
+        &parse_launcher_state_error(&state_path),
+    );
+
+    assert!(state_path.exists());
+}
+
+#[test]
+fn try_acquire_launcher_lock_reports_open_failures() {
+    let lock_path = PathBuf::from("/tmp").join("a".repeat(300));
+
+    let error = try_acquire_launcher_lock(&lock_path)
+        .expect_err("read-only lock paths should fail to open");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::AcquireLauncherLock { .. }
+    ));
+}
+
+#[test]
+fn clear_stale_launcher_lock_handles_not_stale_files() {
+    let lock_path = unique_temp_json_path("acp-launcher-lock", "not-stale");
+    fs::write(&lock_path, []).expect("launcher lock should write");
+
+    assert!(
+        !clear_stale_launcher_lock(&lock_path, Duration::from_secs(3600))
+            .expect("fresh launcher locks should be retained")
+    );
+    assert!(lock_path.exists());
+}
+
+#[test]
+fn clear_stale_launcher_lock_reports_metadata_failures() {
+    let lock_path = path_under_file_parent("metadata-failure", "lock");
+
+    let error = clear_stale_launcher_lock(&lock_path, Duration::ZERO)
+        .expect_err("metadata failures should be surfaced");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::ReadLauncherLockMetadata { .. }
+    ));
+}
+
+#[test]
+fn clear_stale_launcher_lock_reports_remove_failures() {
+    let lock_path = unique_temp_json_path("acp-launcher-lock", "remove-failure");
+    fs::create_dir_all(&lock_path).expect("lock path directory should be creatable");
+
+    let error = clear_stale_launcher_lock(&lock_path, Duration::ZERO)
+        .expect_err("directory lock paths should fail to remove");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::RemoveLauncherLock { .. }
+    ));
+}
+
+#[tokio::test]
+async fn spawn_persistent_bundled_backend_handles_backend_spawn_failures() {
+    let script = write_fake_launcher_script(
+        r#"#!/bin/sh
+if [ "$2" = "mock" ]; then
+  echo "acp mock listening on 127.0.0.1:65535"
+  sleep 1
+else
+  exit 1
+fi
+"#,
+    );
+
+    let error = spawn_persistent_bundled_backend(&script)
+        .await
+        .expect_err("backend startup failures should be returned");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::InvalidStartupLine { .. }
+    ));
+}
+
+#[tokio::test]
+async fn persist_launcher_state_or_shutdown_stops_children_when_saving_fails() {
+    let mut backend = spawn_sleep_child().await;
+    let mut mock = spawn_sleep_child().await;
+    let state_path = path_under_file_parent("save-error", "launcher-stack.json");
+
+    let error = persist_launcher_state_or_shutdown(
+        &state_path,
+        &LauncherState {
+            backend_url: "http://127.0.0.1:1".to_string(),
+            mock_address: Some("127.0.0.1:1".to_string()),
+        },
+        &mut backend,
+        &mut mock,
+    )
+    .await
+    .expect_err("invalid state paths should fail to save");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::CreateLauncherStateDirectory { .. }
+    ));
+    assert!(
+        backend
+            .try_wait()
+            .expect("backend child should be queryable")
+            .is_some()
+    );
+    assert!(
+        mock.try_wait()
+            .expect("mock child should be queryable")
+            .is_some()
+    );
+}
+
+#[test]
+fn save_launcher_state_creates_parent_directories() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "nested-parent")
+        .with_extension("")
+        .join("launcher-stack.json");
+    save_launcher_state(
+        &state_path,
+        &LauncherState {
+            backend_url: "http://127.0.0.1:1".to_string(),
+            mock_address: Some("127.0.0.1:1".to_string()),
+        },
+    )
+    .expect("saving launcher state should create parent directories");
+
+    assert!(state_path.exists());
+}
+
+#[test]
+fn create_launcher_state_parent_creates_nested_directories() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "parent-helper")
+        .with_extension("")
+        .join("launcher-stack.json");
+
+    create_launcher_state_parent(&state_path)
+        .expect("creating a nested launcher state parent should succeed");
+
+    assert!(
+        state_path
+            .parent()
+            .expect("nested launcher state should have a parent")
+            .exists()
+    );
+}
+
+#[test]
+fn create_launcher_state_parent_skips_paths_without_a_parent_component() {
+    create_launcher_state_parent(Path::new("launcher-stack.json"))
+        .expect("plain file names should not require directory creation");
+}
+
+#[tokio::test]
+async fn managed_stack_is_healthy_requires_a_mock_address() {
+    assert!(
+        !managed_stack_is_healthy(&LauncherState {
+            backend_url: "http://127.0.0.1:1".to_string(),
+            mock_address: None,
+        })
+        .await
+    );
+}
+
+#[tokio::test]
+async fn managed_stack_is_healthy_rejects_dead_mock_endpoints() {
+    assert!(
+        !managed_stack_is_healthy(&LauncherState {
+            backend_url: "http://127.0.0.1:1".to_string(),
+            mock_address: Some("127.0.0.1:9".to_string()),
+        })
+        .await
+    );
+}
+
+fn parse_launcher_state_error(path: &Path) -> crate::LauncherError {
+    crate::LauncherError::ParseLauncherState {
+        source: serde_json::from_str::<LauncherState>("{invalid")
+            .expect_err("invalid json should fail to parse"),
+        path: path.to_path_buf(),
+    }
+}
+
+fn path_under_file_parent(label: &str, child: &str) -> PathBuf {
+    let parent = unique_temp_json_path("acp-launcher-parent", label);
+    fs::write(&parent, "file").expect("file parent should write");
+    parent.join(child)
+}
+
+fn write_fake_launcher_script(contents: &str) -> PathBuf {
+    let path = unique_temp_json_path("acp-launcher-script", "mock-backend");
+    fs::write(&path, contents).expect("fake launcher script should write");
+    let mut permissions = fs::metadata(&path)
+        .expect("fake launcher script metadata should load")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("fake launcher script should become executable");
+    path
+}
+
+async fn spawn_health_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("health listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("health listener address should be readable");
+    let task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}",
+                    )
+                    .await;
+            });
+        }
+    });
+
+    (format!("http://{address}"), task)
+}
+
+async fn spawn_sleep_child() -> tokio::process::Child {
+    Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .spawn()
+        .expect("sleep child should spawn")
+}

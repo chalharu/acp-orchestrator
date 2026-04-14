@@ -18,9 +18,7 @@ use launcher_stack::prepare_launcher_stack;
 pub(crate) use launcher_process::{read_startup_url, terminate_child};
 #[cfg(test)]
 pub(crate) use launcher_stack::{
-    clear_stale_launcher_lock, cli_server_url_is_explicit, command_needs_backend,
-    launcher_lock_path_from, launcher_state_path_from, reusable_launcher_backend_url,
-    try_acquire_launcher_lock,
+    cli_server_url_is_explicit, command_needs_backend, launcher_state_path_from,
 };
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
@@ -143,9 +141,6 @@ enum LauncherError {
 
     #[snafu(display("timed out waiting for the launcher lock at {}", path.display()))]
     WaitForLauncherLock { path: PathBuf },
-
-    #[snafu(display("building the launcher stack health-check client failed"))]
-    BuildStackHttpClient { source: reqwest::Error },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -300,7 +295,5 @@ async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
         })
 }
 
-#[cfg(test)]
-mod launcher_stack_tests;
 #[cfg(test)]
 mod tests;

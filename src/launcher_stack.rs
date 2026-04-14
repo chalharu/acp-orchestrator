@@ -13,9 +13,8 @@ use snafu::prelude::*;
 use tokio::process::Child;
 
 use crate::{
-    BuildStackHttpClientSnafu, CreateLauncherStateDirectorySnafu, LauncherArgs,
-    ParseLauncherStateSnafu, ReadLauncherStateSnafu, Result, SerializeLauncherStateSnafu,
-    WriteLauncherStateSnafu,
+    CreateLauncherStateDirectorySnafu, LauncherArgs, ParseLauncherStateSnafu,
+    ReadLauncherStateSnafu, Result, SerializeLauncherStateSnafu, WriteLauncherStateSnafu,
     launcher_process::{SpawnedService, spawn_background_role, terminate_child},
 };
 
@@ -58,11 +57,7 @@ impl Drop for LauncherLock {
         if let Err(error) = fs::remove_file(&self.path)
             && error.kind() != ErrorKind::NotFound
         {
-            tracing::warn!(
-                path = %self.path.display(),
-                %error,
-                "failed to remove the launcher lock file"
-            );
+            warn_lock_cleanup_failure(&self.path, &error);
         }
     }
 }
@@ -199,23 +194,40 @@ async fn spawn_ephemeral_stack(
 
 async fn prepare_persistent_bundled_stack(current_executable: &Path) -> Result<LauncherStack> {
     let state_path = launcher_state_path();
-    let lock_path = launcher_lock_path_from(&state_path);
+    prepare_persistent_bundled_stack_with_retry(
+        current_executable,
+        &state_path,
+        STACK_LOCK_WAIT_ATTEMPTS,
+        STACK_LOCK_WAIT_DELAY,
+        STACK_LOCK_STALE_AFTER,
+    )
+    .await
+}
 
-    for _ in 0..STACK_LOCK_WAIT_ATTEMPTS {
-        if let Some(state) = reusable_launcher_state(&state_path).await? {
+async fn prepare_persistent_bundled_stack_with_retry(
+    current_executable: &Path,
+    state_path: &Path,
+    lock_wait_attempts: usize,
+    lock_wait_delay: Duration,
+    lock_stale_after: Duration,
+) -> Result<LauncherStack> {
+    let lock_path = launcher_lock_path_from(state_path);
+
+    for _ in 0..lock_wait_attempts {
+        if let Some(state) = reusable_launcher_state(state_path).await? {
             return Ok(LauncherStack::persistent(state.backend_url));
         }
 
         if let Some(lock) = try_acquire_launcher_lock(&lock_path)? {
-            return spawn_or_reuse_locked_stack(current_executable, &state_path, lock).await;
+            return spawn_or_reuse_locked_stack(current_executable, state_path, lock).await;
         }
-        if clear_stale_launcher_lock(&lock_path, STACK_LOCK_STALE_AFTER)? {
+        if clear_stale_launcher_lock(&lock_path, lock_stale_after)? {
             continue;
         }
-        tokio::time::sleep(STACK_LOCK_WAIT_DELAY).await;
+        tokio::time::sleep(lock_wait_delay).await;
     }
 
-    if let Some(state) = reusable_launcher_state(&state_path).await? {
+    if let Some(state) = reusable_launcher_state(state_path).await? {
         return Ok(LauncherStack::persistent(state.backend_url));
     }
 
@@ -241,13 +253,6 @@ async fn spawn_or_reuse_locked_stack(
     Ok(LauncherStack::persistent(backend_url))
 }
 
-#[cfg(test)]
-pub(crate) async fn reusable_launcher_backend_url(state_path: &Path) -> Result<Option<String>> {
-    Ok(reusable_launcher_state(state_path)
-        .await?
-        .map(|state| state.backend_url))
-}
-
 async fn reusable_launcher_state(state_path: &Path) -> Result<Option<LauncherState>> {
     let state = match load_launcher_state(state_path) {
         Ok(Some(state)) => state,
@@ -259,14 +264,12 @@ async fn reusable_launcher_state(state_path: &Path) -> Result<Option<LauncherSta
         Err(error) => return Err(error),
     };
 
-    match managed_stack_is_healthy(&state).await {
-        Ok(true) => Ok(Some(state)),
-        Ok(false) => Ok(None),
-        Err(error @ crate::LauncherError::BuildStackHttpClient { .. }) => {
-            warn_and_maybe_clear_invalid_launcher_state(state_path, &error);
-            Ok(None)
-        }
-        Err(error) => Err(error),
+    let is_healthy = managed_stack_is_healthy(&state).await;
+
+    if is_healthy {
+        Ok(Some(state))
+    } else {
+        Ok(None)
     }
 }
 
@@ -275,20 +278,24 @@ fn warn_and_maybe_clear_invalid_launcher_state(state_path: &Path, error: &crate:
         return;
     }
 
-    tracing::warn!(
-        path = %state_path.display(),
-        %error,
-        "ignoring invalid launcher state"
-    );
+    warn_invalid_launcher_state(state_path, error);
     if let Err(remove_error) = fs::remove_file(state_path)
         && remove_error.kind() != ErrorKind::NotFound
     {
-        tracing::warn!(
-            path = %state_path.display(),
-            %remove_error,
-            "failed to remove invalid launcher state"
-        );
+        warn_invalid_launcher_state_cleanup_failure(state_path, &remove_error);
     }
+}
+
+fn warn_lock_cleanup_failure(path: &Path, error: &std::io::Error) {
+    tracing::warn!(path = %path.display(), %error, "failed to remove the launcher lock file");
+}
+
+fn warn_invalid_launcher_state(path: &Path, error: &crate::LauncherError) {
+    tracing::warn!(path = %path.display(), %error, "ignoring invalid launcher state");
+}
+
+fn warn_invalid_launcher_state_cleanup_failure(path: &Path, error: &std::io::Error) {
+    tracing::warn!(path = %path.display(), %error, "failed to remove invalid launcher state");
 }
 
 pub(crate) fn try_acquire_launcher_lock(lock_path: &Path) -> Result<Option<LauncherLock>> {
@@ -452,35 +459,44 @@ fn save_launcher_state(path: &Path, state: &LauncherState) -> Result<()> {
 }
 
 fn create_launcher_state_parent(path: &Path) -> Result<()> {
-    if let Some(parent) = path
+    let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        let parent = parent.to_path_buf();
-        fs::create_dir_all(&parent).context(CreateLauncherStateDirectorySnafu { path: parent })?;
-    }
+    else {
+        return Ok(());
+    };
+
+    let parent = parent.to_path_buf();
+    fs::create_dir_all(&parent).context(CreateLauncherStateDirectorySnafu { path: parent })?;
     Ok(())
 }
 
-async fn managed_stack_is_healthy(state: &LauncherState) -> Result<bool> {
-    let Some(mock_address) = state.mock_address.as_deref() else {
-        return Ok(false);
-    };
-    if wait_for_tcp_connect(mock_address, STACK_READY_ATTEMPTS, STACK_READY_DELAY)
-        .await
-        .is_err()
-    {
-        return Ok(false);
-    }
+async fn managed_stack_is_healthy(state: &LauncherState) -> bool {
+    async {
+        let mock_address = state.mock_address.as_deref()?;
+        if wait_for_tcp_connect(mock_address, STACK_READY_ATTEMPTS, STACK_READY_DELAY)
+            .await
+            .is_err()
+        {
+            return Some(false);
+        }
 
-    let client = build_http_client_for_url(&state.backend_url, Some(STACK_READY_TIMEOUT))
-        .context(BuildStackHttpClientSnafu)?;
-    Ok(wait_for_health(
-        &client,
-        &state.backend_url,
-        STACK_READY_ATTEMPTS,
-        STACK_READY_DELAY,
-    )
+        let timeout = Some(STACK_READY_TIMEOUT);
+        let client = build_http_client_for_url(&state.backend_url, timeout).ok()?;
+        Some(
+            wait_for_health(
+                &client,
+                &state.backend_url,
+                STACK_READY_ATTEMPTS,
+                STACK_READY_DELAY,
+            )
+            .await
+            .is_ok(),
+        )
+    }
     .await
-    .is_ok())
+    .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests;

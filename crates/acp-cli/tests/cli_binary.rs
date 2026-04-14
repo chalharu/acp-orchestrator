@@ -150,32 +150,37 @@ fn read_recent_session_id(path: &Path) -> Result<String> {
         .to_string())
 }
 
+const CHAT_SCRIPT: [(&[u8], u64); 8] = [
+    (b"\n/help\nhello from cli binary\n", 600),
+    (b"permission please\n", 300),
+    (b"/approve req_1\n", 300),
+    (b"permission please again\n", 300),
+    (b"/deny req_2\n", 300),
+    (b"permission please once more\n", 300),
+    (b"/cancel\n", 300),
+    (b"/unknown\n/quit\n", 0),
+];
+
 async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<String> {
     let mut chat = spawn_interactive_command(
         ["chat", "--new", "--server-url", stack.backend_url.as_str()],
         &stack.recent_path,
     )?;
     let mut stdin = take_child_stdin(&mut chat, "missing chat stdin")?;
-    stdin.write_all(b"\n/help\nhello from cli binary\n").await?;
-    sleep(Duration::from_millis(600)).await;
-    stdin.write_all(b"permission please\n").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"/approve req_1\n").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"permission please again\n").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"/deny req_2\n").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"permission please once more\n").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"/cancel\n").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"/unknown\n/quit\n").await?;
+    write_chat_script(&mut stdin).await?;
     drop(stdin);
 
     let output = chat.wait_with_output().await?;
     assert!(output.status.success());
     Ok(String::from_utf8(output.stdout)?)
+}
+
+async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
+    for (input, delay_ms) in CHAT_SCRIPT {
+        stdin.write_all(input).await?;
+        sleep(Duration::from_millis(delay_ms)).await;
+    }
+    Ok(())
 }
 
 fn assert_chat_output(output: &str) {

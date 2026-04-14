@@ -2,7 +2,8 @@ use std::{future::pending, pin::Pin, time::Duration};
 
 use acp_app_support::{wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
-    CreateSessionResponse, MessageRole, PromptRequest, StreamEvent, StreamEventPayload,
+    CancelTurnResponse, CreateSessionResponse, MessageRole, PermissionDecision, PromptRequest,
+    ResolvePermissionRequest, ResolvePermissionResponse, StreamEvent, StreamEventPayload,
 };
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
@@ -220,6 +221,162 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
 }
 
 #[tokio::test]
+async fn permission_requests_can_be_approved_through_http() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_address: String::new(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+    let mut events = stack.open_events("alice", &session.session.id).await?;
+
+    let snapshot = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        snapshot.payload,
+        StreamEventPayload::SessionSnapshot { .. }
+    ));
+
+    stack
+        .submit_prompt("alice", &session.session.id, "permission please")
+        .await?;
+
+    let user_message = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        user_message.payload,
+        StreamEventPayload::ConversationMessage { message }
+            if matches!(message.role, MessageRole::User)
+    ));
+
+    let permission = expect_next_event(&mut events).await?;
+    match permission.payload {
+        StreamEventPayload::PermissionRequested { request } => {
+            assert_eq!(request.request_id, "req_1");
+            assert_eq!(request.summary, "read_text_file README.md");
+        }
+        payload => panic!("unexpected payload: {payload:?}"),
+    }
+
+    let resolution = stack
+        .resolve_permission(
+            "alice",
+            &session.session.id,
+            "req_1",
+            PermissionDecision::Approve,
+        )
+        .await?;
+    assert_eq!(resolution.request_id, "req_1");
+
+    let assistant_message = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        assistant_message.payload,
+        StreamEventPayload::ConversationMessage { message }
+            if matches!(message.role, MessageRole::Assistant)
+                && message.text.starts_with("mock assistant:")
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_requests_can_be_denied_without_recording_an_assistant_reply() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_address: String::new(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+    let mut events = stack.open_events("alice", &session.session.id).await?;
+
+    let _ = expect_next_event(&mut events).await?;
+    stack
+        .submit_prompt("alice", &session.session.id, "permission please")
+        .await?;
+    let _ = expect_next_event(&mut events).await?;
+    let permission = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        permission.payload,
+        StreamEventPayload::PermissionRequested { .. }
+    ));
+
+    let resolution = stack
+        .resolve_permission(
+            "alice",
+            &session.session.id,
+            "req_1",
+            PermissionDecision::Deny,
+        )
+        .await?;
+    assert_eq!(resolution.request_id, "req_1");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let history = stack.session_history("alice", &session.session.id).await?;
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].text, "permission please");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_a_pending_permission_turn_returns_a_status_event() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_address: String::new(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+    let mut events = stack.open_events("alice", &session.session.id).await?;
+
+    let _ = expect_next_event(&mut events).await?;
+    stack
+        .submit_prompt("alice", &session.session.id, "permission please")
+        .await?;
+    let _ = expect_next_event(&mut events).await?;
+    let permission = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        permission.payload,
+        StreamEventPayload::PermissionRequested { .. }
+    ));
+
+    let cancelled = stack.cancel_turn("alice", &session.session.id).await?;
+    assert!(cancelled.cancelled);
+
+    let status = expect_next_event(&mut events).await?;
+    assert!(matches!(
+        status.payload,
+        StreamEventPayload::Status { message } if message == "turn cancelled"
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        mock_address: String::new(),
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+
+    let response = stack
+        .client
+        .post(format!(
+            "{}/api/v1/sessions/{}/permissions/req_missing",
+            stack.backend_url, session.session.id
+        ))
+        .bearer_auth("alice")
+        .json(&ResolvePermissionRequest {
+            decision: PermissionDecision::Approve,
+        })
+        .send()
+        .await
+        .context("resolving a missing permission request")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
 async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
@@ -413,6 +570,48 @@ impl TestStack {
             .error_for_status()
             .context("close session returned an error")?;
         Ok(())
+    }
+
+    async fn cancel_turn(&self, token: &str, session_id: &str) -> Result<CancelTurnResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/v1/sessions/{session_id}/cancel",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("cancelling the test turn")?
+            .error_for_status()
+            .context("cancel turn returned an error")?;
+        response.json().await.context("decoding cancel response")
+    }
+
+    async fn resolve_permission(
+        &self,
+        token: &str,
+        session_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<ResolvePermissionResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/v1/sessions/{session_id}/permissions/{request_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .json(&ResolvePermissionRequest { decision })
+            .send()
+            .await
+            .context("resolving test permission")?
+            .error_for_status()
+            .context("permission resolution returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding permission resolution response")
     }
 
     async fn session_history(

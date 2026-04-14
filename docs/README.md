@@ -14,7 +14,7 @@
 ## ドキュメントの役割
 
 - Overview: `README.md`
-  - リポジトリの目的、スコープ、現在の作業軸をつかむ
+  - リポジトリの目的、スコープ、現在の作業軸とローカル試行手順をつかむ
 - Explanation: `docs/explanation/acp-web-cli-architecture.md`
   - ACP Orchestrator の target architecture、責務分離、設計判断を理解する
 - Explanation: `docs/explanation/cli-feedback-first-mvp.md`

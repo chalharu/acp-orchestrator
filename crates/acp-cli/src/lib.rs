@@ -8,8 +8,9 @@ use std::{
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
-    CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole, PromptRequest,
-    PromptResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole,
+    PermissionDecision, PromptRequest, PromptResponse, ResolvePermissionRequest,
+    ResolvePermissionResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
 };
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -217,7 +218,9 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
         }
 
         if trimmed.starts_with('/') {
-            if handle_repl_command(trimmed).await? {
+            if handle_repl_command(trimmed, &client, &server_url, &args.auth_token, &session.id)
+                .await?
+            {
                 break;
             }
             continue;
@@ -266,27 +269,68 @@ fn require_server_url(command: &'static str, server_url: Option<String>) -> Resu
     server_url.ok_or_else(|| MissingServerUrlSnafu { command }.build())
 }
 
-async fn handle_repl_command(command: &str) -> Result<bool> {
-    match command {
+async fn handle_repl_command(
+    command: &str,
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+) -> Result<bool> {
+    let mut parts = command.split_whitespace();
+    let name = parts.next().unwrap_or_default();
+
+    match name {
         "/help" => {
             println!("/help");
             println!("/quit");
-            println!("/cancel (planned)");
-            println!("/approve <request-id> (planned)");
-            println!("/deny <request-id> (planned)");
+            println!("/cancel");
+            println!("/approve <request-id>");
+            println!("/deny <request-id>");
             Ok(false)
         }
         "/quit" => Ok(true),
-        value if value.starts_with("/cancel") => {
-            println!("[status] `/cancel` is planned.");
+        "/cancel" => {
+            if parts.next().is_some() {
+                println!("[status] usage: /cancel");
+                return Ok(false);
+            }
+            match cancel_turn(client, base_url, auth_token, session_id).await {
+                Ok(response) if response.cancelled => {
+                    println!("[status] cancel requested for the running turn");
+                }
+                Ok(_) => {
+                    println!("[status] no running turn to cancel");
+                }
+                Err(error) => println!("[status] {error}"),
+            }
             Ok(false)
         }
-        value if value.starts_with("/approve ") => {
-            println!("[status] `/approve` is planned.");
-            Ok(false)
-        }
-        value if value.starts_with("/deny ") => {
-            println!("[status] `/deny` is planned.");
+        "/approve" | "/deny" => {
+            let Some(request_id) = parts.next() else {
+                println!("[status] usage: {name} <request-id>");
+                return Ok(false);
+            };
+            if parts.next().is_some() {
+                println!("[status] usage: {name} <request-id>");
+                return Ok(false);
+            }
+            let decision = if name == "/approve" {
+                PermissionDecision::Approve
+            } else {
+                PermissionDecision::Deny
+            };
+            match resolve_permission(
+                client, base_url, auth_token, session_id, request_id, decision,
+            )
+            .await
+            {
+                Ok(response) => println!(
+                    "[status] permission {} {}",
+                    response.request_id,
+                    permission_decision_label(&response.decision)
+                ),
+                Err(error) => println!("[status] {error}"),
+            }
             Ok(false)
         }
         _ => {
@@ -402,6 +446,51 @@ async fn close_session(
     })
 }
 
+async fn cancel_turn(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+) -> Result<CancelTurnResponse> {
+    let response = client
+        .post(format!("{base_url}/api/v1/sessions/{session_id}/cancel"))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "cancel turn",
+        })?;
+    let response = ensure_success(response, "cancel turn").await?;
+    response.json().await.context(DecodeResponseSnafu {
+        action: "cancel turn",
+    })
+}
+
+async fn resolve_permission(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+    request_id: &str,
+    decision: PermissionDecision,
+) -> Result<ResolvePermissionResponse> {
+    let response = client
+        .post(format!(
+            "{base_url}/api/v1/sessions/{session_id}/permissions/{request_id}"
+        ))
+        .bearer_auth(auth_token)
+        .json(&ResolvePermissionRequest { decision })
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "resolve permission",
+        })?;
+    let response = ensure_success(response, "resolve permission").await?;
+    response.json().await.context(DecodeResponseSnafu {
+        action: "resolve permission",
+    })
+}
+
 async fn ensure_success(response: Response, action: &'static str) -> Result<Response> {
     let status = response.status();
     if status.is_success() {
@@ -469,6 +558,9 @@ fn render_event(event: &StreamEvent) {
         StreamEventPayload::ConversationMessage { message } => {
             render_message(message.role.clone(), &message.text);
         }
+        StreamEventPayload::PermissionRequested { request } => {
+            println!("[permission {}] {}", request.request_id, request.summary);
+        }
         StreamEventPayload::SessionClosed { reason, .. } => {
             println!("[status] session closed: {reason}");
         }
@@ -482,6 +574,13 @@ fn render_message(role: MessageRole, text: &str) {
     match role {
         MessageRole::User => println!("[user] {text}"),
         MessageRole::Assistant => println!("[assistant] {text}"),
+    }
+}
+
+fn permission_decision_label(decision: &PermissionDecision) -> &'static str {
+    match decision {
+        PermissionDecision::Approve => "approved",
+        PermissionDecision::Deny => "denied",
     }
 }
 
@@ -654,7 +753,16 @@ mod tests {
                 reason: "done".to_string(),
             },
         });
-        render_event(&StreamEvent::status(4, "working"));
+        render_event(&StreamEvent {
+            sequence: 4,
+            payload: StreamEventPayload::PermissionRequested {
+                request: acp_contracts::PermissionRequest {
+                    request_id: "req_1".to_string(),
+                    summary: "read_text_file README.md".to_string(),
+                },
+            },
+        });
+        render_event(&StreamEvent::status(5, "working"));
     }
 
     #[test]

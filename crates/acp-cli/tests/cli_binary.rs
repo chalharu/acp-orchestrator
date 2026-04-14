@@ -158,9 +158,19 @@ async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<String> {
     let mut stdin = take_child_stdin(&mut chat, "missing chat stdin")?;
     stdin.write_all(b"\n/help\nhello from cli binary\n").await?;
     sleep(Duration::from_millis(600)).await;
-    stdin
-        .write_all(b"/cancel\n/approve req-1\n/deny req-1\n/unknown\n/quit\n")
-        .await?;
+    stdin.write_all(b"permission please\n").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"/approve req_1\n").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"permission please again\n").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"/deny req_2\n").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"permission please once more\n").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"/cancel\n").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"/unknown\n/quit\n").await?;
     drop(stdin);
 
     let output = chat.wait_with_output().await?;
@@ -172,9 +182,16 @@ fn assert_chat_output(output: &str) {
     assert!(output.contains("session: s_"));
     assert!(output.contains("connected to backend:"));
     assert!(output.contains("/help"));
-    assert!(output.contains("[status] `/cancel` is planned."));
-    assert!(output.contains("[status] `/approve` is planned."));
-    assert!(output.contains("[status] `/deny` is planned."));
+    assert!(output.contains("/cancel"));
+    assert!(output.contains("/approve <request-id>"));
+    assert!(output.contains("/deny <request-id>"));
+    assert!(output.contains("[permission req_1] read_text_file README.md"));
+    assert!(output.contains("[status] permission req_1 approved"));
+    assert!(output.contains("[permission req_2] read_text_file README.md"));
+    assert!(output.contains("[status] permission req_2 denied"));
+    assert!(output.contains("[permission req_3] read_text_file README.md"));
+    assert!(output.contains("[status] cancel requested for the running turn"));
+    assert!(output.contains("[status] turn cancelled"));
     assert!(output.contains("[status] unknown command. Use `/help`."));
 }
 

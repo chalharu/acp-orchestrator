@@ -1,8 +1,9 @@
 use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 use acp_contracts::{
-    CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse, PromptRequest,
-    PromptResponse, SessionHistoryResponse, StreamEvent,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
+    PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
+    SessionHistoryResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -21,7 +22,7 @@ use tracing::info;
 
 use crate::{
     auth::{AuthError, extract_principal},
-    mock_client::{MockClient, MockClientError, ReplyProvider},
+    mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStore, SessionStoreError},
 };
 
@@ -79,6 +80,11 @@ pub fn app(state: AppState) -> Router {
             get(stream_session_events),
         )
         .route("/api/v1/sessions/{session_id}/messages", post(post_message))
+        .route("/api/v1/sessions/{session_id}/cancel", post(cancel_turn))
+        .route(
+            "/api/v1/sessions/{session_id}/permissions/{request_id}",
+            post(resolve_permission),
+        )
         .route("/api/v1/sessions/{session_id}/close", post(close_session))
         .with_state(state)
 }
@@ -175,6 +181,35 @@ async fn close_session(
     Ok(Json(CloseSessionResponse { session }))
 }
 
+async fn cancel_turn(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<CancelTurnResponse>, AppError> {
+    let principal = extract_principal(&headers)?;
+    let cancelled = state
+        .store
+        .cancel_active_turn(&principal.id, &session_id)
+        .await?;
+
+    Ok(Json(CancelTurnResponse { cancelled }))
+}
+
+async fn resolve_permission(
+    State(state): State<AppState>,
+    Path((session_id, request_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ResolvePermissionRequest>,
+) -> Result<Json<ResolvePermissionResponse>, AppError> {
+    let principal = extract_principal(&headers)?;
+    let resolution = state
+        .store
+        .resolve_permission(&principal.id, &session_id, &request_id, request.decision)
+        .await?;
+
+    Ok(Json(resolution))
+}
+
 async fn stream_session_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -200,12 +235,11 @@ async fn stream_session_events(
 }
 
 fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: PendingPrompt) {
-    let session_id = pending.session_id().to_string();
-    let prompt = pending.prompt_text().to_string();
-
     tokio::spawn(async move {
-        match reply_provider.request_reply(&session_id, &prompt).await {
-            Ok(reply) => pending.complete_with_reply(reply).await,
+        match reply_provider.request_reply(pending.clone()).await {
+            Ok(ReplyResult::Reply(reply)) => pending.complete_with_reply(reply).await,
+            Ok(ReplyResult::Status(message)) => pending.complete_with_status(message).await,
+            Ok(ReplyResult::NoOutput) => pending.complete_without_output().await,
             Err(error) => {
                 pending
                     .complete_with_status(format!("mock request failed: {error}"))
@@ -292,6 +326,7 @@ impl From<SessionStoreError> for AppError {
             SessionStoreError::Forbidden => Self::Forbidden(error.message().to_string()),
             SessionStoreError::Closed => Self::Conflict(error.message().to_string()),
             SessionStoreError::EmptyPrompt => Self::BadRequest(error.message().to_string()),
+            SessionStoreError::PermissionNotFound => Self::NotFound(error.message().to_string()),
             SessionStoreError::SessionCapReached => {
                 Self::TooManyRequests(error.message().to_string())
             }
@@ -302,7 +337,7 @@ impl From<SessionStoreError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock_client::ReplyFuture;
+    use crate::mock_client::{ReplyFuture, ReplyResult};
 
     #[test]
     fn default_server_config_points_to_the_local_mock() {
@@ -397,6 +432,11 @@ mod tests {
                 "prompt must not be empty",
             ),
             (
+                SessionStoreError::PermissionNotFound,
+                StatusCode::NOT_FOUND,
+                "permission request not found",
+            ),
+            (
                 SessionStoreError::SessionCapReached,
                 StatusCode::TOO_MANY_REQUESTS,
                 "session cap reached for principal",
@@ -465,9 +505,9 @@ mod tests {
     }
 
     impl ReplyProvider for StaticReplyProvider {
-        fn request_reply<'a>(&'a self, _session_id: &'a str, _prompt: &'a str) -> ReplyFuture<'a> {
+        fn request_reply<'a>(&'a self, _pending: PendingPrompt) -> ReplyFuture<'a> {
             let reply = self.reply.clone();
-            Box::pin(async move { Ok(reply) })
+            Box::pin(async move { Ok(ReplyResult::Reply(reply)) })
         }
     }
 }

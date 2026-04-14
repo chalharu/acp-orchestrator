@@ -51,13 +51,11 @@ jobs:
       - name: Run coverage-instrumented tests
         run: |
           mkdir -p coverage
-          eval "$(cargo llvm-cov show-env --sh)"
           export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=mold -C debuginfo=0"
           cargo llvm-cov --workspace -j1 --no-report -- --test-threads=1
       - name: Export LCOV coverage report
         run: |
           mkdir -p coverage
-          eval "$(cargo llvm-cov show-env --sh)"
           export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=mold -C debuginfo=0"
           cargo llvm-cov report --lcov --output-path coverage/lcov.info
       - name: Run SonarCloud scan

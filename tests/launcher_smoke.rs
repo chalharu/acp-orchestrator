@@ -1,9 +1,7 @@
 use std::{io, path::PathBuf, process::Stdio, time::Duration};
 
 use acp_app_support::{unique_temp_json_path, wait_for_tcp_connect};
-use acp_contracts::{MessageRole, SessionHistoryResponse};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
-use reqwest::Client;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
@@ -61,7 +59,6 @@ async fn assert_launcher_roundtrip_with_args(
 ) -> Result<()> {
     let recent_path = unique_recent_sessions_path(label);
     let state_path = unique_launcher_state_path(label);
-    let client = Client::builder().build()?;
     let (child, mut stdin, mut reader) = spawn_launcher(
         &recent_path,
         &state_path,
@@ -71,10 +68,9 @@ async fn assert_launcher_roundtrip_with_args(
     let mut child = child;
 
     stdin.write_all(b"hello from launcher\n").await?;
-    let (session_id, backend_url, mut captured_stdout) =
+    let (_session_id, _backend_url, mut captured_stdout) =
         read_session_connection(&mut reader).await?;
     sleep(Duration::from_millis(600)).await;
-    assert_assistant_history(&client, &backend_url, &session_id).await?;
     captured_stdout.push_str(&quit_launcher(&mut child, &mut stdin, &mut reader).await?);
     assert_launcher_output(&captured_stdout);
 
@@ -167,32 +163,6 @@ fn configure_broken_proxy_env(command: &mut Command) {
         .env("all_proxy", BROKEN_PROXY_URL);
 }
 
-async fn assert_assistant_history(
-    client: &Client,
-    backend_url: &str,
-    session_id: &str,
-) -> Result<()> {
-    let history: SessionHistoryResponse = client
-        .get(format!(
-            "{backend_url}/api/v1/sessions/{session_id}/history"
-        ))
-        .bearer_auth("developer")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    assert!(
-        history
-            .messages
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Assistant)
-                && message.text.starts_with("mock assistant:"))
-    );
-    Ok(())
-}
-
 async fn quit_launcher(
     child: &mut Child,
     stdin: &mut ChildStdin,
@@ -210,6 +180,7 @@ async fn quit_launcher(
 fn assert_launcher_output(output: &str) {
     assert!(output.contains("session: s_"));
     assert!(output.contains("connected to backend: http://127.0.0.1:"));
+    assert!(output.contains("[assistant] mock assistant:"));
 }
 
 async fn read_session_connection(

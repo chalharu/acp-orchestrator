@@ -7,9 +7,10 @@ use std::{
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole,
-    PermissionDecision, PromptRequest, PromptResponse, ResolvePermissionRequest,
-    ResolvePermissionResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
+    CancelTurnResponse, CloseSessionResponse, ConversationMessage, CreateSessionResponse,
+    ErrorResponse, MessageRole, PermissionDecision, PromptRequest, PromptResponse,
+    ResolvePermissionRequest, ResolvePermissionResponse, SessionSnapshot, StreamEvent,
+    StreamEventPayload,
 };
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
@@ -37,6 +38,7 @@ pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
 struct ChatSession {
     session: SessionSnapshot,
+    resume_history: Vec<ConversationMessage>,
     resumed: bool,
 }
 
@@ -223,6 +225,7 @@ async fn load_chat_session(
             .await
             .map(|session| ChatSession {
                 session,
+                resume_history: Vec::new(),
                 resumed: false,
             });
     }
@@ -231,14 +234,15 @@ async fn load_chat_session(
         .session_id
         .as_deref()
         .expect("session id checked before chat execution");
-    // Keep the resume flow aligned with the explicit history endpoint, but
-    // render from the later snapshot so messages and pending permissions stay
-    // consistent with each other.
-    get_session_history(client, server_url, &args.auth_token, session_id).await?;
+    // Load the explicit history endpoint for transcript rendering, then fetch
+    // the later session snapshot so pending permissions and SSE dedupe start
+    // from the latest known state.
+    let history = get_session_history(client, server_url, &args.auth_token, session_id).await?;
     let session = get_session(client, server_url, &args.auth_token, session_id).await?;
 
     Ok(ChatSession {
         session,
+        resume_history: history.messages,
         resumed: true,
     })
 }
@@ -248,8 +252,14 @@ fn render_resume_history(chat_session: &ChatSession) -> Option<InitialSnapshotSt
         return None;
     }
 
-    let initial_snapshot_state = InitialSnapshotState::from_snapshot(&chat_session.session);
-    events::render_event(&StreamEvent::snapshot(chat_session.session.clone()));
+    let initial_snapshot_state = InitialSnapshotState::from_messages_and_permissions(
+        &chat_session.resume_history,
+        &chat_session.session.pending_permissions,
+    );
+    events::render_resume_state(
+        &chat_session.resume_history,
+        &chat_session.session.pending_permissions,
+    );
     Some(initial_snapshot_state)
 }
 

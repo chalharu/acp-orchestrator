@@ -161,8 +161,13 @@ fn cli_server_url_is_explicit_accepts_both_supported_forms() {
 }
 
 #[test]
-fn launcher_state_path_uses_data_dir_before_temp_dir() {
-    let path = launcher_state_path_from(None, Some(PathBuf::from("/tmp/local-data")));
+fn launcher_state_path_uses_data_dir_before_home_dir() {
+    let path = launcher_state_path_from(
+        None,
+        Some(PathBuf::from("/tmp/local-data")),
+        Some(PathBuf::from("/tmp/home")),
+    )
+    .expect("data directory paths should resolve");
 
     assert_eq!(
         path,
@@ -171,13 +176,37 @@ fn launcher_state_path_uses_data_dir_before_temp_dir() {
 }
 
 #[test]
+fn launcher_state_path_uses_home_dir_without_a_data_dir() {
+    let path = launcher_state_path_from(None, None, Some(PathBuf::from("/tmp/home")))
+        .expect("home directory paths should resolve");
+
+    assert_eq!(
+        path,
+        PathBuf::from("/tmp/home/.acp-orchestrator/launcher-stack.json")
+    );
+}
+
+#[test]
 fn launcher_state_path_uses_explicit_override_first() {
     let path = launcher_state_path_from(
         Some(OsString::from("/tmp/acp-launcher-state.json")),
         Some(PathBuf::from("/ignored")),
-    );
+        Some(PathBuf::from("/ignored-home")),
+    )
+    .expect("explicit launcher state paths should resolve");
 
     assert_eq!(path, PathBuf::from("/tmp/acp-launcher-state.json"));
+}
+
+#[test]
+fn launcher_state_path_requires_a_safe_directory_without_overrides() {
+    let error = launcher_state_path_from(None, None, None)
+        .expect_err("missing directory hints should fail");
+
+    assert!(matches!(
+        error,
+        LauncherError::MissingLauncherStateDirectory
+    ));
 }
 
 #[tokio::test]

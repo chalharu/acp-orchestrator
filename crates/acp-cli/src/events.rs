@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::*;
-use acp_contracts::PermissionRequest;
+use acp_contracts::{ConversationMessage, PermissionRequest};
 use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, pin_mut};
 
@@ -12,15 +12,13 @@ pub(super) struct InitialSnapshotState {
 }
 
 impl InitialSnapshotState {
-    pub(super) fn from_snapshot(snapshot: &SessionSnapshot) -> Self {
+    pub(super) fn from_messages_and_permissions(
+        messages: &[ConversationMessage],
+        pending_permissions: &[PermissionRequest],
+    ) -> Self {
         Self {
-            message_ids: snapshot
-                .messages
-                .iter()
-                .map(|message| message.id.clone())
-                .collect(),
-            permission_request_ids: snapshot
-                .pending_permissions
+            message_ids: messages.iter().map(|message| message.id.clone()).collect(),
+            permission_request_ids: pending_permissions
                 .iter()
                 .map(|request| request.request_id.clone())
                 .collect(),
@@ -80,16 +78,7 @@ pub(super) async fn stream_events(
 pub(super) fn render_event(event: &StreamEvent) {
     match &event.payload {
         StreamEventPayload::SessionSnapshot { session } => {
-            if session.messages.is_empty() && session.pending_permissions.is_empty() {
-                println!("[status] session ready");
-            } else {
-                for message in &session.messages {
-                    render_message(message.role.clone(), &message.text);
-                }
-                for request in &session.pending_permissions {
-                    render_permission_request(request);
-                }
-            }
+            render_resume_state(&session.messages, &session.pending_permissions);
         }
         StreamEventPayload::ConversationMessage { message } => {
             render_message(message.role.clone(), &message.text);
@@ -103,6 +92,23 @@ pub(super) fn render_event(event: &StreamEvent) {
         StreamEventPayload::Status { message } => {
             println!("[status] {message}");
         }
+    }
+}
+
+pub(super) fn render_resume_state(
+    messages: &[ConversationMessage],
+    pending_permissions: &[PermissionRequest],
+) {
+    if messages.is_empty() && pending_permissions.is_empty() {
+        println!("[status] session ready");
+        return;
+    }
+
+    for message in messages {
+        render_message(message.role.clone(), &message.text);
+    }
+    for request in pending_permissions {
+        render_permission_request(request);
     }
 }
 

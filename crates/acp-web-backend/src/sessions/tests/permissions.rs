@@ -3,10 +3,17 @@ use super::*;
 async fn register_readme_permission(
     pending: &PendingPrompt,
 ) -> Result<PendingPermissionResolution, SessionStoreError> {
+    register_permission(pending, "read_text_file README.md").await
+}
+
+async fn register_permission(
+    pending: &PendingPrompt,
+    summary: &str,
+) -> Result<PendingPermissionResolution, SessionStoreError> {
     pending
         .turn_handle()
         .register_permission_request(
-            "read_text_file README.md".to_string(),
+            summary.to_string(),
             "allow_once".to_string(),
             "reject_once".to_string(),
         )
@@ -149,6 +156,47 @@ async fn cancelling_the_active_turn_cancels_pending_permissions() {
     assert_eq!(
         resolution.wait().await,
         PermissionResolutionOutcome::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn session_snapshots_keep_pending_permissions_in_creation_order() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "permission please".to_string())
+        .await
+        .expect("prompt submission should succeed");
+
+    let _cancel_rx = pending
+        .turn_handle()
+        .start_turn()
+        .await
+        .expect("starting the turn should succeed");
+    for request_number in 0..12 {
+        let _ = register_permission(&pending, &format!("permission {request_number}"))
+            .await
+            .expect("permission registration should succeed");
+    }
+
+    let snapshot = store
+        .session_snapshot("alice", &session.id)
+        .await
+        .expect("snapshot loading should succeed");
+    let request_ids = snapshot
+        .pending_permissions
+        .into_iter()
+        .map(|request| request.request_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        request_ids,
+        (1..=12)
+            .map(|request_id| format!("req_{request_id}"))
+            .collect::<Vec<_>>()
     );
 }
 

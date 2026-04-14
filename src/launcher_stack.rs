@@ -3,18 +3,23 @@ use std::{
     ffi::OsString,
     fs,
     io::ErrorKind,
+    io::Write,
+    net::IpAddr,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use tokio::process::Child;
+use uuid::Uuid;
 
 use crate::{
-    CreateLauncherStateDirectorySnafu, LauncherArgs, ParseLauncherStateSnafu,
-    ReadLauncherStateSnafu, Result, SerializeLauncherStateSnafu, WriteLauncherStateSnafu,
+    CreateLauncherStateDirectorySnafu, LauncherArgs, MissingLauncherStateDirectorySnafu,
+    ParseLauncherStateSnafu, ReadLauncherExecutableMetadataSnafu,
+    ReadLauncherExecutableModifiedTimeSnafu, ReadLauncherStateSnafu, Result,
+    SerializeLauncherStateSnafu, WriteLauncherStateSnafu,
     launcher_process::{SpawnedService, spawn_background_role, terminate_child},
 };
 
@@ -25,11 +30,12 @@ const STACK_READY_DELAY: Duration = Duration::from_millis(75);
 const STACK_READY_TIMEOUT: Duration = Duration::from_millis(250);
 const STACK_LOCK_WAIT_ATTEMPTS: usize = 600;
 const STACK_LOCK_WAIT_DELAY: Duration = Duration::from_millis(125);
-const STACK_LOCK_STALE_AFTER: Duration = Duration::from_secs(90);
+const STACK_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct LauncherStack {
     backend_url: Option<String>,
+    auth_token: Option<String>,
     bundled_mock: bool,
     ephemeral_children: Option<EphemeralChildren>,
 }
@@ -45,6 +51,14 @@ struct LauncherState {
     backend_url: String,
     #[serde(default)]
     mock_address: Option<String>,
+    auth_token: String,
+    launcher_identity: LauncherIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LauncherIdentity {
+    executable_path: String,
+    build_fingerprint: String,
 }
 
 #[derive(Debug)]
@@ -66,22 +80,30 @@ impl LauncherStack {
     fn direct() -> Self {
         Self {
             backend_url: None,
+            auth_token: None,
             bundled_mock: false,
             ephemeral_children: None,
         }
     }
 
-    fn persistent(backend_url: String) -> Self {
+    fn persistent(backend_url: String, auth_token: String) -> Self {
         Self {
             backend_url: Some(backend_url),
+            auth_token: Some(auth_token),
             bundled_mock: true,
             ephemeral_children: None,
         }
     }
 
-    fn ephemeral(backend: Child, mock: Option<Child>, backend_url: String) -> Self {
+    fn ephemeral(
+        backend: Child,
+        mock: Option<Child>,
+        backend_url: String,
+        auth_token: String,
+    ) -> Self {
         Self {
             backend_url: Some(backend_url),
+            auth_token: Some(auth_token),
             bundled_mock: false,
             ephemeral_children: Some(EphemeralChildren { backend, mock }),
         }
@@ -89,6 +111,10 @@ impl LauncherStack {
 
     pub(crate) fn backend_url(&self) -> Option<&str> {
         self.backend_url.as_deref()
+    }
+
+    pub(crate) fn auth_token(&self) -> Option<&str> {
+        self.auth_token.as_deref()
     }
 
     pub(crate) fn bundled_mock(&self) -> bool {
@@ -104,6 +130,7 @@ impl LauncherStack {
             }
         }
         self.ephemeral_children = None;
+        self.auth_token = None;
         Ok(())
     }
 }
@@ -111,10 +138,10 @@ impl LauncherStack {
 pub(crate) async fn prepare_launcher_stack(
     current_executable: &Path,
     launcher_args: &LauncherArgs,
+    needs_backend: bool,
+    cli_server_url_explicit: bool,
 ) -> Result<LauncherStack> {
-    if !command_needs_backend(&launcher_args.cli_args)
-        || cli_server_url_is_explicit(&launcher_args.cli_args)
-    {
+    if !needs_backend || cli_server_url_explicit {
         return Ok(LauncherStack::direct());
     }
 
@@ -128,38 +155,28 @@ pub(crate) async fn prepare_launcher_stack(
     prepare_persistent_bundled_stack(current_executable).await
 }
 
-pub(crate) fn command_needs_backend(cli_args: &[OsString]) -> bool {
-    !matches!(
-        (
-            cli_args.first().and_then(|arg| arg.to_str()),
-            cli_args.get(1).and_then(|arg| arg.to_str()),
-        ),
-        (Some("session"), Some("list"))
-    )
-}
-
-pub(crate) fn cli_server_url_is_explicit(cli_args: &[OsString]) -> bool {
-    cli_args.iter().any(|arg| {
-        arg.to_str()
-            .is_some_and(|value| value == "--server-url" || value.starts_with("--server-url="))
-    })
-}
-
 pub(crate) fn launcher_state_path_from(
     explicit_path: Option<OsString>,
     data_local_dir: Option<PathBuf>,
-) -> PathBuf {
+    home_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
     if let Some(path) = explicit_path {
-        return PathBuf::from(path);
+        return Ok(PathBuf::from(path));
     }
 
     if let Some(mut directory) = data_local_dir {
         directory.push("acp-orchestrator");
         directory.push("launcher-stack.json");
-        return directory;
+        return Ok(directory);
     }
 
-    std::env::temp_dir().join("acp-orchestrator-launcher-stack.json")
+    if let Some(mut directory) = home_dir {
+        directory.push(".acp-orchestrator");
+        directory.push("launcher-stack.json");
+        return Ok(directory);
+    }
+
+    MissingLauncherStateDirectorySnafu.fail()
 }
 
 pub(crate) fn launcher_lock_path_from(state_path: &Path) -> PathBuf {
@@ -168,14 +185,43 @@ pub(crate) fn launcher_lock_path_from(state_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn launcher_state_path() -> PathBuf {
-    launcher_state_path_from(env::var_os(LAUNCHER_STATE_ENV), dirs::data_local_dir())
+fn launcher_state_path() -> Result<PathBuf> {
+    launcher_state_path_from(
+        env::var_os(LAUNCHER_STATE_ENV),
+        dirs::data_local_dir(),
+        dirs::home_dir(),
+    )
+}
+
+fn current_launcher_identity(current_executable: &Path) -> Result<LauncherIdentity> {
+    let metadata =
+        fs::metadata(current_executable).context(ReadLauncherExecutableMetadataSnafu {
+            path: current_executable.to_path_buf(),
+        })?;
+    let modified = metadata
+        .modified()
+        .context(ReadLauncherExecutableModifiedTimeSnafu {
+            path: current_executable.to_path_buf(),
+        })?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+
+    Ok(LauncherIdentity {
+        executable_path: current_executable.display().to_string(),
+        build_fingerprint: format!(
+            "{}:{}:{}",
+            metadata.len(),
+            modified.as_secs(),
+            modified.subsec_nanos()
+        ),
+    })
 }
 
 async fn spawn_ephemeral_stack(
     current_executable: &Path,
     acp_server: OsString,
 ) -> Result<LauncherStack> {
+    let auth_token = Uuid::new_v4().to_string();
     let SpawnedService {
         child: backend,
         endpoint: backend_url,
@@ -189,14 +235,21 @@ async fn spawn_ephemeral_stack(
     )
     .await?;
 
-    Ok(LauncherStack::ephemeral(backend, None, backend_url))
+    Ok(LauncherStack::ephemeral(
+        backend,
+        None,
+        backend_url,
+        auth_token,
+    ))
 }
 
 async fn prepare_persistent_bundled_stack(current_executable: &Path) -> Result<LauncherStack> {
-    let state_path = launcher_state_path();
+    let state_path = launcher_state_path()?;
+    let launcher_identity = current_launcher_identity(current_executable)?;
     prepare_persistent_bundled_stack_with_retry(
         current_executable,
         &state_path,
+        &launcher_identity,
         STACK_LOCK_WAIT_ATTEMPTS,
         STACK_LOCK_WAIT_DELAY,
         STACK_LOCK_STALE_AFTER,
@@ -207,6 +260,7 @@ async fn prepare_persistent_bundled_stack(current_executable: &Path) -> Result<L
 async fn prepare_persistent_bundled_stack_with_retry(
     current_executable: &Path,
     state_path: &Path,
+    launcher_identity: &LauncherIdentity,
     lock_wait_attempts: usize,
     lock_wait_delay: Duration,
     lock_stale_after: Duration,
@@ -214,12 +268,21 @@ async fn prepare_persistent_bundled_stack_with_retry(
     let lock_path = launcher_lock_path_from(state_path);
 
     for _ in 0..lock_wait_attempts {
-        if let Some(state) = reusable_launcher_state(state_path).await? {
-            return Ok(LauncherStack::persistent(state.backend_url));
+        if let Some(state) = reusable_launcher_state(state_path, launcher_identity).await? {
+            return Ok(LauncherStack::persistent(
+                state.backend_url,
+                state.auth_token,
+            ));
         }
 
         if let Some(lock) = try_acquire_launcher_lock(&lock_path)? {
-            return spawn_or_reuse_locked_stack(current_executable, state_path, lock).await;
+            return spawn_or_reuse_locked_stack(
+                current_executable,
+                state_path,
+                launcher_identity,
+                lock,
+            )
+            .await;
         }
         if clear_stale_launcher_lock(&lock_path, lock_stale_after)? {
             continue;
@@ -227,8 +290,11 @@ async fn prepare_persistent_bundled_stack_with_retry(
         tokio::time::sleep(lock_wait_delay).await;
     }
 
-    if let Some(state) = reusable_launcher_state(state_path).await? {
-        return Ok(LauncherStack::persistent(state.backend_url));
+    if let Some(state) = reusable_launcher_state(state_path, launcher_identity).await? {
+        return Ok(LauncherStack::persistent(
+            state.backend_url,
+            state.auth_token,
+        ));
     }
 
     crate::WaitForLauncherLockSnafu { path: lock_path }.fail()
@@ -237,23 +303,31 @@ async fn prepare_persistent_bundled_stack_with_retry(
 async fn spawn_or_reuse_locked_stack(
     current_executable: &Path,
     state_path: &Path,
+    launcher_identity: &LauncherIdentity,
     _lock: LauncherLock,
 ) -> Result<LauncherStack> {
-    if let Some(state) = reusable_launcher_state(state_path).await? {
-        return Ok(LauncherStack::persistent(state.backend_url));
+    if let Some(state) = reusable_launcher_state(state_path, launcher_identity).await? {
+        return Ok(LauncherStack::persistent(
+            state.backend_url,
+            state.auth_token,
+        ));
     }
 
     let (mut mock, mut backend, state) =
-        spawn_persistent_bundled_backend(current_executable).await?;
+        spawn_persistent_bundled_backend(current_executable, launcher_identity).await?;
     persist_launcher_state_or_shutdown(state_path, &state, &mut backend, &mut mock).await?;
     let backend_url = state.backend_url.clone();
+    let auth_token = state.auth_token.clone();
 
     drop(backend);
     drop(mock);
-    Ok(LauncherStack::persistent(backend_url))
+    Ok(LauncherStack::persistent(backend_url, auth_token))
 }
 
-async fn reusable_launcher_state(state_path: &Path) -> Result<Option<LauncherState>> {
+async fn reusable_launcher_state(
+    state_path: &Path,
+    launcher_identity: &LauncherIdentity,
+) -> Result<Option<LauncherState>> {
     let state = match load_launcher_state(state_path) {
         Ok(Some(state)) => state,
         Ok(None) => return Ok(None),
@@ -264,6 +338,9 @@ async fn reusable_launcher_state(state_path: &Path) -> Result<Option<LauncherSta
         Err(error) => return Err(error),
     };
 
+    if state.launcher_identity != *launcher_identity {
+        return Ok(None);
+    }
     let is_healthy = managed_stack_is_healthy(&state).await;
 
     if is_healthy {
@@ -352,7 +429,9 @@ pub(crate) fn clear_stale_launcher_lock(lock_path: &Path, stale_after: Duration)
 
 async fn spawn_persistent_bundled_backend(
     current_executable: &Path,
+    launcher_identity: &LauncherIdentity,
 ) -> Result<(Child, Child, LauncherState)> {
+    let auth_token = Uuid::new_v4().to_string();
     let SpawnedService {
         child: mut mock,
         endpoint: mock_address,
@@ -385,6 +464,8 @@ async fn spawn_persistent_bundled_backend(
             LauncherState {
                 backend_url: endpoint,
                 mock_address: Some(mock_address),
+                auth_token,
+                launcher_identity: launcher_identity.clone(),
             },
         )),
         Err(error) => {
@@ -452,9 +533,23 @@ fn load_launcher_state(path: &Path) -> Result<Option<LauncherState>> {
 fn save_launcher_state(path: &Path, state: &LauncherState) -> Result<()> {
     create_launcher_state_parent(path)?;
     let serialized = serde_json::to_string_pretty(state).context(SerializeLauncherStateSnafu)?;
-    fs::write(path, serialized).context(WriteLauncherStateSnafu {
+    let mut file = fs::File::create(path).context(WriteLauncherStateSnafu {
         path: path.to_path_buf(),
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).context(
+            WriteLauncherStateSnafu {
+                path: path.to_path_buf(),
+            },
+        )?;
+    }
+    file.write_all(serialized.as_bytes())
+        .context(WriteLauncherStateSnafu {
+            path: path.to_path_buf(),
+        })?;
     Ok(())
 }
 
@@ -468,11 +563,17 @@ fn create_launcher_state_parent(path: &Path) -> Result<()> {
 
     let parent = parent.to_path_buf();
     fs::create_dir_all(&parent).context(CreateLauncherStateDirectorySnafu { path: parent })?;
+    secure_launcher_state_parent_permissions(
+        path.parent().expect("validated parent should exist"),
+    )?;
     Ok(())
 }
 
 async fn managed_stack_is_healthy(state: &LauncherState) -> bool {
     async {
+        if state.auth_token.is_empty() || !launcher_state_endpoints_are_loopback(state) {
+            return Some(false);
+        }
         let mock_address = state.mock_address.as_deref()?;
         if wait_for_tcp_connect(mock_address, STACK_READY_ATTEMPTS, STACK_READY_DELAY)
             .await
@@ -496,6 +597,63 @@ async fn managed_stack_is_healthy(state: &LauncherState) -> bool {
     }
     .await
     .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn secure_launcher_state_parent_permissions(parent: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "acp-orchestrator" | ".acp-orchestrator"))
+    {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).context(
+            CreateLauncherStateDirectorySnafu {
+                path: parent.to_path_buf(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_launcher_state_parent_permissions(_parent: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn launcher_state_endpoints_are_loopback(state: &LauncherState) -> bool {
+    let Some(mock_address) = state.mock_address.as_deref() else {
+        return false;
+    };
+
+    socket_address_uses_loopback(mock_address) && backend_url_uses_loopback(&state.backend_url)
+}
+
+fn socket_address_uses_loopback(address: &str) -> bool {
+    let host = if let Some(rest) = address.strip_prefix('[') {
+        rest.split_once(']').map(|(host, _)| host)
+    } else {
+        address.rsplit_once(':').map(|(host, _)| host)
+    };
+    host.is_some_and(host_uses_loopback)
+}
+
+fn backend_url_uses_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .as_deref()
+        .is_some_and(host_uses_loopback)
+}
+
+fn host_uses_loopback(host: &str) -> bool {
+    let host = host.trim_matches(|character| character == '[' || character == ']');
+
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[cfg(test)]

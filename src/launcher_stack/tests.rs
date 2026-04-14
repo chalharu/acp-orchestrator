@@ -16,12 +16,13 @@ use tokio::{
 static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[test]
-fn launcher_state_path_uses_temp_dir_without_data_dir() {
-    let path = launcher_state_path_from(None, None);
+fn launcher_state_path_uses_home_dir_without_data_dir() {
+    let path = launcher_state_path_from(None, None, Some(PathBuf::from("/tmp/home")))
+        .expect("home directory fallback should resolve");
 
     assert_eq!(
         path,
-        std::env::temp_dir().join("acp-orchestrator-launcher-stack.json")
+        PathBuf::from("/tmp/home/.acp-orchestrator/launcher-stack.json")
     );
 }
 
@@ -31,6 +32,7 @@ async fn shutdown_terminates_optional_mock_children() {
         spawn_sleep_child().await,
         Some(spawn_sleep_child().await),
         "http://127.0.0.1:1".to_string(),
+        "launcher-auth-token".to_string(),
     );
 
     stack
@@ -53,7 +55,7 @@ async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
         cli_args: vec![OsString::from("chat"), OsString::from("--new")],
     };
 
-    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args)
+    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args, true, false)
         .await
         .expect("explicit ACP_SERVER_URL should skip launcher-managed services");
 
@@ -85,6 +87,7 @@ async fn prepare_persistent_stack_times_out_when_the_lock_stays_busy() {
     let error = prepare_persistent_bundled_stack_with_retry(
         Path::new("/bin/true"),
         &state_path,
+        &test_launcher_identity("busy-lock"),
         1,
         Duration::ZERO,
         Duration::from_secs(3600),
@@ -108,6 +111,7 @@ async fn prepare_persistent_stack_clears_stale_locks_before_timing_out() {
     let error = prepare_persistent_bundled_stack_with_retry(
         Path::new("/bin/true"),
         &state_path,
+        &test_launcher_identity("stale-lock"),
         1,
         Duration::ZERO,
         Duration::ZERO,
@@ -131,21 +135,22 @@ async fn prepare_persistent_stack_uses_the_final_reuse_check() {
         .expect("mock listener should bind");
     save_launcher_state(
         &state_path,
-        &LauncherState {
-            backend_url: backend_url.clone(),
-            mock_address: Some(
-                mock_listener
+        &test_launcher_state(
+            &backend_url,
+            Some(
+                &mock_listener
                     .local_addr()
                     .expect("mock listener address should be readable")
                     .to_string(),
             ),
-        },
+        ),
     )
     .expect("launcher state should save");
 
     let stack = prepare_persistent_bundled_stack_with_retry(
         Path::new("/bin/true"),
         &state_path,
+        &test_launcher_identity("current"),
         0,
         Duration::ZERO,
         Duration::ZERO,
@@ -155,6 +160,7 @@ async fn prepare_persistent_stack_uses_the_final_reuse_check() {
 
     health_task.abort();
     assert_eq!(stack.backend_url(), Some(backend_url.as_str()));
+    assert_eq!(stack.auth_token(), Some("launcher-auth-token"));
 }
 
 #[tokio::test]
@@ -170,24 +176,30 @@ async fn spawn_or_reuse_locked_stack_reuses_existing_state() {
         .expect("mock listener should bind");
     save_launcher_state(
         &state_path,
-        &LauncherState {
-            backend_url: backend_url.clone(),
-            mock_address: Some(
-                mock_listener
+        &test_launcher_state(
+            &backend_url,
+            Some(
+                &mock_listener
                     .local_addr()
                     .expect("mock listener address should be readable")
                     .to_string(),
             ),
-        },
+        ),
     )
     .expect("launcher state should save");
 
-    let stack = spawn_or_reuse_locked_stack(Path::new("/bin/true"), &state_path, lock)
-        .await
-        .expect("the existing healthy stack should be reused");
+    let stack = spawn_or_reuse_locked_stack(
+        Path::new("/bin/true"),
+        &state_path,
+        &test_launcher_identity("current"),
+        lock,
+    )
+    .await
+    .expect("the existing healthy stack should be reused");
 
     health_task.abort();
     assert_eq!(stack.backend_url(), Some(backend_url.as_str()));
+    assert_eq!(stack.auth_token(), Some("launcher-auth-token"));
 }
 
 #[tokio::test]
@@ -196,7 +208,7 @@ async fn reusable_launcher_state_clears_invalid_json_without_a_lock() {
     fs::write(&state_path, "{invalid").expect("invalid launcher state should write");
 
     assert_eq!(
-        reusable_launcher_state(&state_path)
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
             .await
             .expect("invalid json should be ignored"),
         None
@@ -212,7 +224,7 @@ async fn reusable_launcher_state_keeps_invalid_json_while_the_lock_exists() {
     fs::write(&lock_path, []).expect("launcher lock should write");
 
     assert_eq!(
-        reusable_launcher_state(&state_path)
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
             .await
             .expect("invalid json should be ignored while locked"),
         None
@@ -225,7 +237,7 @@ async fn reusable_launcher_state_propagates_non_parse_read_errors() {
     let state_path = unique_temp_json_path("acp-launcher-state", "read-error");
     fs::create_dir_all(&state_path).expect("state path directory should be creatable");
 
-    let error = reusable_launcher_state(&state_path)
+    let error = reusable_launcher_state(&state_path, &test_launcher_identity("current"))
         .await
         .expect_err("non-parse read failures should still be surfaced");
 
@@ -243,25 +255,57 @@ async fn reusable_launcher_state_treats_invalid_backend_urls_as_unhealthy() {
         .expect("mock listener should bind");
     save_launcher_state(
         &state_path,
-        &LauncherState {
-            backend_url: "://invalid".to_string(),
-            mock_address: Some(
-                mock_listener
+        &test_launcher_state(
+            "://invalid",
+            Some(
+                &mock_listener
                     .local_addr()
                     .expect("mock listener address should be readable")
                     .to_string(),
             ),
-        },
+        ),
     )
     .expect("launcher state should save");
 
     assert_eq!(
-        reusable_launcher_state(&state_path)
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
             .await
             .expect("invalid backend urls should be ignored"),
         None
     );
     assert!(state_path.exists());
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_rejects_identity_mismatches() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "identity-mismatch");
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock listener should bind");
+    save_launcher_state(
+        &state_path,
+        &test_launcher_state_with_identity(
+            &backend_url,
+            Some(
+                &mock_listener
+                    .local_addr()
+                    .expect("mock listener address should be readable")
+                    .to_string(),
+            ),
+            test_launcher_identity("old-binary"),
+        ),
+    )
+    .expect("launcher state should save");
+
+    assert_eq!(
+        reusable_launcher_state(&state_path, &test_launcher_identity("new-binary"))
+            .await
+            .expect("identity mismatches should be ignored"),
+        None
+    );
+
+    health_task.abort();
 }
 
 #[test]
@@ -343,7 +387,7 @@ fi
 "#,
     );
 
-    let error = spawn_persistent_bundled_backend(&script)
+    let error = spawn_persistent_bundled_backend(&script, &test_launcher_identity("spawn-failure"))
         .await
         .expect_err("backend startup failures should be returned");
 
@@ -361,10 +405,7 @@ async fn persist_launcher_state_or_shutdown_stops_children_when_saving_fails() {
 
     let error = persist_launcher_state_or_shutdown(
         &state_path,
-        &LauncherState {
-            backend_url: "http://127.0.0.1:1".to_string(),
-            mock_address: Some("127.0.0.1:1".to_string()),
-        },
+        &test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1")),
         &mut backend,
         &mut mock,
     )
@@ -395,14 +436,20 @@ fn save_launcher_state_creates_parent_directories() {
         .join("launcher-stack.json");
     save_launcher_state(
         &state_path,
-        &LauncherState {
-            backend_url: "http://127.0.0.1:1".to_string(),
-            mock_address: Some("127.0.0.1:1".to_string()),
-        },
+        &test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1")),
     )
     .expect("saving launcher state should create parent directories");
 
     assert!(state_path.exists());
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&state_path)
+            .expect("state metadata should load")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -432,8 +479,8 @@ fn create_launcher_state_parent_skips_paths_without_a_parent_component() {
 async fn managed_stack_is_healthy_requires_a_mock_address() {
     assert!(
         !managed_stack_is_healthy(&LauncherState {
-            backend_url: "http://127.0.0.1:1".to_string(),
             mock_address: None,
+            ..test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"))
         })
         .await
     );
@@ -443,9 +490,20 @@ async fn managed_stack_is_healthy_requires_a_mock_address() {
 async fn managed_stack_is_healthy_rejects_dead_mock_endpoints() {
     assert!(
         !managed_stack_is_healthy(&LauncherState {
-            backend_url: "http://127.0.0.1:1".to_string(),
             mock_address: Some("127.0.0.1:9".to_string()),
+            ..test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"))
         })
+        .await
+    );
+}
+
+#[tokio::test]
+async fn managed_stack_is_healthy_rejects_non_loopback_backend_urls() {
+    assert!(
+        !managed_stack_is_healthy(&test_launcher_state(
+            "http://example.com",
+            Some("127.0.0.1:9")
+        ))
         .await
     );
 }
@@ -455,6 +513,30 @@ fn parse_launcher_state_error(path: &Path) -> crate::LauncherError {
         source: serde_json::from_str::<LauncherState>("{invalid")
             .expect_err("invalid json should fail to parse"),
         path: path.to_path_buf(),
+    }
+}
+
+fn test_launcher_identity(label: &str) -> LauncherIdentity {
+    LauncherIdentity {
+        executable_path: format!("/bin/{label}"),
+        build_fingerprint: format!("fingerprint-{label}"),
+    }
+}
+
+fn test_launcher_state(backend_url: &str, mock_address: Option<&str>) -> LauncherState {
+    test_launcher_state_with_identity(backend_url, mock_address, test_launcher_identity("current"))
+}
+
+fn test_launcher_state_with_identity(
+    backend_url: &str,
+    mock_address: Option<&str>,
+    launcher_identity: LauncherIdentity,
+) -> LauncherState {
+    LauncherState {
+        backend_url: backend_url.to_string(),
+        mock_address: mock_address.map(str::to_string),
+        auth_token: "launcher-auth-token".to_string(),
+        launcher_identity,
     }
 }
 

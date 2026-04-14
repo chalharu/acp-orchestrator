@@ -32,6 +32,7 @@ pub(super) enum PromptCompletion {
 
 #[derive(Debug)]
 struct PendingPermission {
+    request_order: u64,
     prompt_order: u64,
     summary: String,
     approve_option_id: String,
@@ -93,23 +94,41 @@ impl SessionHandle {
         self.data.lock().await.status == SessionStatus::Active
     }
 
+    #[cfg(test)]
+    pub(super) async fn is_turn_active(&self, prompt_order: u64) -> bool {
+        self.data
+            .lock()
+            .await
+            .active_turn
+            .as_ref()
+            .is_some_and(|active_turn| active_turn.prompt_order == prompt_order)
+    }
+
     pub(super) async fn snapshot(&self) -> SessionSnapshot {
         let data = self.data.lock().await;
         let mut pending_permissions = data
             .pending_permissions
             .iter()
-            .map(|(request_id, pending)| PermissionRequest {
-                request_id: request_id.clone(),
-                summary: pending.summary.clone(),
+            .map(|(request_id, pending)| {
+                (
+                    pending.request_order,
+                    PermissionRequest {
+                        request_id: request_id.clone(),
+                        summary: pending.summary.clone(),
+                    },
+                )
             })
             .collect::<Vec<_>>();
-        pending_permissions.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        pending_permissions.sort_by_key(|(request_order, _)| *request_order);
         SessionSnapshot {
             id: data.id.clone(),
             status: data.status.clone(),
             latest_sequence: data.latest_sequence,
             messages: data.messages.clone(),
-            pending_permissions,
+            pending_permissions: pending_permissions
+                .into_iter()
+                .map(|(_, request)| request)
+                .collect(),
         }
     }
 
@@ -169,12 +188,14 @@ impl SessionHandle {
             return Ok((None, PendingPermissionResolution::cancelled()));
         }
 
-        let request_id = format!("req_{}", data.next_permission_request_id);
+        let request_order = data.next_permission_request_id;
+        let request_id = format!("req_{request_order}");
         data.next_permission_request_id += 1;
         let (outcome_tx, outcome_rx) = oneshot::channel();
         data.pending_permissions.insert(
             request_id.clone(),
             PendingPermission {
+                request_order,
                 prompt_order,
                 summary: summary.clone(),
                 approve_option_id,

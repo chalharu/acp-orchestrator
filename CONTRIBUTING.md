@@ -36,32 +36,18 @@ Types:
 - `test`: tests
 - `chore`: maintenance/configuration
 
-## 4. Local and Containerized Validation
+## 4. Local and Hosted Validation
 
-- Hosted lint is provided by the external `linter-service`; the repository-managed
-  local validation baseline starts at `scripts/build-test.sh`.
-- `scripts/build-test.sh` is the supported local build/test entry point.
-- `scripts/build-test.sh` uses Docker Buildx by default. `--build-only` can fall
-  back to an ephemeral Kubernetes Buildkitd when the Docker daemon is unavailable.
-- Use `CONTROL_PLANE_TOOLCHAIN=docker` or `CONTROL_PLANE_TOOLCHAIN=buildkitd` to
-  force the build surface explicitly.
-- Use trusted upstream images when they already satisfy the contract.
-- If only a third-party image exists, build a thin repository-managed image and
-  publish it to GHCR for reuse.
-- GitHub Actions validation should pass without extra registry secrets.
-- Keep the Renovate dry-run scoped to public dependencies and the pinned
-  external skills repository.
-- `scripts/test-standalone.sh` and `scripts/test-kind.sh` remain the lower-level
-  smoke / integration scripts used by `scripts/build-test.sh`.
-- When this repository is developed from inside a containerized tooling
-  environment, keep these scripts unchanged.
-- In that environment, also provide `docker buildx` together with `kubectl`,
-  `ssh`, and `ssh-keygen`.
-- In that environment, full runtime / Kind coverage still needs a
-  Docker-compatible container runtime.
-- In that environment, the Buildkitd fallback only covers
-  `scripts/build-test.sh --build-only`.
-- When behavior or operator guidance changes, keep `README.md`,
-  `docs/README.md`, `docs/how-to-guides/cookbook.md`,
-  `docs/explanation/knowledge.md`, `docs/reference/control-plane-runtime.md`,
-  and `docs/reference/debug-log.md` aligned in the same PR.
+- Hosted lint is provided by the external `linter-service` using
+  `.github/linter-service.yaml`.
+- The supported local validation baseline for this Rust workspace is:
+  - `cargo fmt --all`
+  - `cargo test --workspace`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+- If a change is coverage-sensitive or a PR is failing Sonar coverage, mirror the
+  hosted coverage job with
+  `cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1`.
+- Keep Renovate configuration changes in `renovate.json5`.
+- When behavior or contributor guidance changes, keep `README.md`,
+  `docs/README.md`, `docs/explanation/acp-web-cli-architecture.md`, and
+  `docs/explanation/cli-feedback-first-mvp.md` aligned in the same PR.

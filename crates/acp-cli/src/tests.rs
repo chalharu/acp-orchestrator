@@ -137,11 +137,8 @@ async fn stream_events_renders_new_messages_from_an_initial_snapshot_delta() {
         client,
         url,
         "developer".to_string(),
-        Some(InitialSnapshotState::from_snapshot(&SessionSnapshot {
-            id: "s_test".to_string(),
-            status: acp_contracts::SessionStatus::Active,
-            latest_sequence: 0,
-            messages: vec![acp_contracts::ConversationMessage {
+        Some(InitialSnapshotState::from_messages_and_permissions(
+            &[acp_contracts::ConversationMessage {
                 id: "m_known".to_string(),
                 role: MessageRole::Assistant,
                 text: "already rendered".to_string(),
@@ -150,8 +147,8 @@ async fn stream_events_renders_new_messages_from_an_initial_snapshot_delta() {
                     .single()
                     .expect("timestamp should be valid"),
             }],
-            pending_permissions: Vec::new(),
-        })),
+            &[],
+        )),
     )
     .await
     .expect("initial snapshot delta rendering should complete cleanly");
@@ -169,16 +166,13 @@ async fn stream_events_renders_new_pending_permissions_from_an_initial_snapshot_
         client,
         url,
         "developer".to_string(),
-        Some(InitialSnapshotState::from_snapshot(&SessionSnapshot {
-            id: "s_test".to_string(),
-            status: acp_contracts::SessionStatus::Active,
-            latest_sequence: 0,
-            messages: Vec::new(),
-            pending_permissions: vec![acp_contracts::PermissionRequest {
+        Some(InitialSnapshotState::from_messages_and_permissions(
+            &[],
+            &[acp_contracts::PermissionRequest {
                 request_id: "req_old".to_string(),
                 summary: "read_text_file Cargo.toml".to_string(),
             }],
-        })),
+        )),
     )
     .await
     .expect("initial snapshot permission delta should complete cleanly");
@@ -258,7 +252,7 @@ fn render_event_covers_all_display_variants() {
 }
 
 #[test]
-fn render_resume_history_uses_the_snapshot_captured_for_resume() {
+fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
     let created_at = Utc
         .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
         .single()
@@ -269,9 +263,9 @@ fn render_resume_history_uses_the_snapshot_captured_for_resume() {
             status: acp_contracts::SessionStatus::Active,
             latest_sequence: 2,
             messages: vec![acp_contracts::ConversationMessage {
-                id: "m_test".to_string(),
+                id: "m_snapshot".to_string(),
                 role: MessageRole::Assistant,
-                text: "hello".to_string(),
+                text: "from snapshot".to_string(),
                 created_at,
             }],
             pending_permissions: vec![acp_contracts::PermissionRequest {
@@ -279,12 +273,21 @@ fn render_resume_history_uses_the_snapshot_captured_for_resume() {
                 summary: "read_text_file README.md".to_string(),
             }],
         },
+        resume_history: vec![acp_contracts::ConversationMessage {
+            id: "m_history".to_string(),
+            role: MessageRole::Assistant,
+            text: "from history".to_string(),
+            created_at,
+        }],
         resumed: true,
     };
 
     assert_eq!(
         render_resume_history(&chat_session),
-        Some(InitialSnapshotState::from_snapshot(&chat_session.session))
+        Some(InitialSnapshotState::from_messages_and_permissions(
+            &chat_session.resume_history,
+            &chat_session.session.pending_permissions,
+        ))
     );
 }
 

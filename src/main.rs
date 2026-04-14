@@ -17,9 +17,7 @@ use launcher_stack::prepare_launcher_stack;
 #[cfg(test)]
 pub(crate) use launcher_process::{read_startup_url, terminate_child};
 #[cfg(test)]
-pub(crate) use launcher_stack::{
-    cli_server_url_is_explicit, command_needs_backend, launcher_state_path_from,
-};
+pub(crate) use launcher_stack::launcher_state_path_from;
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
 
@@ -141,6 +139,29 @@ enum LauncherError {
 
     #[snafu(display("timed out waiting for the launcher lock at {}", path.display()))]
     WaitForLauncherLock { path: PathBuf },
+
+    #[snafu(display(
+        "unable to determine a safe launcher state directory; set ACP_LAUNCHER_STATE_PATH"
+    ))]
+    MissingLauncherStateDirectory,
+
+    #[snafu(display(
+        "reading the launcher executable metadata from {} failed",
+        path.display()
+    ))]
+    ReadLauncherExecutableMetadata {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display(
+        "reading the launcher executable modification time from {} failed",
+        path.display()
+    ))]
+    ReadLauncherExecutableModifiedTime {
+        source: std::io::Error,
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -158,12 +179,19 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     let current_executable = env::current_exe().context(CurrentExecutableSnafu)?;
     let launcher_args = split_launcher_args(&args)?;
-    let mut stack = prepare_launcher_stack(&current_executable, &launcher_args).await?;
+    let mut stack = prepare_launcher_stack(
+        &current_executable,
+        &launcher_args,
+        command_needs_backend(&launcher_args.cli_args),
+        cli_server_url_is_explicit(&launcher_args.cli_args),
+    )
+    .await?;
     print_chat_hints(&launcher_args.cli_args, stack.bundled_mock());
     let cli_status = run_cli_foreground(
         &current_executable,
         launcher_args.cli_args,
         stack.backend_url(),
+        stack.auth_token(),
     )
     .await?;
 
@@ -179,8 +207,6 @@ fn print_chat_hints(cli_args: &[OsString], bundled_mock: bool) {
         println!(
             "[hint] bundled mock verification: enter `{MANUAL_CANCEL_TRIGGER}` to start a delayed mock reply, then run `/cancel` before the assistant reply arrives."
         );
-    }
-    if is_bundled_mock_chat(cli_args, bundled_mock) {
         println!(
             "[hint] session continuity: exit with `/quit`, then use `cargo run -- session list` and `cargo run -- chat --session <id>` to resume this bundled session."
         );
@@ -191,23 +217,38 @@ async fn run_cli_foreground(
     current_executable: &Path,
     cli_args: Vec<OsString>,
     backend_url: Option<&str>,
+    auth_token: Option<&str>,
 ) -> Result<std::process::ExitStatus> {
+    let mut envs = Vec::new();
     if let Some(backend_url) = backend_url {
-        return spawn_foreground_role(
-            current_executable,
-            "cli frontend",
-            "cli",
-            cli_args,
-            &[("ACP_SERVER_URL", backend_url)],
-        )
-        .await;
+        envs.push(("ACP_SERVER_URL", backend_url));
+    }
+    if let Some(auth_token) = auth_token {
+        envs.push(("ACP_AUTH_TOKEN", auth_token));
     }
 
-    spawn_foreground_role(current_executable, "cli frontend", "cli", cli_args, &[]).await
+    spawn_foreground_role(current_executable, "cli frontend", "cli", cli_args, &envs).await
 }
 
 fn is_bundled_mock_chat(cli_args: &[OsString], bundled_mock: bool) -> bool {
     bundled_mock && cli_args.first().and_then(|arg| arg.to_str()) == Some("chat")
+}
+
+fn command_needs_backend(cli_args: &[OsString]) -> bool {
+    !matches!(
+        (
+            cli_args.first().and_then(|arg| arg.to_str()),
+            cli_args.get(1).and_then(|arg| arg.to_str()),
+        ),
+        (Some("session"), Some("list"))
+    )
+}
+
+fn cli_server_url_is_explicit(cli_args: &[OsString]) -> bool {
+    cli_args.iter().any(|arg| {
+        arg.to_str()
+            .is_some_and(|value| value == "--server-url" || value.starts_with("--server-url="))
+    })
 }
 
 fn internal_role_request(args: &[OsString]) -> Result<Option<(OsString, Vec<OsString>)>> {

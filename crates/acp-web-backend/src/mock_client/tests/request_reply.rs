@@ -1,4 +1,5 @@
 use super::*;
+use crate::sessions::TurnHandle;
 
 #[tokio::test]
 async fn request_reply_collects_text_from_acp_mock() {
@@ -150,24 +151,21 @@ async fn request_reply_returns_cancelled_status_when_turns_are_cancelled() {
         .await
         .expect("prompt submission should succeed");
 
+    let turn = pending.turn_handle();
     let request_task = {
         let client = client.clone();
-        tokio::spawn(async move { client.request_reply(pending.turn_handle()).await })
+        let turn = turn.clone();
+        tokio::spawn(async move { client.request_reply(turn).await })
     };
 
-    let mut cancelled = false;
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
-        if store
+    wait_for_turn_to_start(&turn).await;
+    assert!(
+        store
             .cancel_active_turn("alice", &session.id)
             .await
-            .expect("cancelling should succeed")
-        {
-            cancelled = true;
-            break;
-        }
-    }
-    assert!(cancelled, "the active turn should have started");
+            .expect("cancelling should succeed"),
+        "the active turn should have started"
+    );
 
     let reply = request_task
         .await
@@ -176,6 +174,19 @@ async fn request_reply_returns_cancelled_status_when_turns_are_cancelled() {
     assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
 
     let _ = shutdown_tx.send(());
+}
+
+async fn wait_for_turn_to_start(turn: &TurnHandle) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if turn.is_started().await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the active turn should have started within the timeout");
 }
 
 #[tokio::test]

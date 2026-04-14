@@ -7,6 +7,7 @@ use std::{
 };
 
 use acp_app_support::init_tracing;
+use acp_mock::{MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 use snafu::prelude::*;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -124,6 +125,15 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
     )
     .await?;
 
+    if should_print_mock_verification_hints(&launcher_args.cli_args, mock.is_some()) {
+        println!(
+            "[hint] bundled mock verification: enter `{MANUAL_PERMISSION_TRIGGER}` to trigger a permission request, then answer with `/approve <request-id>` or `/deny <request-id>`."
+        );
+        println!(
+            "[hint] bundled mock verification: enter `{MANUAL_CANCEL_TRIGGER}` to start a delayed mock reply, then run `/cancel` before the assistant reply arrives."
+        );
+    }
+
     let cli_status = spawn_foreground_role(
         &current_executable,
         "cli frontend",
@@ -135,6 +145,10 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     shutdown_services(&mut backend, &mut mock).await?;
     ensure_success("cli frontend", cli_status)
+}
+
+fn should_print_mock_verification_hints(cli_args: &[OsString], bundled_mock: bool) -> bool {
+    bundled_mock && cli_args.first().and_then(|arg| arg.to_str()) == Some("chat")
 }
 
 fn internal_role_request(args: &[OsString]) -> Result<Option<(OsString, Vec<OsString>)>> {

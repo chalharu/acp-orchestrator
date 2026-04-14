@@ -1,7 +1,10 @@
 use super::*;
 use crate::{
     notifications::{finalize_permission_request, finalize_session_update},
-    prompt::reply_for,
+    prompt::{
+        MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER, prompt_requires_permission, reply_for,
+        response_delay_for,
+    },
 };
 use agent_client_protocol::Agent as _;
 use std::rc::Rc;
@@ -243,6 +246,26 @@ fn long_prompts_are_truncated_in_mock_replies() {
     assert!(reply.contains("...`"));
     assert!(reply.starts_with("mock assistant: I received `"));
     assert!(reply.contains("ACP round-trip succeeded"));
+}
+
+#[test]
+fn manual_permission_trigger_still_uses_the_permission_flow() {
+    assert!(prompt_requires_permission(MANUAL_PERMISSION_TRIGGER));
+}
+
+#[test]
+fn manual_cancel_trigger_uses_an_extended_delay() {
+    assert_eq!(
+        response_delay_for(MANUAL_CANCEL_TRIGGER, Duration::from_millis(120)),
+        Duration::from_secs(10)
+    );
+}
+
+#[test]
+fn ordinary_prompts_keep_the_default_delay() {
+    let default_delay = Duration::from_millis(120);
+
+    assert_eq!(response_delay_for("hello", default_delay), default_delay);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -2,6 +2,10 @@ use agent_client_protocol as acp;
 use std::time::Duration;
 use tokio::{sync::watch, time::sleep};
 
+pub const MANUAL_PERMISSION_TRIGGER: &str = "verify permission";
+pub const MANUAL_CANCEL_TRIGGER: &str = "verify cancel";
+const MANUAL_CANCEL_RESPONSE_DELAY: Duration = Duration::from_secs(10);
+
 pub(super) fn prompt_text(prompt: &[acp::ContentBlock]) -> String {
     prompt
         .iter()
@@ -35,6 +39,14 @@ pub(crate) fn reply_for(prompt: &str) -> String {
 
 pub(super) fn prompt_requires_permission(prompt: &str) -> bool {
     prompt.to_ascii_lowercase().contains("permission")
+}
+
+pub(crate) fn response_delay_for(prompt: &str, default_delay: Duration) -> Duration {
+    if prompt.to_ascii_lowercase().contains(MANUAL_CANCEL_TRIGGER) {
+        MANUAL_CANCEL_RESPONSE_DELAY
+    } else {
+        default_delay
+    }
 }
 
 pub(super) async fn wait_for_cancel(

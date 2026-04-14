@@ -15,7 +15,9 @@ use std::{
 
 use agent_client_protocol::{self as acp, Client as _};
 use notifications::{drain_permission_requests, drain_session_updates, log_connection_result};
-use prompt::{prompt_requires_permission, prompt_text, reply_for, wait_for_cancel};
+use prompt::{
+    prompt_requires_permission, prompt_text, reply_for, response_delay_for, wait_for_cancel,
+};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot, watch},
@@ -23,6 +25,7 @@ use tokio::{
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::info;
 
+pub use prompt::{MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 pub use runtime::{MockAppError, run_with_args};
 
 #[derive(Debug, Clone)]
@@ -260,7 +263,7 @@ impl acp::Agent for MockAgent {
         if wait_for_cancel(
             &mut cancel_rx,
             cancel_generation,
-            self.state.config.response_delay,
+            response_delay_for(&prompt, self.state.config.response_delay),
         )
         .await
         {

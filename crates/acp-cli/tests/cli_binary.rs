@@ -152,11 +152,11 @@ fn read_recent_session_id(path: &Path) -> Result<String> {
 
 const CHAT_SCRIPT: [(&[u8], u64); 8] = [
     (b"\n/help\nhello from cli binary\n", 600),
-    (b"permission please\n", 300),
+    (b"verify permission\n", 300),
     (b"/approve req_1\n", 300),
-    (b"permission please again\n", 300),
+    (b"verify permission again\n", 300),
     (b"/deny req_2\n", 300),
-    (b"permission please once more\n", 300),
+    (b"verify cancel\n", 300),
     (b"/cancel\n", 300),
     (b"/unknown\n/quit\n", 0),
 ];
@@ -194,7 +194,7 @@ fn assert_chat_output(output: &str) {
     assert!(output.contains("[status] permission req_1 approved"));
     assert!(output.contains("[permission req_2] read_text_file README.md"));
     assert!(output.contains("[status] permission req_2 denied"));
-    assert!(output.contains("[permission req_3] read_text_file README.md"));
+    assert!(output.contains("[user] verify cancel"));
     assert!(output.contains("[status] cancel requested for the running turn"));
     assert!(output.contains("[status] turn cancelled"));
     assert!(output.contains("[status] unknown command. Use `/help`."));

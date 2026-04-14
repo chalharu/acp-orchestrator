@@ -113,6 +113,22 @@ fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
     );
 }
 
+#[test]
+fn mock_verification_hints_only_show_for_bundled_mock_chat() {
+    assert!(should_print_mock_verification_hints(
+        &[OsString::from("chat"), OsString::from("--new")],
+        true,
+    ));
+    assert!(!should_print_mock_verification_hints(
+        &[OsString::from("session"), OsString::from("list")],
+        true,
+    ));
+    assert!(!should_print_mock_verification_hints(
+        &[OsString::from("chat"), OsString::from("--new")],
+        false,
+    ));
+}
+
 #[tokio::test]
 async fn run_with_args_requires_an_internal_role_name() {
     let error = run_with_args(vec![

@@ -452,6 +452,41 @@ fn save_launcher_state_creates_parent_directories() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn save_launcher_state_secures_default_launcher_directories_on_unix() {
+    let state_path = unique_temp_json_path("acp-launcher-state-root", "secure-parent")
+        .with_extension("")
+        .join(".acp-orchestrator")
+        .join("launcher-stack.json");
+    save_launcher_state(
+        &state_path,
+        &test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1")),
+    )
+    .expect("saving launcher state should secure default launcher directories");
+
+    assert_eq!(
+        fs::metadata(
+            state_path
+                .parent()
+                .expect("launcher state paths should have a parent"),
+        )
+        .expect("parent directory metadata should load")
+        .permissions()
+        .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&state_path)
+            .expect("state metadata should load")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
 #[test]
 fn create_launcher_state_parent_creates_nested_directories() {
     let state_path = unique_temp_json_path("acp-launcher-state", "parent-helper")
@@ -506,6 +541,11 @@ async fn managed_stack_is_healthy_rejects_non_loopback_backend_urls() {
         ))
         .await
     );
+}
+
+#[test]
+fn socket_address_uses_loopback_accepts_bracketed_ipv6_loopback() {
+    assert!(socket_address_uses_loopback("[::1]:8080"));
 }
 
 fn parse_launcher_state_error(path: &Path) -> crate::LauncherError {

@@ -540,11 +540,9 @@ fn save_launcher_state(path: &Path, state: &LauncherState) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).context(
-            WriteLauncherStateSnafu {
-                path: path.to_path_buf(),
-            },
-        )?;
+        let path_buf = path.to_path_buf();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .context(WriteLauncherStateSnafu { path: path_buf })?;
     }
     file.write_all(serialized.as_bytes())
         .context(WriteLauncherStateSnafu {
@@ -563,9 +561,8 @@ fn create_launcher_state_parent(path: &Path) -> Result<()> {
 
     let parent = parent.to_path_buf();
     fs::create_dir_all(&parent).context(CreateLauncherStateDirectorySnafu { path: parent })?;
-    secure_launcher_state_parent_permissions(
-        path.parent().expect("validated parent should exist"),
-    )?;
+    let parent = path.parent().expect("validated parent should exist");
+    secure_launcher_state_parent_permissions(parent)?;
     Ok(())
 }
 
@@ -608,11 +605,9 @@ fn secure_launcher_state_parent_permissions(parent: &Path) -> Result<()> {
         .and_then(|name| name.to_str())
         .is_some_and(|name| matches!(name, "acp-orchestrator" | ".acp-orchestrator"))
     {
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).context(
-            CreateLauncherStateDirectorySnafu {
-                path: parent.to_path_buf(),
-            },
-        )?;
+        let parent_path = parent.to_path_buf();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .context(CreateLauncherStateDirectorySnafu { path: parent_path })?;
     }
     Ok(())
 }

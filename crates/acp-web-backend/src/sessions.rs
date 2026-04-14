@@ -1,13 +1,9 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use acp_contracts::{
-    ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    ResolvePermissionResponse, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    ConversationMessage, PermissionDecision, ResolvePermissionResponse, SessionSnapshot,
+    StreamEvent,
 };
-use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
 

@@ -8,7 +8,6 @@ use std::{
 };
 
 use clap::Args;
-#[cfg(feature = "test-helpers")]
 use reqwest::Client;
 use snafu::prelude::*;
 use tokio::{
@@ -51,7 +50,8 @@ pub fn init_tracing() {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .without_time(),
+                .without_time()
+                .with_writer(std::io::stderr),
         )
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .try_init();
@@ -61,21 +61,29 @@ pub async fn bind_listener(
     host: &str,
     port: u16,
     service_name: &'static str,
-    startup_label: &'static str,
-    startup_prefix: &'static str,
 ) -> Result<TcpListener, ListenerSetupError> {
     init_tracing();
 
-    let listener = TcpListener::bind((host, port)).await.context(BindSnafu {
+    TcpListener::bind((host, port)).await.context(BindSnafu {
         service_name,
         host: host.to_string(),
         port,
-    })?;
+    })
+}
+
+pub fn listener_endpoint(
+    listener: &TcpListener,
+    service_name: &'static str,
+    startup_prefix: &'static str,
+) -> Result<String, ListenerSetupError> {
     let address = listener
         .local_addr()
         .context(ReadBoundAddressSnafu { service_name })?;
-    println!("{startup_label} listening on {startup_prefix}{address}");
-    Ok(listener)
+    Ok(format!("{startup_prefix}{address}"))
+}
+
+pub fn print_startup_line(startup_label: &'static str, endpoint: &str) {
+    println!("{startup_label} listening on {endpoint}");
 }
 
 pub fn shutdown_signal(exit_after_ms: Option<u64>) -> ShutdownSignal {
@@ -101,7 +109,6 @@ pub async fn read_startup_url(child: &mut Child, prefix: &str) -> Result<String,
         .to_string())
 }
 
-#[cfg(feature = "test-helpers")]
 pub async fn wait_for_health(
     client: &Client,
     base_url: &str,
@@ -153,9 +160,7 @@ mod tests {
     use super::*;
     use std::process::Stdio;
 
-    #[cfg(feature = "test-helpers")]
     use reqwest::Client;
-    #[cfg(feature = "test-helpers")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::{net::TcpListener, process::Command, time::timeout};
 
@@ -240,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_listener_reports_successful_binding() {
-        let listener = bind_listener("127.0.0.1", 0, "test service", "test service", "")
+        let listener = bind_listener("127.0.0.1", 0, "test service")
             .await
             .expect("listener should bind");
         let address = listener
@@ -260,13 +265,25 @@ mod tests {
             .expect("listener should expose its address")
             .port();
 
-        let error = bind_listener("127.0.0.1", port, "test service", "test service", "")
+        let error = bind_listener("127.0.0.1", port, "test service")
             .await
             .expect_err("occupied ports should fail");
 
         assert!(
             matches!(error, ListenerSetupError::Bind { port: bound_port, .. } if bound_port == port)
         );
+    }
+
+    #[tokio::test]
+    async fn listener_endpoint_formats_the_bound_address() {
+        let listener = bind_listener("127.0.0.1", 0, "test service")
+            .await
+            .expect("listener should bind");
+
+        let endpoint = listener_endpoint(&listener, "test service", "http://")
+            .expect("endpoint should format");
+
+        assert!(endpoint.starts_with("http://127.0.0.1:"));
     }
 
     #[tokio::test]
@@ -305,7 +322,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "test-helpers")]
     #[tokio::test]
     async fn wait_for_health_succeeds_when_the_endpoint_is_ready() {
         let client = Client::builder().build().expect("test client should build");
@@ -318,7 +334,6 @@ mod tests {
         let _ = handle.await;
     }
 
-    #[cfg(feature = "test-helpers")]
     #[tokio::test]
     async fn wait_for_health_reports_failures_after_exhausting_retries() {
         let client = Client::builder().build().expect("test client should build");
@@ -330,7 +345,6 @@ mod tests {
         assert!(error.to_string().contains("health check did not succeed"));
     }
 
-    #[cfg(feature = "test-helpers")]
     async fn spawn_health_server() -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

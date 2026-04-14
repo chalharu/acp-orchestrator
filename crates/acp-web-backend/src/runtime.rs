@@ -1,12 +1,19 @@
 use std::ffi::OsString;
 
-use acp_app_support::{ListenerSetupError, RuntimeListenArgs, bind_listener, shutdown_signal};
+use acp_app_support::{
+    BoxError, ListenerSetupError, RuntimeListenArgs, bind_listener, listener_endpoint,
+    print_startup_line, shutdown_signal, wait_for_health,
+};
 use clap::Parser;
+use reqwest::Client;
 use snafu::prelude::*;
 
 use crate::{AppState, MockClientError, ServerConfig, serve_with_shutdown};
 
 type Result<T, E = BackendAppError> = std::result::Result<T, E>;
+const READY_CHECK_ATTEMPTS: usize = 50;
+const READY_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const READY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Snafu)]
 pub enum BackendAppError {
@@ -18,6 +25,12 @@ pub enum BackendAppError {
 
     #[snafu(display("building backend state failed"))]
     BuildState { source: MockClientError },
+
+    #[snafu(display("building the backend readiness HTTP client failed"))]
+    BuildHttpClient { source: reqwest::Error },
+
+    #[snafu(display("waiting for the web backend readiness probe failed"))]
+    WaitForReady { source: BoxError },
 
     #[snafu(display("running the web backend failed"))]
     Run { source: std::io::Error },
@@ -38,25 +51,34 @@ struct Cli {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let listener = bind_listener(
-        &cli.listen.host,
-        cli.port,
-        "web backend",
-        "web backend",
-        "http://",
-    )
-    .await
-    .map_err(|source| BackendAppError::Setup { source })?;
+    let listener = bind_listener(&cli.listen.host, cli.port, "web backend")
+        .await
+        .map_err(|source| BackendAppError::Setup { source })?;
+    let endpoint = listener_endpoint(&listener, "web backend", "http://")
+        .map_err(|source| BackendAppError::Setup { source })?;
 
     let state = AppState::new(ServerConfig {
         session_cap: cli.session_cap,
         mock_address: cli.mock_address,
     })
     .context(BuildStateSnafu)?;
+    let client = Client::builder()
+        .timeout(READY_CHECK_TIMEOUT)
+        .build()
+        .context(BuildHttpClientSnafu)?;
+    let ready = wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
+    let serve = serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms));
+    tokio::pin!(ready);
+    tokio::pin!(serve);
 
-    serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms))
-        .await
-        .context(RunSnafu)
+    tokio::select! {
+        result = &mut ready => {
+            result.context(WaitForReadySnafu)?;
+            print_startup_line("web backend", &endpoint);
+            serve.await.context(RunSnafu)
+        }
+        result = &mut serve => result.context(RunSnafu),
+    }
 }
 
 pub async fn run_with_args<I, T>(args: I) -> Result<()>

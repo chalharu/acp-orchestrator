@@ -7,25 +7,19 @@ use std::{
 };
 
 use acp_app_support::init_tracing;
-use reqwest::Client;
 use snafu::prelude::*;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    time::{Instant, sleep},
 };
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
-const HEALTH_CHECK_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
-const HEALTH_CHECK_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const STARTUP_LINE_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Snafu)]
 enum LauncherError {
     #[snafu(display("reading the current executable path failed"))]
     CurrentExecutable { source: std::io::Error },
-
-    #[snafu(display("building the launcher HTTP client failed"))]
-    BuildHttpClient { source: reqwest::Error },
 
     #[snafu(display("spawning the {role} child process failed"))]
     SpawnChild {
@@ -38,15 +32,6 @@ enum LauncherError {
         source: std::io::Error,
         role: &'static str,
     },
-
-    #[snafu(display("{role} exited before becoming healthy"))]
-    ChildExitedEarly {
-        role: &'static str,
-        status: ExitStatus,
-    },
-
-    #[snafu(display("{role} did not become healthy at {url}"))]
-    WaitForHealth { role: &'static str, url: String },
 
     #[snafu(display("waiting for the {role} child process failed"))]
     WaitForChild {
@@ -116,7 +101,6 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     let current_executable = env::current_exe().context(CurrentExecutableSnafu)?;
     let cli_args = forwarded_cli_args(&args);
-    let client = launcher_http_client()?;
 
     let SpawnedService {
         child: mut mock,
@@ -146,7 +130,6 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
         &[],
     )
     .await?;
-    wait_for_health(&client, &mut backend, "web backend", &backend_url).await?;
 
     let cli_status = spawn_foreground_role(
         &current_executable,
@@ -243,7 +226,7 @@ async fn read_startup_url(child: &mut Child, role: &'static str) -> Result<Strin
         .ok_or_else(|| MissingChildStdoutSnafu { role }.build())?;
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    let bytes_read = tokio::time::timeout(Duration::from_secs(15), reader.read_line(&mut line))
+    let bytes_read = tokio::time::timeout(STARTUP_LINE_TIMEOUT, reader.read_line(&mut line))
         .await
         .map_err(|_| LauncherError::WaitForStartupLine { role })?
         .context(ReadStartupLineSnafu { role })?;
@@ -272,48 +255,6 @@ async fn read_startup_url(child: &mut Child, role: &'static str) -> Result<Strin
     Ok(base_url)
 }
 
-async fn wait_for_health(
-    client: &Client,
-    child: &mut Child,
-    role: &'static str,
-    base_url: &str,
-) -> Result<()> {
-    wait_for_health_with_timeout(client, child, role, base_url, HEALTH_CHECK_STARTUP_TIMEOUT).await
-}
-
-async fn wait_for_health_with_timeout(
-    client: &Client,
-    child: &mut Child,
-    role: &'static str,
-    base_url: &str,
-    timeout: Duration,
-) -> Result<()> {
-    let health_url = format!("{base_url}/healthz");
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        if let Some(status) = child.try_wait().context(CheckChildStatusSnafu { role })? {
-            return ChildExitedEarlySnafu { role, status }.fail();
-        }
-
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-
-        if Instant::now() >= deadline {
-            return WaitForHealthSnafu {
-                role,
-                url: health_url,
-            }
-            .fail();
-        }
-
-        sleep(Duration::from_millis(100)).await;
-    }
-}
-
 async fn terminate_child(child: &mut Child, role: &'static str) -> Result<()> {
     if child
         .try_wait()
@@ -338,13 +279,6 @@ fn ensure_success(role: &'static str, status: ExitStatus) -> Result<()> {
         }
         .fail()
     }
-}
-
-fn launcher_http_client() -> Result<Client> {
-    Client::builder()
-        .timeout(HEALTH_CHECK_REQUEST_TIMEOUT)
-        .build()
-        .context(BuildHttpClientSnafu)
 }
 
 async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<()> {
@@ -387,10 +321,6 @@ async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
 
     #[test]
     fn forwarded_cli_args_defaults_to_chat_new() {
@@ -464,99 +394,6 @@ mod tests {
             error,
             LauncherError::InvalidStartupLine { line, .. } if line == "ready"
         ));
-    }
-
-    #[tokio::test]
-    async fn wait_for_health_detects_exited_children() {
-        let client = Client::builder()
-            .timeout(Duration::from_millis(20))
-            .build()
-            .expect("client should build");
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .spawn()
-            .expect("child should spawn");
-
-        let error = wait_for_health(&client, &mut child, "test role", "http://127.0.0.1:9")
-            .await
-            .expect_err("exited child should fail");
-
-        assert!(matches!(error, LauncherError::ChildExitedEarly { .. }));
-    }
-
-    #[tokio::test]
-    async fn wait_for_health_times_out_when_child_stays_running() {
-        let client = Client::builder()
-            .timeout(Duration::from_millis(20))
-            .build()
-            .expect("client should build");
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 1")
-            .spawn()
-            .expect("child should spawn");
-
-        let error = wait_for_health_with_timeout(
-            &client,
-            &mut child,
-            "test role",
-            "http://127.0.0.1:9",
-            Duration::from_millis(50),
-        )
-        .await
-        .expect_err("running child should time out");
-
-        assert!(matches!(error, LauncherError::WaitForHealth { .. }));
-        terminate_child(&mut child, "test role")
-            .await
-            .expect("timeout child should terminate cleanly");
-    }
-
-    #[tokio::test]
-    async fn wait_for_health_accepts_slow_successful_responses() {
-        let client = launcher_http_client().expect("client should build");
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let address = listener
-            .local_addr()
-            .expect("listener should expose its address");
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("request should arrive");
-            let mut request = vec![0; 1024];
-            let _ = stream
-                .read(&mut request)
-                .await
-                .expect("request bytes should be readable");
-            sleep(Duration::from_millis(300)).await;
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 15\r\nconnection: close\r\n\r\n{\"status\":\"ok\"}",
-                )
-                .await
-                .expect("response bytes should be writable");
-        });
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 2")
-            .spawn()
-            .expect("child should spawn");
-
-        wait_for_health_with_timeout(
-            &client,
-            &mut child,
-            "test role",
-            &format!("http://{address}"),
-            Duration::from_secs(2),
-        )
-        .await
-        .expect("slow health responses should still be accepted");
-
-        terminate_child(&mut child, "test role")
-            .await
-            .expect("slow-health child should terminate cleanly");
-        server.await.expect("server task should finish");
     }
 
     #[tokio::test]

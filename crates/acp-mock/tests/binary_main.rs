@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use acp_app_support::{read_startup_url, wait_for_tcp_connect};
+use acp_app_support::read_startup_url;
 use agent_client_protocol::{self as acp, Agent as _};
 use tokio::{net::TcpStream, process::Command, time::timeout};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -78,8 +78,6 @@ async fn mock_binary_accepts_acp_prompt_roundtrips() -> Result<()> {
         .stderr(Stdio::inherit())
         .spawn()?;
     let address = read_startup_url(&mut child, "acp mock listening on ").await?;
-
-    wait_for_tcp_connect(&address, 100, Duration::from_millis(20)).await?;
 
     let reply = request_reply(&address, "hello from binary test").await?;
     assert!(reply.starts_with("mock assistant:"));

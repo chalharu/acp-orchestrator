@@ -1,12 +1,17 @@
 use std::{ffi::OsString, time::Duration};
 
-use acp_app_support::{ListenerSetupError, RuntimeListenArgs, bind_listener, shutdown_signal};
+use acp_app_support::{
+    BoxError, ListenerSetupError, RuntimeListenArgs, bind_listener, listener_endpoint,
+    print_startup_line, shutdown_signal, wait_for_tcp_connect,
+};
 use clap::Parser;
 use snafu::prelude::*;
 
 use crate::{MockConfig, serve_with_shutdown};
 
 type Result<T, E = MockAppError> = std::result::Result<T, E>;
+const READY_CHECK_ATTEMPTS: usize = 300;
+const READY_CHECK_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Snafu)]
 pub enum MockAppError {
@@ -18,6 +23,9 @@ pub enum MockAppError {
 
     #[snafu(display("running the mock server failed"))]
     Run { source: std::io::Error },
+
+    #[snafu(display("waiting for the mock readiness probe failed"))]
+    WaitForReady { source: BoxError },
 }
 
 #[derive(Debug, Parser)]
@@ -33,17 +41,28 @@ struct Cli {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let listener = bind_listener(&cli.listen.host, cli.port, "mock server", "acp mock", "")
+    let listener = bind_listener(&cli.listen.host, cli.port, "mock server")
         .await
+        .map_err(|source| MockAppError::Setup { source })?;
+    let endpoint = listener_endpoint(&listener, "mock server", "")
         .map_err(|source| MockAppError::Setup { source })?;
 
     let config = MockConfig {
         response_delay: Duration::from_millis(cli.response_delay_ms),
     };
+    let ready = wait_for_tcp_connect(&endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
+    let serve = serve_with_shutdown(listener, config, shutdown_signal(cli.listen.exit_after_ms));
+    tokio::pin!(ready);
+    tokio::pin!(serve);
 
-    serve_with_shutdown(listener, config, shutdown_signal(cli.listen.exit_after_ms))
-        .await
-        .context(RunSnafu)
+    tokio::select! {
+        result = &mut ready => {
+            result.context(WaitForReadySnafu)?;
+            print_startup_line("acp mock", &endpoint);
+            serve.await.context(RunSnafu)
+        }
+        result = &mut serve => result.context(RunSnafu),
+    }
 }
 
 pub async fn run_with_args<I, T>(args: I) -> Result<()>

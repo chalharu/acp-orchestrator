@@ -1,6 +1,6 @@
 use std::{process::Stdio, time::Duration};
 
-use acp_app_support::{read_startup_url, wait_for_health, wait_for_tcp_connect};
+use acp_app_support::{read_startup_url, wait_for_tcp_connect};
 use acp_contracts::HealthResponse;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use reqwest::Client;
@@ -24,9 +24,6 @@ async fn backend_binary_serves_health_checks() -> Result<()> {
         .stderr(Stdio::inherit())
         .spawn()?;
     let base_url = read_startup_url(&mut child, "web backend listening on ").await?;
-
-    wait_for_health(&client, &base_url, 100, Duration::from_millis(20)).await?;
-
     let health: HealthResponse = client
         .get(format!("{base_url}/healthz"))
         .send()

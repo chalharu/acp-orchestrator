@@ -13,6 +13,7 @@ axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 futures-util.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
@@ -27,5 +28,4 @@ acp-mock = { path = "../acp-mock" }
 anyhow = "=1.0.102"
 eventsource-stream.workspace = true
 futures-util.workspace = true
-reqwest.workspace = true
 tokio.workspace = true

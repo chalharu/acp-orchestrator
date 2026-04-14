@@ -49,8 +49,8 @@ processes, then hands terminal I/O to the CLI frontend. Type a prompt, wait for
 the streamed assistant reply, and leave the REPL with `/quit`.
 
 When running against the bundled mock stack, prompts containing the word
-`permission` trigger a mock permission request so you can exercise `/approve`,
-`/deny`, and `/cancel`.
+`permission` trigger a mock permission request.
+Use that prompt to exercise `/approve`, `/deny`, and `/cancel`.
 
 ## Run each component directly
 

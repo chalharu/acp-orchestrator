@@ -43,9 +43,23 @@ impl TestClient {
 impl acp::Client for TestClient {
     async fn request_permission(
         &self,
-        _args: acp::RequestPermissionRequest,
+        args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        Err(acp::Error::method_not_found())
+        let selected = args
+            .options
+            .iter()
+            .find(|option| {
+                matches!(
+                    option.kind,
+                    acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
+                )
+            })
+            .ok_or_else(acp::Error::invalid_params)?;
+        Ok(acp::RequestPermissionResponse::new(
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                selected.option_id.to_string(),
+            )),
+        ))
     }
 
     async fn session_notification(
@@ -80,6 +94,29 @@ async fn mock_binary_accepts_acp_prompt_roundtrips() -> Result<()> {
     let address = read_startup_url(&mut child, "acp mock listening on ").await?;
 
     let reply = request_reply(&address, "hello from binary test").await?;
+    assert!(reply.starts_with("mock assistant:"));
+
+    let status = timeout(Duration::from_secs(2), child.wait()).await??;
+    assert!(status.success());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mock_binary_accepts_permission_prompt_roundtrips() -> Result<()> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_acp-mock"))
+        .arg("--port")
+        .arg("0")
+        .arg("--response-delay-ms")
+        .arg("1")
+        .arg("--exit-after-ms")
+        .arg("500")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let address = read_startup_url(&mut child, "acp mock listening on ").await?;
+
+    let reply = request_reply(&address, "permission from binary test").await?;
     assert!(reply.starts_with("mock assistant:"));
 
     let status = timeout(Duration::from_secs(2), child.wait()).await??;

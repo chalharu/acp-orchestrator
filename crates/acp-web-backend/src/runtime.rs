@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{env, ffi::OsString};
 
 use acp_app_support::{
     BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
@@ -53,11 +53,27 @@ struct Cli {
     port: u16,
     #[arg(long, default_value_t = 8)]
     session_cap: usize,
-    #[arg(long, env = "ACP_MOCK_ADDRESS")]
-    mock_address: String,
+    #[arg(long, alias = "mock-address", env = "ACP_SERVER")]
+    acp_server: Option<String>,
+}
+
+fn resolve_acp_server(
+    acp_server: Option<String>,
+    deprecated_mock_address: Option<String>,
+) -> std::result::Result<String, clap::Error> {
+    acp_server
+        .or(deprecated_mock_address)
+        .ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "missing ACP server address; use --acp-server, ACP_SERVER, or the deprecated ACP_MOCK_ADDRESS",
+            )
+        })
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let acp_server = resolve_acp_server(cli.acp_server.clone(), env::var("ACP_MOCK_ADDRESS").ok())
+        .context(ParseArgsSnafu)?;
     let listener = bind_listener(&cli.listen.host, cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
@@ -66,7 +82,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     let state = AppState::new(ServerConfig {
         session_cap: cli.session_cap,
-        mock_address: cli.mock_address,
+        acp_server,
     })
     .context(BuildStateSnafu)?;
     let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
@@ -95,6 +111,18 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    fn test_cli(acp_server: Option<&str>) -> Cli {
+        Cli {
+            listen: RuntimeListenArgs {
+                host: "127.0.0.1".to_string(),
+                exit_after_ms: None,
+            },
+            port: 0,
+            session_cap: 8,
+            acp_server: acp_server.map(str::to_string),
+        }
+    }
+
     #[test]
     fn service_readiness_errors_map_to_wait_for_ready_failures() {
         let error = map_service_readiness_error(ServiceReadinessError::Ready(
@@ -112,8 +140,45 @@ mod tests {
         assert!(matches!(error, BackendAppError::Run { .. }));
     }
 
+    #[test]
+    fn resolve_acp_server_prefers_the_new_surface() {
+        let cli = test_cli(Some("127.0.0.1:8090"));
+
+        assert_eq!(
+            resolve_acp_server(cli.acp_server.clone(), Some("127.0.0.1:9000".to_string()))
+                .expect("the ACP server should resolve"),
+            "127.0.0.1:8090"
+        );
+    }
+
+    #[test]
+    fn resolve_acp_server_accepts_the_deprecated_env_fallback() {
+        let cli = test_cli(None);
+
+        assert_eq!(
+            resolve_acp_server(cli.acp_server.clone(), Some("127.0.0.1:8090".to_string()))
+                .expect("the legacy ACP server should resolve"),
+            "127.0.0.1:8090"
+        );
+    }
+
     #[tokio::test]
     async fn run_with_args_can_shutdown_cleanly() {
+        run_with_args([
+            "acp-web-backend",
+            "--port",
+            "0",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--exit-after-ms",
+            "50",
+        ])
+        .await
+        .expect("backend server should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn run_with_args_accepts_the_deprecated_mock_address_flag() {
         run_with_args([
             "acp-web-backend",
             "--port",
@@ -124,7 +189,7 @@ mod tests {
             "50",
         ])
         .await
-        .expect("backend server should stop cleanly");
+        .expect("the deprecated mock-address flag should still work");
     }
 
     #[tokio::test]
@@ -133,7 +198,7 @@ mod tests {
             "acp-web-backend",
             "--port",
             "0",
-            "--mock-address",
+            "--acp-server",
             "127.0.0.1:9",
         ]));
 
@@ -143,10 +208,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_args_requires_a_mock_address() {
+    async fn run_with_args_requires_an_acp_server() {
         let error = run_with_args(["acp-web-backend"])
             .await
-            .expect_err("missing mock addresses should fail");
+            .expect_err("missing ACP server addresses should fail");
 
         assert!(matches!(error, BackendAppError::ParseArgs { .. }));
     }
@@ -165,7 +230,7 @@ mod tests {
             "acp-web-backend",
             "--port",
             &port.to_string(),
-            "--mock-address",
+            "--acp-server",
             "127.0.0.1:9",
             "--exit-after-ms",
             "1",

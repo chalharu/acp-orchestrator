@@ -47,6 +47,35 @@ pub struct PromptResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionRequest {
+    pub request_id: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    Approve,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvePermissionRequest {
+    pub decision: PermissionDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvePermissionResponse {
+    pub request_id: String,
+    pub decision: PermissionDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CancelTurnResponse {
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionHistoryResponse {
     pub session_id: String,
     pub messages: Vec<ConversationMessage>,
@@ -90,6 +119,7 @@ pub struct StreamEvent {
 pub enum StreamEventPayload {
     SessionSnapshot { session: SessionSnapshot },
     ConversationMessage { message: ConversationMessage },
+    PermissionRequested { request: PermissionRequest },
     SessionClosed { session_id: String, reason: String },
     Status { message: String },
 }
@@ -99,6 +129,7 @@ impl StreamEvent {
         match &self.payload {
             StreamEventPayload::SessionSnapshot { .. } => "session.snapshot",
             StreamEventPayload::ConversationMessage { .. } => "conversation.message",
+            StreamEventPayload::PermissionRequested { .. } => "tool.permission.requested",
             StreamEventPayload::SessionClosed { .. } => "session.closed",
             StreamEventPayload::Status { .. } => "status",
         }
@@ -136,6 +167,21 @@ mod tests {
         };
 
         assert_eq!(event.event_name(), "session.closed");
+    }
+
+    #[test]
+    fn permission_requested_events_use_the_permission_event_name() {
+        let event = StreamEvent {
+            sequence: 8,
+            payload: StreamEventPayload::PermissionRequested {
+                request: PermissionRequest {
+                    request_id: "req_1".to_string(),
+                    summary: "read_text_file README.md".to_string(),
+                },
+            },
+        };
+
+        assert_eq!(event.event_name(), "tool.permission.requested");
     }
 
     #[test]

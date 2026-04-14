@@ -48,6 +48,25 @@ This starts the ACP mock, the web backend, and the CLI frontend as child
 processes, then hands terminal I/O to the CLI frontend. Type a prompt, wait for
 the streamed assistant reply, and leave the REPL with `/quit`.
 
+When running against the bundled mock stack, prompts containing the word
+`permission` still trigger a mock permission request. For reproducible manual
+verification, use the built-in mock prompts below:
+
+- `verify permission`: emits `[permission <request-id>] read_text_file README.md`.
+  Respond with `/approve <request-id>` or `/deny <request-id>`.
+- `verify cancel`: starts a delayed mock reply. Run `/cancel` before the
+  assistant reply arrives and confirm `[status] turn cancelled`.
+
+The root `cargo run` launcher prints the same hints when it starts the bundled
+mock for `chat`.
+
+If you already have an ACP server running, point the launcher at it instead of
+starting the bundled mock:
+
+```bash
+cargo run -- --acp-server 127.0.0.1:8090
+```
+
 ## Run each component directly
 
 Start the ACP mock:
@@ -59,7 +78,7 @@ cargo run -p acp-mock -- --port 8090
 Start the web backend:
 
 ```bash
-cargo run -p acp-web-backend -- --port 8080 --mock-address 127.0.0.1:8090
+cargo run -p acp-web-backend -- --port 8080 --acp-server 127.0.0.1:8090
 ```
 
 Run the CLI frontend against that backend:

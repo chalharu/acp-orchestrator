@@ -1,8 +1,9 @@
 use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 use acp_contracts::{
-    CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse, PromptRequest,
-    PromptResponse, SessionHistoryResponse, StreamEvent,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
+    PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
+    SessionHistoryResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -19,23 +20,25 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 
+#[cfg(test)]
+use crate::sessions::TurnHandle;
 use crate::{
     auth::{AuthError, extract_principal},
-    mock_client::{MockClient, MockClientError, ReplyProvider},
+    mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStore, SessionStoreError},
 };
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub session_cap: usize,
-    pub mock_address: String,
+    pub acp_server: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             session_cap: 8,
-            mock_address: "127.0.0.1:8090".to_string(),
+            acp_server: "127.0.0.1:8090".to_string(),
         }
     }
 }
@@ -50,7 +53,7 @@ impl AppState {
     pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
         Ok(Self::with_dependencies(
             Arc::new(SessionStore::new(config.session_cap)),
-            Arc::new(MockClient::new(config.mock_address)?),
+            Arc::new(MockClient::new(config.acp_server)?),
         ))
     }
 
@@ -79,6 +82,11 @@ pub fn app(state: AppState) -> Router {
             get(stream_session_events),
         )
         .route("/api/v1/sessions/{session_id}/messages", post(post_message))
+        .route("/api/v1/sessions/{session_id}/cancel", post(cancel_turn))
+        .route(
+            "/api/v1/sessions/{session_id}/permissions/{request_id}",
+            post(resolve_permission),
+        )
         .route("/api/v1/sessions/{session_id}/close", post(close_session))
         .with_state(state)
 }
@@ -171,8 +179,38 @@ async fn close_session(
         .store
         .close_session(&principal.id, &session_id)
         .await?;
+    state.reply_provider.forget_session(&session_id);
 
     Ok(Json(CloseSessionResponse { session }))
+}
+
+async fn cancel_turn(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<CancelTurnResponse>, AppError> {
+    let principal = extract_principal(&headers)?;
+    let cancelled = state
+        .store
+        .cancel_active_turn(&principal.id, &session_id)
+        .await?;
+
+    Ok(Json(CancelTurnResponse { cancelled }))
+}
+
+async fn resolve_permission(
+    State(state): State<AppState>,
+    Path((session_id, request_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ResolvePermissionRequest>,
+) -> Result<Json<ResolvePermissionResponse>, AppError> {
+    let principal = extract_principal(&headers)?;
+    let resolution = state
+        .store
+        .resolve_permission(&principal.id, &session_id, &request_id, request.decision)
+        .await?;
+
+    Ok(Json(resolution))
 }
 
 async fn stream_session_events(
@@ -200,15 +238,14 @@ async fn stream_session_events(
 }
 
 fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: PendingPrompt) {
-    let session_id = pending.session_id().to_string();
-    let prompt = pending.prompt_text().to_string();
-
     tokio::spawn(async move {
-        match reply_provider.request_reply(&session_id, &prompt).await {
-            Ok(reply) => pending.complete_with_reply(reply).await,
+        match reply_provider.request_reply(pending.turn_handle()).await {
+            Ok(ReplyResult::Reply(reply)) => pending.complete_with_reply(reply).await,
+            Ok(ReplyResult::Status(message)) => pending.complete_with_status(message).await,
+            Ok(ReplyResult::NoOutput) => pending.complete_without_output().await,
             Err(error) => {
                 pending
-                    .complete_with_status(format!("mock request failed: {error}"))
+                    .complete_with_status(format!("ACP request failed: {error}"))
                     .await;
             }
         }
@@ -292,6 +329,7 @@ impl From<SessionStoreError> for AppError {
             SessionStoreError::Forbidden => Self::Forbidden(error.message().to_string()),
             SessionStoreError::Closed => Self::Conflict(error.message().to_string()),
             SessionStoreError::EmptyPrompt => Self::BadRequest(error.message().to_string()),
+            SessionStoreError::PermissionNotFound => Self::NotFound(error.message().to_string()),
             SessionStoreError::SessionCapReached => {
                 Self::TooManyRequests(error.message().to_string())
             }
@@ -300,174 +338,4 @@ impl From<SessionStoreError> for AppError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mock_client::ReplyFuture;
-
-    #[test]
-    fn default_server_config_points_to_the_local_mock() {
-        let config = ServerConfig::default();
-
-        assert_eq!(config.session_cap, 8);
-        assert_eq!(config.mock_address, "127.0.0.1:8090");
-    }
-
-    #[test]
-    fn app_errors_map_to_the_expected_status_codes() {
-        let cases = [
-            (
-                AppError::Unauthorized("auth".to_string()),
-                StatusCode::UNAUTHORIZED,
-                "auth",
-            ),
-            (
-                AppError::Forbidden("forbidden".to_string()),
-                StatusCode::FORBIDDEN,
-                "forbidden",
-            ),
-            (
-                AppError::NotFound("missing".to_string()),
-                StatusCode::NOT_FOUND,
-                "missing",
-            ),
-            (
-                AppError::BadRequest("bad".to_string()),
-                StatusCode::BAD_REQUEST,
-                "bad",
-            ),
-            (
-                AppError::Conflict("conflict".to_string()),
-                StatusCode::CONFLICT,
-                "conflict",
-            ),
-            (
-                AppError::TooManyRequests("too many".to_string()),
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many",
-            ),
-            (
-                AppError::Internal("internal".to_string()),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-            ),
-        ];
-
-        for (error, expected_status, expected_message) in cases {
-            assert_eq!(error.status_code(), expected_status);
-            assert_eq!(error.message(), expected_message);
-        }
-    }
-
-    #[test]
-    fn auth_errors_become_unauthorized_responses() {
-        let missing: AppError = AuthError::MissingAuthorization.into();
-        let invalid: AppError = AuthError::InvalidAuthorization.into();
-
-        assert!(matches!(
-            missing,
-            AppError::Unauthorized(message) if message == "missing bearer token"
-        ));
-        assert!(matches!(
-            invalid,
-            AppError::Unauthorized(message) if message == "invalid bearer token"
-        ));
-    }
-
-    #[test]
-    fn session_store_errors_map_to_matching_http_categories() {
-        let cases = [
-            (
-                SessionStoreError::NotFound,
-                StatusCode::NOT_FOUND,
-                "session not found",
-            ),
-            (
-                SessionStoreError::Forbidden,
-                StatusCode::FORBIDDEN,
-                "session owner mismatch",
-            ),
-            (
-                SessionStoreError::Closed,
-                StatusCode::CONFLICT,
-                "session already closed",
-            ),
-            (
-                SessionStoreError::EmptyPrompt,
-                StatusCode::BAD_REQUEST,
-                "prompt must not be empty",
-            ),
-            (
-                SessionStoreError::SessionCapReached,
-                StatusCode::TOO_MANY_REQUESTS,
-                "session cap reached for principal",
-            ),
-        ];
-
-        for (source, expected_status, expected_message) in cases {
-            let error: AppError = source.into();
-
-            assert_eq!(error.status_code(), expected_status);
-            assert_eq!(error.message(), expected_message);
-        }
-    }
-
-    #[tokio::test]
-    async fn injected_reply_provider_handles_prompt_dispatch() {
-        let store = Arc::new(SessionStore::new(4));
-        let state = AppState::with_dependencies(
-            store.clone(),
-            Arc::new(StaticReplyProvider {
-                reply: "injected reply".to_string(),
-            }),
-        );
-        let session = store
-            .create_session("alice")
-            .await
-            .expect("session creation should succeed");
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            "Bearer alice".parse().expect("authorization should parse"),
-        );
-
-        let _ = post_message(
-            State(state),
-            Path(session.id.clone()),
-            headers,
-            Json(PromptRequest {
-                text: "hello".to_string(),
-            }),
-        )
-        .await
-        .expect("prompt submission should succeed");
-
-        let history = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let history = store
-                    .session_history("alice", &session.id)
-                    .await
-                    .expect("session history should load");
-                if history.len() == 2 {
-                    return history;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("assistant reply should be recorded");
-
-        assert_eq!(history[1].text, "injected reply");
-    }
-
-    #[derive(Debug)]
-    struct StaticReplyProvider {
-        reply: String,
-    }
-
-    impl ReplyProvider for StaticReplyProvider {
-        fn request_reply<'a>(&'a self, _session_id: &'a str, _prompt: &'a str) -> ReplyFuture<'a> {
-            let reply = self.reply.clone();
-            Box::pin(async move { Ok(reply) })
-        }
-    }
-}
+mod tests;

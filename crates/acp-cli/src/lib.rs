@@ -1,23 +1,35 @@
 use std::{
     error::Error as StdError,
     ffi::OsString,
-    fs,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
-    CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole, PromptRequest,
-    PromptResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole,
+    PermissionDecision, PromptRequest, PromptResponse, ResolvePermissionRequest,
+    ResolvePermissionResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
-use eventsource_stream::Eventsource;
-use futures_util::{StreamExt, pin_mut};
 use reqwest::{Client, Response, StatusCode};
-use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
+
+mod api;
+mod events;
+mod recent_sessions;
+mod repl_commands;
+
+#[cfg(test)]
+mod tests;
+
+use api::{close_session, create_session, ensure_success, get_session, submit_prompt};
+use events::stream_events_to_stderr;
+use recent_sessions::{
+    RecentSessionEntry, load_recent_sessions, record_recent_session, remove_recent_session,
+};
+use repl_commands::handle_repl_command;
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
@@ -148,13 +160,6 @@ struct CloseArgs {
     auth_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RecentSessionEntry {
-    session_id: String,
-    server_url: String,
-    last_used_at: DateTime<Utc>,
-}
-
 pub async fn run_with_args<I, T>(args: I) -> Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -174,60 +179,81 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
 
     let server_url = require_server_url("chat", args.server_url.clone())?;
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+    let session = load_chat_session(&client, &server_url, &args).await?;
+    record_recent_session(&RecentSessionEntry::new(
+        &session.id,
+        &server_url,
+        Utc::now(),
+    ))?;
+    print_chat_banner(&session.id, &server_url);
 
-    let session = if args.new {
-        create_session(&client, &server_url, &args.auth_token).await?
-    } else {
-        get_session(
-            &client,
-            &server_url,
-            &args.auth_token,
-            args.session_id
-                .as_deref()
-                .expect("session id checked before chat execution"),
-        )
-        .await?
-    };
+    let event_task = spawn_event_task(&client, &server_url, &args.auth_token, &session.id);
+    drive_repl(&client, &server_url, &args.auth_token, &session.id).await?;
+    event_task.abort();
+    Ok(())
+}
 
-    record_recent_session(&RecentSessionEntry {
-        session_id: session.id.clone(),
-        server_url: server_url.clone(),
-        last_used_at: Utc::now(),
-    })?;
+async fn load_chat_session(
+    client: &Client,
+    server_url: &str,
+    args: &ChatArgs,
+) -> Result<SessionSnapshot> {
+    if args.new {
+        return create_session(client, server_url, &args.auth_token).await;
+    }
 
-    println!("session: {}", session.id);
+    get_session(
+        client,
+        server_url,
+        &args.auth_token,
+        args.session_id
+            .as_deref()
+            .expect("session id checked before chat execution"),
+    )
+    .await
+}
+
+fn print_chat_banner(session_id: &str, server_url: &str) {
+    println!("session: {session_id}");
     println!("connected to backend: {server_url}");
+}
 
-    let events_url = format!("{server_url}/api/v1/sessions/{}/events", session.id);
-    let event_client = client.clone();
-    let auth_token = args.auth_token.clone();
-    let event_task = tokio::spawn(stream_events_to_stderr(
-        event_client,
+fn spawn_event_task(
+    client: &Client,
+    server_url: &str,
+    auth_token: &str,
+    session_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let events_url = format!("{server_url}/api/v1/sessions/{session_id}/events");
+    tokio::spawn(stream_events_to_stderr(
+        client.clone(),
         events_url,
-        auth_token,
-    ));
+        auth_token.to_string(),
+    ))
+}
 
+async fn drive_repl(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+) -> Result<()> {
     loop {
         let Some(line) = read_prompt_line().await? else {
-            break;
+            return Ok(());
         };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-
         if trimmed.starts_with('/') {
-            if handle_repl_command(trimmed).await? {
-                break;
+            if handle_repl_command(trimmed, client, base_url, auth_token, session_id).await? {
+                return Ok(());
             }
             continue;
         }
-
-        submit_prompt(&client, &server_url, &args.auth_token, &session.id, trimmed).await?;
+        submit_prompt(client, base_url, auth_token, session_id, trimmed).await?;
     }
-
-    event_task.abort();
-    Ok(())
 }
 
 async fn run_session(args: SessionArgs) -> Result<()> {
@@ -266,36 +292,6 @@ fn require_server_url(command: &'static str, server_url: Option<String>) -> Resu
     server_url.ok_or_else(|| MissingServerUrlSnafu { command }.build())
 }
 
-async fn handle_repl_command(command: &str) -> Result<bool> {
-    match command {
-        "/help" => {
-            println!("/help");
-            println!("/quit");
-            println!("/cancel (planned)");
-            println!("/approve <request-id> (planned)");
-            println!("/deny <request-id> (planned)");
-            Ok(false)
-        }
-        "/quit" => Ok(true),
-        value if value.starts_with("/cancel") => {
-            println!("[status] `/cancel` is planned.");
-            Ok(false)
-        }
-        value if value.starts_with("/approve ") => {
-            println!("[status] `/approve` is planned.");
-            Ok(false)
-        }
-        value if value.starts_with("/deny ") => {
-            println!("[status] `/deny` is planned.");
-            Ok(false)
-        }
-        _ => {
-            println!("[status] unknown command. Use `/help`.");
-            Ok(false)
-        }
-    }
-}
-
 async fn read_prompt_line() -> Result<Option<String>> {
     tokio::task::spawn_blocking(|| -> Result<Option<String>> {
         print!("> ");
@@ -314,405 +310,4 @@ async fn read_prompt_line() -> Result<Option<String>> {
     })
     .await
     .context(JoinPromptReaderSnafu)?
-}
-
-async fn create_session(
-    client: &Client,
-    base_url: &str,
-    auth_token: &str,
-) -> Result<SessionSnapshot> {
-    let response = client
-        .post(format!("{base_url}/api/v1/sessions"))
-        .bearer_auth(auth_token)
-        .send()
-        .await
-        .context(SendRequestSnafu {
-            action: "create session",
-        })?;
-    let response = ensure_success(response, "create session").await?;
-    let payload: CreateSessionResponse = response.json().await.context(DecodeResponseSnafu {
-        action: "create session",
-    })?;
-    Ok(payload.session)
-}
-
-async fn get_session(
-    client: &Client,
-    base_url: &str,
-    auth_token: &str,
-    session_id: &str,
-) -> Result<SessionSnapshot> {
-    let response = client
-        .get(format!("{base_url}/api/v1/sessions/{session_id}"))
-        .bearer_auth(auth_token)
-        .send()
-        .await
-        .context(SendRequestSnafu {
-            action: "load session",
-        })?;
-    let response = ensure_success(response, "load session").await?;
-    let payload: CreateSessionResponse = response.json().await.context(DecodeResponseSnafu {
-        action: "load session",
-    })?;
-    Ok(payload.session)
-}
-
-async fn submit_prompt(
-    client: &Client,
-    base_url: &str,
-    auth_token: &str,
-    session_id: &str,
-    prompt: &str,
-) -> Result<()> {
-    let response = client
-        .post(format!("{base_url}/api/v1/sessions/{session_id}/messages"))
-        .bearer_auth(auth_token)
-        .json(&PromptRequest {
-            text: prompt.to_string(),
-        })
-        .send()
-        .await
-        .context(SendRequestSnafu {
-            action: "submit prompt",
-        })?;
-    let response = ensure_success(response, "submit prompt").await?;
-    let _: PromptResponse = response.json().await.context(DecodeResponseSnafu {
-        action: "submit prompt",
-    })?;
-    Ok(())
-}
-
-async fn close_session(
-    client: &Client,
-    base_url: &str,
-    auth_token: &str,
-    session_id: &str,
-) -> Result<CloseSessionResponse> {
-    let response = client
-        .post(format!("{base_url}/api/v1/sessions/{session_id}/close"))
-        .bearer_auth(auth_token)
-        .send()
-        .await
-        .context(SendRequestSnafu {
-            action: "close session",
-        })?;
-    let response = ensure_success(response, "close session").await?;
-    response.json().await.context(DecodeResponseSnafu {
-        action: "close session",
-    })
-}
-
-async fn ensure_success(response: Response, action: &'static str) -> Result<Response> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-
-    let message = match response.json::<ErrorResponse>().await {
-        Ok(payload) => payload.error,
-        Err(_) => status
-            .canonical_reason()
-            .unwrap_or("request failed")
-            .to_string(),
-    };
-
-    HttpStatusSnafu {
-        action,
-        status,
-        message,
-    }
-    .fail()
-}
-
-async fn stream_events(client: Client, events_url: String, auth_token: String) -> Result<()> {
-    let response = client
-        .get(events_url)
-        .bearer_auth(auth_token)
-        .send()
-        .await
-        .context(SendRequestSnafu {
-            action: "open event stream",
-        })?;
-    let response = ensure_success(response, "open event stream").await?;
-    let stream = response.bytes_stream().eventsource();
-    pin_mut!(stream);
-
-    while let Some(event) = stream.next().await {
-        let event = event.map_err(|source| CliError::ReadEventStream {
-            source: Box::new(source),
-        })?;
-        let payload: StreamEvent =
-            serde_json::from_str(&event.data).context(DecodeStreamEventSnafu)?;
-        render_event(&payload);
-    }
-
-    Ok(())
-}
-
-async fn stream_events_to_stderr(client: Client, events_url: String, auth_token: String) {
-    if let Err(error) = stream_events(client, events_url, auth_token).await {
-        eprintln!("[status] event stream ended: {error}");
-    }
-}
-
-fn render_event(event: &StreamEvent) {
-    match &event.payload {
-        StreamEventPayload::SessionSnapshot { session } => {
-            if session.messages.is_empty() {
-                println!("[status] session ready");
-            } else {
-                for message in &session.messages {
-                    render_message(message.role.clone(), &message.text);
-                }
-            }
-        }
-        StreamEventPayload::ConversationMessage { message } => {
-            render_message(message.role.clone(), &message.text);
-        }
-        StreamEventPayload::SessionClosed { reason, .. } => {
-            println!("[status] session closed: {reason}");
-        }
-        StreamEventPayload::Status { message } => {
-            println!("[status] {message}");
-        }
-    }
-}
-
-fn render_message(role: MessageRole, text: &str) {
-    match role {
-        MessageRole::User => println!("[user] {text}"),
-        MessageRole::Assistant => println!("[assistant] {text}"),
-    }
-}
-
-fn recent_sessions_path() -> Result<PathBuf> {
-    recent_sessions_path_from(
-        std::env::var_os("ACP_RECENT_SESSIONS_PATH"),
-        dirs::data_local_dir(),
-    )
-}
-
-fn recent_sessions_path_from(
-    explicit_path: Option<OsString>,
-    data_local_dir: Option<PathBuf>,
-) -> Result<PathBuf> {
-    if let Some(path) = explicit_path {
-        return Ok(PathBuf::from(path));
-    }
-
-    let mut directory = data_local_dir.ok_or_else(|| MissingRecentSessionDirectorySnafu.build())?;
-    directory.push("acp-orchestrator");
-    directory.push("recent-sessions.json");
-    Ok(directory)
-}
-
-fn load_recent_sessions() -> Result<Vec<RecentSessionEntry>> {
-    let path = recent_sessions_path()?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let raw = fs::read_to_string(&path).context(ReadRecentSessionsSnafu { path: path.clone() })?;
-    let entries = serde_json::from_str(&raw).context(ParseRecentSessionsSnafu { path })?;
-    Ok(entries)
-}
-
-fn save_recent_sessions(entries: &[RecentSessionEntry]) -> Result<()> {
-    let path = recent_sessions_path()?;
-    create_recent_sessions_parent(&path)?;
-
-    let serialized = serde_json::to_string_pretty(entries).context(SerializeRecentSessionsSnafu)?;
-    fs::write(&path, serialized).context(WriteRecentSessionsSnafu { path })?;
-    Ok(())
-}
-
-fn create_recent_sessions_parent(path: &Path) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        let parent = parent.to_path_buf();
-        fs::create_dir_all(&parent).context(CreateRecentSessionsDirectorySnafu { path: parent })?;
-    }
-    Ok(())
-}
-
-fn record_recent_session(entry: &RecentSessionEntry) -> Result<()> {
-    let mut entries = load_recent_sessions()?;
-    entries.retain(|existing| existing.session_id != entry.session_id);
-    entries.insert(0, entry.clone());
-    entries.truncate(20);
-    save_recent_sessions(&entries)
-}
-
-fn remove_recent_session(session_id: &str) -> Result<()> {
-    let mut entries = load_recent_sessions()?;
-    entries.retain(|entry| entry.session_id != session_id);
-    save_recent_sessions(&entries)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use chrono::TimeZone;
-    use tokio::{io::AsyncWriteExt, net::TcpListener};
-
-    #[tokio::test]
-    async fn ensure_success_uses_http_reason_when_error_body_is_not_json() {
-        let url = spawn_raw_http_server(
-            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nbad gateway",
-        )
-        .await;
-        let client = Client::builder().build().expect("client should build");
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .expect("request should succeed");
-
-        let error = ensure_success(response, "open event stream")
-            .await
-            .expect_err("plain text errors should fail");
-
-        assert!(matches!(
-            error,
-            CliError::HttpStatus { action, status, message }
-                if action == "open event stream"
-                    && status == StatusCode::BAD_GATEWAY
-                    && message == "Bad Gateway"
-        ));
-    }
-
-    #[tokio::test]
-    async fn stream_events_finishes_when_the_server_closes_the_stream() {
-        let url = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"sequence\":1,\"kind\":\"status\",\"message\":\"done\"}\n\n",
-        )
-        .await;
-        let client = Client::builder().build().expect("client should build");
-
-        stream_events(client, url, "developer".to_string())
-            .await
-            .expect("single-event streams should complete cleanly");
-    }
-
-    #[tokio::test]
-    async fn stream_events_surfaces_event_stream_read_errors() {
-        let url = spawn_raw_http_server_bytes(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: \xff\n\n"
-                .to_vec(),
-        )
-        .await;
-        let client = Client::builder().build().expect("client should build");
-
-        let error = stream_events(client, url, "developer".to_string())
-            .await
-            .expect_err("invalid event streams should fail");
-
-        assert!(matches!(error, CliError::ReadEventStream { .. }));
-    }
-
-    #[tokio::test]
-    async fn stream_events_to_stderr_returns_after_stream_failures() {
-        let url = spawn_raw_http_server_bytes(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: \xff\n\n"
-                .to_vec(),
-        )
-        .await;
-        let client = Client::builder().build().expect("client should build");
-
-        stream_events_to_stderr(client, url, "developer".to_string()).await;
-    }
-
-    #[test]
-    fn render_event_covers_all_display_variants() {
-        let created_at = Utc
-            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
-            .single()
-            .expect("timestamp should be valid");
-        let snapshot = SessionSnapshot {
-            id: "s_test".to_string(),
-            status: acp_contracts::SessionStatus::Active,
-            latest_sequence: 2,
-            messages: vec![acp_contracts::ConversationMessage {
-                id: "m_test".to_string(),
-                role: MessageRole::Assistant,
-                text: "hello".to_string(),
-                created_at,
-            }],
-        };
-
-        render_event(&StreamEvent {
-            sequence: 2,
-            payload: StreamEventPayload::SessionSnapshot { session: snapshot },
-        });
-        render_event(&StreamEvent {
-            sequence: 3,
-            payload: StreamEventPayload::SessionClosed {
-                session_id: "s_test".to_string(),
-                reason: "done".to_string(),
-            },
-        });
-        render_event(&StreamEvent::status(4, "working"));
-    }
-
-    #[test]
-    fn recent_sessions_path_uses_the_explicit_path_first() {
-        let path = recent_sessions_path_from(
-            Some(OsString::from("/tmp/acp-test.json")),
-            Some(PathBuf::from("/ignored")),
-        )
-        .expect("explicit paths should win");
-
-        assert_eq!(path, PathBuf::from("/tmp/acp-test.json"));
-    }
-
-    #[test]
-    fn recent_sessions_path_falls_back_to_the_local_data_directory() {
-        let path = recent_sessions_path_from(None, Some(PathBuf::from("/tmp/local-data")))
-            .expect("fallback data dir should work");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/local-data/acp-orchestrator/recent-sessions.json")
-        );
-    }
-
-    #[test]
-    fn recent_sessions_path_requires_a_data_directory_when_no_override_is_set() {
-        let error =
-            recent_sessions_path_from(None, None).expect_err("missing data dir should fail");
-
-        assert!(matches!(error, CliError::MissingRecentSessionDirectory));
-    }
-
-    #[test]
-    fn create_recent_sessions_parent_skips_paths_without_a_directory_component() {
-        create_recent_sessions_parent(Path::new(""))
-            .expect("empty paths should not require directory creation");
-    }
-
-    async fn spawn_raw_http_server(response: &'static str) -> String {
-        spawn_raw_http_server_bytes(response.as_bytes().to_vec()).await
-    }
-
-    async fn spawn_raw_http_server_bytes(payload: Vec<u8>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("server should bind");
-        let address = listener
-            .local_addr()
-            .expect("server address should be readable");
-
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("server should accept");
-            stream
-                .write_all(&payload)
-                .await
-                .expect("response should write");
-        });
-
-        format!("http://{address}")
-    }
 }

@@ -17,7 +17,7 @@ async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()>
     command
         .arg("--port")
         .arg("0")
-        .arg("--mock-address")
+        .arg("--acp-server")
         .arg(&mock_address)
         .arg("--exit-after-ms")
         .arg("500")

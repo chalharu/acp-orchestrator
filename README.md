@@ -44,9 +44,9 @@ Run the full local stack directly from the repository root:
 cargo run
 ```
 
-This starts the ACP mock, the web backend, and the CLI frontend as child
-processes, then hands terminal I/O to the CLI frontend. Type a prompt, wait for
-the streamed assistant reply, and leave the REPL with `/quit`.
+This starts or reuses the bundled ACP mock and web backend, then hands terminal
+I/O to the CLI frontend. Type a prompt, wait for the streamed assistant reply,
+and leave the REPL with `/quit`.
 
 When running against the bundled mock stack, prompts containing the word
 `permission` still trigger a mock permission request. For reproducible manual
@@ -59,6 +59,16 @@ verification, use the built-in mock prompts below:
 
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.
+
+For slice-3 session continuation, the default launcher keeps the bundled stack
+available across repeated `cargo run` invocations. A manual resume flow is:
+
+1. `cargo run`
+2. Send a prompt, then exit with `/quit`
+3. `cargo run -- session list`
+4. `cargo run -- chat --session <id>`
+
+The resumed chat prints the saved transcript before returning to the prompt.
 
 If you already have an ACP server running, point the launcher at it instead of
 starting the bundled mock:

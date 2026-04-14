@@ -24,14 +24,21 @@ mod repl_commands;
 #[cfg(test)]
 mod tests;
 
-use api::{close_session, create_session, ensure_success, get_session, submit_prompt};
-use events::stream_events_to_stderr;
+use api::{
+    close_session, create_session, ensure_success, get_session, get_session_history, submit_prompt,
+};
+use events::{InitialSnapshotState, stream_events_to_stderr};
 use recent_sessions::{
     RecentSessionEntry, load_recent_sessions, record_recent_session, remove_recent_session,
 };
 use repl_commands::handle_repl_command;
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
+
+struct ChatSession {
+    session: SessionSnapshot,
+    resumed: bool,
+}
 
 #[derive(Debug, Snafu)]
 pub enum CliError {
@@ -179,16 +186,29 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
 
     let server_url = require_server_url("chat", args.server_url.clone())?;
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-    let session = load_chat_session(&client, &server_url, &args).await?;
+    let chat_session = load_chat_session(&client, &server_url, &args).await?;
     record_recent_session(&RecentSessionEntry::new(
-        &session.id,
+        &chat_session.session.id,
         &server_url,
         Utc::now(),
     ))?;
-    print_chat_banner(&session.id, &server_url);
+    print_chat_banner(&chat_session.session.id, &server_url);
+    let initial_snapshot_state = render_resume_history(&chat_session);
 
-    let event_task = spawn_event_task(&client, &server_url, &args.auth_token, &session.id);
-    drive_repl(&client, &server_url, &args.auth_token, &session.id).await?;
+    let event_task = spawn_event_task(
+        &client,
+        &server_url,
+        &args.auth_token,
+        &chat_session.session.id,
+        initial_snapshot_state,
+    );
+    drive_repl(
+        &client,
+        &server_url,
+        &args.auth_token,
+        &chat_session.session.id,
+    )
+    .await?;
     event_task.abort();
     Ok(())
 }
@@ -197,20 +217,40 @@ async fn load_chat_session(
     client: &Client,
     server_url: &str,
     args: &ChatArgs,
-) -> Result<SessionSnapshot> {
+) -> Result<ChatSession> {
     if args.new {
-        return create_session(client, server_url, &args.auth_token).await;
+        return create_session(client, server_url, &args.auth_token)
+            .await
+            .map(|session| ChatSession {
+                session,
+                resumed: false,
+            });
     }
 
-    get_session(
-        client,
-        server_url,
-        &args.auth_token,
-        args.session_id
-            .as_deref()
-            .expect("session id checked before chat execution"),
-    )
-    .await
+    let session_id = args
+        .session_id
+        .as_deref()
+        .expect("session id checked before chat execution");
+    // Keep the resume flow aligned with the explicit history endpoint, but
+    // render from the later snapshot so messages and pending permissions stay
+    // consistent with each other.
+    get_session_history(client, server_url, &args.auth_token, session_id).await?;
+    let session = get_session(client, server_url, &args.auth_token, session_id).await?;
+
+    Ok(ChatSession {
+        session,
+        resumed: true,
+    })
+}
+
+fn render_resume_history(chat_session: &ChatSession) -> Option<InitialSnapshotState> {
+    if !chat_session.resumed {
+        return None;
+    }
+
+    let initial_snapshot_state = InitialSnapshotState::from_snapshot(&chat_session.session);
+    events::render_event(&StreamEvent::snapshot(chat_session.session.clone()));
+    Some(initial_snapshot_state)
 }
 
 fn print_chat_banner(session_id: &str, server_url: &str) {
@@ -223,12 +263,14 @@ fn spawn_event_task(
     server_url: &str,
     auth_token: &str,
     session_id: &str,
+    initial_snapshot_state: Option<InitialSnapshotState>,
 ) -> tokio::task::JoinHandle<()> {
     let events_url = format!("{server_url}/api/v1/sessions/{session_id}/events");
     tokio::spawn(stream_events_to_stderr(
         client.clone(),
         events_url,
         auth_token.to_string(),
+        initial_snapshot_state,
     ))
 }
 

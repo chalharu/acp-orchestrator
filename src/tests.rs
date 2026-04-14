@@ -1,4 +1,6 @@
 use super::*;
+use std::{process::Stdio, time::Duration};
+use tokio::process::Command;
 
 #[test]
 fn split_launcher_args_defaults_to_chat_new() {
@@ -115,18 +117,67 @@ fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
 
 #[test]
 fn mock_verification_hints_only_show_for_bundled_mock_chat() {
-    assert!(should_print_mock_verification_hints(
+    assert!(is_bundled_mock_chat(
         &[OsString::from("chat"), OsString::from("--new")],
         true,
     ));
-    assert!(!should_print_mock_verification_hints(
+    assert!(!is_bundled_mock_chat(
         &[OsString::from("session"), OsString::from("list")],
         true,
     ));
-    assert!(!should_print_mock_verification_hints(
+    assert!(!is_bundled_mock_chat(
         &[OsString::from("chat"), OsString::from("--new")],
         false,
     ));
+}
+
+#[test]
+fn command_needs_backend_skips_session_list_only() {
+    assert!(!command_needs_backend(&[
+        OsString::from("session"),
+        OsString::from("list"),
+    ]));
+    assert!(command_needs_backend(&[
+        OsString::from("chat"),
+        OsString::from("--new"),
+    ]));
+}
+
+#[test]
+fn cli_server_url_is_explicit_accepts_both_supported_forms() {
+    assert!(cli_server_url_is_explicit(&[
+        OsString::from("chat"),
+        OsString::from("--server-url"),
+        OsString::from("http://127.0.0.1:8080"),
+    ]));
+    assert!(cli_server_url_is_explicit(&[
+        OsString::from("chat"),
+        OsString::from("--server-url=http://127.0.0.1:8080"),
+    ]));
+    assert!(!cli_server_url_is_explicit(&[
+        OsString::from("chat"),
+        OsString::from("--new"),
+    ]));
+}
+
+#[test]
+fn launcher_state_path_uses_data_dir_before_temp_dir() {
+    let path = launcher_state_path_from(None, Some(PathBuf::from("/tmp/local-data")));
+
+    assert_eq!(
+        path,
+        PathBuf::from("/tmp/local-data/acp-orchestrator/launcher-stack.json")
+    );
+}
+
+#[test]
+fn launcher_state_path_uses_explicit_override_first() {
+    let path = launcher_state_path_from(
+        Some(OsString::from("/tmp/acp-launcher-state.json")),
+        Some(PathBuf::from("/ignored")),
+    );
+
+    assert_eq!(path, PathBuf::from("/tmp/acp-launcher-state.json"));
 }
 
 #[tokio::test]

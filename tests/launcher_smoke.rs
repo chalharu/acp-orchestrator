@@ -14,6 +14,7 @@ use tokio::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const BROKEN_PROXY_URL: &str = "http://127.0.0.1:9";
+const MANAGED_STACK_EXIT_AFTER_MS: &str = "5000";
 
 #[tokio::test]
 async fn launcher_starts_the_full_stack_and_proxies_cli_io() -> Result<()> {
@@ -59,9 +60,14 @@ async fn assert_launcher_roundtrip_with_args(
     launcher_args: &[&str],
 ) -> Result<()> {
     let recent_path = unique_recent_sessions_path(label);
+    let state_path = unique_launcher_state_path(label);
     let client = Client::builder().build()?;
-    let (child, mut stdin, mut reader) =
-        spawn_launcher(&recent_path, use_broken_proxy_env, launcher_args)?;
+    let (child, mut stdin, mut reader) = spawn_launcher(
+        &recent_path,
+        &state_path,
+        use_broken_proxy_env,
+        launcher_args,
+    )?;
     let mut child = child;
 
     stdin.write_all(b"hello from launcher\n").await?;
@@ -75,14 +81,60 @@ async fn assert_launcher_roundtrip_with_args(
     Ok(())
 }
 
+#[tokio::test]
+async fn launcher_reuses_the_bundled_stack_across_invocations() -> Result<()> {
+    let label = "launcher-resume";
+    let recent_path = unique_recent_sessions_path(label);
+    let state_path = unique_launcher_state_path(label);
+
+    let (child, mut stdin, mut reader) = spawn_launcher(&recent_path, &state_path, false, &[])?;
+    let mut child = child;
+    stdin.write_all(b"hello from launcher\n").await?;
+    let (session_id, backend_url, mut first_output) = read_session_connection(&mut reader).await?;
+    sleep(Duration::from_millis(600)).await;
+    first_output.push_str(&quit_launcher(&mut child, &mut stdin, &mut reader).await?);
+
+    let list_output = run_launcher_command(&recent_path, &state_path, ["session", "list"]).await?;
+    assert!(list_output.status.success());
+    let list_stdout = String::from_utf8(list_output.stdout)?;
+    assert!(list_stdout.contains(&session_id));
+
+    let (resumed_child, mut resumed_stdin, mut resumed_reader) = spawn_launcher(
+        &recent_path,
+        &state_path,
+        false,
+        &["chat", "--session", session_id.as_str()],
+    )?;
+    let mut resumed_child = resumed_child;
+    let (resumed_session_id, resumed_backend_url, mut resumed_output) =
+        read_session_connection(&mut resumed_reader).await?;
+    resumed_output.push_str(
+        &quit_launcher(&mut resumed_child, &mut resumed_stdin, &mut resumed_reader).await?,
+    );
+
+    assert_eq!(resumed_session_id, session_id);
+    assert_eq!(resumed_backend_url, backend_url);
+    assert!(resumed_output.contains("[user] hello from launcher"));
+    assert!(resumed_output.contains("[assistant] mock assistant:"));
+
+    sleep(Duration::from_millis(5200)).await;
+    Ok(())
+}
+
 fn spawn_launcher(
     recent_path: &PathBuf,
+    state_path: &PathBuf,
     use_broken_proxy_env: bool,
     launcher_args: &[&str],
 ) -> Result<(Child, ChildStdin, BufReader<ChildStdout>)> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_acp"));
     command
         .env("ACP_RECENT_SESSIONS_PATH", recent_path)
+        .env("ACP_LAUNCHER_STATE_PATH", state_path)
+        .env(
+            "ACP_LAUNCHER_STACK_EXIT_AFTER_MS",
+            MANAGED_STACK_EXIT_AFTER_MS,
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -192,6 +244,30 @@ async fn read_session_connection(
 
 fn unique_recent_sessions_path(label: &str) -> PathBuf {
     unique_temp_json_path("acp-launcher", label)
+}
+
+fn unique_launcher_state_path(label: &str) -> PathBuf {
+    unique_temp_json_path("acp-launcher-state", label)
+}
+
+async fn run_launcher_command<'a, I>(
+    recent_path: &PathBuf,
+    state_path: &PathBuf,
+    args: I,
+) -> Result<std::process::Output>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    Ok(Command::new(env!("CARGO_BIN_EXE_acp"))
+        .env("ACP_RECENT_SESSIONS_PATH", recent_path)
+        .env("ACP_LAUNCHER_STATE_PATH", state_path)
+        .env(
+            "ACP_LAUNCHER_STACK_EXIT_AFTER_MS",
+            MANAGED_STACK_EXIT_AFTER_MS,
+        )
+        .args(args)
+        .output()
+        .await?)
 }
 
 async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {

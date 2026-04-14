@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    events::{render_event, stream_events},
+    events::{InitialSnapshotState, render_event, stream_events},
     recent_sessions::{create_recent_sessions_parent, recent_sessions_path_from},
 };
 use chrono::TimeZone;
@@ -120,9 +120,68 @@ async fn stream_events_finishes_when_the_server_closes_the_stream() {
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    stream_events(client, url, "developer".to_string())
+    stream_events(client, url, "developer".to_string(), None)
         .await
         .expect("single-event streams should complete cleanly");
+}
+
+#[tokio::test]
+async fn stream_events_renders_new_messages_from_an_initial_snapshot_delta() {
+    let url = spawn_raw_http_server(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"sequence\":1,\"kind\":\"session_snapshot\",\"session\":{\"id\":\"s_test\",\"status\":\"active\",\"latest_sequence\":1,\"messages\":[{\"id\":\"m_new\",\"role\":\"assistant\",\"text\":\"hello\",\"created_at\":\"2024-01-01T00:00:00Z\"}]}}\n\n",
+    )
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    stream_events(
+        client,
+        url,
+        "developer".to_string(),
+        Some(InitialSnapshotState::from_snapshot(&SessionSnapshot {
+            id: "s_test".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 0,
+            messages: vec![acp_contracts::ConversationMessage {
+                id: "m_known".to_string(),
+                role: MessageRole::Assistant,
+                text: "already rendered".to_string(),
+                created_at: Utc
+                    .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("timestamp should be valid"),
+            }],
+            pending_permissions: Vec::new(),
+        })),
+    )
+    .await
+    .expect("initial snapshot delta rendering should complete cleanly");
+}
+
+#[tokio::test]
+async fn stream_events_renders_new_pending_permissions_from_an_initial_snapshot_delta() {
+    let url = spawn_raw_http_server(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"sequence\":1,\"kind\":\"session_snapshot\",\"session\":{\"id\":\"s_test\",\"status\":\"active\",\"latest_sequence\":1,\"messages\":[],\"pending_permissions\":[{\"request_id\":\"req_new\",\"summary\":\"read_text_file README.md\"}]}}\n\n",
+    )
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    stream_events(
+        client,
+        url,
+        "developer".to_string(),
+        Some(InitialSnapshotState::from_snapshot(&SessionSnapshot {
+            id: "s_test".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 0,
+            messages: Vec::new(),
+            pending_permissions: vec![acp_contracts::PermissionRequest {
+                request_id: "req_old".to_string(),
+                summary: "read_text_file Cargo.toml".to_string(),
+            }],
+        })),
+    )
+    .await
+    .expect("initial snapshot permission delta should complete cleanly");
 }
 
 #[tokio::test]
@@ -134,7 +193,7 @@ async fn stream_events_surfaces_event_stream_read_errors() {
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    let error = stream_events(client, url, "developer".to_string())
+    let error = stream_events(client, url, "developer".to_string(), None)
         .await
         .expect_err("invalid event streams should fail");
 
@@ -150,7 +209,7 @@ async fn stream_events_to_stderr_returns_after_stream_failures() {
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    stream_events_to_stderr(client, url, "developer".to_string()).await;
+    stream_events_to_stderr(client, url, "developer".to_string(), None).await;
 }
 
 #[test]
@@ -168,6 +227,10 @@ fn render_event_covers_all_display_variants() {
             role: MessageRole::Assistant,
             text: "hello".to_string(),
             created_at,
+        }],
+        pending_permissions: vec![acp_contracts::PermissionRequest {
+            request_id: "req_1".to_string(),
+            summary: "read_text_file README.md".to_string(),
         }],
     };
 
@@ -192,6 +255,37 @@ fn render_event_covers_all_display_variants() {
         },
     });
     render_event(&StreamEvent::status(5, "working"));
+}
+
+#[test]
+fn render_resume_history_uses_the_snapshot_captured_for_resume() {
+    let created_at = Utc
+        .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+        .single()
+        .expect("timestamp should be valid");
+    let chat_session = ChatSession {
+        session: SessionSnapshot {
+            id: "s_test".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 2,
+            messages: vec![acp_contracts::ConversationMessage {
+                id: "m_test".to_string(),
+                role: MessageRole::Assistant,
+                text: "hello".to_string(),
+                created_at,
+            }],
+            pending_permissions: vec![acp_contracts::PermissionRequest {
+                request_id: "req_1".to_string(),
+                summary: "read_text_file README.md".to_string(),
+            }],
+        },
+        resumed: true,
+    };
+
+    assert_eq!(
+        render_resume_history(&chat_session),
+        Some(InitialSnapshotState::from_snapshot(&chat_session.session))
+    );
 }
 
 #[test]

@@ -1,21 +1,29 @@
 use std::{
     env,
     ffi::OsString,
-    path::Path,
-    process::{ExitStatus, Stdio},
-    time::Duration,
+    path::{Path, PathBuf},
 };
 
 use acp_app_support::init_tracing;
 use acp_mock::{MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 use snafu::prelude::*;
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::{Child, Command},
+
+mod launcher_process;
+mod launcher_stack;
+
+use launcher_process::{ensure_success, spawn_foreground_role};
+use launcher_stack::prepare_launcher_stack;
+
+#[cfg(test)]
+pub(crate) use launcher_process::{read_startup_url, terminate_child};
+#[cfg(test)]
+pub(crate) use launcher_stack::{
+    clear_stale_launcher_lock, cli_server_url_is_explicit, command_needs_backend,
+    launcher_lock_path_from, launcher_state_path_from, reusable_launcher_backend_url,
+    try_acquire_launcher_lock,
 };
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
-const STARTUP_LINE_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Snafu)]
 enum LauncherError {
@@ -84,15 +92,64 @@ enum LauncherError {
 
     #[snafu(display("running the backend child failed: {message}"))]
     RunBackend { message: String },
-}
 
-struct SpawnedService {
-    child: Child,
-    endpoint: String,
+    #[snafu(display("creating the launcher state directory {} failed", path.display()))]
+    CreateLauncherStateDirectory {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("reading the launcher state from {} failed", path.display()))]
+    ReadLauncherState {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("parsing the launcher state from {} failed", path.display()))]
+    ParseLauncherState {
+        source: serde_json::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("serializing the launcher state failed"))]
+    SerializeLauncherState { source: serde_json::Error },
+
+    #[snafu(display("writing the launcher state to {} failed", path.display()))]
+    WriteLauncherState {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("acquiring the launcher lock at {} failed", path.display()))]
+    AcquireLauncherLock {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display(
+        "reading the launcher lock metadata from {} failed",
+        path.display()
+    ))]
+    ReadLauncherLockMetadata {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("removing the launcher lock at {} failed", path.display()))]
+    RemoveLauncherLock {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("timed out waiting for the launcher lock at {}", path.display()))]
+    WaitForLauncherLock { path: PathBuf },
+
+    #[snafu(display("building the launcher stack health-check client failed"))]
+    BuildStackHttpClient { source: reqwest::Error },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct LauncherArgs {
+pub(crate) struct LauncherArgs {
     acp_server: Option<OsString>,
     cli_args: Vec<OsString>,
 }
@@ -106,26 +163,21 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     let current_executable = env::current_exe().context(CurrentExecutableSnafu)?;
     let launcher_args = split_launcher_args(&args)?;
-    let (mut mock, acp_server) =
-        resolve_acp_server(&current_executable, launcher_args.acp_server).await?;
-    let SpawnedService {
-        child: mut backend,
-        endpoint: backend_url,
-    } = spawn_background_role(
+    let mut stack = prepare_launcher_stack(&current_executable, &launcher_args).await?;
+    print_chat_hints(&launcher_args.cli_args, stack.bundled_mock());
+    let cli_status = run_cli_foreground(
         &current_executable,
-        "web backend",
-        "backend",
-        vec![
-            "--port".into(),
-            "0".into(),
-            "--acp-server".into(),
-            acp_server,
-        ],
-        &[],
+        launcher_args.cli_args,
+        stack.backend_url(),
     )
     .await?;
 
-    if should_print_mock_verification_hints(&launcher_args.cli_args, mock.is_some()) {
+    stack.shutdown().await?;
+    ensure_success("cli frontend", cli_status)
+}
+
+fn print_chat_hints(cli_args: &[OsString], bundled_mock: bool) {
+    if is_bundled_mock_chat(cli_args, bundled_mock) {
         println!(
             "[hint] bundled mock verification: enter `{MANUAL_PERMISSION_TRIGGER}` to trigger a permission request, then answer with `/approve <request-id>` or `/deny <request-id>`."
         );
@@ -133,21 +185,33 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
             "[hint] bundled mock verification: enter `{MANUAL_CANCEL_TRIGGER}` to start a delayed mock reply, then run `/cancel` before the assistant reply arrives."
         );
     }
-
-    let cli_status = spawn_foreground_role(
-        &current_executable,
-        "cli frontend",
-        "cli",
-        launcher_args.cli_args,
-        &[("ACP_SERVER_URL", backend_url.as_str())],
-    )
-    .await?;
-
-    shutdown_services(&mut backend, &mut mock).await?;
-    ensure_success("cli frontend", cli_status)
+    if is_bundled_mock_chat(cli_args, bundled_mock) {
+        println!(
+            "[hint] session continuity: exit with `/quit`, then use `cargo run -- session list` and `cargo run -- chat --session <id>` to resume this bundled session."
+        );
+    }
 }
 
-fn should_print_mock_verification_hints(cli_args: &[OsString], bundled_mock: bool) -> bool {
+async fn run_cli_foreground(
+    current_executable: &Path,
+    cli_args: Vec<OsString>,
+    backend_url: Option<&str>,
+) -> Result<std::process::ExitStatus> {
+    if let Some(backend_url) = backend_url {
+        return spawn_foreground_role(
+            current_executable,
+            "cli frontend",
+            "cli",
+            cli_args,
+            &[("ACP_SERVER_URL", backend_url)],
+        )
+        .await;
+    }
+
+    spawn_foreground_role(current_executable, "cli frontend", "cli", cli_args, &[]).await
+}
+
+fn is_bundled_mock_chat(cli_args: &[OsString], bundled_mock: bool) -> bool {
     bundled_mock && cli_args.first().and_then(|arg| arg.to_str()) == Some("chat")
 }
 
@@ -162,36 +226,6 @@ fn internal_role_request(args: &[OsString]) -> Result<Option<(OsString, Vec<OsSt
         .ok_or_else(|| MissingInternalRoleSnafu.build())?;
     let role_args = args.iter().skip(3).cloned().collect::<Vec<_>>();
     Ok(Some((role, role_args)))
-}
-
-async fn resolve_acp_server(
-    current_executable: &Path,
-    acp_server: Option<OsString>,
-) -> Result<(Option<Child>, OsString)> {
-    if let Some(acp_server) = acp_server {
-        return Ok((None, acp_server));
-    }
-
-    let SpawnedService {
-        child,
-        endpoint: mock_address,
-    } = spawn_background_role(
-        current_executable,
-        "acp mock",
-        "mock",
-        vec!["--port".into(), "0".into()],
-        &[],
-    )
-    .await?;
-    Ok((Some(child), OsString::from(mock_address)))
-}
-
-async fn shutdown_services(backend: &mut Child, mock: &mut Option<Child>) -> Result<()> {
-    terminate_child(backend, "web backend").await?;
-    if let Some(mock) = mock.as_mut() {
-        terminate_child(mock, "acp mock").await?;
-    }
-    Ok(())
 }
 
 #[tokio::main]
@@ -229,128 +263,6 @@ fn split_launcher_args(all_args: &[OsString]) -> Result<LauncherArgs> {
 
     Ok(launcher_args)
 }
-
-async fn spawn_background_role(
-    current_executable: &Path,
-    role_label: &'static str,
-    role_name: &'static str,
-    role_args: Vec<OsString>,
-    envs: &[(&str, &str)],
-) -> Result<SpawnedService> {
-    let mut command = role_command(current_executable, role_name, role_args, envs);
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::inherit());
-    command.kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .context(SpawnChildSnafu { role: role_label })?;
-    let endpoint = read_startup_url(&mut child, role_label).await?;
-    Ok(SpawnedService { child, endpoint })
-}
-
-async fn spawn_foreground_role(
-    current_executable: &Path,
-    role_label: &'static str,
-    role_name: &'static str,
-    role_args: Vec<OsString>,
-    envs: &[(&str, &str)],
-) -> Result<ExitStatus> {
-    let mut child = role_command(current_executable, role_name, role_args, envs)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context(SpawnChildSnafu { role: role_label })?;
-
-    child
-        .wait()
-        .await
-        .context(WaitForChildSnafu { role: role_label })
-}
-
-fn role_command(
-    current_executable: &Path,
-    role_name: &'static str,
-    role_args: Vec<OsString>,
-    envs: &[(&str, &str)],
-) -> Command {
-    let mut command = Command::new(current_executable);
-    command.arg("__internal-role").arg(role_name);
-
-    for arg in role_args {
-        command.arg(arg);
-    }
-
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-
-    command
-}
-
-async fn read_startup_url(child: &mut Child, role: &'static str) -> Result<String> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| MissingChildStdoutSnafu { role }.build())?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let bytes_read = tokio::time::timeout(STARTUP_LINE_TIMEOUT, reader.read_line(&mut line))
-        .await
-        .map_err(|_| LauncherError::WaitForStartupLine { role })?
-        .context(ReadStartupLineSnafu { role })?;
-
-    if bytes_read == 0 {
-        return InvalidStartupLineSnafu {
-            role,
-            line: "<empty>".to_string(),
-        }
-        .fail();
-    }
-
-    let prefix = "listening on ";
-    let line = line.trim();
-    let base_url = line
-        .split_once(prefix)
-        .map(|(_, value)| value.to_string())
-        .ok_or_else(|| {
-            InvalidStartupLineSnafu {
-                role,
-                line: line.to_string(),
-            }
-            .build()
-        })?;
-
-    Ok(base_url)
-}
-
-async fn terminate_child(child: &mut Child, role: &'static str) -> Result<()> {
-    if child
-        .try_wait()
-        .context(CheckChildStatusSnafu { role })?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    child.kill().await.context(TerminateChildSnafu { role })?;
-    let _ = child.wait().await.context(WaitForChildSnafu { role })?;
-    Ok(())
-}
-
-fn ensure_success(role: &'static str, status: ExitStatus) -> Result<()> {
-    if status.success() {
-        Ok(())
-    } else {
-        ChildExitSnafu {
-            role,
-            code: status.code(),
-        }
-        .fail()
-    }
-}
-
 async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<()> {
     match role.to_string_lossy().as_ref() {
         "cli" => {
@@ -388,5 +300,7 @@ async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
         })
 }
 
+#[cfg(test)]
+mod launcher_stack_tests;
 #[cfg(test)]
 mod tests;

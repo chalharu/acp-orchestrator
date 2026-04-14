@@ -33,6 +33,7 @@ pub(super) enum PromptCompletion {
 #[derive(Debug)]
 struct PendingPermission {
     prompt_order: u64,
+    summary: String,
     approve_option_id: String,
     deny_option_id: String,
     outcome_tx: Option<oneshot::Sender<PermissionResolutionOutcome>>,
@@ -94,11 +95,21 @@ impl SessionHandle {
 
     pub(super) async fn snapshot(&self) -> SessionSnapshot {
         let data = self.data.lock().await;
+        let mut pending_permissions = data
+            .pending_permissions
+            .iter()
+            .map(|(request_id, pending)| PermissionRequest {
+                request_id: request_id.clone(),
+                summary: pending.summary.clone(),
+            })
+            .collect::<Vec<_>>();
+        pending_permissions.sort_by(|left, right| left.request_id.cmp(&right.request_id));
         SessionSnapshot {
             id: data.id.clone(),
             status: data.status.clone(),
             latest_sequence: data.latest_sequence,
             messages: data.messages.clone(),
+            pending_permissions,
         }
     }
 
@@ -165,6 +176,7 @@ impl SessionHandle {
             request_id.clone(),
             PendingPermission {
                 prompt_order,
+                summary: summary.clone(),
                 approve_option_id,
                 deny_option_id,
                 outcome_tx: Some(outcome_tx),

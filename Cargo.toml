@@ -51,7 +51,10 @@ acp-app-support.workspace = true
 acp-cli = { path = "crates/acp-cli" }
 acp-mock = { path = "crates/acp-mock" }
 acp-web-backend = { path = "crates/acp-web-backend" }
+dirs.workspace = true
 reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tracing.workspace = true

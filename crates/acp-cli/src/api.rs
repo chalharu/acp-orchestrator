@@ -1,4 +1,5 @@
 use super::*;
+use acp_contracts::SessionHistoryResponse;
 
 pub(super) async fn create_session(
     client: &Client,
@@ -39,6 +40,26 @@ pub(super) async fn get_session(
         action: "load session",
     })?;
     Ok(payload.session)
+}
+
+pub(super) async fn get_session_history(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+) -> Result<SessionHistoryResponse> {
+    let response = client
+        .get(format!("{base_url}/api/v1/sessions/{session_id}/history"))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "load session history",
+        })?;
+    let response = ensure_success(response, "load session history").await?;
+    response.json().await.context(DecodeResponseSnafu {
+        action: "load session history",
+    })
 }
 
 pub(super) async fn submit_prompt(

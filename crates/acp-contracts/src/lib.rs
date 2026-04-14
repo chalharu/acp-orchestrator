@@ -29,6 +29,8 @@ pub struct SessionSnapshot {
     pub status: SessionStatus,
     pub latest_sequence: u64,
     pub messages: Vec<ConversationMessage>,
+    #[serde(default)]
+    pub pending_permissions: Vec<PermissionRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

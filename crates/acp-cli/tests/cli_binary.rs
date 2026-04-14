@@ -229,7 +229,10 @@ async fn assert_resume_and_list_commands(stack: &TestStack, session_id: &str) ->
 
     let resumed_output = resumed.wait_with_output().await?;
     assert!(resumed_output.status.success());
-    assert!(String::from_utf8(resumed_output.stdout)?.contains(session_id));
+    let resumed_stdout = String::from_utf8(resumed_output.stdout)?;
+    assert!(resumed_stdout.contains(session_id));
+    assert!(resumed_stdout.contains("[user] hello from cli binary"));
+    assert!(resumed_stdout.contains("[assistant] mock assistant:"));
 
     let list_output = run_command(["session", "list"], &stack.recent_path).await?;
     assert!(list_output.status.success());

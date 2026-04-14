@@ -59,6 +59,20 @@ async fn permission_requests_can_be_denied_without_recording_an_assistant_reply(
 }
 
 #[tokio::test]
+async fn session_snapshot_replays_pending_permissions_for_attach() -> Result<()> {
+    let mut flow = start_pending_permission_flow().await?;
+    let request = next_permission_request(&mut flow.events).await?;
+
+    let snapshot = flow
+        .stack
+        .session_snapshot("alice", &flow.session_id)
+        .await?;
+    assert_eq!(snapshot.session.pending_permissions, vec![request]);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancelling_a_pending_permission_turn_returns_a_status_event() -> Result<()> {
     let mut flow = start_pending_permission_flow().await?;
     let _ = next_permission_request(&mut flow.events).await?;

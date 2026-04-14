@@ -95,6 +95,11 @@ impl TurnHandle {
         self.handle.is_active().await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn is_started(&self) -> bool {
+        self.handle.is_turn_active(self.prompt_order).await
+    }
+
     pub(crate) async fn register_permission_request(
         &self,
         summary: String,

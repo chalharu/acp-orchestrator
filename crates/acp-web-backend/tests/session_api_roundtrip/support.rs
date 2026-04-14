@@ -164,6 +164,26 @@ impl TestStack {
         response.json().await.context("decoding history response")
     }
 
+    pub(super) async fn session_snapshot(
+        &self,
+        token: &str,
+        session_id: &str,
+    ) -> Result<CreateSessionResponse> {
+        let response = self
+            .client
+            .get(format!("{}/api/v1/sessions/{session_id}", self.backend_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("loading test session snapshot")?
+            .error_for_status()
+            .context("session snapshot request returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding session snapshot response")
+    }
+
     pub(super) async fn open_events(&self, token: &str, session_id: &str) -> Result<SseStream> {
         let response = self
             .client

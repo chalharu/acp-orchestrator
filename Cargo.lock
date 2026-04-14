@@ -64,11 +64,15 @@ dependencies = [
  "acp-contracts",
  "acp-mock",
  "acp-web-backend",
+ "dirs",
  "reqwest",
+ "serde",
+ "serde_json",
  "snafu",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

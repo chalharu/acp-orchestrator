@@ -12,6 +12,7 @@
 
   labels: ["dependencies", "renovate"],
   dependencyDashboard: true,
+  configMigration: true,
   prCreation: "immediate",
   rebaseWhen: "behind-base-branch",
   timezone: "Asia/Tokyo",

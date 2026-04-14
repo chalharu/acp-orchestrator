@@ -15,7 +15,8 @@
 
 - Overview: `README.md`
   - リポジトリの目的、スコープ、現在の作業軸、ローカル試行手順、bundled mock の
-    手動確認 prompt（`verify permission` / `verify cancel`）をつかむ
+    手動確認 prompt（`verify permission` / `verify cancel`）と、`session list` /
+    `chat --session` による session 復帰手順をつかむ
 - Explanation: `docs/explanation/acp-web-cli-architecture.md`
   - ACP Orchestrator の target architecture、責務分離、設計判断を理解する
 - Explanation: `docs/explanation/cli-feedback-first-mvp.md`

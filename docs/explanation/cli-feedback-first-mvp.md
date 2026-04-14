@@ -66,9 +66,9 @@ frontend に I/O を渡します。個別実行が必要な場合のみ `cargo r
 - 既存 session へ再 attach: `cargo run -- chat --session <id>`
 - recent session の確認: `cargo run -- session list`
 
-slice 3 以降の bundled feedback flow では、launcher が同じ bundled backend / mock を
-再利用できるようにし、`/quit` 後の `cargo run -- chat --session <id>` でも同じ
-session に戻れるようにします。
+slice 3 以降の bundled feedback flow では、launcher が bundled backend / mock を
+再利用します。`/quit` 後に `cargo run -- chat --session <id>` を実行しても、同じ
+session へ戻れます。
 
 bundled mock を使う手動確認では、launcher が次の prompt を表示上の標準トリガとして案内します。
 

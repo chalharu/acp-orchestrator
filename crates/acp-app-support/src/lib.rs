@@ -155,12 +155,9 @@ mod tests {
 
     #[cfg(feature = "test-helpers")]
     use reqwest::Client;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-        process::Command,
-        time::timeout,
-    };
+    #[cfg(feature = "test-helpers")]
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::{net::TcpListener, process::Command, time::timeout};
 
     #[test]
     fn init_tracing_can_be_called_more_than_once() {

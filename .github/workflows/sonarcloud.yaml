@@ -48,16 +48,11 @@ jobs:
           eval "$(cargo llvm-cov show-env --sh)"
           export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=mold -C debuginfo=0"
           cargo chef cook --workspace --all-targets --recipe-path recipe.json
-      - name: Run coverage-instrumented tests
+      - name: Generate coverage report
         run: |
           mkdir -p coverage
           export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=mold -C debuginfo=0"
-          cargo llvm-cov --workspace -j1 --no-report -- --test-threads=1
-      - name: Export LCOV coverage report
-        run: |
-          mkdir -p coverage
-          export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-fuse-ld=mold -C debuginfo=0"
-          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+          cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1
       - name: Run SonarCloud scan
         uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:

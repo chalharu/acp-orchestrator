@@ -425,7 +425,7 @@ async fn drain_permission_requests<N: PermissionRequester>(
     while let Some((request, ack_tx)) = permission_request_rx.recv().await {
         let result = requester.request_permission(request).await;
         if !finalize_permission_request(result, ack_tx) {
-            return;
+            break;
         }
     }
 }
@@ -496,6 +496,23 @@ mod tests {
     use super::*;
     use agent_client_protocol::Agent as _;
     use std::rc::Rc;
+
+    struct StubPermissionRequester {
+        call_count: Rc<Cell<usize>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl PermissionRequester for StubPermissionRequester {
+        async fn request_permission(
+            &self,
+            _request: acp::RequestPermissionRequest,
+        ) -> Result<acp::RequestPermissionResponse, acp::Error> {
+            self.call_count.set(self.call_count.get() + 1);
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Cancelled,
+            ))
+        }
+    }
 
     struct StubSessionUpdateNotifier {
         should_fail: bool,
@@ -594,6 +611,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn draining_permission_requests_returns_after_delivery_errors() {
+        let call_count = Rc::new(Cell::new(0));
+        let requester = StubPermissionRequester {
+            call_count: call_count.clone(),
+        };
+        let (permission_request_tx, permission_request_rx) = mpsc::unbounded_channel();
+        let (first_ack_tx, first_ack_rx) = oneshot::channel();
+        let (second_ack_tx, second_ack_rx) = oneshot::channel();
+        drop(first_ack_rx);
+        permission_request_tx
+            .send((
+                acp::RequestPermissionRequest::new(
+                    "mock_0",
+                    acp::ToolCallUpdate::new("tool_0", acp::ToolCallUpdateFields::new()),
+                    vec![],
+                ),
+                first_ack_tx,
+            ))
+            .expect("first permission request should queue");
+        permission_request_tx
+            .send((
+                acp::RequestPermissionRequest::new(
+                    "mock_0",
+                    acp::ToolCallUpdate::new("tool_1", acp::ToolCallUpdateFields::new()),
+                    vec![],
+                ),
+                second_ack_tx,
+            ))
+            .expect("second permission request should queue");
+        drop(permission_request_tx);
+
+        drain_permission_requests(&requester, permission_request_rx).await;
+
+        assert_eq!(call_count.get(), 1);
+        assert!(second_ack_rx.await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn mock_agent_permission_requests_include_expected_options() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -678,6 +733,15 @@ mod tests {
         assert!(reply.contains("...`"));
         assert!(reply.starts_with("mock assistant: I received `"));
         assert!(reply.contains("ACP round-trip succeeded"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_cancel_returns_true_when_the_generation_has_advanced() {
+        let session = MockSessionState::new();
+        let (mut cancel_rx, generation) = session.subscribe_cancel();
+        session.cancel();
+
+        assert!(wait_for_cancel(&mut cancel_rx, generation, Duration::from_secs(1)).await);
     }
 
     #[test]

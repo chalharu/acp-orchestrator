@@ -700,6 +700,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_repl_command_validates_cancel_and_permission_usage() {
+        let client = Client::builder().build().expect("client should build");
+
+        assert!(
+            !handle_repl_command(
+                "/cancel extra",
+                &client,
+                "http://127.0.0.1",
+                "developer",
+                "s"
+            )
+            .await
+            .expect("usage errors should not fail")
+        );
+        assert!(
+            !handle_repl_command("/approve", &client, "http://127.0.0.1", "developer", "s")
+                .await
+                .expect("usage errors should not fail")
+        );
+        assert!(
+            !handle_repl_command(
+                "/deny req_1 extra",
+                &client,
+                "http://127.0.0.1",
+                "developer",
+                "s",
+            )
+            .await
+            .expect("usage errors should not fail")
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_repl_command_reports_cancel_errors_without_failing() {
+        let url = spawn_raw_http_server(
+            "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"cancel failed\"}",
+        )
+        .await;
+        let client = Client::builder().build().expect("client should build");
+
+        let should_quit = handle_repl_command("/cancel", &client, &url, "developer", "s_test")
+            .await
+            .expect("cancel errors should stay in the REPL");
+
+        assert!(!should_quit);
+    }
+
+    #[tokio::test]
+    async fn handle_repl_command_reports_permission_errors_without_failing() {
+        let url = spawn_raw_http_server(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"permission request not found\"}",
+        )
+        .await;
+        let client = Client::builder().build().expect("client should build");
+
+        let should_quit =
+            handle_repl_command("/approve req_1", &client, &url, "developer", "s_test")
+                .await
+                .expect("permission errors should stay in the REPL");
+
+        assert!(!should_quit);
+    }
+
+    #[tokio::test]
     async fn stream_events_finishes_when_the_server_closes_the_stream() {
         let url = spawn_raw_http_server(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"sequence\":1,\"kind\":\"status\",\"message\":\"done\"}\n\n",

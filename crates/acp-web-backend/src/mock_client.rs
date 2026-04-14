@@ -194,6 +194,7 @@ async fn drive_acp_roundtrip(
             let mut cancel_rx = pending.start_turn().await.map_err(session_runtime_error)?;
             let prompt = pending.prompt_text().to_string();
             let prompt_request = acp::PromptRequest::new(session_id.clone(), vec![prompt.into()]);
+            let cancel_request = acp::CancelNotification::new(session_id.clone());
             let prompt_future = conn.prompt(prompt_request);
             tokio::pin!(prompt_future);
             let stop_reason = tokio::select! {
@@ -201,11 +202,7 @@ async fn drive_acp_roundtrip(
                     response.context(SendPromptSnafu)?.stop_reason
                 }
                 changed = cancel_rx.changed() => {
-                    if changed.is_ok() && *cancel_rx.borrow() {
-                        conn.cancel(acp::CancelNotification::new(session_id))
-                            .await
-                            .context(SendCancelSnafu)?;
-                    }
+                    if changed.is_ok() && *cancel_rx.borrow() { conn.cancel(cancel_request).await.context(SendCancelSnafu)?; }
                     prompt_future.await.context(SendPromptSnafu)?.stop_reason
                 }
             };
@@ -346,28 +343,32 @@ fn permission_option_ids(
     let approve_option_id = args
         .options
         .iter()
-        .find(|option| {
-            matches!(
-                option.kind,
-                acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-            )
-        })
+        .find(|option| is_approve_option(option.kind))
         .map(|option| option.option_id.to_string());
     let deny_option_id = args
         .options
         .iter()
-        .find(|option| {
-            matches!(
-                option.kind,
-                acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways
-            )
-        })
+        .find(|option| is_deny_option(option.kind))
         .map(|option| option.option_id.to_string());
 
     match (approve_option_id, deny_option_id) {
         (Some(approve_option_id), Some(deny_option_id)) => Ok((approve_option_id, deny_option_id)),
         _ => InvalidPermissionOptionsSnafu.fail(),
     }
+}
+
+fn is_approve_option(kind: acp::PermissionOptionKind) -> bool {
+    matches!(
+        kind,
+        acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
+    )
+}
+
+fn is_deny_option(kind: acp::PermissionOptionKind) -> bool {
+    matches!(
+        kind,
+        acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways
+    )
 }
 
 fn to_acp_error(source: crate::sessions::SessionStoreError) -> acp::Error {
@@ -487,6 +488,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_reply_returns_cancelled_status_when_turns_are_cancelled() {
+        let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(200)).await;
+        let client = MockClient::new(mock_address).expect("client construction should succeed");
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        let request_task = {
+            let client = client.clone();
+            tokio::spawn(async move { client.request_reply(pending).await })
+        };
+
+        let mut cancelled = false;
+        for _ in 0..20 {
+            if store
+                .cancel_active_turn("alice", &session.id)
+                .await
+                .expect("cancelling should succeed")
+            {
+                cancelled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(cancelled, "the active turn should have started");
+
+        let reply = request_task
+            .await
+            .expect("request task should join")
+            .expect("cancelled turns should resolve cleanly");
+        assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn request_reply_reports_session_runtime_failures_after_sessions_close() {
         let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
         let client = MockClient::new(mock_address).expect("client construction should succeed");
@@ -515,6 +558,146 @@ mod tests {
         ));
 
         let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_acp_client_rejects_invalid_permission_requests() {
+        let client = BackendAcpClient::new(test_pending_prompt("alice", "permission please").await);
+        let error = client
+            .request_permission(acp::RequestPermissionRequest::new(
+                "mock_0",
+                acp::ToolCallUpdate::new(
+                    "tool_0",
+                    acp::ToolCallUpdateFields::new().title("permission prompt"),
+                ),
+                vec![acp::PermissionOption::new(
+                    "allow_once",
+                    "Allow once",
+                    acp::PermissionOptionKind::AllowOnce,
+                )],
+            ))
+            .await
+            .expect_err("missing deny options should be rejected");
+
+        assert_eq!(error.message, acp::Error::invalid_params().message);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_acp_client_uses_the_tool_call_id_when_titles_are_missing() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let store = SessionStore::new(4);
+                let session = store
+                    .create_session("alice")
+                    .await
+                    .expect("session creation should succeed");
+                let (_snapshot, mut receiver) = store
+                    .session_events("alice", &session.id)
+                    .await
+                    .expect("subscribing should succeed");
+                let pending = store
+                    .submit_prompt("alice", &session.id, "permission please".to_string())
+                    .await
+                    .expect("prompt submission should succeed");
+                let _ = receiver.recv().await.expect("user event should arrive");
+                let _cancel_rx = pending
+                    .start_turn()
+                    .await
+                    .expect("starting the turn should succeed");
+                let client = BackendAcpClient::new(pending);
+                let requester = tokio::task::spawn_local(async move {
+                    client
+                        .request_permission(acp::RequestPermissionRequest::new(
+                            "mock_0",
+                            acp::ToolCallUpdate::new("tool_0", acp::ToolCallUpdateFields::new()),
+                            vec![
+                                acp::PermissionOption::new(
+                                    "allow_always",
+                                    "Allow always",
+                                    acp::PermissionOptionKind::AllowAlways,
+                                ),
+                                acp::PermissionOption::new(
+                                    "reject_always",
+                                    "Reject always",
+                                    acp::PermissionOptionKind::RejectAlways,
+                                ),
+                            ],
+                        ))
+                        .await
+                        .expect("permission requests should resolve")
+                });
+
+                let permission_event = receiver
+                    .recv()
+                    .await
+                    .expect("permission event should arrive");
+                assert!(matches!(
+                    permission_event.payload,
+                    acp_contracts::StreamEventPayload::PermissionRequested { request }
+                        if request.request_id == "req_1" && request.summary == "tool tool_0"
+                ));
+                let resolved = store
+                    .resolve_permission(
+                        "alice",
+                        &session.id,
+                        "req_1",
+                        acp_contracts::PermissionDecision::Deny,
+                    )
+                    .await
+                    .expect("permission resolution should succeed");
+                assert_eq!(resolved.request_id, "req_1");
+
+                let response = requester.await.expect("permission waiter should complete");
+                assert!(matches!(
+                    response.outcome,
+                    acp::RequestPermissionOutcome::Selected(selected)
+                        if selected.option_id.to_string() == "reject_always"
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_acp_client_maps_store_errors_to_internal_errors() {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "permission please".to_string())
+            .await
+            .expect("prompt submission should succeed");
+        store
+            .close_session("alice", &session.id)
+            .await
+            .expect("closing the session should succeed");
+        let client = BackendAcpClient::new(pending);
+
+        let error = client
+            .request_permission(acp::RequestPermissionRequest::new(
+                "mock_0",
+                acp::ToolCallUpdate::new(
+                    "tool_0",
+                    acp::ToolCallUpdateFields::new().title("permission prompt"),
+                ),
+                vec![
+                    acp::PermissionOption::new(
+                        "allow_once",
+                        "Allow once",
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "reject_once",
+                        "Reject once",
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            ))
+            .await
+            .expect_err("closed sessions should map to ACP internal errors");
+
+        assert_eq!(error.message, acp::Error::internal_error().message);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -616,6 +799,16 @@ mod tests {
             permission_option_ids(&request),
             Err(MockClientError::InvalidPermissionOptions)
         ));
+    }
+
+    #[test]
+    fn permission_option_kind_helpers_match_expected_variants() {
+        assert!(is_approve_option(acp::PermissionOptionKind::AllowOnce));
+        assert!(is_approve_option(acp::PermissionOptionKind::AllowAlways));
+        assert!(!is_approve_option(acp::PermissionOptionKind::RejectOnce));
+        assert!(is_deny_option(acp::PermissionOptionKind::RejectOnce));
+        assert!(is_deny_option(acp::PermissionOptionKind::RejectAlways));
+        assert!(!is_deny_option(acp::PermissionOptionKind::AllowOnce));
     }
 
     #[test]

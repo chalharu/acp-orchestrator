@@ -1,18 +1,20 @@
 use std::{process::Stdio, time::Duration};
 
-use acp_app_support::{read_startup_url, wait_for_health, wait_for_tcp_connect};
+use acp_app_support::{read_startup_url, wait_for_tcp_connect};
 use acp_contracts::HealthResponse;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use reqwest::Client;
 use tokio::{net::TcpListener, process::Command, sync::oneshot, time::timeout};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+const BROKEN_PROXY_URL: &str = "http://127.0.0.1:9";
 
 #[tokio::test]
-async fn backend_binary_serves_health_checks() -> Result<()> {
+async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()> {
     let client = Client::builder().build()?;
     let (mock_address, mock_shutdown) = spawn_mock_server().await?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_acp-web-backend"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_acp-web-backend"));
+    command
         .arg("--port")
         .arg("0")
         .arg("--mock-address")
@@ -21,12 +23,10 @@ async fn backend_binary_serves_health_checks() -> Result<()> {
         .arg("500")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::inherit());
+    configure_broken_proxy_env(&mut command);
+    let mut child = command.spawn()?;
     let base_url = read_startup_url(&mut child, "web backend listening on ").await?;
-
-    wait_for_health(&client, &base_url, 100, Duration::from_millis(20)).await?;
-
     let health: HealthResponse = client
         .get(format!("{base_url}/healthz"))
         .send()
@@ -40,6 +40,18 @@ async fn backend_binary_serves_health_checks() -> Result<()> {
     assert!(status.success());
     let _ = mock_shutdown.send(());
     Ok(())
+}
+
+fn configure_broken_proxy_env(command: &mut Command) {
+    command
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env("HTTP_PROXY", BROKEN_PROXY_URL)
+        .env("HTTPS_PROXY", BROKEN_PROXY_URL)
+        .env("ALL_PROXY", BROKEN_PROXY_URL)
+        .env("http_proxy", BROKEN_PROXY_URL)
+        .env("https_proxy", BROKEN_PROXY_URL)
+        .env("all_proxy", BROKEN_PROXY_URL);
 }
 
 async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {

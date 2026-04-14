@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use acp_app_support::init_tracing;
+use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
     CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole, PromptRequest,
     PromptResponse, SessionSnapshot, StreamEvent, StreamEventPayload,
@@ -172,8 +172,8 @@ where
 async fn run_chat(args: ChatArgs) -> Result<()> {
     ensure!(args.new || args.session_id.is_some(), ChatModeRequiredSnafu);
 
-    let client = Client::builder().build().context(BuildHttpClientSnafu)?;
     let server_url = require_server_url("chat", args.server_url.clone())?;
+    let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
 
     let session = if args.new {
         create_session(&client, &server_url, &args.auth_token).await?
@@ -252,7 +252,8 @@ async fn run_session(args: SessionArgs) -> Result<()> {
         }
         SessionCommand::Close(args) => {
             let server_url = require_server_url("closing a session", args.server_url)?;
-            let client = Client::builder().build().context(BuildHttpClientSnafu)?;
+            let client =
+                build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
             close_session(&client, &server_url, &args.auth_token, &args.session_id).await?;
             remove_recent_session(&args.session_id)?;
             println!("[status] session {} closed", args.session_id);

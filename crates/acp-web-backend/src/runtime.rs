@@ -2,11 +2,10 @@ use std::ffi::OsString;
 
 use acp_app_support::{
     BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
-    listener_endpoint, print_startup_line, run_service_with_readiness, shutdown_signal,
-    wait_for_health,
+    build_http_client_for_url, listener_endpoint, print_startup_line, run_service_with_readiness,
+    shutdown_signal, wait_for_health,
 };
 use clap::Parser;
-use reqwest::Client;
 use snafu::prelude::*;
 
 use crate::{AppState, MockClientError, ServerConfig, serve_with_shutdown};
@@ -70,9 +69,7 @@ async fn run(cli: Cli) -> Result<()> {
         mock_address: cli.mock_address,
     })
     .context(BuildStateSnafu)?;
-    let client = Client::builder()
-        .timeout(READY_CHECK_TIMEOUT)
-        .build()
+    let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
         .context(BuildHttpClientSnafu)?;
     let ready = wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
     let serve = serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms));

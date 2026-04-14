@@ -2,6 +2,7 @@ use std::{
     error::Error as StdError,
     future::{Future, pending},
     io,
+    net::IpAddr,
     path::PathBuf,
     pin::Pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -91,6 +92,35 @@ pub fn listener_endpoint(
 
 pub fn print_startup_line(startup_label: &'static str, endpoint: &str) {
     println!("{startup_label} listening on {endpoint}");
+}
+
+pub fn build_http_client_for_url(
+    base_url: &str,
+    timeout: Option<Duration>,
+) -> Result<Client, reqwest::Error> {
+    let mut builder = Client::builder();
+    if should_bypass_proxy_for_url(base_url) {
+        builder = builder.no_proxy();
+    }
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder.build()
+}
+
+fn should_bypass_proxy_for_url(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_matches(|character| character == '[' || character == ']');
+
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 pub async fn run_service_with_readiness<E, Ready, Serve, OnReady>(
@@ -320,6 +350,32 @@ mod tests {
             .expect("endpoint should format");
 
         assert!(endpoint.starts_with("http://127.0.0.1:"));
+    }
+
+    #[test]
+    fn build_http_client_for_loopback_urls_succeeds() {
+        build_http_client_for_url("http://127.0.0.1:8080", Some(Duration::from_secs(1)))
+            .expect("loopback clients should build");
+    }
+
+    #[test]
+    fn build_http_client_for_remote_urls_succeeds() {
+        build_http_client_for_url("https://example.com", None)
+            .expect("remote clients should build");
+    }
+
+    #[test]
+    fn proxy_bypass_is_enabled_for_loopback_urls() {
+        assert!(should_bypass_proxy_for_url("http://127.0.0.1:8080"));
+        assert!(should_bypass_proxy_for_url("http://localhost:8080"));
+        assert!(should_bypass_proxy_for_url("http://[::1]:8080"));
+    }
+
+    #[test]
+    fn proxy_bypass_is_disabled_for_remote_and_invalid_urls() {
+        assert!(!should_bypass_proxy_for_url("https://example.com"));
+        assert!(!should_bypass_proxy_for_url("mailto:test@example.com"));
+        assert!(!should_bypass_proxy_for_url("not-a-url"));
     }
 
     #[tokio::test]

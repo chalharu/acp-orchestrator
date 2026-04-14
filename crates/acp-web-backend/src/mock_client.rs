@@ -294,9 +294,12 @@ fn content_text(content: acp::ContentBlock) -> String {
         acp::ContentBlock::Image(_) => "<image>".to_string(),
         acp::ContentBlock::Audio(_) => "<audio>".to_string(),
         acp::ContentBlock::ResourceLink(link) => link.uri,
-        acp::ContentBlock::Resource(_) => "<resource>".to_string(),
-        _ => "<unsupported>".to_string(),
+        content => resource_placeholder(matches!(content, acp::ContentBlock::Resource(_))),
     }
+}
+
+fn resource_placeholder(is_resource: bool) -> String {
+    ["<unsupported>", "<resource>"][usize::from(is_resource)].to_string()
 }
 
 #[cfg(test)]
@@ -304,6 +307,7 @@ mod tests {
     use super::*;
     use acp_app_support::wait_for_tcp_connect;
     use acp_mock::{MockConfig, spawn_with_shutdown_task};
+    use agent_client_protocol::Client as _;
     use tokio::{net::TcpListener, sync::oneshot};
 
     #[tokio::test]
@@ -378,6 +382,97 @@ mod tests {
             .expect_err("unreachable mock transports should fail");
 
         assert!(matches!(error, MockClientError::Connect { .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_acp_client_waits_until_the_first_chunk_arrives() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client = BackendAcpClient::new();
+                let waiter = tokio::task::spawn_local({
+                    let client = client.clone();
+                    async move {
+                        client.wait_for_first_chunk().await;
+                    }
+                });
+
+                tokio::task::yield_now().await;
+                client
+                    .session_notification(acp::SessionNotification::new(
+                        "mock_0",
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            "first chunk".into(),
+                        )),
+                    ))
+                    .await
+                    .expect("session updates should succeed");
+
+                waiter
+                    .await
+                    .expect("waiting for the first chunk should complete");
+                assert_eq!(client.reply_text(), "first chunk");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn backend_acp_client_rejects_permission_requests() {
+        let client = BackendAcpClient::new();
+
+        assert!(
+            client
+                .request_permission(acp::RequestPermissionRequest::new(
+                    "mock_0",
+                    acp::ToolCallUpdate::new(
+                        "tool_0",
+                        acp::ToolCallUpdateFields::new().title("permission prompt"),
+                    ),
+                    vec![acp::PermissionOption::new(
+                        "allow_once",
+                        "Allow once",
+                        acp::PermissionOptionKind::AllowOnce,
+                    )],
+                ))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn content_text_formats_embedded_resources() {
+        let resource = acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+            acp::EmbeddedResourceResource::TextResourceContents(acp::TextResourceContents::new(
+                "hello",
+                "file:///embedded.md",
+            )),
+        ));
+
+        assert_eq!(content_text(resource), "<resource>");
+    }
+
+    #[test]
+    fn content_text_formats_non_text_prompt_blocks() {
+        assert_eq!(
+            content_text(acp::ContentBlock::Image(acp::ImageContent::new(
+                "aGVsbG8=",
+                "image/png",
+            ))),
+            "<image>"
+        );
+        assert_eq!(
+            content_text(acp::ContentBlock::Audio(acp::AudioContent::new(
+                "aGVsbG8=",
+                "audio/wav",
+            ))),
+            "<audio>"
+        );
+        assert_eq!(
+            content_text(acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                "guide",
+                "file:///guide.md",
+            ))),
+            "file:///guide.md"
+        );
     }
 
     async fn spawn_mock_server(delay: Duration) -> (String, oneshot::Sender<()>) {

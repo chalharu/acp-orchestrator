@@ -278,14 +278,18 @@ mod tests {
             .local_addr()
             .expect("listener should expose its address");
         let handle = tokio::spawn(async move {
-            let _ = listener.accept().await;
+            listener
+                .accept()
+                .await
+                .expect("probe connection should reach the listener");
         });
 
         wait_for_tcp_connect(&address.to_string(), 10, Duration::from_millis(5))
             .await
             .expect("TCP wait should succeed");
-        handle.abort();
-        let _ = handle.await;
+        handle
+            .await
+            .expect("listener task should complete after the probe connection");
     }
 
     #[tokio::test]

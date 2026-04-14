@@ -49,6 +49,14 @@ impl MockServerState {
 
 type QueuedSessionNotification = (acp::SessionNotification, oneshot::Sender<()>);
 
+#[async_trait::async_trait(?Send)]
+trait SessionUpdateNotifier {
+    async fn send_session_update(
+        &self,
+        notification: acp::SessionNotification,
+    ) -> Result<(), acp::Error>;
+}
+
 struct MockAgent {
     state: Rc<MockServerState>,
     session_update_tx: mpsc::UnboundedSender<QueuedSessionNotification>,
@@ -137,6 +145,16 @@ impl acp::Agent for MockAgent {
     }
 }
 
+#[async_trait::async_trait(?Send)]
+impl SessionUpdateNotifier for acp::AgentSideConnection {
+    async fn send_session_update(
+        &self,
+        notification: acp::SessionNotification,
+    ) -> Result<(), acp::Error> {
+        self.session_notification(notification).await
+    }
+}
+
 pub async fn serve_with_shutdown<F>(
     listener: TcpListener,
     config: MockConfig,
@@ -161,9 +179,7 @@ where
                         let (stream, _) = accepted?;
                         let state = state.clone();
                         tokio::task::spawn_local(async move {
-                            if let Err(error) = handle_connection(stream, state).await {
-                                error!("mock ACP connection failed: {error}");
-                            }
+                            log_connection_result(handle_connection(stream, state).await);
                         });
                     }
                 }
@@ -204,17 +220,38 @@ async fn handle_connection(
     );
 
     tokio::task::spawn_local(async move {
-        while let Some((notification, ack_tx)) = session_update_rx.recv().await {
-            let result = conn.session_notification(notification).await;
-            if let Err(error) = result {
-                error!("sending mock ACP session update failed: {error}");
-                break;
-            }
-            let _ = ack_tx.send(());
-        }
+        drain_session_updates(&conn, session_update_rx).await;
     });
 
     handle_io.await
+}
+
+fn log_connection_result(result: Result<(), acp::Error>) {
+    if let Err(error) = result {
+        error!("mock ACP connection failed: {error}");
+    }
+}
+
+fn finalize_session_update(result: Result<(), acp::Error>, ack_tx: oneshot::Sender<()>) -> bool {
+    if let Err(error) = result {
+        error!("sending mock ACP session update failed: {error}");
+        return false;
+    }
+
+    let _ = ack_tx.send(());
+    true
+}
+
+async fn drain_session_updates<N: SessionUpdateNotifier>(
+    notifier: &N,
+    mut session_update_rx: mpsc::UnboundedReceiver<QueuedSessionNotification>,
+) {
+    while let Some((notification, ack_tx)) = session_update_rx.recv().await {
+        let result = notifier.send_session_update(notification).await;
+        if !finalize_session_update(result, ack_tx) {
+            return;
+        }
+    }
 }
 
 fn prompt_text(prompt: &[acp::ContentBlock]) -> String {
@@ -231,9 +268,12 @@ fn content_text(content: &acp::ContentBlock) -> String {
         acp::ContentBlock::Image(_) => "<image>".to_string(),
         acp::ContentBlock::Audio(_) => "<audio>".to_string(),
         acp::ContentBlock::ResourceLink(link) => link.uri.clone(),
-        acp::ContentBlock::Resource(_) => "<resource>".to_string(),
-        _ => "<unsupported>".to_string(),
+        content => resource_placeholder(matches!(content, acp::ContentBlock::Resource(_))),
     }
+}
+
+fn resource_placeholder(is_resource: bool) -> String {
+    ["<unsupported>", "<resource>"][usize::from(is_resource)].to_string()
 }
 
 pub fn reply_for(prompt: &str) -> String {
@@ -260,6 +300,27 @@ fn truncate(value: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use agent_client_protocol::Agent as _;
+    use std::rc::Rc;
+
+    struct StubSessionUpdateNotifier {
+        should_fail: bool,
+        call_count: Rc<Cell<usize>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SessionUpdateNotifier for StubSessionUpdateNotifier {
+        async fn send_session_update(
+            &self,
+            _notification: acp::SessionNotification,
+        ) -> Result<(), acp::Error> {
+            self.call_count.set(self.call_count.get() + 1);
+            if self.should_fail {
+                Err(acp::Error::internal_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mock_agent_supports_control_plane_requests() {
@@ -317,9 +378,17 @@ mod tests {
             acp::ContentBlock::Image(acp::ImageContent::new("aGVsbG8=", "image/png")),
             acp::ContentBlock::Audio(acp::AudioContent::new("aGVsbG8=", "audio/wav")),
             acp::ContentBlock::ResourceLink(acp::ResourceLink::new("guide", "file:///guide.md")),
+            acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                acp::EmbeddedResourceResource::TextResourceContents(
+                    acp::TextResourceContents::new("hello", "file:///embedded.md"),
+                ),
+            )),
         ];
 
-        assert_eq!(prompt_text(&prompt), "<image> <audio> file:///guide.md");
+        assert_eq!(
+            prompt_text(&prompt),
+            "<image> <audio> file:///guide.md <resource>"
+        );
     }
 
     #[test]
@@ -330,5 +399,55 @@ mod tests {
         assert!(reply.contains("...`"));
         assert!(reply.starts_with("mock assistant: I received `"));
         assert!(reply.contains("ACP round-trip succeeded"));
+    }
+
+    #[test]
+    fn logging_connection_errors_does_not_panic() {
+        log_connection_result(Err(acp::Error::internal_error()));
+    }
+
+    #[test]
+    fn finalizing_session_updates_stops_after_errors() {
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        assert!(!finalize_session_update(
+            Err(acp::Error::internal_error()),
+            ack_tx
+        ));
+        assert!(ack_rx.blocking_recv().is_err());
+    }
+
+    #[test]
+    fn finalizing_session_updates_acknowledges_successful_notifications() {
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        assert!(finalize_session_update(Ok(()), ack_tx));
+        assert!(ack_rx.blocking_recv().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn draining_session_updates_returns_after_notification_errors() {
+        let call_count = Rc::new(Cell::new(0));
+        let notifier = StubSessionUpdateNotifier {
+            should_fail: true,
+            call_count: call_count.clone(),
+        };
+        let (session_update_tx, session_update_rx) = mpsc::unbounded_channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        session_update_tx
+            .send((
+                acp::SessionNotification::new(
+                    "mock_0",
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("hello".into())),
+                ),
+                ack_tx,
+            ))
+            .expect("session update should queue");
+        drop(session_update_tx);
+
+        drain_session_updates(&notifier, session_update_rx).await;
+
+        assert_eq!(call_count.get(), 1);
+        assert!(ack_rx.await.is_err());
     }
 }

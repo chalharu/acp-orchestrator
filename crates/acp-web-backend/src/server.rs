@@ -20,6 +20,8 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 
+#[cfg(test)]
+use crate::sessions::TurnHandle;
 use crate::{
     auth::{AuthError, extract_principal},
     mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
@@ -29,14 +31,14 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub session_cap: usize,
-    pub mock_address: String,
+    pub acp_server: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             session_cap: 8,
-            mock_address: "127.0.0.1:8090".to_string(),
+            acp_server: "127.0.0.1:8090".to_string(),
         }
     }
 }
@@ -51,7 +53,7 @@ impl AppState {
     pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
         Ok(Self::with_dependencies(
             Arc::new(SessionStore::new(config.session_cap)),
-            Arc::new(MockClient::new(config.mock_address)?),
+            Arc::new(MockClient::new(config.acp_server)?),
         ))
     }
 
@@ -177,6 +179,7 @@ async fn close_session(
         .store
         .close_session(&principal.id, &session_id)
         .await?;
+    state.reply_provider.forget_session(&session_id);
 
     Ok(Json(CloseSessionResponse { session }))
 }
@@ -236,13 +239,13 @@ async fn stream_session_events(
 
 fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: PendingPrompt) {
     tokio::spawn(async move {
-        match reply_provider.request_reply(pending.clone()).await {
+        match reply_provider.request_reply(pending.turn_handle()).await {
             Ok(ReplyResult::Reply(reply)) => pending.complete_with_reply(reply).await,
             Ok(ReplyResult::Status(message)) => pending.complete_with_status(message).await,
             Ok(ReplyResult::NoOutput) => pending.complete_without_output().await,
             Err(error) => {
                 pending
-                    .complete_with_status(format!("mock request failed: {error}"))
+                    .complete_with_status(format!("ACP request failed: {error}"))
                     .await;
             }
         }
@@ -338,13 +341,14 @@ impl From<SessionStoreError> for AppError {
 mod tests {
     use super::*;
     use crate::mock_client::{ReplyFuture, ReplyResult};
+    use std::sync::{Arc as StdArc, Mutex};
 
     #[test]
-    fn default_server_config_points_to_the_local_mock() {
+    fn default_server_config_points_to_the_local_acp_server() {
         let config = ServerConfig::default();
 
         assert_eq!(config.session_cap, 8);
-        assert_eq!(config.mock_address, "127.0.0.1:8090");
+        assert_eq!(config.acp_server, "127.0.0.1:8090");
     }
 
     #[test]
@@ -499,15 +503,67 @@ mod tests {
         assert_eq!(history[1].text, "injected reply");
     }
 
+    #[tokio::test]
+    async fn closing_sessions_notifies_reply_provider_cleanup() {
+        let store = Arc::new(SessionStore::new(4));
+        let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+        let state = AppState::with_dependencies(
+            store.clone(),
+            Arc::new(TrackingReplyProvider {
+                forgotten_sessions: forgotten_sessions.clone(),
+            }),
+        );
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer alice".parse().expect("authorization should parse"),
+        );
+
+        let response = close_session(State(state), Path(session.id.clone()), headers)
+            .await
+            .expect("closing the session should succeed");
+
+        assert_eq!(response.0.session.id, session.id);
+        assert_eq!(
+            forgotten_sessions
+                .lock()
+                .expect("cleanup tracking should not poison")
+                .as_slice(),
+            [session.id]
+        );
+    }
+
     #[derive(Debug)]
     struct StaticReplyProvider {
         reply: String,
     }
 
     impl ReplyProvider for StaticReplyProvider {
-        fn request_reply<'a>(&'a self, _pending: PendingPrompt) -> ReplyFuture<'a> {
+        fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
             let reply = self.reply.clone();
             Box::pin(async move { Ok(ReplyResult::Reply(reply)) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct TrackingReplyProvider {
+        forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+    }
+
+    impl ReplyProvider for TrackingReplyProvider {
+        fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+            Box::pin(async { Ok(ReplyResult::NoOutput) })
+        }
+
+        fn forget_session(&self, session_id: &str) {
+            self.forgotten_sessions
+                .lock()
+                .expect("cleanup tracking should not poison")
+                .push(session_id.to_string());
         }
     }
 }

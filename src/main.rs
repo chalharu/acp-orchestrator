@@ -69,6 +69,9 @@ enum LauncherError {
     #[snafu(display("missing the internal role name"))]
     MissingInternalRole,
 
+    #[snafu(display("missing the ACP server address after `--acp-server`"))]
+    MissingAcpServer,
+
     #[snafu(display("unknown internal role `{role}`"))]
     UnknownInternalRole { role: String },
 
@@ -87,6 +90,12 @@ struct SpawnedService {
     endpoint: String,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LauncherArgs {
+    acp_server: Option<OsString>,
+    cli_args: Vec<OsString>,
+}
+
 async fn run_with_args(args: Vec<OsString>) -> Result<()> {
     init_tracing();
 
@@ -100,19 +109,26 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
     }
 
     let current_executable = env::current_exe().context(CurrentExecutableSnafu)?;
-    let cli_args = forwarded_cli_args(&args);
-
-    let SpawnedService {
-        child: mut mock,
-        endpoint: mock_address,
-    } = spawn_background_role(
-        &current_executable,
-        "acp mock",
-        "mock",
-        vec!["--port".into(), "0".into()],
-        &[],
-    )
-    .await?;
+    let launcher_args = split_launcher_args(&args)?;
+    let cli_args = launcher_args.cli_args;
+    let mut mock = None;
+    let acp_server = if let Some(acp_server) = launcher_args.acp_server {
+        acp_server
+    } else {
+        let SpawnedService {
+            child,
+            endpoint: mock_address,
+        } = spawn_background_role(
+            &current_executable,
+            "acp mock",
+            "mock",
+            vec!["--port".into(), "0".into()],
+            &[],
+        )
+        .await?;
+        mock = Some(child);
+        OsString::from(mock_address)
+    };
 
     let SpawnedService {
         child: mut backend,
@@ -124,8 +140,8 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
         vec![
             "--port".into(),
             "0".into(),
-            "--mock-address".into(),
-            mock_address.clone().into(),
+            "--acp-server".into(),
+            acp_server,
         ],
         &[],
     )
@@ -141,7 +157,9 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
     .await?;
 
     terminate_child(&mut backend, "web backend").await?;
-    terminate_child(&mut mock, "acp mock").await?;
+    if let Some(mut mock) = mock {
+        terminate_child(&mut mock, "acp mock").await?;
+    }
 
     ensure_success("cli frontend", cli_status)
 }
@@ -151,13 +169,35 @@ async fn main() -> Result<()> {
     run_with_args(env::args_os().collect()).await
 }
 
-fn forwarded_cli_args(all_args: &[OsString]) -> Vec<OsString> {
-    let args = all_args.iter().skip(1).cloned().collect::<Vec<_>>();
-    if args.is_empty() {
-        vec!["chat".into(), "--new".into()]
-    } else {
-        args
+fn split_launcher_args(all_args: &[OsString]) -> Result<LauncherArgs> {
+    let mut launcher_args = LauncherArgs::default();
+    let mut args = all_args.iter().skip(1).cloned();
+
+    while let Some(arg) = args.next() {
+        if arg.as_os_str() == "--acp-server" {
+            let value = args.next().ok_or_else(|| MissingAcpServerSnafu.build())?;
+            if value.is_empty() {
+                return MissingAcpServerSnafu.fail();
+            }
+            launcher_args.acp_server = Some(value);
+        } else if let Some(value) = arg
+            .to_str()
+            .and_then(|value| value.strip_prefix("--acp-server="))
+        {
+            if value.is_empty() {
+                return MissingAcpServerSnafu.fail();
+            }
+            launcher_args.acp_server = Some(OsString::from(value));
+        } else {
+            launcher_args.cli_args.push(arg);
+        }
     }
+
+    if launcher_args.cli_args.is_empty() {
+        launcher_args.cli_args = vec!["chat".into(), "--new".into()];
+    }
+
+    Ok(launcher_args)
 }
 
 async fn spawn_background_role(
@@ -323,17 +363,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forwarded_cli_args_defaults_to_chat_new() {
+    fn split_launcher_args_defaults_to_chat_new() {
         let args = vec![OsString::from("acp")];
 
         assert_eq!(
-            forwarded_cli_args(&args),
-            vec![OsString::from("chat"), OsString::from("--new")]
+            split_launcher_args(&args).expect("default launcher args should parse"),
+            LauncherArgs {
+                acp_server: None,
+                cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            }
         );
     }
 
     #[test]
-    fn forwarded_cli_args_preserves_explicit_arguments() {
+    fn split_launcher_args_preserves_explicit_arguments() {
         let args = vec![
             OsString::from("acp"),
             OsString::from("session"),
@@ -341,8 +384,81 @@ mod tests {
         ];
 
         assert_eq!(
-            forwarded_cli_args(&args),
-            vec![OsString::from("session"), OsString::from("list")]
+            split_launcher_args(&args).expect("explicit launcher args should parse"),
+            LauncherArgs {
+                acp_server: None,
+                cli_args: vec![OsString::from("session"), OsString::from("list")],
+            }
+        );
+    }
+
+    #[test]
+    fn split_launcher_args_extracts_the_acp_server_override() {
+        let args = vec![
+            OsString::from("acp"),
+            OsString::from("--acp-server"),
+            OsString::from("127.0.0.1:8090"),
+        ];
+
+        assert_eq!(
+            split_launcher_args(&args).expect("ACP server overrides should parse"),
+            LauncherArgs {
+                acp_server: Some(OsString::from("127.0.0.1:8090")),
+                cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            }
+        );
+    }
+
+    #[test]
+    fn split_launcher_args_requires_an_acp_server_value() {
+        let args = vec![OsString::from("acp"), OsString::from("--acp-server")];
+
+        let error = split_launcher_args(&args).expect_err("missing ACP server values should fail");
+
+        assert!(matches!(error, LauncherError::MissingAcpServer));
+    }
+
+    #[test]
+    fn split_launcher_args_extracts_the_equals_form_acp_server_override() {
+        let args = vec![
+            OsString::from("acp"),
+            OsString::from("--acp-server=127.0.0.1:8090"),
+        ];
+
+        assert_eq!(
+            split_launcher_args(&args).expect("ACP server overrides should parse"),
+            LauncherArgs {
+                acp_server: Some(OsString::from("127.0.0.1:8090")),
+                cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            }
+        );
+    }
+
+    #[test]
+    fn split_launcher_args_rejects_an_empty_equals_form_acp_server_override() {
+        let args = vec![OsString::from("acp"), OsString::from("--acp-server=")];
+
+        let error = split_launcher_args(&args).expect_err("empty ACP server values should fail");
+
+        assert!(matches!(error, LauncherError::MissingAcpServer));
+    }
+
+    #[test]
+    fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
+        let args = vec![
+            OsString::from("acp"),
+            OsString::from("--acp-server"),
+            OsString::from("127.0.0.1:8090"),
+            OsString::from("chat"),
+            OsString::from("--new"),
+        ];
+
+        assert_eq!(
+            split_launcher_args(&args).expect("launcher args should parse"),
+            LauncherArgs {
+                acp_server: Some(OsString::from("127.0.0.1:8090")),
+                cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            }
         );
     }
 
@@ -506,7 +622,7 @@ mod tests {
 
         let error = run_backend_role(Vec::new())
             .await
-            .expect_err("missing mock address should fail");
+            .expect_err("missing ACP server addresses should fail");
         assert!(matches!(error, LauncherError::RunBackend { .. }));
 
         let error = run_backend_role(vec![
@@ -523,7 +639,7 @@ mod tests {
         run_backend_role(vec![
             OsString::from("--port"),
             OsString::from("0"),
-            OsString::from("--mock-address"),
+            OsString::from("--acp-server"),
             OsString::from("127.0.0.1:9"),
             OsString::from("--exit-after-ms"),
             OsString::from("50"),
@@ -537,7 +653,7 @@ mod tests {
         let handle = tokio::spawn(run_backend_role(vec![
             OsString::from("--port"),
             OsString::from("0"),
-            OsString::from("--mock-address"),
+            OsString::from("--acp-server"),
             OsString::from("127.0.0.1:9"),
         ]));
 

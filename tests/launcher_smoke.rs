@@ -1,11 +1,14 @@
 use std::{io, path::PathBuf, process::Stdio, time::Duration};
 
-use acp_app_support::unique_temp_json_path;
+use acp_app_support::{unique_temp_json_path, wait_for_tcp_connect};
 use acp_contracts::{MessageRole, SessionHistoryResponse};
+use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use reqwest::Client;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
     process::{Child, ChildStdin, ChildStdout, Command},
+    sync::oneshot,
     time::sleep,
 };
 
@@ -22,10 +25,43 @@ async fn launcher_starts_the_full_stack_and_proxies_cli_io_with_proxy_env() -> R
     assert_launcher_roundtrip("launcher-proxy", true).await
 }
 
+#[tokio::test]
+async fn launcher_connects_to_an_existing_acp_server() -> Result<()> {
+    let (acp_server, mock_shutdown) = spawn_mock_server().await?;
+    let result = assert_launcher_roundtrip_with_args(
+        "launcher-existing-acp",
+        false,
+        &["--acp-server", acp_server.as_str()],
+    )
+    .await;
+    let _ = mock_shutdown.send(());
+    result
+}
+
+#[tokio::test]
+async fn launcher_connects_to_an_existing_acp_server_with_equals_syntax() -> Result<()> {
+    let (acp_server, mock_shutdown) = spawn_mock_server().await?;
+    let arg = format!("--acp-server={acp_server}");
+    let result =
+        assert_launcher_roundtrip_with_args("launcher-existing-acp-equals", false, &[arg.as_str()])
+            .await;
+    let _ = mock_shutdown.send(());
+    result
+}
+
 async fn assert_launcher_roundtrip(label: &str, use_broken_proxy_env: bool) -> Result<()> {
+    assert_launcher_roundtrip_with_args(label, use_broken_proxy_env, &[]).await
+}
+
+async fn assert_launcher_roundtrip_with_args(
+    label: &str,
+    use_broken_proxy_env: bool,
+    launcher_args: &[&str],
+) -> Result<()> {
     let recent_path = unique_recent_sessions_path(label);
     let client = Client::builder().build()?;
-    let (child, mut stdin, mut reader) = spawn_launcher(&recent_path, use_broken_proxy_env)?;
+    let (child, mut stdin, mut reader) =
+        spawn_launcher(&recent_path, use_broken_proxy_env, launcher_args)?;
     let mut child = child;
 
     stdin.write_all(b"hello from launcher\n").await?;
@@ -42,6 +78,7 @@ async fn assert_launcher_roundtrip(label: &str, use_broken_proxy_env: bool) -> R
 fn spawn_launcher(
     recent_path: &PathBuf,
     use_broken_proxy_env: bool,
+    launcher_args: &[&str],
 ) -> Result<(Child, ChildStdin, BufReader<ChildStdout>)> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_acp"));
     command
@@ -49,6 +86,7 @@ fn spawn_launcher(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.args(launcher_args);
     if use_broken_proxy_env {
         configure_broken_proxy_env(&mut command);
     }
@@ -154,4 +192,18 @@ async fn read_session_connection(
 
 fn unique_recent_sessions_path(label: &str) -> PathBuf {
     unique_temp_json_path("acp-launcher", label)
+}
+
+async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    spawn_with_shutdown_task(listener, MockConfig::default(), async move {
+        let _ = shutdown_rx.await;
+    });
+
+    wait_for_tcp_connect(&address.to_string(), 100, Duration::from_millis(20)).await?;
+
+    Ok((address.to_string(), shutdown_tx))
 }

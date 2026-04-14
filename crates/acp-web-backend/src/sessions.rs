@@ -68,14 +68,14 @@ impl PendingPermissionResolution {
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingPrompt {
+pub struct TurnHandle {
     handle: Arc<SessionHandle>,
     session_id: String,
     prompt_text: String,
     prompt_order: u64,
 }
 
-impl PendingPrompt {
+impl TurnHandle {
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -86,6 +86,10 @@ impl PendingPrompt {
 
     pub(crate) async fn start_turn(&self) -> Result<watch::Receiver<bool>, SessionStoreError> {
         self.handle.start_turn(self.prompt_order).await
+    }
+
+    pub(crate) async fn is_active(&self) -> bool {
+        self.handle.is_active().await
     }
 
     pub(crate) async fn register_permission_request(
@@ -108,39 +112,64 @@ impl PendingPrompt {
         }
         Ok(resolution)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPrompt {
+    turn: TurnHandle,
+}
+
+impl PendingPrompt {
+    pub fn session_id(&self) -> &str {
+        self.turn.session_id()
+    }
+
+    pub fn prompt_text(&self) -> &str {
+        self.turn.prompt_text()
+    }
+
+    pub(crate) fn turn_handle(&self) -> TurnHandle {
+        self.turn.clone()
+    }
 
     pub async fn complete_with_reply(self, text: String) {
         if let Ok(events) = self
+            .turn
             .handle
-            .complete_prompt(self.prompt_order, PromptCompletion::Reply(text))
+            .complete_prompt(self.turn.prompt_order, PromptCompletion::Reply(text))
             .await
         {
             for event in events {
-                self.handle.broadcast(event);
+                self.turn.handle.broadcast(event);
             }
         }
     }
 
     pub async fn complete_with_status(self, message: impl Into<String>) {
         if let Ok(events) = self
+            .turn
             .handle
-            .complete_prompt(self.prompt_order, PromptCompletion::Status(message.into()))
+            .complete_prompt(
+                self.turn.prompt_order,
+                PromptCompletion::Status(message.into()),
+            )
             .await
         {
             for event in events {
-                self.handle.broadcast(event);
+                self.turn.handle.broadcast(event);
             }
         }
     }
 
     pub async fn complete_without_output(self) {
         if let Ok(events) = self
+            .turn
             .handle
-            .complete_prompt(self.prompt_order, PromptCompletion::None)
+            .complete_prompt(self.turn.prompt_order, PromptCompletion::None)
             .await
         {
             for event in events {
-                self.handle.broadcast(event);
+                self.turn.handle.broadcast(event);
             }
         }
     }
@@ -227,10 +256,12 @@ impl SessionStore {
         handle.broadcast(user_event);
 
         Ok(PendingPrompt {
-            handle,
-            session_id: session_id.to_string(),
-            prompt_text: text,
-            prompt_order,
+            turn: TurnHandle {
+                handle,
+                session_id: session_id.to_string(),
+                prompt_text: text,
+                prompt_order,
+            },
         })
     }
 
@@ -918,12 +949,12 @@ mod tests {
                 if matches!(message.role, MessageRole::User)
         ));
 
-        pending.complete_with_status("mock request failed").await;
+        pending.complete_with_status("ACP request failed").await;
 
         let status_event = receiver.recv().await.expect("status event should arrive");
         assert!(matches!(
             status_event.payload,
-            StreamEventPayload::Status { message } if message == "mock request failed"
+            StreamEventPayload::Status { message } if message == "ACP request failed"
         ));
     }
 
@@ -982,10 +1013,12 @@ mod tests {
 
         let _ = receiver.recv().await.expect("user event should arrive");
         let _cancel_rx = pending
+            .turn_handle()
             .start_turn()
             .await
             .expect("starting the turn should succeed");
         let resolution = pending
+            .turn_handle()
             .register_permission_request(
                 "read_text_file README.md".to_string(),
                 "allow_once".to_string(),
@@ -1030,6 +1063,7 @@ mod tests {
             .expect("prompt submission should succeed");
 
         let resolution = pending
+            .turn_handle()
             .register_permission_request(
                 "read_text_file README.md".to_string(),
                 "allow_once".to_string(),
@@ -1060,11 +1094,13 @@ mod tests {
             .await
             .expect("second prompt submission should succeed");
         let _cancel_rx = first
+            .turn_handle()
             .start_turn()
             .await
             .expect("starting the first turn should succeed");
 
         let resolution = second
+            .turn_handle()
             .register_permission_request(
                 "read_text_file README.md".to_string(),
                 "allow_once".to_string(),
@@ -1092,10 +1128,12 @@ mod tests {
             .expect("prompt submission should succeed");
 
         let _cancel_rx = pending
+            .turn_handle()
             .start_turn()
             .await
             .expect("starting the turn should succeed");
         let resolution = pending
+            .turn_handle()
             .register_permission_request(
                 "read_text_file README.md".to_string(),
                 "allow_once".to_string(),
@@ -1133,6 +1171,7 @@ mod tests {
             .expect("closing the session should succeed");
 
         let registration_error = pending
+            .turn_handle()
             .register_permission_request(
                 "read_text_file README.md".to_string(),
                 "allow_once".to_string(),
@@ -1168,10 +1207,12 @@ mod tests {
             .expect("prompt submission should succeed");
 
         let mut cancel_rx = pending
+            .turn_handle()
             .start_turn()
             .await
             .expect("starting the turn should succeed");
         let resolution = pending
+            .turn_handle()
             .register_permission_request(
                 "read_text_file README.md".to_string(),
                 "allow_once".to_string(),

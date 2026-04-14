@@ -1,6 +1,13 @@
 use std::{
-    cell::RefCell, collections::HashMap, env, future::Future, path::PathBuf, pin::Pin, rc::Rc,
-    sync::Arc, time::Duration,
+    cell::RefCell,
+    collections::HashMap,
+    env,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
 };
 
 use agent_client_protocol::{self as acp, Agent as _};
@@ -8,7 +15,9 @@ use snafu::prelude::*;
 use tokio::net::TcpStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::sessions::{PendingPrompt, PermissionResolutionOutcome};
+#[cfg(test)]
+use crate::sessions::PendingPrompt;
+use crate::sessions::{PermissionResolutionOutcome, TurnHandle};
 
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
 pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Send + 'a>>;
@@ -22,7 +31,9 @@ pub enum ReplyResult {
 }
 
 pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
-    fn request_reply<'a>(&'a self, pending: PendingPrompt) -> ReplyFuture<'a>;
+    fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a>;
+
+    fn forget_session(&self, _session_id: &str) {}
 }
 
 #[derive(Debug, Clone)]
@@ -39,34 +50,34 @@ pub enum MockClientError {
     #[snafu(display("reading the current working directory failed"))]
     ReadCurrentDirectory { source: std::io::Error },
 
-    #[snafu(display("connecting to the mock ACP transport at {address} failed"))]
+    #[snafu(display("connecting to the ACP server at {address} failed"))]
     Connect {
         source: std::io::Error,
         address: String,
     },
 
-    #[snafu(display("initializing the mock ACP client failed"))]
+    #[snafu(display("initializing the ACP client failed"))]
     Initialize { source: acp::Error },
 
-    #[snafu(display("creating a mock ACP session failed"))]
+    #[snafu(display("creating an ACP session failed"))]
     CreateSession { source: acp::Error },
 
-    #[snafu(display("loading a mock ACP session failed"))]
+    #[snafu(display("loading an ACP session failed"))]
     LoadSession { source: acp::Error },
 
-    #[snafu(display("sending the mock ACP prompt failed"))]
+    #[snafu(display("sending the ACP prompt failed"))]
     SendPrompt { source: acp::Error },
 
-    #[snafu(display("sending the mock ACP cancel notification failed"))]
+    #[snafu(display("sending the ACP cancel notification failed"))]
     SendCancel { source: acp::Error },
 
-    #[snafu(display("building the mock ACP runtime failed"))]
+    #[snafu(display("building the ACP runtime failed"))]
     BuildRuntime { source: std::io::Error },
 
-    #[snafu(display("joining the mock ACP task failed"))]
+    #[snafu(display("joining the ACP task failed"))]
     JoinTask { source: tokio::task::JoinError },
 
-    #[snafu(display("the mock ACP request timed out after {timeout:?}"))]
+    #[snafu(display("the ACP request timed out after {timeout:?}"))]
     TimedOut { timeout: Duration },
 
     #[snafu(display("coordinating the prompt turn failed: {message}"))]
@@ -74,6 +85,9 @@ pub enum MockClientError {
 
     #[snafu(display("the agent requested permission without both allow and deny options"))]
     InvalidPermissionOptions,
+
+    #[snafu(display("the agent requested permission options the CLI cannot represent safely"))]
+    UnsupportedPermissionOptions,
 }
 
 impl MockClient {
@@ -92,8 +106,9 @@ impl MockClient {
         })
     }
 
-    pub async fn request_reply(&self, pending: PendingPrompt) -> Result<ReplyResult> {
-        let backend_session_id = pending.session_id().to_string();
+    pub async fn request_reply(&self, turn: TurnHandle) -> Result<ReplyResult> {
+        let backend_session_id = turn.session_id().to_string();
+        let tracked_turn = turn.clone();
         let mock_address = self.mock_address.clone();
         let working_dir = self.working_dir.clone();
         let request_timeout = self.request_timeout;
@@ -101,17 +116,31 @@ impl MockClient {
         let session_lock = self.session_lock(&backend_session_id).await;
         let _serial = session_lock.lock().await;
 
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             drive_acp_roundtrip_blocking(
                 mock_address,
                 working_dir,
-                pending,
+                turn,
                 request_timeout,
                 upstream_sessions,
             )
         })
         .await
-        .context(JoinTaskSnafu)?
+        .context(JoinTaskSnafu);
+
+        if !tracked_turn.is_active().await {
+            MockClient::forget_session(self, &backend_session_id).await;
+        }
+
+        result?
+    }
+
+    async fn forget_session(&self, backend_session_id: &str) {
+        self.upstream_sessions
+            .lock()
+            .await
+            .remove(backend_session_id);
+        self.session_locks.lock().await.remove(backend_session_id);
     }
 
     async fn session_lock(&self, backend_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -133,25 +162,34 @@ impl MockClient {
 }
 
 impl ReplyProvider for MockClient {
-    fn request_reply<'a>(&'a self, pending: PendingPrompt) -> ReplyFuture<'a> {
-        Box::pin(MockClient::request_reply(self, pending))
+    fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(MockClient::request_reply(self, turn))
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        let client = self.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            MockClient::forget_session(&client, &session_id).await;
+        });
     }
 }
 
 async fn drive_acp_roundtrip(
     mock_address: String,
     working_dir: PathBuf,
-    pending: PendingPrompt,
+    turn: TurnHandle,
     upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
 ) -> Result<ReplyResult> {
-    let backend_session_id = pending.session_id().to_string();
+    let backend_session_id = turn.session_id().to_string();
+    let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
     let stream = TcpStream::connect(&mock_address)
         .await
         .context(ConnectSnafu {
             address: mock_address.clone(),
         })?;
     let (reader, writer) = stream.into_split();
-    let client = BackendAcpClient::new(pending.clone());
+    let client = BackendAcpClient::new(turn.clone());
     let local_set = tokio::task::LocalSet::new();
 
     local_set
@@ -166,53 +204,48 @@ async fn drive_acp_roundtrip(
             );
             let io_task = tokio::task::spawn_local(handle_io);
             initialize_connection(&conn).await?;
-            let session_id = if let Some(session_id) = upstream_sessions
-                .lock()
-                .await
-                .get(&backend_session_id)
-                .cloned()
-            {
-                conn.load_session(acp::LoadSessionRequest::new(
-                    session_id.clone(),
-                    working_dir.clone(),
-                ))
-                .await
-                .context(LoadSessionSnafu)?;
-                session_id
-            } else {
-                let session = conn
-                    .new_session(acp::NewSessionRequest::new(working_dir))
-                    .await
-                    .context(CreateSessionSnafu)?;
-                let session_id = session.session_id.to_string();
-                upstream_sessions
-                    .lock()
-                    .await
-                    .insert(backend_session_id, session_id.clone());
-                session_id
-            };
-            let mut cancel_rx = pending.start_turn().await.map_err(session_runtime_error)?;
-            let prompt = pending.prompt_text().to_string();
+            let session_id = load_or_create_session(
+                &conn,
+                &working_dir,
+                &backend_session_id,
+                &upstream_sessions,
+            )
+            .await?;
+            if *cancel_rx.borrow() {
+                io_task.abort();
+                let _ = io_task.await;
+                return Ok(ReplyResult::Status("turn cancelled".to_string()));
+            }
+            let prompt = turn.prompt_text().to_string();
             let prompt_request = acp::PromptRequest::new(session_id.clone(), vec![prompt.into()]);
             let cancel_request = acp::CancelNotification::new(session_id.clone());
             let prompt_future = conn.prompt(prompt_request);
             tokio::pin!(prompt_future);
-            let stop_reason = tokio::select! {
+            let reply = tokio::select! {
                 response = &mut prompt_future => {
-                    response.context(SendPromptSnafu)?.stop_reason
+                    match response.context(SendPromptSnafu)?.stop_reason {
+                        acp::StopReason::Cancelled => ReplyResult::Status("turn cancelled".to_string()),
+                        _ if client.reply_text().is_empty() => ReplyResult::NoOutput,
+                        _ => ReplyResult::Reply(client.reply_text()),
+                    }
                 }
                 changed = cancel_rx.changed() => {
-                    if changed.is_ok() && *cancel_rx.borrow() { conn.cancel(cancel_request).await.context(SendCancelSnafu)?; }
-                    prompt_future.await.context(SendPromptSnafu)?.stop_reason
+                    if changed.is_ok() && *cancel_rx.borrow() {
+                        conn.cancel(cancel_request).await.context(SendCancelSnafu)?;
+                        let _ = prompt_future.await;
+                        ReplyResult::Status("turn cancelled".to_string())
+                    } else {
+                        match prompt_future.await.context(SendPromptSnafu)?.stop_reason {
+                            acp::StopReason::Cancelled => ReplyResult::Status("turn cancelled".to_string()),
+                            _ if client.reply_text().is_empty() => ReplyResult::NoOutput,
+                            _ => ReplyResult::Reply(client.reply_text()),
+                        }
+                    }
                 }
             };
             io_task.abort();
             let _ = io_task.await;
-            Ok(match stop_reason {
-                acp::StopReason::Cancelled => ReplyResult::Status("turn cancelled".to_string()),
-                _ if client.reply_text().is_empty() => ReplyResult::NoOutput,
-                _ => ReplyResult::Reply(client.reply_text()),
-            })
+            Ok(reply)
         })
         .await
 }
@@ -220,7 +253,7 @@ async fn drive_acp_roundtrip(
 fn drive_acp_roundtrip_blocking(
     mock_address: String,
     working_dir: PathBuf,
-    pending: PendingPrompt,
+    turn: TurnHandle,
     request_timeout: Duration,
     upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
 ) -> Result<ReplyResult> {
@@ -232,7 +265,7 @@ fn drive_acp_roundtrip_blocking(
     runtime.block_on(async move {
         tokio::time::timeout(
             request_timeout,
-            drive_acp_roundtrip(mock_address, working_dir, pending, upstream_sessions),
+            drive_acp_roundtrip(mock_address, working_dir, turn, upstream_sessions),
         )
         .await
         .map_err(|_| MockClientError::TimedOut {
@@ -259,16 +292,54 @@ fn session_runtime_error(source: crate::sessions::SessionStoreError) -> MockClie
     }
 }
 
+async fn load_or_create_session(
+    conn: &acp::ClientSideConnection,
+    working_dir: &Path,
+    backend_session_id: &str,
+    upstream_sessions: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+) -> Result<String> {
+    if let Some(session_id) = upstream_sessions
+        .lock()
+        .await
+        .get(backend_session_id)
+        .cloned()
+    {
+        if conn
+            .load_session(acp::LoadSessionRequest::new(
+                session_id.clone(),
+                working_dir.to_path_buf(),
+            ))
+            .await
+            .is_ok()
+        {
+            return Ok(session_id);
+        }
+
+        upstream_sessions.lock().await.remove(backend_session_id);
+    }
+
+    let session = conn
+        .new_session(acp::NewSessionRequest::new(working_dir.to_path_buf()))
+        .await
+        .context(CreateSessionSnafu)?;
+    let session_id = session.session_id.to_string();
+    upstream_sessions
+        .lock()
+        .await
+        .insert(backend_session_id.to_string(), session_id.clone());
+    Ok(session_id)
+}
+
 #[derive(Debug, Clone)]
 struct BackendAcpClient {
-    pending: PendingPrompt,
+    turn: TurnHandle,
     collected: Rc<RefCell<String>>,
 }
 
 impl BackendAcpClient {
-    fn new(pending: PendingPrompt) -> Self {
+    fn new(turn: TurnHandle) -> Self {
         Self {
-            pending,
+            turn,
             collected: Rc::new(RefCell::new(String::new())),
         }
     }
@@ -293,7 +364,7 @@ impl acp::Client for BackendAcpClient {
             .clone()
             .unwrap_or_else(|| format!("tool {}", args.tool_call.tool_call_id));
         let resolution = self
-            .pending
+            .turn
             .register_permission_request(summary, approve_option_id, deny_option_id)
             .await
             .map_err(to_acp_error)?;
@@ -340,16 +411,17 @@ fn resource_placeholder(is_resource: bool) -> String {
 fn permission_option_ids(
     args: &acp::RequestPermissionRequest,
 ) -> Result<(String, String), MockClientError> {
-    let approve_option_id = args
-        .options
-        .iter()
-        .find(|option| is_approve_option(option.kind))
-        .map(|option| option.option_id.to_string());
-    let deny_option_id = args
-        .options
-        .iter()
-        .find(|option| is_deny_option(option.kind))
-        .map(|option| option.option_id.to_string());
+    if args.options.iter().any(|option| {
+        matches!(
+            option.kind,
+            acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::RejectAlways
+        )
+    }) {
+        return UnsupportedPermissionOptionsSnafu.fail();
+    }
+
+    let approve_option_id = unique_option_id(args, acp::PermissionOptionKind::AllowOnce)?;
+    let deny_option_id = unique_option_id(args, acp::PermissionOptionKind::RejectOnce)?;
 
     match (approve_option_id, deny_option_id) {
         (Some(approve_option_id), Some(deny_option_id)) => Ok((approve_option_id, deny_option_id)),
@@ -357,18 +429,20 @@ fn permission_option_ids(
     }
 }
 
-fn is_approve_option(kind: acp::PermissionOptionKind) -> bool {
-    matches!(
-        kind,
-        acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-    )
-}
-
-fn is_deny_option(kind: acp::PermissionOptionKind) -> bool {
-    matches!(
-        kind,
-        acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways
-    )
+fn unique_option_id(
+    args: &acp::RequestPermissionRequest,
+    kind: acp::PermissionOptionKind,
+) -> Result<Option<String>, MockClientError> {
+    let mut matches = args
+        .options
+        .iter()
+        .filter(|option| option.kind == kind)
+        .map(|option| option.option_id.to_string());
+    let first = matches.next();
+    if matches.next().is_some() {
+        return UnsupportedPermissionOptionsSnafu.fail();
+    }
+    Ok(first)
 }
 
 fn to_acp_error(source: crate::sessions::SessionStoreError) -> acp::Error {
@@ -392,7 +466,7 @@ mod tests {
         let pending = test_pending_prompt("alice", "hello").await;
 
         let reply = client
-            .request_reply(pending)
+            .request_reply(pending.turn_handle())
             .await
             .expect("mock ACP replies should succeed");
 
@@ -432,15 +506,15 @@ mod tests {
             .expect("third prompt should submit");
 
         client
-            .request_reply(first)
+            .request_reply(first.turn_handle())
             .await
             .expect("first replies should succeed");
         client
-            .request_reply(second)
+            .request_reply(second.turn_handle())
             .await
             .expect("reused sessions should succeed");
         client
-            .request_reply(third)
+            .request_reply(third.turn_handle())
             .await
             .expect("second backend sessions should succeed");
 
@@ -457,6 +531,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forgetting_sessions_clears_cached_upstream_state() {
+        let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+        let client = MockClient::new(mock_address).expect("client construction should succeed");
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice")
+            .await
+            .expect("session creation should succeed");
+        let pending = store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed");
+
+        client
+            .request_reply(pending.turn_handle())
+            .await
+            .expect("mock ACP replies should succeed");
+        assert_eq!(
+            client.mapped_session_id(&session.id).await.as_deref(),
+            Some("mock_0")
+        );
+
+        MockClient::forget_session(&client, &session.id).await;
+
+        assert_eq!(client.mapped_session_id(&session.id).await, None);
+        assert!(
+            client.session_locks.lock().await.get(&session.id).is_none(),
+            "session locks should be released with the upstream cache entry"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn request_reply_times_out_for_slow_mock_agents() {
         let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(200)).await;
         let client = MockClient::with_timeout(mock_address, Duration::from_millis(20))
@@ -464,7 +572,7 @@ mod tests {
         let pending = test_pending_prompt("alice", "hello").await;
 
         let error = client
-            .request_reply(pending)
+            .request_reply(pending.turn_handle())
             .await
             .expect_err("stalled responses should time out");
 
@@ -480,7 +588,7 @@ mod tests {
         let pending = test_pending_prompt("alice", "hello").await;
 
         let error = client
-            .request_reply(pending)
+            .request_reply(pending.turn_handle())
             .await
             .expect_err("unreachable mock transports should fail");
 
@@ -503,7 +611,7 @@ mod tests {
 
         let request_task = {
             let client = client.clone();
-            tokio::spawn(async move { client.request_reply(pending).await })
+            tokio::spawn(async move { client.request_reply(pending.turn_handle()).await })
         };
 
         let mut cancelled = false;
@@ -548,7 +656,7 @@ mod tests {
             .expect("closing the session should succeed");
 
         let error = client
-            .request_reply(pending)
+            .request_reply(pending.turn_handle())
             .await
             .expect_err("closed sessions should surface turn runtime failures");
 
@@ -562,7 +670,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn backend_acp_client_rejects_invalid_permission_requests() {
-        let client = BackendAcpClient::new(test_pending_prompt("alice", "permission please").await);
+        let client = BackendAcpClient::new(
+            test_pending_prompt("alice", "permission please")
+                .await
+                .turn_handle(),
+        );
         let error = client
             .request_permission(acp::RequestPermissionRequest::new(
                 "mock_0",
@@ -601,10 +713,11 @@ mod tests {
                     .expect("prompt submission should succeed");
                 let _ = receiver.recv().await.expect("user event should arrive");
                 let _cancel_rx = pending
+                    .turn_handle()
                     .start_turn()
                     .await
                     .expect("starting the turn should succeed");
-                let client = BackendAcpClient::new(pending);
+                let client = BackendAcpClient::new(pending.turn_handle());
                 let requester = tokio::task::spawn_local(async move {
                     client
                         .request_permission(acp::RequestPermissionRequest::new(
@@ -612,14 +725,14 @@ mod tests {
                             acp::ToolCallUpdate::new("tool_0", acp::ToolCallUpdateFields::new()),
                             vec![
                                 acp::PermissionOption::new(
-                                    "allow_always",
-                                    "Allow always",
-                                    acp::PermissionOptionKind::AllowAlways,
+                                    "allow_once",
+                                    "Allow once",
+                                    acp::PermissionOptionKind::AllowOnce,
                                 ),
                                 acp::PermissionOption::new(
-                                    "reject_always",
-                                    "Reject always",
-                                    acp::PermissionOptionKind::RejectAlways,
+                                    "reject_once",
+                                    "Reject once",
+                                    acp::PermissionOptionKind::RejectOnce,
                                 ),
                             ],
                         ))
@@ -651,7 +764,7 @@ mod tests {
                 assert!(matches!(
                     response.outcome,
                     acp::RequestPermissionOutcome::Selected(selected)
-                        if selected.option_id.to_string() == "reject_always"
+                        if selected.option_id.to_string() == "reject_once"
                 ));
             })
             .await;
@@ -672,7 +785,7 @@ mod tests {
             .close_session("alice", &session.id)
             .await
             .expect("closing the session should succeed");
-        let client = BackendAcpClient::new(pending);
+        let client = BackendAcpClient::new(pending.turn_handle());
 
         let error = client
             .request_permission(acp::RequestPermissionRequest::new(
@@ -702,7 +815,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn backend_acp_client_collects_agent_message_chunks() {
-        let client = BackendAcpClient::new(test_pending_prompt("alice", "hello").await);
+        let client =
+            BackendAcpClient::new(test_pending_prompt("alice", "hello").await.turn_handle());
 
         client
             .session_notification(acp::SessionNotification::new(
@@ -729,10 +843,11 @@ mod tests {
                     .await
                     .expect("prompt submission should succeed");
                 let _cancel_rx = pending
+                    .turn_handle()
                     .start_turn()
                     .await
                     .expect("starting the turn should succeed");
-                let client = BackendAcpClient::new(pending);
+                let client = BackendAcpClient::new(pending.turn_handle());
                 let requester = tokio::task::spawn_local(async move {
                     client
                         .request_permission(acp::RequestPermissionRequest::new(
@@ -802,13 +917,64 @@ mod tests {
     }
 
     #[test]
-    fn permission_option_kind_helpers_match_expected_variants() {
-        assert!(is_approve_option(acp::PermissionOptionKind::AllowOnce));
-        assert!(is_approve_option(acp::PermissionOptionKind::AllowAlways));
-        assert!(!is_approve_option(acp::PermissionOptionKind::RejectOnce));
-        assert!(is_deny_option(acp::PermissionOptionKind::RejectOnce));
-        assert!(is_deny_option(acp::PermissionOptionKind::RejectAlways));
-        assert!(!is_deny_option(acp::PermissionOptionKind::AllowOnce));
+    fn permission_option_ids_reject_persistent_permission_choices() {
+        let request = acp::RequestPermissionRequest::new(
+            "mock_0",
+            acp::ToolCallUpdate::new(
+                "tool_0",
+                acp::ToolCallUpdateFields::new().title("permission prompt"),
+            ),
+            vec![
+                acp::PermissionOption::new(
+                    "allow_always",
+                    "Allow always",
+                    acp::PermissionOptionKind::AllowAlways,
+                ),
+                acp::PermissionOption::new(
+                    "reject_once",
+                    "Reject once",
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ],
+        );
+
+        assert!(matches!(
+            permission_option_ids(&request),
+            Err(MockClientError::UnsupportedPermissionOptions)
+        ));
+    }
+
+    #[test]
+    fn permission_option_ids_reject_duplicate_once_choices() {
+        let request = acp::RequestPermissionRequest::new(
+            "mock_0",
+            acp::ToolCallUpdate::new(
+                "tool_0",
+                acp::ToolCallUpdateFields::new().title("permission prompt"),
+            ),
+            vec![
+                acp::PermissionOption::new(
+                    "allow_once_1",
+                    "Allow once",
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                acp::PermissionOption::new(
+                    "allow_once_2",
+                    "Allow once again",
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                acp::PermissionOption::new(
+                    "reject_once",
+                    "Reject once",
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ],
+        );
+
+        assert!(matches!(
+            permission_option_ids(&request),
+            Err(MockClientError::UnsupportedPermissionOptions)
+        ));
     }
 
     #[test]

@@ -19,7 +19,7 @@ type SseStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
 
@@ -61,7 +61,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
 async fn session_lookup_rejects_different_principal() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -85,7 +85,7 @@ async fn session_lookup_rejects_different_principal() -> Result<()> {
 async fn session_creation_enforces_principal_session_cap() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 1,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
 
@@ -108,7 +108,7 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
 async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 128,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
 
@@ -157,7 +157,7 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
 async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -188,7 +188,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
 async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: "127.0.0.1:9".to_string(),
+        acp_server: "127.0.0.1:9".to_string(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -214,7 +214,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
     let status = expect_next_event(&mut events).await?;
     assert!(matches!(
         status.payload,
-        StreamEventPayload::Status { message } if message.starts_with("mock request failed:")
+        StreamEventPayload::Status { message } if message.starts_with("ACP request failed:")
     ));
 
     Ok(())
@@ -224,7 +224,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
 async fn permission_requests_can_be_approved_through_http() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -281,7 +281,7 @@ async fn permission_requests_can_be_approved_through_http() -> Result<()> {
 async fn permission_requests_can_be_denied_without_recording_an_assistant_reply() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -320,7 +320,7 @@ async fn permission_requests_can_be_denied_without_recording_an_assistant_reply(
 async fn cancelling_a_pending_permission_turn_returns_a_status_event() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -353,7 +353,7 @@ async fn cancelling_a_pending_permission_turn_returns_a_status_event() -> Result
 async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: String::new(),
+        acp_server: String::new(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -380,7 +380,7 @@ async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()>
 async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        mock_address: "127.0.0.1:9".to_string(),
+        acp_server: "127.0.0.1:9".to_string(),
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -482,7 +482,7 @@ impl TestStack {
     async fn spawn(mut backend_config: ServerConfig) -> Result<Self> {
         let client = Client::builder().build().context("building test client")?;
         let mut mock_shutdown = None;
-        if backend_config.mock_address.is_empty() {
+        if backend_config.acp_server.is_empty() {
             let mock_listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .context("binding mock listener")?;
@@ -492,8 +492,8 @@ impl TestStack {
                 let _ = mock_shutdown_rx.await;
             });
 
-            backend_config.mock_address = mock_address.to_string();
-            wait_for_stack_tcp(&backend_config.mock_address).await?;
+            backend_config.acp_server = mock_address.to_string();
+            wait_for_stack_tcp(&backend_config.acp_server).await?;
             mock_shutdown = Some(mock_shutdown_tx);
         }
 
@@ -701,7 +701,7 @@ async fn spawn_direct_backend_server(
 ) -> Result<(String, JoinHandle<std::io::Result<()>>)> {
     let state = AppState::new(ServerConfig {
         session_cap: 8,
-        mock_address,
+        acp_server: mock_address,
     })
     .context("building direct backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -737,7 +737,7 @@ async fn spawn_graceful_backend_server(
 ) -> Result<(String, oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)> {
     let state = AppState::new(ServerConfig {
         session_cap: 8,
-        mock_address,
+        acp_server: mock_address,
     })
     .context("building graceful backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")

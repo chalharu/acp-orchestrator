@@ -19,6 +19,13 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 pub type BoxError = Box<dyn StdError + Send + Sync>;
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+pub type SupportResult<T, E> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+pub enum ServiceReadinessError<E> {
+    Ready(E),
+    Run(io::Error),
+}
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeListenArgs {
@@ -84,6 +91,29 @@ pub fn listener_endpoint(
 
 pub fn print_startup_line(startup_label: &'static str, endpoint: &str) {
     println!("{startup_label} listening on {endpoint}");
+}
+
+pub async fn run_service_with_readiness<E, Ready, Serve, OnReady>(
+    ready: Ready,
+    serve: Serve,
+    on_ready: OnReady,
+) -> SupportResult<(), ServiceReadinessError<E>>
+where
+    Ready: Future<Output = SupportResult<(), E>>,
+    Serve: Future<Output = io::Result<()>>,
+    OnReady: FnOnce(),
+{
+    tokio::pin!(ready);
+    tokio::pin!(serve);
+
+    tokio::select! {
+        result = &mut ready => {
+            result.map_err(ServiceReadinessError::Ready)?;
+            on_ready();
+            serve.await.map_err(ServiceReadinessError::Run)
+        }
+        result = &mut serve => result.map_err(ServiceReadinessError::Run),
+    }
 }
 
 pub fn shutdown_signal(exit_after_ms: Option<u64>) -> ShutdownSignal {
@@ -158,7 +188,13 @@ pub async fn wait_for_tcp_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Stdio;
+    use std::{
+        process::Stdio,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -343,6 +379,53 @@ mod tests {
             .expect_err("unreachable health endpoints should fail");
 
         assert!(error.to_string().contains("health check did not succeed"));
+    }
+
+    #[tokio::test]
+    async fn run_service_with_readiness_calls_the_ready_callback_before_waiting_for_shutdown() {
+        let ready_called = Arc::new(AtomicBool::new(false));
+        let ready_called_for_assert = ready_called.clone();
+
+        run_service_with_readiness(
+            async { Ok::<(), io::Error>(()) },
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok::<(), io::Error>(())
+            },
+            move || {
+                ready_called.store(true, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("service should run after readiness succeeds");
+
+        assert!(ready_called_for_assert.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn run_service_with_readiness_surfaces_service_failures_before_ready() {
+        let error = run_service_with_readiness(
+            std::future::pending::<std::result::Result<(), io::Error>>(),
+            std::future::ready(Err::<(), _>(io::Error::other("boom"))),
+            Default::default,
+        )
+        .await
+        .expect_err("service errors should win when they happen first");
+
+        assert!(matches!(error, ServiceReadinessError::Run(_)));
+    }
+
+    #[tokio::test]
+    async fn run_service_with_readiness_surfaces_readiness_failures() {
+        let error = run_service_with_readiness(
+            std::future::ready(Err::<(), _>(io::Error::other("not ready"))),
+            std::future::pending::<std::result::Result<(), io::Error>>(),
+            Default::default,
+        )
+        .await
+        .expect_err("readiness failures should be surfaced");
+
+        assert!(matches!(error, ServiceReadinessError::Ready(_)));
     }
 
     async fn spawn_health_server() -> (String, tokio::task::JoinHandle<()>) {

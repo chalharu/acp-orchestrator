@@ -1,8 +1,9 @@
 use std::{ffi::OsString, time::Duration};
 
 use acp_app_support::{
-    BoxError, ListenerSetupError, RuntimeListenArgs, bind_listener, listener_endpoint,
-    print_startup_line, shutdown_signal, wait_for_tcp_connect,
+    BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
+    listener_endpoint, print_startup_line, run_service_with_readiness, shutdown_signal,
+    wait_for_tcp_connect,
 };
 use clap::Parser;
 use snafu::prelude::*;
@@ -12,6 +13,13 @@ use crate::{MockConfig, serve_with_shutdown};
 type Result<T, E = MockAppError> = std::result::Result<T, E>;
 const READY_CHECK_ATTEMPTS: usize = 300;
 const READY_CHECK_DELAY: Duration = Duration::from_millis(100);
+
+fn map_service_readiness_error(error: ServiceReadinessError<BoxError>) -> MockAppError {
+    match error {
+        ServiceReadinessError::Ready(source) => MockAppError::WaitForReady { source },
+        ServiceReadinessError::Run(source) => MockAppError::Run { source },
+    }
+}
 
 #[derive(Debug, Snafu)]
 pub enum MockAppError {
@@ -52,17 +60,10 @@ async fn run(cli: Cli) -> Result<()> {
     };
     let ready = wait_for_tcp_connect(&endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
     let serve = serve_with_shutdown(listener, config, shutdown_signal(cli.listen.exit_after_ms));
-    tokio::pin!(ready);
-    tokio::pin!(serve);
 
-    tokio::select! {
-        result = &mut ready => {
-            result.context(WaitForReadySnafu)?;
-            print_startup_line("acp mock", &endpoint);
-            serve.await.context(RunSnafu)
-        }
-        result = &mut serve => result.context(RunSnafu),
-    }
+    run_service_with_readiness(ready, serve, || print_startup_line("acp mock", &endpoint))
+        .await
+        .map_err(map_service_readiness_error)
 }
 
 pub async fn run_with_args<I, T>(args: I) -> Result<()>
@@ -78,6 +79,23 @@ where
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn service_readiness_errors_map_to_wait_for_ready_failures() {
+        let error = map_service_readiness_error(ServiceReadinessError::Ready(
+            std::io::Error::other("not ready").into(),
+        ));
+
+        assert!(matches!(error, MockAppError::WaitForReady { .. }));
+    }
+
+    #[test]
+    fn service_readiness_errors_map_to_runtime_failures() {
+        let error =
+            map_service_readiness_error(ServiceReadinessError::Run(std::io::Error::other("boom")));
+
+        assert!(matches!(error, MockAppError::Run { .. }));
+    }
 
     #[tokio::test]
     async fn run_with_args_can_shutdown_cleanly() {

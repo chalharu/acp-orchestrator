@@ -18,11 +18,14 @@ started to outgrow `copilot-sandbox-container`.
 - `docs/README.md`
 - `docs/explanation/acp-web-cli-architecture.md`
 - `docs/explanation/cli-feedback-first-mvp.md`
+- `docs/explanation/web-feedback-first-mvp.md`
 
 The architecture document under `docs/explanation/acp-web-cli-architecture.md`
 explains the long-term shape of the stack.
 The feedback-first CLI document captures why the repo keeps a minimal
 user-visible slice working throughout development.
+The matching Web feedback-first document defines the first browser-facing slice
+around `cargo run -- --web`.
 
 ## Current workspace layout
 

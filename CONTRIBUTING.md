@@ -49,5 +49,6 @@ Types:
   `cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1`.
 - Keep Renovate configuration changes in `renovate.json5`.
 - When behavior or contributor guidance changes, keep `README.md`,
-  `docs/README.md`, `docs/explanation/acp-web-cli-architecture.md`, and
-  `docs/explanation/cli-feedback-first-mvp.md` aligned in the same PR.
+  `docs/README.md`, `docs/explanation/acp-web-cli-architecture.md`,
+  `docs/explanation/cli-feedback-first-mvp.md`, and
+  `docs/explanation/web-feedback-first-mvp.md` aligned in the same PR.

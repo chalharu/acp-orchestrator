@@ -46,6 +46,8 @@ struct Cli {
     port: u16,
     #[arg(long, default_value_t = 120)]
     response_delay_ms: u64,
+    #[arg(long, default_value_t = false)]
+    startup_hints: bool,
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -57,6 +59,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     let config = MockConfig {
         response_delay: Duration::from_millis(cli.response_delay_ms),
+        startup_hints: cli.startup_hints,
     };
     let ready = wait_for_tcp_connect(&endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
     let serve = serve_with_shutdown(listener, config, shutdown_signal(cli.listen.exit_after_ms));

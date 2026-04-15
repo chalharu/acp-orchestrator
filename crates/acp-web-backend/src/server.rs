@@ -3,7 +3,7 @@ use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
     PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
-    SessionHistoryResponse, SlashCompletionsResponse, StreamEvent,
+    SessionHistoryResponse, SessionSnapshot, SlashCompletionsResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -34,6 +34,7 @@ use crate::{
 pub struct ServerConfig {
     pub session_cap: usize,
     pub acp_server: String,
+    pub startup_hints: bool,
 }
 
 impl Default for ServerConfig {
@@ -41,6 +42,7 @@ impl Default for ServerConfig {
         Self {
             session_cap: 8,
             acp_server: "127.0.0.1:8090".to_string(),
+            startup_hints: false,
         }
     }
 }
@@ -49,14 +51,16 @@ impl Default for ServerConfig {
 pub struct AppState {
     store: Arc<SessionStore>,
     reply_provider: Arc<dyn ReplyProvider>,
+    startup_hints: bool,
 }
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
-        Ok(Self::with_dependencies(
-            Arc::new(SessionStore::new(config.session_cap)),
-            Arc::new(MockClient::new(config.acp_server)?),
-        ))
+        Ok(Self {
+            store: Arc::new(SessionStore::new(config.session_cap)),
+            reply_provider: Arc::new(MockClient::new(config.acp_server)?),
+            startup_hints: config.startup_hints,
+        })
     }
 
     pub fn with_dependencies(
@@ -66,6 +70,7 @@ impl AppState {
         Self {
             store,
             reply_provider,
+            startup_hints: false,
         }
     }
 }
@@ -121,8 +126,62 @@ async fn create_session(
 ) -> Result<(StatusCode, Json<CreateSessionResponse>), AppError> {
     let principal = extract_principal(&headers)?;
     let session = state.store.create_session(&principal.id).await?;
+    let session_id = session.id.clone();
+    let session = match seed_startup_hint(&state, &principal.id, session).await {
+        Ok(session) => session,
+        Err(error) => {
+            if let Err(rollback_error) =
+                rollback_failed_session(&state, &principal.id, &session_id).await
+            {
+                return Err(AppError::Internal(format!(
+                    "{}; session rollback failed: {}",
+                    error.message(),
+                    rollback_error.message()
+                )));
+            }
+            return Err(error);
+        }
+    };
 
     Ok((StatusCode::CREATED, Json(CreateSessionResponse { session })))
+}
+
+async fn seed_startup_hint(
+    state: &AppState,
+    owner: &str,
+    session: SessionSnapshot,
+) -> Result<SessionSnapshot, AppError> {
+    if !state.startup_hints {
+        return Ok(session);
+    }
+
+    let Some(hint) = state
+        .reply_provider
+        .prime_session(&session.id)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?
+    else {
+        return Ok(session);
+    };
+
+    state
+        .store
+        .append_assistant_message(owner, &session.id, hint)
+        .await
+        .map_err(AppError::from)
+}
+
+async fn rollback_failed_session(
+    state: &AppState,
+    owner: &str,
+    session_id: &str,
+) -> Result<(), AppError> {
+    state.reply_provider.forget_session(session_id);
+    state
+        .store
+        .discard_session(owner, session_id)
+        .await
+        .map_err(|error| AppError::Internal(error.message().to_string()))
 }
 
 async fn get_session(

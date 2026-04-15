@@ -55,6 +55,8 @@ struct Cli {
     session_cap: usize,
     #[arg(long, alias = "mock-address", env = "ACP_SERVER")]
     acp_server: Option<String>,
+    #[arg(long, default_value_t = false)]
+    startup_hints: bool,
 }
 
 fn resolve_acp_server(
@@ -83,6 +85,7 @@ async fn run(cli: Cli) -> Result<()> {
     let state = AppState::new(ServerConfig {
         session_cap: cli.session_cap,
         acp_server,
+        startup_hints: cli.startup_hints,
     })
     .context(BuildStateSnafu)?;
     let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
@@ -120,6 +123,7 @@ mod tests {
             port: 0,
             session_cap: 8,
             acp_server: acp_server.map(str::to_string),
+            startup_hints: false,
         }
     }
 

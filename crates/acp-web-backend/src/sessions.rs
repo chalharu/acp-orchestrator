@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use acp_contracts::{
-    ConversationMessage, PermissionDecision, PermissionRequest, ResolvePermissionResponse,
-    SessionSnapshot, StreamEvent,
+    ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
+    ResolvePermissionResponse, SessionSnapshot, StreamEvent,
 };
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
@@ -220,6 +220,16 @@ impl SessionStore {
         Ok(snapshot)
     }
 
+    pub async fn discard_session(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<(), SessionStoreError> {
+        let _ = self.authorized_handle(owner, session_id).await?;
+        self.sessions.write().await.remove(session_id);
+        Ok(())
+    }
+
     pub async fn session_snapshot(
         &self,
         owner: &str,
@@ -321,6 +331,17 @@ impl SessionStore {
         let snapshot = handle.snapshot().await;
         self.prune_closed_sessions().await;
         Ok(snapshot)
+    }
+
+    pub async fn append_assistant_message(
+        &self,
+        owner: &str,
+        session_id: &str,
+        text: String,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        handle.append_message(MessageRole::Assistant, text).await?;
+        Ok(handle.snapshot().await)
     }
 
     async fn authorized_handle(

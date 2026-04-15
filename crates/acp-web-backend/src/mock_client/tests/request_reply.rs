@@ -21,6 +21,47 @@ async fn request_reply_collects_text_from_acp_mock() {
 }
 
 #[tokio::test]
+async fn prime_session_hint_collects_startup_hints_without_polluting_prompt_replies() {
+    let (mock_address, shutdown_tx) = spawn_mock_server_with_config(MockConfig {
+        response_delay: Duration::from_millis(1),
+        startup_hints: true,
+    })
+    .await;
+    let client = MockClient::new(mock_address).expect("client construction should succeed");
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+
+    let hint = client
+        .prime_session_hint(&session.id)
+        .await
+        .expect("session priming should succeed")
+        .expect("startup hints should be returned");
+    assert!(hint.contains("verify permission"));
+    assert_eq!(
+        client.mapped_session_id(&session.id).await.as_deref(),
+        Some("mock_0")
+    );
+
+    let pending = store
+        .submit_prompt("alice", &session.id, "hello".to_string())
+        .await
+        .expect("prompt submission should succeed");
+    let reply = client
+        .request_reply(pending.turn_handle())
+        .await
+        .expect("mock ACP replies should succeed");
+    assert!(matches!(
+        reply,
+        ReplyResult::Reply(text) if text.starts_with("mock assistant:")
+    ));
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
 async fn request_reply_reuses_upstream_sessions_for_the_same_backend_session() {
     let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
     let client = MockClient::new(mock_address).expect("client construction should succeed");

@@ -23,7 +23,12 @@ use backend_client::BackendAcpClient;
 
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
 pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Send + 'a>>;
+pub type PrimeSessionFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
+type SessionLock = Arc<tokio::sync::Mutex<()>>;
+type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
+type IoTask = tokio::task::JoinHandle<acp::Result<()>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyResult {
@@ -35,6 +40,10 @@ pub enum ReplyResult {
 pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
     fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a>;
 
+    fn prime_session<'a>(&'a self, _session_id: &'a str) -> PrimeSessionFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn forget_session(&self, _session_id: &str) {}
 }
 
@@ -43,8 +52,8 @@ pub struct MockClient {
     mock_address: String,
     request_timeout: Duration,
     working_dir: PathBuf,
-    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
-    session_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    upstream_sessions: UpstreamSessions,
+    session_locks: SessionLocks,
 }
 
 #[derive(Debug, Snafu)]
@@ -92,6 +101,13 @@ pub enum MockClientError {
     UnsupportedPermissionOptions,
 }
 
+struct PreparedConnection {
+    conn: acp::ClientSideConnection,
+    client: BackendAcpClient,
+    session_id: String,
+    io_task: Option<IoTask>,
+}
+
 impl MockClient {
     pub fn new(mock_address: String) -> Result<Self> {
         Self::with_timeout(mock_address, DEFAULT_REQUEST_TIMEOUT)
@@ -111,30 +127,43 @@ impl MockClient {
     pub async fn request_reply(&self, turn: TurnHandle) -> Result<ReplyResult> {
         let backend_session_id = turn.session_id().to_string();
         let tracked_turn = turn.clone();
-        let mock_address = self.mock_address.clone();
-        let working_dir = self.working_dir.clone();
-        let request_timeout = self.request_timeout;
-        let upstream_sessions = self.upstream_sessions.clone();
-        let session_lock = self.session_lock(&backend_session_id).await;
-        let _serial = session_lock.lock().await;
-
-        let result = tokio::task::spawn_blocking(move || {
-            drive_acp_roundtrip_blocking(
-                mock_address,
-                working_dir,
-                turn,
-                request_timeout,
-                upstream_sessions,
+        let result = self
+            .run_locked_operation(
+                backend_session_id.clone(),
+                move |mock_address, working_dir, request_timeout, upstream_sessions| {
+                    drive_acp_roundtrip_blocking(
+                        mock_address,
+                        working_dir,
+                        turn,
+                        request_timeout,
+                        upstream_sessions,
+                    )
+                },
             )
-        })
-        .await
-        .context(JoinTaskSnafu);
+            .await;
 
         if !tracked_turn.is_active().await {
             MockClient::forget_session(self, &backend_session_id).await;
         }
 
-        result?
+        result
+    }
+
+    pub async fn prime_session_hint(&self, backend_session_id: &str) -> Result<Option<String>> {
+        let backend_session_id = backend_session_id.to_string();
+        self.run_locked_operation(
+            backend_session_id.clone(),
+            move |mock_address, working_dir, request_timeout, upstream_sessions| {
+                drive_acp_session_prime_blocking(
+                    mock_address,
+                    working_dir,
+                    backend_session_id,
+                    request_timeout,
+                    upstream_sessions,
+                )
+            },
+        )
+        .await
     }
 
     async fn forget_session(&self, backend_session_id: &str) {
@@ -145,12 +174,40 @@ impl MockClient {
         self.session_locks.lock().await.remove(backend_session_id);
     }
 
-    async fn session_lock(&self, backend_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    async fn session_lock(&self, backend_session_id: &str) -> SessionLock {
         let mut session_locks = self.session_locks.lock().await;
         session_locks
             .entry(backend_session_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    async fn run_locked_operation<T, F>(
+        &self,
+        backend_session_id: String,
+        operation: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(String, PathBuf, Duration, UpstreamSessions) -> Result<T> + Send + 'static,
+    {
+        let mock_address = self.mock_address.clone();
+        let working_dir = self.working_dir.clone();
+        let request_timeout = self.request_timeout;
+        let upstream_sessions = self.upstream_sessions.clone();
+        let session_lock = self.session_lock(&backend_session_id).await;
+        let _serial = session_lock.lock().await;
+
+        tokio::task::spawn_blocking(move || {
+            operation(
+                mock_address,
+                working_dir,
+                request_timeout,
+                upstream_sessions,
+            )
+        })
+        .await
+        .context(JoinTaskSnafu)?
     }
 
     #[cfg(test)]
@@ -168,6 +225,10 @@ impl ReplyProvider for MockClient {
         Box::pin(MockClient::request_reply(self, turn))
     }
 
+    fn prime_session<'a>(&'a self, session_id: &'a str) -> PrimeSessionFuture<'a> {
+        Box::pin(MockClient::prime_session_hint(self, session_id))
+    }
+
     fn forget_session(&self, session_id: &str) {
         let client = self.clone();
         let session_id = session_id.to_string();
@@ -181,25 +242,58 @@ async fn drive_acp_roundtrip(
     mock_address: String,
     working_dir: PathBuf,
     turn: TurnHandle,
-    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    upstream_sessions: UpstreamSessions,
 ) -> Result<ReplyResult> {
     let backend_session_id = turn.session_id().to_string();
-    let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
-    let stream = connect_stream(&mock_address).await?;
     let client = BackendAcpClient::new(turn.clone());
-    let local_set = tokio::task::LocalSet::new();
 
-    local_set
-        .run_until(run_roundtrip_on_connection(
-            stream,
-            working_dir,
-            turn,
-            backend_session_id,
-            &mut cancel_rx,
-            client,
-            upstream_sessions,
-        ))
-        .await
+    drive_acp_operation(
+        mock_address,
+        working_dir,
+        backend_session_id,
+        upstream_sessions,
+        client,
+        move |stream, working_dir, backend_session_id, client, upstream_sessions| async move {
+            let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
+            run_roundtrip_on_connection(
+                stream,
+                working_dir,
+                turn,
+                backend_session_id,
+                &mut cancel_rx,
+                client,
+                upstream_sessions,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn drive_acp_session_prime(
+    mock_address: String,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    upstream_sessions: UpstreamSessions,
+) -> Result<Option<String>> {
+    drive_acp_operation(
+        mock_address,
+        working_dir,
+        backend_session_id,
+        upstream_sessions,
+        BackendAcpClient::without_turn(),
+        move |stream, working_dir, backend_session_id, client, upstream_sessions| async move {
+            prime_session_on_connection(
+                stream,
+                working_dir,
+                backend_session_id,
+                client,
+                upstream_sessions,
+            )
+            .await
+        },
+    )
+    .await
 }
 
 async fn connect_stream(mock_address: &str) -> Result<TcpStream> {
@@ -217,29 +311,50 @@ async fn run_roundtrip_on_connection(
     backend_session_id: String,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     client: BackendAcpClient,
-    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    upstream_sessions: UpstreamSessions,
 ) -> Result<ReplyResult> {
-    let (reader, writer) = stream.into_split();
-    let (conn, handle_io) = acp::ClientSideConnection::new(
-        client.clone(),
-        writer.compat_write(),
-        reader.compat(),
-        |future| {
-            tokio::task::spawn_local(future);
-        },
-    );
-    let mut io_task = Some(tokio::task::spawn_local(handle_io));
-    initialize_connection(&conn).await?;
-    let session_id =
-        load_or_create_session(&conn, &working_dir, &backend_session_id, &upstream_sessions)
-            .await?;
-    if let Some(reply) = cancelled_before_prompt_reply(cancel_rx, &mut io_task).await {
+    let mut prepared = prepare_connection(
+        stream,
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+    )
+    .await?;
+    if let Some(reply) = cancelled_before_prompt_reply(cancel_rx, &mut prepared.io_task).await {
         return Ok(reply);
     }
 
-    let reply = prompt_session(&conn, &client, cancel_rx, session_id, turn.prompt_text()).await;
-    stop_io_task(io_task).await;
+    let reply = prompt_session(
+        &prepared.conn,
+        &prepared.client,
+        cancel_rx,
+        prepared.session_id.clone(),
+        turn.prompt_text(),
+    )
+    .await;
+    stop_io_task(prepared.io_task).await;
     reply
+}
+
+async fn prime_session_on_connection(
+    stream: TcpStream,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    client: BackendAcpClient,
+    upstream_sessions: UpstreamSessions,
+) -> Result<Option<String>> {
+    let prepared = prepare_connection(
+        stream,
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+    )
+    .await?;
+    let reply = prepared.client.take_reply_text();
+    stop_io_task(prepared.io_task).await;
+    Ok((!reply.is_empty()).then_some(reply))
 }
 
 async fn prompt_session(
@@ -327,23 +442,74 @@ fn drive_acp_roundtrip_blocking(
     working_dir: PathBuf,
     turn: TurnHandle,
     request_timeout: Duration,
-    upstream_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    upstream_sessions: UpstreamSessions,
 ) -> Result<ReplyResult> {
+    drive_acp_operation_blocking(
+        request_timeout,
+        drive_acp_roundtrip(mock_address, working_dir, turn, upstream_sessions),
+    )
+}
+
+fn drive_acp_session_prime_blocking(
+    mock_address: String,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    request_timeout: Duration,
+    upstream_sessions: UpstreamSessions,
+) -> Result<Option<String>> {
+    drive_acp_operation_blocking(
+        request_timeout,
+        drive_acp_session_prime(
+            mock_address,
+            working_dir,
+            backend_session_id,
+            upstream_sessions,
+        ),
+    )
+}
+
+fn drive_acp_operation_blocking<T, Fut>(request_timeout: Duration, operation: Fut) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context(BuildRuntimeSnafu)?;
 
     runtime.block_on(async move {
-        tokio::time::timeout(
-            request_timeout,
-            drive_acp_roundtrip(mock_address, working_dir, turn, upstream_sessions),
-        )
-        .await
-        .map_err(|_| MockClientError::TimedOut {
-            timeout: request_timeout,
-        })?
+        tokio::time::timeout(request_timeout, operation)
+            .await
+            .map_err(|_| MockClientError::TimedOut {
+                timeout: request_timeout,
+            })?
     })
+}
+
+async fn drive_acp_operation<T, F, Fut>(
+    mock_address: String,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    upstream_sessions: UpstreamSessions,
+    client: BackendAcpClient,
+    operation: F,
+) -> Result<T>
+where
+    F: FnOnce(TcpStream, PathBuf, String, BackendAcpClient, UpstreamSessions) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let stream = connect_stream(&mock_address).await?;
+    let local_set = tokio::task::LocalSet::new();
+
+    local_set
+        .run_until(operation(
+            stream,
+            working_dir,
+            backend_session_id,
+            client,
+            upstream_sessions,
+        ))
+        .await
 }
 
 async fn initialize_connection(conn: &acp::ClientSideConnection) -> Result<()> {
@@ -358,6 +524,36 @@ async fn initialize_connection(conn: &acp::ClientSideConnection) -> Result<()> {
     Ok(())
 }
 
+async fn prepare_connection(
+    stream: TcpStream,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    client: BackendAcpClient,
+    upstream_sessions: UpstreamSessions,
+) -> Result<PreparedConnection> {
+    let (reader, writer) = stream.into_split();
+    let (conn, handle_io) = acp::ClientSideConnection::new(
+        client.clone(),
+        writer.compat_write(),
+        reader.compat(),
+        |future| {
+            tokio::task::spawn_local(future);
+        },
+    );
+    let io_task = Some(tokio::task::spawn_local(handle_io));
+    initialize_connection(&conn).await?;
+    let session_id =
+        load_or_create_session(&conn, &working_dir, &backend_session_id, &upstream_sessions)
+            .await?;
+
+    Ok(PreparedConnection {
+        conn,
+        client,
+        session_id,
+        io_task,
+    })
+}
+
 fn session_runtime_error(source: crate::sessions::SessionStoreError) -> MockClientError {
     MockClientError::TurnRuntime {
         message: source.message().to_string(),
@@ -368,7 +564,7 @@ async fn load_or_create_session(
     conn: &acp::ClientSideConnection,
     working_dir: &Path,
     backend_session_id: &str,
-    upstream_sessions: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    upstream_sessions: &UpstreamSessions,
 ) -> Result<String> {
     let cached_session_id = upstream_sessions
         .lock()

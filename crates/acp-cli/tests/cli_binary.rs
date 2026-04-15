@@ -333,6 +333,7 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
     let state = AppState::new(ServerConfig {
         session_cap: 8,
         acp_server: mock_address,
+        startup_hints: false,
     })?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

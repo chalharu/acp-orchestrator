@@ -148,6 +148,42 @@ fn chat_app_formats_user_messages_and_connection_details() {
 }
 
 #[test]
+fn chat_app_recalls_submitted_inputs_and_restores_drafts() {
+    let mut app = ChatApp::new("s_test", "http://127.0.0.1:8080", false, &[], &[], vec![]);
+    app.record_submitted_input("first");
+    app.record_submitted_input("second");
+    for value in "draft".chars() {
+        app.insert_char(value);
+    }
+
+    app.recall_previous_input();
+    assert_eq!(app.input(), "second");
+    app.recall_previous_input();
+    assert_eq!(app.input(), "first");
+    app.recall_next_input();
+    assert_eq!(app.input(), "second");
+    app.recall_next_input();
+    assert_eq!(app.input(), "draft");
+}
+
+#[test]
+fn chat_app_keeps_follow_mode_when_the_transcript_fits_the_viewport() {
+    let mut app = ChatApp::new(
+        "s_test",
+        "http://127.0.0.1:8080",
+        false,
+        &[assistant_message("m_1", "hello")],
+        &[],
+        vec![],
+    );
+
+    app.scroll_up(10, 80, 1);
+
+    assert!(app.follow_transcript());
+    assert_eq!(app.transcript_start(10, 80), 0);
+}
+
+#[test]
 fn chat_app_handles_noop_paths_and_duplicate_permission_events() {
     let mut app = ChatApp::new("s_test", "http://127.0.0.1:8080", false, &[], &[], vec![]);
 

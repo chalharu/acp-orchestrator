@@ -89,6 +89,47 @@ async fn mock_agent_supports_control_plane_requests() {
     assert_eq!(mode, acp::SetSessionModeResponse::default());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn mock_agent_emits_startup_hints_when_enabled() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let state = Rc::new(MockServerState::new(MockConfig {
+                response_delay: Duration::from_millis(120),
+                startup_hints: true,
+            }));
+            let (session_update_tx, mut session_update_rx) = mpsc::unbounded_channel();
+            let (permission_request_tx, _permission_request_rx) = mpsc::unbounded_channel();
+            let agent = MockAgent::new(state, session_update_tx, permission_request_tx);
+
+            let session_task = tokio::task::spawn_local(async move {
+                agent
+                    .new_session(acp::NewSessionRequest::new("/tmp"))
+                    .await
+                    .expect("new sessions should succeed")
+            });
+            let (notification, ack_tx) = session_update_rx
+                .recv()
+                .await
+                .expect("startup hints should be queued");
+
+            match notification.update {
+                acp::SessionUpdate::AgentMessageChunk(chunk) => match chunk.content {
+                    acp::ContentBlock::Text(text) => {
+                        assert!(text.text.contains(MANUAL_PERMISSION_TRIGGER));
+                        assert!(text.text.contains(MANUAL_CANCEL_TRIGGER));
+                    }
+                    other => panic!("unexpected startup hint content: {other:?}"),
+                },
+                other => panic!("unexpected startup hint update: {other:?}"),
+            }
+            ack_tx
+                .send(())
+                .expect("startup hint acknowledgements should succeed");
+            let _ = session_task.await.expect("startup hint task should join");
+        })
+        .await;
+}
+
 #[test]
 fn finalizing_permission_requests_acknowledges_successful_notifications() {
     let (ack_tx, ack_rx) = oneshot::channel();
@@ -216,6 +257,7 @@ fn default_config_uses_the_expected_delay() {
         MockConfig::default().response_delay,
         Duration::from_millis(120)
     );
+    assert!(!MockConfig::default().startup_hints);
 }
 
 #[test]

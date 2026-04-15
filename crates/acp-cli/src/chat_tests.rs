@@ -114,12 +114,12 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
 async fn load_chat_session_loads_history_for_resumed_sessions() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(
-            &serde_json::to_vec(&resumed_history_response())
-                .expect("history response should serialize"),
-        ),
-        json_response(
             &serde_json::to_vec(&resumed_session_response())
                 .expect("session response should serialize"),
+        ),
+        json_response(
+            &serde_json::to_vec(&resumed_history_response())
+                .expect("history response should serialize"),
         ),
     ])
     .await;
@@ -135,6 +135,40 @@ async fn load_chat_session_loads_history_for_resumed_sessions() {
         chat_session.session.pending_permissions[0].request_id,
         "req_1"
     );
+}
+
+#[tokio::test]
+async fn load_chat_session_prunes_stale_recent_sessions_when_sessions_are_missing() {
+    let recent_path = unique_temp_json_path("acp-cli", "stale-resume");
+    with_recent_sessions_path(&recent_path, async {
+        let server_url = spawn_ordered_http_server(vec![json_error_response(
+            "404 Not Found",
+            "session not found",
+        )])
+        .await;
+        record_recent_session(&RecentSessionEntry::new(
+            "s_resume",
+            &server_url,
+            Utc::now(),
+        ))
+        .expect("recent session should record");
+        let client = Client::builder().build().expect("client should build");
+
+        let error = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
+            .await
+            .expect_err("missing sessions should fail");
+
+        assert!(matches!(
+            error,
+            CliError::HttpStatus { status, .. } if status == StatusCode::NOT_FOUND
+        ));
+        assert!(
+            !fs::read_to_string(&recent_path)
+                .expect("recent sessions should be readable")
+                .contains("s_resume")
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -185,17 +219,70 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
     .await;
 }
 
+#[tokio::test]
+async fn filter_recent_sessions_for_current_backend_only_keeps_current_resumable_entries() {
+    let recent_path = unique_temp_json_path("acp-cli", "filter-session-list");
+    with_recent_sessions_path(&recent_path, async {
+        let server_url = spawn_ordered_http_server(vec![json_response(
+            &serde_json::to_vec(&resumed_session_response())
+                .expect("session response should serialize"),
+        )])
+        .await;
+        record_recent_session(&RecentSessionEntry::new(
+            "s_resume",
+            &server_url,
+            Utc::now(),
+        ))
+        .expect("current recent session should record");
+        record_recent_session(&RecentSessionEntry::new(
+            "s_other",
+            "http://127.0.0.1:9999",
+            Utc::now(),
+        ))
+        .expect("other backend session should record");
+
+        unsafe {
+            std::env::set_var("ACP_SERVER_URL", &server_url);
+            std::env::set_var("ACP_AUTH_TOKEN", "developer");
+        }
+
+        let filtered = filter_recent_sessions_for_current_backend(
+            load_recent_sessions().expect("recent sessions should load"),
+        )
+        .await
+        .expect("current backend filtering should succeed");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "s_resume");
+    })
+    .await;
+}
+
 async fn with_recent_sessions_path<Fut>(path: &std::path::Path, action: Fut)
 where
     Fut: std::future::Future<Output = ()>,
 {
     let _guard = env_lock().lock().await;
-    let previous = std::env::var_os("ACP_RECENT_SESSIONS_PATH");
+    let previous_recent_path = std::env::var_os("ACP_RECENT_SESSIONS_PATH");
+    let previous_server_url = std::env::var_os("ACP_SERVER_URL");
+    let previous_auth_token = std::env::var_os("ACP_AUTH_TOKEN");
     unsafe { std::env::set_var("ACP_RECENT_SESSIONS_PATH", path) };
+    unsafe {
+        std::env::remove_var("ACP_SERVER_URL");
+        std::env::remove_var("ACP_AUTH_TOKEN");
+    }
     action.await;
-    match previous {
+    match previous_recent_path {
         Some(value) => unsafe { std::env::set_var("ACP_RECENT_SESSIONS_PATH", value) },
         None => unsafe { std::env::remove_var("ACP_RECENT_SESSIONS_PATH") },
+    }
+    match previous_server_url {
+        Some(value) => unsafe { std::env::set_var("ACP_SERVER_URL", value) },
+        None => unsafe { std::env::remove_var("ACP_SERVER_URL") },
+    }
+    match previous_auth_token {
+        Some(value) => unsafe { std::env::set_var("ACP_AUTH_TOKEN", value) },
+        None => unsafe { std::env::remove_var("ACP_AUTH_TOKEN") },
     }
 }
 
@@ -223,19 +310,24 @@ async fn spawn_ordered_http_server(responses: Vec<Vec<u8>>) -> String {
 }
 
 fn json_response(payload: &[u8]) -> Vec<u8> {
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        payload.len()
-    )
-    .into_bytes()
-    .into_iter()
-    .chain(payload.iter().copied())
-    .collect()
+    raw_http_response("200 OK", "application/json", payload)
+}
+
+fn json_error_response(status: &str, message: &str) -> Vec<u8> {
+    let payload = serde_json::to_vec(&ErrorResponse {
+        error: message.to_string(),
+    })
+    .expect("error payload should serialize");
+    raw_http_response(status, "application/json", &payload)
 }
 
 fn sse_response(payload: &[u8]) -> Vec<u8> {
+    raw_http_response("200 OK", "text/event-stream", payload)
+}
+
+fn raw_http_response(status: &str, content_type: &str, payload: &[u8]) -> Vec<u8> {
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     )
     .into_bytes()

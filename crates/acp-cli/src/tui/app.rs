@@ -78,9 +78,12 @@ pub(super) struct ChatApp {
     pending_permissions: Vec<PermissionRequest>,
     status_entries: Vec<String>,
     command_catalog: Vec<CompletionCandidate>,
+    input_history: Vec<String>,
     input: String,
     cursor: usize,
     completion_menu: Option<CompletionMenu>,
+    history_index: Option<usize>,
+    history_draft: Option<String>,
     follow_transcript: bool,
     transcript_scroll: usize,
     should_quit: bool,
@@ -103,9 +106,12 @@ impl ChatApp {
             pending_permissions: pending_permissions.to_vec(),
             status_entries: Vec::new(),
             command_catalog,
+            input_history: Vec::new(),
             input: String::new(),
             cursor: 0,
             completion_menu: None,
+            history_index: None,
+            history_draft: None,
             follow_transcript: true,
             transcript_scroll: 0,
             should_quit: false,
@@ -191,6 +197,7 @@ impl ChatApp {
     }
 
     pub(super) fn insert_char(&mut self, value: char) {
+        self.reset_history_navigation();
         self.input.insert(self.cursor, value);
         self.cursor += value.len_utf8();
         self.clear_completion_menu();
@@ -205,6 +212,7 @@ impl ChatApp {
             .last()
             .map(|(index, _)| index)
             .unwrap_or(0);
+        self.reset_history_navigation();
         self.input.drain(previous_index..self.cursor);
         self.cursor = previous_index;
         self.clear_completion_menu();
@@ -234,9 +242,8 @@ impl ChatApp {
     }
 
     pub(super) fn clear_input(&mut self) {
-        self.input.clear();
-        self.cursor = 0;
-        self.clear_completion_menu();
+        self.reset_history_navigation();
+        self.replace_input(String::new());
     }
 
     pub(super) fn clear_completion_menu(&mut self) {
@@ -269,10 +276,59 @@ impl ChatApp {
             return;
         };
 
+        self.reset_history_navigation();
         let start = completion_start(&self.input[..self.cursor]);
         self.input.replace_range(start..self.cursor, &insert_text);
         self.cursor = start + insert_text.len();
         self.clear_completion_menu();
+    }
+
+    pub(super) fn record_submitted_input(&mut self, value: &str) {
+        let value = value.trim();
+        if value.is_empty() {
+            return;
+        }
+        if self
+            .input_history
+            .last()
+            .is_none_or(|existing| existing != value)
+        {
+            self.input_history.push(value.to_string());
+        }
+        self.reset_history_navigation();
+    }
+
+    pub(super) fn recall_previous_input(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+
+        self.history_index = Some(match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = Some(self.input.clone());
+                self.input_history.len().saturating_sub(1)
+            }
+        });
+        if let Some(index) = self.history_index {
+            self.replace_input(self.input_history[index].clone());
+        }
+    }
+
+    pub(super) fn recall_next_input(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 < self.input_history.len() {
+            let next = index + 1;
+            self.history_index = Some(next);
+            self.replace_input(self.input_history[next].clone());
+            return;
+        }
+
+        self.history_index = None;
+        let draft = self.history_draft.take().unwrap_or_default();
+        self.replace_input(draft);
     }
 
     pub(super) fn request_quit(&mut self) {
@@ -289,9 +345,15 @@ impl ChatApp {
         viewport_width: usize,
         amount: usize,
     ) {
+        let max_start = self.max_transcript_start(viewport_height, viewport_width);
+        if max_start == 0 {
+            self.follow_transcript = true;
+            self.transcript_scroll = 0;
+            return;
+        }
         if self.follow_transcript {
             self.follow_transcript = false;
-            self.transcript_scroll = self.max_transcript_start(viewport_height, viewport_width);
+            self.transcript_scroll = max_start;
         }
         self.transcript_scroll = self.transcript_scroll.saturating_sub(amount);
     }
@@ -302,10 +364,15 @@ impl ChatApp {
         viewport_width: usize,
         amount: usize,
     ) {
+        let max_start = self.max_transcript_start(viewport_height, viewport_width);
+        if max_start == 0 {
+            self.follow_transcript = true;
+            self.transcript_scroll = 0;
+            return;
+        }
         if self.follow_transcript {
             return;
         }
-        let max_start = self.max_transcript_start(viewport_height, viewport_width);
         self.transcript_scroll = self.transcript_scroll.saturating_add(amount).min(max_start);
         if self.transcript_scroll >= max_start {
             self.follow_transcript = true;
@@ -370,6 +437,17 @@ impl ChatApp {
     fn append_message(&mut self, message: &ConversationMessage) {
         self.transcript
             .extend(formatted_message_lines(message.role.clone(), &message.text));
+    }
+
+    fn replace_input(&mut self, value: String) {
+        self.input = value;
+        self.cursor = self.input.len();
+        self.clear_completion_menu();
+    }
+
+    fn reset_history_navigation(&mut self) {
+        self.history_index = None;
+        self.history_draft = None;
     }
 
     fn max_transcript_start(&self, viewport_height: usize, viewport_width: usize) -> usize {

@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::app::ChatApp;
 
@@ -83,7 +84,8 @@ fn render_session_pane(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
         Line::styled("keys", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("tab: slash completion"),
         Line::from("enter: submit/apply"),
-        Line::from("pgup/pgdn: scroll"),
+        Line::from("up/down: history recall"),
+        Line::from("pgup/pgdn: transcript scroll"),
         Line::from("end: follow latest"),
         Line::from(""),
         Line::styled("commands", Style::default().add_modifier(Modifier::BOLD)),
@@ -143,44 +145,56 @@ fn render_transcript_pane(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
 }
 
 fn render_tool_status_pane(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
-    let mut lines = vec![Line::styled(
-        "pending permissions",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    if app.pending_permissions().is_empty() {
-        lines.push(Line::from("none"));
-    } else {
-        lines.extend(
-            app.pending_permissions()
-                .iter()
-                .map(|request| Line::from(format!("{} {}", request.request_id, request.summary))),
-        );
-    }
-    lines.extend([
-        Line::from(""),
-        Line::styled(
-            "recent status",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    if app.status_entries().is_empty() {
-        lines.push(Line::from("none"));
-    } else {
-        lines.extend(
-            app.status_entries()
-                .iter()
-                .map(|message| Line::from(format!("[status] {message}"))),
-        );
+    let block = Block::default()
+        .title("Tool / Status")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
     }
 
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .title("Tool / Status")
-                .borders(Borders::ALL),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    let permission_lines = if app.pending_permissions().is_empty() {
+        vec!["none".to_string()]
+    } else {
+        app.pending_permissions()
+            .iter()
+            .map(|request| format!("{} {}", request.request_id, request.summary))
+            .collect()
+    };
+    let status_lines = if app.status_entries().is_empty() {
+        vec!["none".to_string()]
+    } else {
+        app.status_entries()
+            .iter()
+            .map(|message| format!("[status] {message}"))
+            .collect()
+    };
+
+    let status_min_height = inner.height.min(4);
+    let permission_height = inner
+        .height
+        .saturating_sub(status_min_height)
+        .min(section_row_count(
+            "pending permissions",
+            &permission_lines,
+            inner.width as usize,
+        ) as u16);
+    let status_height = inner.height.saturating_sub(permission_height);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(permission_height),
+            Constraint::Min(status_height),
+        ])
+        .split(inner);
+
+    if permission_height > 0 {
+        render_tail_section(frame, sections[0], "pending permissions", &permission_lines);
+    }
+    if status_height > 0 {
+        render_tail_section(frame, sections[1], "recent status", &status_lines);
+    }
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
@@ -225,4 +239,43 @@ fn render_completion_menu(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     );
     frame.render_widget(Clear, area);
     frame.render_widget(list, area);
+}
+
+fn render_tail_section(frame: &mut Frame<'_>, area: Rect, title: &str, body: &[String]) {
+    let lines = section_lines(title, body);
+    let paragraph = Paragraph::new(lines.iter().cloned().map(Line::from).collect::<Vec<_>>())
+        .scroll((
+            tail_scroll(&lines, area.width as usize, area.height as usize),
+            0,
+        ))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn section_lines(title: &str, body: &[String]) -> Vec<String> {
+    std::iter::once(title.to_string())
+        .chain(body.iter().cloned())
+        .collect()
+}
+
+fn section_row_count(title: &str, body: &[String], width: usize) -> usize {
+    let lines = section_lines(title, body);
+    wrapped_rows(&lines, width)
+}
+
+fn tail_scroll(lines: &[String], width: usize, height: usize) -> u16 {
+    wrapped_rows(lines, width)
+        .saturating_sub(height.max(1))
+        .min(u16::MAX as usize) as u16
+}
+
+fn wrapped_rows(lines: &[String], width: usize) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            UnicodeWidthStr::width(line.as_str())
+                .max(1)
+                .div_ceil(width.max(1))
+        })
+        .sum()
 }

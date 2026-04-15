@@ -60,7 +60,6 @@ async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
         .expect("explicit ACP_SERVER_URL should skip launcher-managed services");
 
     assert!(stack.backend_url().is_none());
-    assert!(!stack.bundled_mock());
     // SAFETY: the test holds a process-wide mutex while mutating the environment.
     unsafe {
         std::env::remove_var("ACP_SERVER_URL");

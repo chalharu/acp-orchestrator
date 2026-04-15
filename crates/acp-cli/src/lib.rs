@@ -33,6 +33,7 @@ use recent_sessions::{
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
+#[derive(Debug)]
 pub(crate) struct ChatSession {
     session: SessionSnapshot,
     resume_history: Vec<ConversationMessage>,
@@ -281,17 +282,38 @@ async fn load_chat_session(
         .session_id
         .as_deref()
         .expect("session id checked before chat execution");
-    // Load the explicit history endpoint for transcript rendering, then fetch
-    // the later session snapshot so pending permissions and SSE dedupe start
-    // from the latest known state.
-    let history = get_session_history(client, server_url, &args.auth_token, session_id).await?;
-    let session = get_session(client, server_url, &args.auth_token, session_id).await?;
+    let session = match get_session(client, server_url, &args.auth_token, session_id).await {
+        Ok(session) => session,
+        Err(error) => {
+            if is_session_not_found(&error) {
+                let _ = remove_recent_session(session_id);
+            }
+            return Err(error);
+        }
+    };
+    let resume_history =
+        match get_session_history(client, server_url, &args.auth_token, session_id).await {
+            Ok(history) => history.messages,
+            Err(error) if is_session_not_found(&error) => session.messages.clone(),
+            Err(error) => return Err(error),
+        };
 
     Ok(ChatSession {
         session,
-        resume_history: history.messages,
+        resume_history,
         resumed: true,
     })
+}
+
+fn is_session_not_found(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::HttpStatus {
+            status,
+            message,
+            ..
+        } if *status == StatusCode::NOT_FOUND && message == "session not found"
+    )
 }
 
 fn render_resume_history(chat_session: &ChatSession) -> Option<InitialSnapshotState> {
@@ -349,7 +371,8 @@ fn spawn_event_task(
 async fn run_session(args: SessionArgs) -> Result<()> {
     match args.command {
         SessionCommand::List => {
-            let entries = load_recent_sessions()?;
+            let entries =
+                filter_recent_sessions_for_current_backend(load_recent_sessions()?).await?;
             if entries.is_empty() {
                 println!("no recent sessions recorded");
                 return Ok(());
@@ -376,6 +399,33 @@ async fn run_session(args: SessionArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn filter_recent_sessions_for_current_backend(
+    entries: Vec<RecentSessionEntry>,
+) -> Result<Vec<RecentSessionEntry>> {
+    let Ok(server_url) = std::env::var("ACP_SERVER_URL") else {
+        return Ok(entries);
+    };
+    let auth_token = std::env::var("ACP_AUTH_TOKEN").unwrap_or_else(|_| "developer".to_string());
+    let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+    let mut filtered = Vec::new();
+
+    for entry in entries {
+        if entry.server_url != server_url {
+            continue;
+        }
+
+        match get_session(&client, &server_url, &auth_token, &entry.session_id).await {
+            Ok(_) => filtered.push(entry),
+            Err(error) if is_session_not_found(&error) => {
+                remove_recent_session(&entry.session_id)?;
+            }
+            Err(_) => filtered.push(entry),
+        }
+    }
+
+    Ok(filtered)
 }
 
 fn require_server_url(command: &'static str, server_url: Option<String>) -> Result<String> {

@@ -116,7 +116,7 @@ fn handle_navigation_key(
             if app.completion_menu().is_some() {
                 app.select_previous_completion();
             } else {
-                app.scroll_up(viewport_height, viewport_width, 1);
+                app.recall_previous_input();
             }
             true
         }
@@ -124,7 +124,7 @@ fn handle_navigation_key(
             if app.completion_menu().is_some() {
                 app.select_next_completion();
             } else {
-                app.scroll_down(viewport_height, viewport_width, 1);
+                app.recall_next_input();
             }
             true
         }
@@ -202,6 +202,7 @@ fn submit_current_input(context: &UiContext<'_>, app: &mut ChatApp) -> Result<()
     if line.is_empty() {
         return Ok(());
     }
+    app.record_submitted_input(&line);
 
     if line.starts_with('/') {
         let command = execute_repl_command(

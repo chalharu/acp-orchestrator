@@ -36,7 +36,6 @@ const STACK_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 pub(crate) struct LauncherStack {
     backend_url: Option<String>,
     auth_token: Option<String>,
-    bundled_mock: bool,
     ephemeral_children: Option<EphemeralChildren>,
 }
 
@@ -81,7 +80,6 @@ impl LauncherStack {
         Self {
             backend_url: None,
             auth_token: None,
-            bundled_mock: false,
             ephemeral_children: None,
         }
     }
@@ -90,7 +88,6 @@ impl LauncherStack {
         Self {
             backend_url: Some(backend_url),
             auth_token: Some(auth_token),
-            bundled_mock: true,
             ephemeral_children: None,
         }
     }
@@ -104,7 +101,6 @@ impl LauncherStack {
         Self {
             backend_url: Some(backend_url),
             auth_token: Some(auth_token),
-            bundled_mock: false,
             ephemeral_children: Some(EphemeralChildren { backend, mock }),
         }
     }
@@ -115,10 +111,6 @@ impl LauncherStack {
 
     pub(crate) fn auth_token(&self) -> Option<&str> {
         self.auth_token.as_deref()
-    }
-
-    pub(crate) fn bundled_mock(&self) -> bool {
-        self.bundled_mock
     }
 
     pub(crate) async fn shutdown(&mut self) -> Result<()> {
@@ -229,7 +221,7 @@ async fn spawn_ephemeral_stack(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(acp_server),
+        backend_role_args(acp_server, false),
         &[],
         true,
     )
@@ -439,7 +431,7 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "acp mock",
         "mock",
-        mock_role_args(),
+        mock_role_args(true),
         &[],
         false,
     )
@@ -449,7 +441,7 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(OsString::from(&mock_address)),
+        backend_role_args(OsString::from(&mock_address), true),
         &[],
         false,
     )
@@ -490,19 +482,25 @@ async fn persist_launcher_state_or_shutdown(
     Ok(())
 }
 
-fn backend_role_args(acp_server: OsString) -> Vec<OsString> {
+fn backend_role_args(acp_server: OsString, startup_hints: bool) -> Vec<OsString> {
     let mut args = vec![
         "--port".into(),
         "0".into(),
         "--acp-server".into(),
         acp_server,
     ];
+    if startup_hints {
+        args.push("--startup-hints".into());
+    }
     append_stack_exit_after_ms(&mut args);
     args
 }
 
-fn mock_role_args() -> Vec<OsString> {
+fn mock_role_args(startup_hints: bool) -> Vec<OsString> {
     let mut args = vec!["--port".into(), "0".into()];
+    if startup_hints {
+        args.push("--startup-hints".into());
+    }
     append_stack_exit_after_ms(&mut args);
     args
 }

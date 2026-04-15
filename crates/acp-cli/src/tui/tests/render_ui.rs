@@ -85,3 +85,16 @@ fn render_draws_manual_mode_with_empty_recent_status() {
     assert!(rendered.contains("recent status"));
     assert!(rendered.contains("none"));
 }
+
+#[test]
+fn render_tool_status_pane_keeps_the_latest_status_entries_visible() {
+    let mut app = ChatApp::new("s_test", "http://127.0.0.1:8080", false, &[], &[], vec![]);
+    app.clear_status_entries();
+    for index in 0..40 {
+        app.push_status(format!("status-{index:02}"));
+    }
+
+    let rendered = rendered_screen(&app);
+    assert!(rendered.contains("status-39"));
+    assert!(!rendered.contains("status-08"));
+}

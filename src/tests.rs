@@ -116,24 +116,10 @@ fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
 }
 
 #[test]
-fn mock_verification_hints_only_show_for_bundled_mock_chat() {
-    assert!(is_bundled_mock_chat(
-        &[OsString::from("chat"), OsString::from("--new")],
-        true,
-    ));
-    assert!(!is_bundled_mock_chat(
-        &[OsString::from("session"), OsString::from("list")],
-        true,
-    ));
-    assert!(!is_bundled_mock_chat(
-        &[OsString::from("chat"), OsString::from("--new")],
-        false,
-    ));
-}
-
-#[test]
-fn command_needs_backend_skips_session_list_only() {
-    assert!(!command_needs_backend(&[
+fn command_needs_backend_skips_only_top_level_help_and_version() {
+    assert!(!command_needs_backend(&[OsString::from("--help")]));
+    assert!(!command_needs_backend(&[OsString::from("--version")]));
+    assert!(command_needs_backend(&[
         OsString::from("session"),
         OsString::from("list"),
     ]));

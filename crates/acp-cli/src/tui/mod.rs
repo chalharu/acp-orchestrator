@@ -2,7 +2,7 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use acp_contracts::CompletionCandidate;
+use acp_contracts::{CompletionCandidate, PermissionRequest};
 use reqwest::Client;
 use snafu::ResultExt;
 use tokio::{runtime::Handle, sync::mpsc};
@@ -33,6 +33,7 @@ static TERMINAL_UI_RUNNER_OVERRIDE: OnceLock<Mutex<Option<TerminalUiRunner>>> = 
 enum TuiEvent {
     Stream(StreamUpdate),
     StreamEnded(String),
+    PendingPermissionsRefreshed(std::result::Result<Vec<PermissionRequest>, String>),
 }
 
 struct StartupState {
@@ -72,12 +73,14 @@ where
             &chat_session.session.pending_permissions,
         )
     });
-    let (stream_task, event_rx) = spawn_stream_task(
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let stream_task = spawn_stream_task(
         client.clone(),
         server_url.clone(),
         auth_token.clone(),
         &chat_session,
         initial_snapshot_state,
+        event_tx.clone(),
     );
     let startup = prepare_startup_state(&client, &server_url, &auth_token, &chat_session).await;
 
@@ -92,7 +95,10 @@ where
                 chat_session,
                 startup.command_catalog,
                 startup.startup_statuses,
-                event_rx,
+                runtime::UiEventChannel {
+                    tx: event_tx,
+                    rx: event_rx,
+                },
             ),
         )
     })
@@ -176,16 +182,13 @@ fn spawn_stream_task(
     auth_token: String,
     chat_session: &ChatSession,
     initial_snapshot_state: Option<InitialSnapshotState>,
-) -> (
-    tokio::task::JoinHandle<()>,
-    mpsc::UnboundedReceiver<TuiEvent>,
-) {
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    event_tx: mpsc::UnboundedSender<TuiEvent>,
+) -> tokio::task::JoinHandle<()> {
     let events_url = format!(
         "{server_url}/api/v1/sessions/{}/events",
         chat_session.session.id
     );
-    let stream_task = tokio::spawn(async move {
+    tokio::spawn(async move {
         let result = stream_updates(
             client,
             events_url,
@@ -201,6 +204,5 @@ fn spawn_stream_task(
             |error| format!("event stream ended: {error}"),
         );
         let _ = event_tx.send(TuiEvent::StreamEnded(message));
-    });
-    (stream_task, event_rx)
+    })
 }

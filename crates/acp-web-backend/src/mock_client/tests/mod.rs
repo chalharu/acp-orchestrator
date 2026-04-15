@@ -23,6 +23,14 @@ mod helpers;
 mod request_reply;
 
 async fn spawn_mock_server(delay: Duration) -> (String, oneshot::Sender<()>) {
+    spawn_mock_server_with_config(MockConfig {
+        response_delay: delay,
+        ..MockConfig::default()
+    })
+    .await
+}
+
+async fn spawn_mock_server_with_config(config: MockConfig) -> (String, oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -31,15 +39,9 @@ async fn spawn_mock_server(delay: Duration) -> (String, oneshot::Sender<()>) {
         .expect("listener should expose its address");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    spawn_with_shutdown_task(
-        listener,
-        MockConfig {
-            response_delay: delay,
-        },
-        async move {
-            let _ = shutdown_rx.await;
-        },
-    );
+    spawn_with_shutdown_task(listener, config, async move {
+        let _ = shutdown_rx.await;
+    });
 
     wait_for_tcp_connect(&address.to_string(), 20, Duration::from_millis(10))
         .await

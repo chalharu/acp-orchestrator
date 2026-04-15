@@ -171,8 +171,15 @@ async fn prepare_startup_state_with_timeout_records_stalls() {
 async fn spawn_stream_task_forwards_updates_and_end_events() {
     let (url, server_task) = spawn_tui_server(None, false).await;
     let client = Client::builder().build().expect("client should build");
-    let (stream_task, mut event_rx) =
-        spawn_stream_task(client, url, "developer".to_string(), &chat_session(), None);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let stream_task = spawn_stream_task(
+        client,
+        url,
+        "developer".to_string(),
+        &chat_session(),
+        None,
+        event_tx,
+    );
 
     match event_rx.recv().await.expect("stream update should arrive") {
         TuiEvent::Stream(StreamUpdate::Status(message)) => assert_eq!(message, "working"),
@@ -195,8 +202,15 @@ async fn spawn_stream_task_reports_stream_errors() {
     ))
     .await;
     let client = Client::builder().build().expect("client should build");
-    let (_stream_task, mut event_rx) =
-        spawn_stream_task(client, url, "developer".to_string(), &chat_session(), None);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let _stream_task = spawn_stream_task(
+        client,
+        url,
+        "developer".to_string(),
+        &chat_session(),
+        None,
+        event_tx,
+    );
 
     match event_rx.recv().await.expect("stream end should arrive") {
         TuiEvent::StreamEnded(message) => {

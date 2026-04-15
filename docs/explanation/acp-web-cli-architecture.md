@@ -878,8 +878,8 @@ ACP 固有型に依存しません。
   - static command 定義と、`initialize` / `session/new` / `session/load` /
     `current_mode_update` で得た session metadata を統合し、UI 共通形式へ正規化する
 
-Application read model として `OwnedSessionListView`, `SessionSnapshotView`, `HistoryWindow`,
-`CompletionCandidate`, `ConnectionBadgeState` を組み立てます。
+Application read model として、`OwnedSessionListView` と `SessionSnapshotView` を組み立てます。
+あわせて `HistoryWindow`、`CompletionCandidate`、`ConnectionBadgeState` も返します。
 
 #### Infrastructure
 
@@ -923,8 +923,9 @@ Application read model として `OwnedSessionListView`, `SessionSnapshotView`, 
     sandbox 上で実装する
   - working directory、環境変数、resource limit、process group、timeout、output cap を管理する
 - `SessionStateRepository`
-  - session owner、session metadata、ACP sessionId、negotiated protocol/capabilities、TTL、
-    recent activity 順序、worker ひも付け、attach 数などの現在値を保存する single writer
+  - session owner、session metadata、ACP sessionId、negotiated protocol/capabilities を保存する
+    single writer
+  - TTL、recent activity 順序、worker ひも付け、attach 数などの現在値も同じ repository で管理する
   - recent activity は create / attach / prompt accept / permission resolve / cancel / close の
     成功時に更新し、history 読み出しや stream delta 受信だけでは更新しない
 - `EventStore`

@@ -291,23 +291,9 @@ async fn filter_recent_sessions_for_current_backend_only_keeps_current_resumable
             Utc::now(),
         ))
         .expect("current recent session should record");
-        record_recent_session(&RecentSessionEntry::new(
-            "s_other",
-            "http://127.0.0.1:9999",
-            Utc::now(),
-        ))
-        .expect("other backend session should record");
+        record_recent_session_now("s_other", "http://127.0.0.1:9999");
 
-        unsafe {
-            std::env::set_var("ACP_SERVER_URL", &server_url);
-            std::env::set_var("ACP_AUTH_TOKEN", "developer");
-        }
-
-        let filtered = filter_recent_sessions_for_current_backend(
-            load_recent_sessions().expect("recent sessions should load"),
-        )
-        .await
-        .expect("current backend filtering should succeed");
+        let filtered = filter_recent_sessions_for_current_backend_with_env(&server_url).await;
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].session_id, "s_resume");
@@ -324,19 +310,9 @@ async fn filter_recent_sessions_for_current_backend_prunes_stale_entries() {
             "session not found",
         )])
         .await;
-        record_recent_session(&RecentSessionEntry::new("s_stale", &server_url, Utc::now()))
-            .expect("stale recent session should record");
+        record_recent_session_now("s_stale", &server_url);
 
-        unsafe {
-            std::env::set_var("ACP_SERVER_URL", &server_url);
-            std::env::set_var("ACP_AUTH_TOKEN", "developer");
-        }
-
-        let filtered = filter_recent_sessions_for_current_backend(
-            load_recent_sessions().expect("recent sessions should load"),
-        )
-        .await
-        .expect("stale sessions should be filtered");
+        let filtered = filter_recent_sessions_for_current_backend_with_env(&server_url).await;
 
         assert!(filtered.is_empty());
         assert!(
@@ -357,23 +333,9 @@ async fn filter_recent_sessions_for_current_backend_keeps_entries_on_non_404_err
             "backend unavailable",
         )])
         .await;
-        record_recent_session(&RecentSessionEntry::new(
-            "s_degraded",
-            &server_url,
-            Utc::now(),
-        ))
-        .expect("degraded recent session should record");
+        record_recent_session_now("s_degraded", &server_url);
 
-        unsafe {
-            std::env::set_var("ACP_SERVER_URL", &server_url);
-            std::env::set_var("ACP_AUTH_TOKEN", "developer");
-        }
-
-        let filtered = filter_recent_sessions_for_current_backend(
-            load_recent_sessions().expect("recent sessions should load"),
-        )
-        .await
-        .expect("non-404 failures should keep the entry");
+        let filtered = filter_recent_sessions_for_current_backend_with_env(&server_url).await;
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].session_id, "s_degraded");
@@ -384,6 +346,26 @@ async fn filter_recent_sessions_for_current_backend_keeps_entries_on_non_404_err
         );
     })
     .await;
+}
+
+fn record_recent_session_now(session_id: &str, server_url: &str) {
+    record_recent_session(&RecentSessionEntry::new(session_id, server_url, Utc::now()))
+        .expect("recent session should record");
+}
+
+async fn filter_recent_sessions_for_current_backend_with_env(
+    server_url: &str,
+) -> Vec<RecentSessionEntry> {
+    unsafe {
+        std::env::set_var("ACP_SERVER_URL", server_url);
+        std::env::set_var("ACP_AUTH_TOKEN", "developer");
+    }
+
+    filter_recent_sessions_for_current_backend(
+        load_recent_sessions().expect("recent sessions should load"),
+    )
+    .await
+    .expect("current backend filtering should succeed")
 }
 
 async fn with_recent_sessions_path<Fut>(path: &std::path::Path, action: Fut)

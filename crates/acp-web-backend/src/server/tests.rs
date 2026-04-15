@@ -233,6 +233,44 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
 }
 
 #[tokio::test]
+async fn create_session_reports_rollback_failures() {
+    let store = Arc::new(SessionStore::new(1));
+    let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState {
+        store: store.clone(),
+        reply_provider: Arc::new(RollbackFailingStartupHintProvider {
+            store: store.clone(),
+            owner: "alice".to_string(),
+            forgotten_sessions: forgotten_sessions.clone(),
+        }),
+        startup_hints: true,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let error = create_session(State(state), headers)
+        .await
+        .expect_err("rollback failures should surface as internal errors");
+
+    assert!(matches!(
+        error,
+        AppError::Internal(message)
+            if message.contains("startup hint priming failed")
+                && message.contains("session rollback failed: session not found")
+    ));
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn closing_sessions_notifies_reply_provider_cleanup() {
     let store = Arc::new(SessionStore::new(4));
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -415,6 +453,44 @@ impl ReplyProvider for FailingStartupHintProvider {
         _session_id: &'a str,
     ) -> crate::mock_client::PrimeSessionFuture<'a> {
         Box::pin(async {
+            Err(MockClientError::TurnRuntime {
+                message: "startup hint priming failed".to_string(),
+            })
+        })
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        self.forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .push(session_id.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct RollbackFailingStartupHintProvider {
+    store: Arc<SessionStore>,
+    owner: String,
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+}
+
+impl ReplyProvider for RollbackFailingStartupHintProvider {
+    fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn prime_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> crate::mock_client::PrimeSessionFuture<'a> {
+        let store = self.store.clone();
+        let owner = self.owner.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            store
+                .discard_session(&owner, &session_id)
+                .await
+                .expect("the provisional session should exist before rollback");
             Err(MockClientError::TurnRuntime {
                 message: "startup hint priming failed".to_string(),
             })

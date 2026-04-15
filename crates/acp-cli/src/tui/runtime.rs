@@ -75,13 +75,6 @@ struct TerminalSetupGuard {
     alternate_screen_enabled: bool,
 }
 
-impl TerminalSetupGuard {
-    fn disarm(&mut self) {
-        self.raw_mode_enabled = false;
-        self.alternate_screen_enabled = false;
-    }
-}
-
 impl Drop for TerminalSetupGuard {
     fn drop(&mut self) {
         if self.raw_mode_enabled {
@@ -95,14 +88,14 @@ impl Drop for TerminalSetupGuard {
 }
 
 pub(super) fn run_terminal_ui(runtime_handle: Handle, state: UiRunState) -> Result<()> {
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, mut setup_guard) = setup_terminal()?;
     let result = event_loop(&mut terminal, runtime_handle, state);
-    let cleanup_result = restore_terminal(&mut terminal);
+    let cleanup_result = restore_terminal(&mut terminal, &mut setup_guard);
     cleanup_result?;
     result
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, TerminalSetupGuard)> {
     let mut guard = TerminalSetupGuard::default();
     enable_raw_mode().context(SetupTerminalUiSnafu)?;
     guard.raw_mode_enabled = true;
@@ -112,13 +105,21 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     guard.alternate_screen_enabled = true;
 
     let terminal = Terminal::new(CrosstermBackend::new(stdout)).context(SetupTerminalUiSnafu)?;
-    guard.disarm();
-    Ok(terminal)
+    Ok((terminal, guard))
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode().context(SetupTerminalUiSnafu)?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).context(SetupTerminalUiSnafu)?;
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    guard: &mut TerminalSetupGuard,
+) -> Result<()> {
+    if guard.raw_mode_enabled {
+        disable_raw_mode().context(SetupTerminalUiSnafu)?;
+        guard.raw_mode_enabled = false;
+    }
+    if guard.alternate_screen_enabled {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).context(SetupTerminalUiSnafu)?;
+        guard.alternate_screen_enabled = false;
+    }
     terminal.show_cursor().context(SetupTerminalUiSnafu)
 }
 

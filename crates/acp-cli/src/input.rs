@@ -1,5 +1,5 @@
 use std::{
-    io::{self, IsTerminal, Write},
+    io::{self, BufRead, IsTerminal, Write},
     time::Duration,
 };
 
@@ -96,31 +96,14 @@ fn interactive_repl(
         .context(BuildInteractiveEditorSnafu)?;
     editor.set_helper(Some(helper));
 
-    loop {
-        match editor.readline("> ") {
-            Ok(line) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let _ = editor.add_history_entry(trimmed);
-                if runtime_handle.block_on(execute_repl_line(
-                    &client,
-                    &base_url,
-                    &auth_token,
-                    &session_id,
-                    trimmed,
-                ))? {
-                    return Ok(());
-                }
-            }
-            Err(ReadlineError::Eof) => return Ok(()),
-            Err(ReadlineError::Interrupted) => {
-                println!("[status] interrupted input. Use `/quit` to leave the chat.");
-            }
-            Err(source) => return Err(crate::CliError::ReadInteractivePrompt { source }),
-        }
-    }
+    drive_editor_repl(
+        &mut editor,
+        &runtime_handle,
+        &client,
+        &base_url,
+        &auth_token,
+        &session_id,
+    )
 }
 
 async fn execute_repl_line(
@@ -144,22 +127,60 @@ async fn execute_repl_line(
 
 async fn read_prompt_line() -> Result<Option<String>> {
     tokio::task::spawn_blocking(|| -> Result<Option<String>> {
-        print!("> ");
-        io::stdout().flush().context(FlushPromptSnafu)?;
-
-        let mut buffer = String::new();
-        let bytes_read = io::stdin()
-            .read_line(&mut buffer)
-            .context(ReadPromptLineSnafu)?;
-
-        if bytes_read == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(buffer))
-        }
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut stdin = stdin.lock();
+        let mut stdout = stdout.lock();
+        read_prompt_line_from(&mut stdin, &mut stdout)
     })
     .await
     .context(JoinPromptReaderSnafu)?
+}
+
+trait PromptEditor {
+    fn readline(&mut self, prompt: &str) -> std::result::Result<String, ReadlineError>;
+    fn add_history_entry(&mut self, line: &str);
+}
+
+impl PromptEditor for Editor<SlashCompletionHelper, DefaultHistory> {
+    fn readline(&mut self, prompt: &str) -> std::result::Result<String, ReadlineError> {
+        Editor::readline(self, prompt)
+    }
+
+    fn add_history_entry(&mut self, line: &str) {
+        let _ = Editor::add_history_entry(self, line);
+    }
+}
+
+fn drive_editor_repl<E: PromptEditor>(
+    editor: &mut E,
+    runtime_handle: &Handle,
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+) -> Result<()> {
+    loop {
+        match editor.readline("> ") {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                editor.add_history_entry(trimmed);
+                if runtime_handle.block_on(execute_repl_line(
+                    client, base_url, auth_token, session_id, trimmed,
+                ))? {
+                    return Ok(());
+                }
+            }
+            Err(ReadlineError::Eof) => return Ok(()),
+            Err(ReadlineError::Interrupted) => {
+                println!("[status] interrupted input. Use `/quit` to leave the chat.");
+            }
+            Err(source) => return Err(crate::CliError::ReadInteractivePrompt { source }),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -266,6 +287,23 @@ impl Hinter for SlashCompletionHelper {
 }
 
 impl Validator for SlashCompletionHelper {}
+
+fn read_prompt_line_from<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<Option<String>> {
+    write!(writer, "> ").context(FlushPromptSnafu)?;
+    writer.flush().context(FlushPromptSnafu)?;
+
+    let mut buffer = String::new();
+    let bytes_read = reader.read_line(&mut buffer).context(ReadPromptLineSnafu)?;
+
+    if bytes_read == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(buffer))
+    }
+}
 
 fn completion_query(line: &str, position: usize) -> Option<&str> {
     let prefix = &line[..position];

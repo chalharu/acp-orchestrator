@@ -193,12 +193,10 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
     let server_url = require_server_url("chat", args.server_url.clone())?;
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
     let chat_session = load_chat_session(&client, &server_url, &args).await?;
-    record_recent_session(&RecentSessionEntry::new(
-        &chat_session.session.id,
-        &server_url,
-        Utc::now(),
-    ))?;
-    print_chat_banner(&chat_session.session.id, &server_url);
+    let session_id = &chat_session.session.id;
+    let recent_entry = RecentSessionEntry::new(session_id, &server_url, Utc::now());
+    record_recent_session(&recent_entry)?;
+    print_chat_banner(session_id, &server_url);
     print_chat_status(&chat_session, interactive_completion_enabled());
     let initial_snapshot_state = render_resume_history(&chat_session);
 
@@ -206,16 +204,10 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
         &client,
         &server_url,
         &args.auth_token,
-        &chat_session.session.id,
+        session_id,
         initial_snapshot_state,
     );
-    drive_repl(
-        &client,
-        &server_url,
-        &args.auth_token,
-        &chat_session.session.id,
-    )
-    .await?;
+    drive_repl(&client, &server_url, &args.auth_token, session_id).await?;
     event_task.abort();
     Ok(())
 }

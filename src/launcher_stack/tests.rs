@@ -1,8 +1,9 @@
 use super::*;
 use acp_app_support::{init_tracing, unique_temp_json_path};
 use std::{
+    ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -323,10 +324,10 @@ fn warn_and_maybe_clear_invalid_launcher_state_tolerates_directory_paths() {
 
 #[test]
 fn try_acquire_launcher_lock_reports_open_failures() {
-    let lock_path = PathBuf::from("/tmp").join("a".repeat(300));
+    let lock_path = PathBuf::from(OsString::from_vec(b"launcher\0lock".to_vec()));
 
-    let error = try_acquire_launcher_lock(&lock_path)
-        .expect_err("read-only lock paths should fail to open");
+    let error =
+        try_acquire_launcher_lock(&lock_path).expect_err("invalid lock paths should fail to open");
 
     assert!(matches!(
         error,

@@ -116,16 +116,34 @@ fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
 }
 
 #[test]
-fn command_needs_backend_skips_only_top_level_help_and_version() {
+fn command_needs_backend_skips_help_version_and_session_list() {
     assert!(!command_needs_backend(&[OsString::from("--help")]));
     assert!(!command_needs_backend(&[OsString::from("--version")]));
-    assert!(command_needs_backend(&[
+    assert!(!command_needs_backend(&[
+        OsString::from("chat"),
+        OsString::from("--help"),
+    ]));
+    assert!(!command_needs_backend(&[
+        OsString::from("session"),
+        OsString::from("--help"),
+    ]));
+    assert!(!command_needs_backend(&[
         OsString::from("session"),
         OsString::from("list"),
+    ]));
+    assert!(!command_needs_backend(&[
+        OsString::from("session"),
+        OsString::from("list"),
+        OsString::from("--help"),
     ]));
     assert!(command_needs_backend(&[
         OsString::from("chat"),
         OsString::from("--new"),
+    ]));
+    assert!(command_needs_backend(&[
+        OsString::from("session"),
+        OsString::from("close"),
+        OsString::from("s_test"),
     ]));
 }
 

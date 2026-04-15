@@ -215,10 +215,13 @@ async fn run_cli_foreground(
 }
 
 fn command_needs_backend(cli_args: &[OsString]) -> bool {
-    !matches!(
-        cli_args.first().and_then(|arg| arg.to_str()),
-        Some("-h" | "--help" | "-V" | "--version")
-    )
+    let args = cli_args.iter().map(|arg| arg.to_str()).collect::<Vec<_>>();
+    let is_help_or_version = args
+        .iter()
+        .any(|arg| matches!(arg, Some("-h" | "--help" | "-V" | "--version")));
+    let is_session_list = matches!(args.as_slice(), [Some("session"), Some("list"), ..]);
+
+    !is_help_or_version && !is_session_list
 }
 
 fn cli_server_url_is_explicit(cli_args: &[OsString]) -> bool {

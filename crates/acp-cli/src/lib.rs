@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, ffi::OsString, future::Future, path::PathBuf};
+use std::{error::Error as StdError, ffi::OsString, future::Future, io::IsTerminal, path::PathBuf};
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
@@ -26,7 +26,7 @@ mod tests;
 
 use api::{close_session, create_session, ensure_success, get_session, get_session_history};
 use events::{InitialSnapshotState, stream_events_to_stderr};
-use input::{drive_repl, interactive_completion_enabled};
+use input::drive_repl;
 use recent_sessions::{
     RecentSessionEntry, load_recent_sessions, record_recent_session, remove_recent_session,
 };
@@ -52,11 +52,6 @@ pub enum CliError {
     #[snafu(display("building the HTTP client failed"))]
     BuildHttpClient { source: reqwest::Error },
 
-    #[snafu(display("building the interactive line editor failed"))]
-    BuildInteractiveEditor {
-        source: rustyline::error::ReadlineError,
-    },
-
     #[snafu(display("joining the interactive terminal UI task failed"))]
     JoinInteractiveUi { source: tokio::task::JoinError },
 
@@ -68,11 +63,6 @@ pub enum CliError {
 
     #[snafu(display("reading a prompt line failed"))]
     ReadPromptLine { source: std::io::Error },
-
-    #[snafu(display("reading interactive input failed"))]
-    ReadInteractivePrompt {
-        source: rustyline::error::ReadlineError,
-    },
 
     #[snafu(display("setting up the terminal UI failed"))]
     SetupTerminalUi { source: std::io::Error },
@@ -206,7 +196,7 @@ where
 }
 
 async fn run_chat(args: ChatArgs) -> Result<()> {
-    run_chat_with_ui(args, interactive_completion_enabled(), tui::run_chat_tui).await
+    run_chat_with_ui(args, interactive_terminal_available(), tui::run_chat_tui).await
 }
 
 async fn run_chat_with_handlers<RunUi, UiFuture, RunRepl, ReplFuture>(
@@ -266,6 +256,10 @@ where
         },
     )
     .await
+}
+
+fn interactive_terminal_available() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 async fn load_chat_session(

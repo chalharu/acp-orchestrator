@@ -362,6 +362,11 @@ impl ChatApp {
             .retain(|request| request.request_id != request_id);
     }
 
+    #[cfg(test)]
+    pub(super) fn clear_status_entries(&mut self) {
+        self.status_entries.clear();
+    }
+
     fn append_message(&mut self, message: &ConversationMessage) {
         self.transcript
             .extend(formatted_message_lines(message.role.clone(), &message.text));

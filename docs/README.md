@@ -9,15 +9,15 @@
 | --- | --- |
 | リポジトリの目的と現在地を知りたい | `README.md` |
 | ACP ベースの backend・Web・CLI の目標アーキテクチャを知りたい | `docs/explanation/acp-web-cli-architecture.md` |
-| アジャイル前提のタスク分割と、最初に見せる最小 CLI の設計を知りたい | `docs/explanation/cli-feedback-first-mvp.md` |
+| 最小 CLI の出し方と設計を知りたい | `docs/explanation/cli-feedback-first-mvp.md` |
 
 ## ドキュメントの役割
 
 - Overview: `README.md`
-  - リポジトリの目的、スコープ、現在の作業軸、ローカル試行手順、bundled mock の
-    手動確認 prompt（`verify permission` / `verify cancel`）、slice 5 の
-    multi-pane terminal UI、slash command 補完、`session list` /
-    `chat --session` による session 復帰手順をつかむ
+  - リポジトリの目的、スコープ、現在の作業軸、ローカル試行手順をつかむ
+  - bundled mock の手動確認 prompt（`verify permission` / `verify cancel`）、
+    slice 5 の multi-pane terminal UI、slash command 補完、`session list` /
+    `chat --session` による session 復帰手順もここで確認する
 - Explanation: `docs/explanation/acp-web-cli-architecture.md`
   - ACP Orchestrator の target architecture、責務分離、設計判断を理解する
 - Explanation: `docs/explanation/cli-feedback-first-mvp.md`

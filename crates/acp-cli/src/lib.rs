@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, ffi::OsString, path::PathBuf};
+use std::{error::Error as StdError, ffi::OsString, future::Future, path::PathBuf};
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
@@ -19,6 +19,8 @@ mod recent_sessions;
 mod repl_commands;
 mod tui;
 
+#[cfg(test)]
+mod chat_tests;
 #[cfg(test)]
 mod tests;
 
@@ -204,6 +206,21 @@ where
 }
 
 async fn run_chat(args: ChatArgs) -> Result<()> {
+    run_chat_with_ui(args, interactive_completion_enabled(), tui::run_chat_tui).await
+}
+
+async fn run_chat_with_handlers<RunUi, UiFuture, RunRepl, ReplFuture>(
+    args: ChatArgs,
+    interactive_ui: bool,
+    run_ui: RunUi,
+    run_repl: RunRepl,
+) -> Result<()>
+where
+    RunUi: FnOnce(Client, String, String, ChatSession) -> UiFuture,
+    UiFuture: Future<Output = Result<()>>,
+    RunRepl: FnOnce(Client, String, String, String) -> ReplFuture,
+    ReplFuture: Future<Output = Result<()>>,
+{
     ensure!(args.new || args.session_id.is_some(), ChatModeRequiredSnafu);
 
     let server_url = require_server_url("chat", args.server_url.clone())?;
@@ -212,14 +229,13 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
     let session_id = chat_session.session.id.clone();
     let recent_entry = RecentSessionEntry::new(&session_id, &server_url, Utc::now());
     record_recent_session(&recent_entry)?;
-    if interactive_completion_enabled() {
-        return tui::run_chat_tui(client, server_url, args.auth_token, chat_session).await;
+    if interactive_ui {
+        return run_ui(client, server_url, args.auth_token, chat_session).await;
     }
 
     print_chat_banner(&chat_session.session.id, &server_url);
     print_chat_status(&chat_session, false);
     let initial_snapshot_state = render_resume_history(&chat_session);
-
     let event_task = spawn_event_task(
         &client,
         &server_url,
@@ -227,15 +243,29 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
         &chat_session.session.id,
         initial_snapshot_state,
     );
-    drive_repl(
-        &client,
-        &server_url,
-        &args.auth_token,
-        &chat_session.session.id,
-    )
-    .await?;
+    let repl_result = run_repl(client, server_url, args.auth_token, session_id).await;
     event_task.abort();
-    Ok(())
+    repl_result
+}
+
+async fn run_chat_with_ui<RunUi, UiFuture>(
+    args: ChatArgs,
+    interactive_ui: bool,
+    run_ui: RunUi,
+) -> Result<()>
+where
+    RunUi: FnOnce(Client, String, String, ChatSession) -> UiFuture,
+    UiFuture: Future<Output = Result<()>>,
+{
+    run_chat_with_handlers(
+        args,
+        interactive_ui,
+        run_ui,
+        |client, server_url, auth_token, session_id| async move {
+            drive_repl(&client, &server_url, &auth_token, &session_id).await
+        },
+    )
+    .await
 }
 
 async fn load_chat_session(

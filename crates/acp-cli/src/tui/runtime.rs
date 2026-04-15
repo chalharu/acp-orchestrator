@@ -145,7 +145,8 @@ fn event_loop(
         }
 
         if let Some(terminal_event) = read_terminal_event()? {
-            handle_input_event(terminal, &context, &mut app, terminal_event)?;
+            let terminal_size = terminal.size().context(DrawTerminalUiSnafu)?;
+            handle_input_event(terminal_size, &context, &mut app, terminal_event)?;
         }
     }
 }

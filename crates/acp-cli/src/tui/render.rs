@@ -201,9 +201,9 @@ pub(super) fn composer_cursor_position(area: Rect, app: &ChatApp) -> (u16, u16) 
 }
 
 fn render_completion_menu(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
-    let Some(menu) = app.completion_menu() else {
-        return;
-    };
+    let menu = app
+        .completion_menu()
+        .expect("completion menu should be visible before rendering");
     let items = menu
         .candidates()
         .iter()

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use acp_contracts::CompletionCandidate;
@@ -17,10 +19,17 @@ mod render;
 mod runtime;
 
 #[cfg(test)]
+mod mod_tests;
+#[cfg(test)]
 mod tests;
 
 const SLASH_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+type TerminalUiRunner = fn(Handle, runtime::UiRunState) -> Result<()>;
 
+#[cfg(test)]
+static TERMINAL_UI_RUNNER_OVERRIDE: OnceLock<Mutex<Option<TerminalUiRunner>>> = OnceLock::new();
+
+#[derive(Debug)]
 enum TuiEvent {
     Stream(StreamUpdate),
     StreamEnded(String),
@@ -37,6 +46,26 @@ pub(super) async fn run_chat_tui(
     auth_token: String,
     chat_session: ChatSession,
 ) -> Result<()> {
+    run_chat_tui_with_runner(
+        client,
+        server_url,
+        auth_token,
+        chat_session,
+        terminal_ui_runner(),
+    )
+    .await
+}
+
+async fn run_chat_tui_with_runner<RunUi>(
+    client: Client,
+    server_url: String,
+    auth_token: String,
+    chat_session: ChatSession,
+    run_ui: RunUi,
+) -> Result<()>
+where
+    RunUi: FnOnce(Handle, runtime::UiRunState) -> Result<()> + Send + 'static,
+{
     let initial_snapshot_state = chat_session.resumed.then(|| {
         InitialSnapshotState::from_messages_and_permissions(
             &chat_session.resume_history,
@@ -54,7 +83,7 @@ pub(super) async fn run_chat_tui(
 
     let runtime_handle = Handle::current();
     let ui_result = tokio::task::spawn_blocking(move || {
-        runtime::run_terminal_ui(
+        run_ui(
             runtime_handle,
             runtime::UiRunState::new(
                 client,
@@ -72,15 +101,54 @@ pub(super) async fn run_chat_tui(
     ui_result.context(JoinInteractiveUiSnafu)?
 }
 
+fn terminal_ui_runner() -> TerminalUiRunner {
+    #[cfg(test)]
+    {
+        if let Some(runner) = *TERMINAL_UI_RUNNER_OVERRIDE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("terminal ui runner override should not poison")
+        {
+            return runner;
+        }
+    }
+    runtime::run_terminal_ui
+}
+
+#[cfg(test)]
+fn set_terminal_ui_runner_override(runner: Option<TerminalUiRunner>) {
+    *TERMINAL_UI_RUNNER_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("terminal ui runner override should not poison") = runner;
+}
+
 async fn prepare_startup_state(
     client: &Client,
     server_url: &str,
     auth_token: &str,
     chat_session: &ChatSession,
 ) -> StartupState {
+    prepare_startup_state_with_timeout(
+        client,
+        server_url,
+        auth_token,
+        chat_session,
+        SLASH_COMPLETION_TIMEOUT,
+    )
+    .await
+}
+
+async fn prepare_startup_state_with_timeout(
+    client: &Client,
+    server_url: &str,
+    auth_token: &str,
+    chat_session: &ChatSession,
+    timeout: Duration,
+) -> StartupState {
     let mut startup_statuses = Vec::new();
     let command_catalog = match tokio::time::timeout(
-        SLASH_COMPLETION_TIMEOUT,
+        timeout,
         load_command_catalog(client, server_url, auth_token, &chat_session.session.id),
     )
     .await

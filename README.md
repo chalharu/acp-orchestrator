@@ -46,18 +46,18 @@ cargo run
 
 This starts or reuses the bundled ACP mock and web backend, then hands terminal
 I/O to the CLI frontend. On interactive terminals the CLI now opens a
-multi-pane terminal UI with a session/command pane, transcript pane, input
+multi-pane terminal UI. It shows a session/command pane, transcript pane, input
 composer, and tool/status pane. Use `PageUp` / `PageDown` to switch the
-transcript into manual scroll mode, `End` to jump back to the live tail, and
-leave chat with `/quit`.
+transcript into manual scroll mode. Use `End` to jump back to the live tail,
+then leave chat with `/quit`.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
 
 On interactive terminals, type `/` or a partial slash command such as `/ap`,
-then press `TAB` to fetch slash-command candidates from the backend in the
-composer. After a permission request appears, `/approve` or `/deny` followed by
-`TAB` suggests pending request IDs.
+then press `TAB`. The CLI fetches slash-command candidates from the backend in
+the composer. After a permission request appears, `/approve` or `/deny`
+followed by `TAB` suggests pending request IDs.
 
 When running against the bundled mock stack, prompts containing the word
 `permission` still trigger a mock permission request. For reproducible manual

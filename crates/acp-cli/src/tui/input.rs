@@ -1,15 +1,12 @@
-use std::io;
-
 use acp_contracts::classify_slash_completion_prefix;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::layout::Rect;
 use reqwest::Client;
-use snafu::ResultExt;
 use tokio::runtime::Handle;
 
 use super::{SLASH_COMPLETION_TIMEOUT, app::ChatApp, render};
 use crate::{
-    DrawTerminalUiSnafu, Result,
+    Result,
     api::{get_session, submit_prompt},
     repl_commands::{
         PendingPermissionsUpdate, ReplCommandNotice, ReplCommandOutcome, execute_repl_command,
@@ -25,14 +22,24 @@ pub(super) struct UiContext<'a> {
 }
 
 pub(super) fn handle_terminal_event(
-    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    terminal_size: ratatui::layout::Size,
     context: &UiContext<'_>,
     app: &mut ChatApp,
     terminal_event: Event,
 ) -> Result<()> {
     match terminal_event {
         Event::Key(key) if key.kind != KeyEventKind::Release => {
-            handle_key(terminal, context, app, key)
+            let viewport = render::transcript_viewport(
+                size_to_rect(terminal_size),
+                app.completion_menu().is_some(),
+            );
+            handle_key(
+                context,
+                app,
+                key,
+                viewport.height as usize,
+                viewport.width as usize,
+            )
         }
         Event::Paste(data) => handle_paste(context, app, &data),
         _ => Ok(()),
@@ -40,18 +47,12 @@ pub(super) fn handle_terminal_event(
 }
 
 fn handle_key(
-    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
     context: &UiContext<'_>,
     app: &mut ChatApp,
     key: KeyEvent,
+    viewport_height: usize,
+    viewport_width: usize,
 ) -> Result<()> {
-    let viewport = render::transcript_viewport(
-        size_to_rect(terminal.size().context(DrawTerminalUiSnafu)?),
-        app.completion_menu().is_some(),
-    );
-    let viewport_height = viewport.height as usize;
-    let viewport_width = viewport.width as usize;
-
     if handle_completion_shortcuts(context, app, key)? {
         return Ok(());
     }
@@ -203,13 +204,14 @@ fn submit_current_input(context: &UiContext<'_>, app: &mut ChatApp) -> Result<()
     }
 
     if line.starts_with('/') {
-        let outcome = context.runtime_handle.block_on(execute_repl_command(
+        let command = execute_repl_command(
             &line,
             context.client,
             context.server_url,
             context.auth_token,
             context.session_id,
-        ))?;
+        );
+        let outcome = context.runtime_handle.block_on(command)?;
         app.clear_input();
         apply_command_outcome(context, app, outcome)?;
         return Ok(());
@@ -275,3 +277,6 @@ fn apply_command_outcome(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -2,8 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use acp_contracts::{
     ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    ResolvePermissionResponse, SessionSnapshot, StreamEvent,
+    ResolvePermissionResponse, SessionListItem, SessionSnapshot, StreamEvent,
 };
+use chrono::Utc;
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
 
@@ -18,6 +19,7 @@ use handle::{PromptCompletion, SessionHandle};
 pub struct SessionStore {
     sessions: Arc<RwLock<HashMap<String, Arc<SessionHandle>>>>,
     create_session_lock: Arc<Mutex<()>>,
+    recent_order_counter: Arc<Mutex<u64>>,
     closed_session_limit: usize,
     session_cap: usize,
 }
@@ -188,6 +190,7 @@ impl SessionStore {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             create_session_lock: Arc::new(Mutex::new(())),
+            recent_order_counter: Arc::new(Mutex::new(0)),
             closed_session_limit: 32,
             session_cap,
         }
@@ -212,7 +215,14 @@ impl SessionStore {
         }
 
         let session_id = format!("s_{}", Uuid::new_v4().simple());
-        let handle = Arc::new(SessionHandle::new(session_id.clone(), owner.to_string()));
+        let last_activity_at = Utc::now();
+        let recent_order = self.claim_recent_order().await;
+        let handle = Arc::new(SessionHandle::new(
+            session_id.clone(),
+            owner.to_string(),
+            last_activity_at,
+            recent_order,
+        ));
         let snapshot = handle.snapshot().await;
 
         self.sessions.write().await.insert(session_id, handle);
@@ -237,6 +247,41 @@ impl SessionStore {
     ) -> Result<SessionSnapshot, SessionStoreError> {
         let handle = self.authorized_handle(owner, session_id).await?;
         Ok(handle.snapshot().await)
+    }
+
+    pub async fn open_session(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        self.touch_recent_activity(&handle).await;
+        Ok(handle.snapshot().await)
+    }
+
+    pub async fn list_owned_sessions(&self, owner: &str) -> Vec<SessionListItem> {
+        let handles = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect::<Vec<_>>()
+        };
+
+        let mut owned_sessions = Vec::new();
+        for handle in handles {
+            if handle.owner_matches(owner).await {
+                let (item, recent_order) = handle.session_list_item_with_order().await;
+                owned_sessions.push((recent_order, item));
+            }
+        }
+
+        owned_sessions.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
+                .then_with(|| left.1.id.cmp(&right.1.id))
+        });
+
+        owned_sessions.into_iter().map(|(_, item)| item).collect()
     }
 
     pub async fn session_history(
@@ -289,6 +334,7 @@ impl SessionStore {
         let handle = self.authorized_handle(owner, session_id).await?;
         let (user_event, prompt_order) = handle.submit_user_prompt(text.clone()).await?;
         handle.broadcast(user_event);
+        self.touch_recent_activity(&handle).await;
 
         Ok(PendingPrompt {
             turn: TurnHandle {
@@ -308,7 +354,9 @@ impl SessionStore {
         decision: PermissionDecision,
     ) -> Result<ResolvePermissionResponse, SessionStoreError> {
         let handle = self.authorized_handle(owner, session_id).await?;
-        handle.resolve_permission(request_id, decision).await
+        let response = handle.resolve_permission(request_id, decision).await?;
+        self.touch_recent_activity(&handle).await;
+        Ok(response)
     }
 
     pub async fn cancel_active_turn(
@@ -317,7 +365,11 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<bool, SessionStoreError> {
         let handle = self.authorized_handle(owner, session_id).await?;
-        handle.cancel_active_turn().await
+        let cancelled = handle.cancel_active_turn().await?;
+        if cancelled {
+            self.touch_recent_activity(&handle).await;
+        }
+        Ok(cancelled)
     }
 
     pub async fn close_session(
@@ -328,6 +380,7 @@ impl SessionStore {
         let handle = self.authorized_handle(owner, session_id).await?;
         let close_event = handle.close("closed by user").await?;
         handle.broadcast(close_event);
+        self.touch_recent_activity(&handle).await;
         let snapshot = handle.snapshot().await;
         self.prune_closed_sessions().await;
         Ok(snapshot)
@@ -362,6 +415,17 @@ impl SessionStore {
         }
 
         Ok(handle)
+    }
+
+    async fn claim_recent_order(&self) -> u64 {
+        let mut counter = self.recent_order_counter.lock().await;
+        *counter += 1;
+        *counter
+    }
+
+    async fn touch_recent_activity(&self, handle: &Arc<SessionHandle>) {
+        let recent_order = self.claim_recent_order().await;
+        handle.touch_recent_activity(recent_order).await;
     }
 
     async fn prune_closed_sessions(&self) {

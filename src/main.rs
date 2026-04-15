@@ -219,9 +219,8 @@ fn command_needs_backend(cli_args: &[OsString]) -> bool {
     let is_help_or_version = args
         .iter()
         .any(|arg| matches!(arg, Some("-h" | "--help" | "-V" | "--version")));
-    let is_session_list = matches!(args.as_slice(), [Some("session"), Some("list"), ..]);
 
-    !is_help_or_version && !is_session_list
+    !is_help_or_version
 }
 
 fn cli_server_url_is_explicit(cli_args: &[OsString]) -> bool {

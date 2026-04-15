@@ -4,10 +4,9 @@ use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, ConversationMessage, CreateSessionResponse,
     ErrorResponse, MessageRole, PermissionDecision, PromptRequest, PromptResponse,
-    ResolvePermissionRequest, ResolvePermissionResponse, SessionSnapshot, StreamEvent,
-    StreamEventPayload,
+    ResolvePermissionRequest, ResolvePermissionResponse, SessionSnapshot, SessionStatus,
+    StreamEvent, StreamEventPayload,
 };
-use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use reqwest::{Client, Response, StatusCode};
 use snafu::prelude::*;
@@ -15,7 +14,6 @@ use snafu::prelude::*;
 mod api;
 mod events;
 mod input;
-mod recent_sessions;
 mod repl_commands;
 mod tui;
 
@@ -24,12 +22,11 @@ mod chat_tests;
 #[cfg(test)]
 mod tests;
 
-use api::{close_session, create_session, ensure_success, get_session, get_session_history};
+use api::{
+    close_session, create_session, ensure_success, get_session, get_session_history, list_sessions,
+};
 use events::{InitialSnapshotState, stream_events_to_stderr};
 use input::drive_repl;
-use recent_sessions::{
-    RecentSessionEntry, load_recent_sessions, record_recent_session, remove_recent_session,
-};
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
@@ -38,6 +35,12 @@ pub(crate) struct ChatSession {
     session: SessionSnapshot,
     resume_history: Vec<ConversationMessage>,
     resumed: bool,
+}
+
+impl ChatSession {
+    fn is_read_only(&self) -> bool {
+        self.session.status == SessionStatus::Closed
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -169,8 +172,16 @@ struct SessionArgs {
 
 #[derive(Subcommand, Debug)]
 enum SessionCommand {
-    List,
+    List(ListArgs),
     Close(CloseArgs),
+}
+
+#[derive(Args, Debug)]
+struct ListArgs {
+    #[arg(long, env = "ACP_SERVER_URL")]
+    server_url: Option<String>,
+    #[arg(long, env = "ACP_AUTH_TOKEN", default_value = "developer")]
+    auth_token: String,
 }
 
 #[derive(Args, Debug)]
@@ -218,8 +229,12 @@ where
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
     let chat_session = load_chat_session(&client, &server_url, &args).await?;
     let session_id = chat_session.session.id.clone();
-    let recent_entry = RecentSessionEntry::new(&session_id, &server_url, Utc::now());
-    record_recent_session(&recent_entry)?;
+    if chat_session.is_read_only() {
+        print_chat_banner(&chat_session.session.id, &server_url);
+        print_chat_status(&chat_session, false);
+        let _ = render_resume_history(&chat_session);
+        return Ok(());
+    }
     if interactive_ui {
         return run_ui(client, server_url, args.auth_token, chat_session).await;
     }
@@ -282,15 +297,7 @@ async fn load_chat_session(
         .session_id
         .as_deref()
         .expect("session id checked before chat execution");
-    let session = match get_session(client, server_url, &args.auth_token, session_id).await {
-        Ok(session) => session,
-        Err(error) => {
-            if is_session_not_found(&error) {
-                let _ = remove_recent_session(session_id);
-            }
-            return Err(error);
-        }
-    };
+    let session = get_session(client, server_url, &args.auth_token, session_id).await?;
     let resume_history =
         match get_session_history(client, server_url, &args.auth_token, session_id).await {
             Ok(history) => history.messages,
@@ -338,12 +345,14 @@ fn print_chat_banner(session_id: &str, server_url: &str) {
 }
 
 fn print_chat_status(chat_session: &ChatSession, interactive_completion: bool) {
-    if chat_session.resumed {
+    if chat_session.is_read_only() {
+        println!("[status] opened closed session as read-only transcript");
+    } else if chat_session.resumed {
         println!("[status] resumed existing session");
     } else {
         println!("[status] new session ready");
     }
-    if interactive_completion {
+    if interactive_completion && !chat_session.is_read_only() {
         println!("[status] press TAB after `/` to view slash command candidates");
     }
     let pending_permissions = chat_session.session.pending_permissions.len();
@@ -370,20 +379,22 @@ fn spawn_event_task(
 
 async fn run_session(args: SessionArgs) -> Result<()> {
     match args.command {
-        SessionCommand::List => {
-            let entries =
-                filter_recent_sessions_for_current_backend(load_recent_sessions()?).await?;
-            if entries.is_empty() {
-                println!("no recent sessions recorded");
+        SessionCommand::List(args) => {
+            let server_url = require_server_url("listing sessions", args.server_url)?;
+            let client =
+                build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+            let sessions = list_sessions(&client, &server_url, &args.auth_token).await?;
+            if sessions.sessions.is_empty() {
+                println!("no sessions found for the current owner");
                 return Ok(());
             }
 
-            for entry in entries {
+            for session in sessions.sessions {
                 println!(
                     "{}\t{}\t{}",
-                    entry.session_id,
-                    entry.server_url,
-                    entry.last_used_at.to_rfc3339()
+                    session.id,
+                    session_status_label(&session.status),
+                    session.last_activity_at.to_rfc3339()
                 );
             }
 
@@ -394,38 +405,17 @@ async fn run_session(args: SessionArgs) -> Result<()> {
             let client =
                 build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
             close_session(&client, &server_url, &args.auth_token, &args.session_id).await?;
-            remove_recent_session(&args.session_id)?;
             println!("[status] session {} closed", args.session_id);
             Ok(())
         }
     }
 }
 
-async fn filter_recent_sessions_for_current_backend(
-    entries: Vec<RecentSessionEntry>,
-) -> Result<Vec<RecentSessionEntry>> {
-    let Ok(server_url) = std::env::var("ACP_SERVER_URL") else {
-        return Ok(entries);
-    };
-    let auth_token = std::env::var("ACP_AUTH_TOKEN").unwrap_or_else(|_| "developer".to_string());
-    let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-    let mut filtered = Vec::new();
-
-    for entry in entries {
-        if entry.server_url != server_url {
-            continue;
-        }
-
-        match get_session(&client, &server_url, &auth_token, &entry.session_id).await {
-            Ok(_) => filtered.push(entry),
-            Err(error) if is_session_not_found(&error) => {
-                remove_recent_session(&entry.session_id)?;
-            }
-            Err(_) => filtered.push(entry),
-        }
+fn session_status_label(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Active => "active",
+        SessionStatus::Closed => "closed",
     }
-
-    Ok(filtered)
 }
 
 fn require_server_url(command: &'static str, server_url: Option<String>) -> Result<String> {

@@ -1,11 +1,9 @@
 use super::*;
 use crate::{
     events::{InitialSnapshotState, render_event, stream_events},
-    recent_sessions::{create_recent_sessions_parent, recent_sessions_path_from},
     repl_commands::handle_repl_command,
 };
-use chrono::TimeZone;
-use std::path::Path;
+use chrono::{TimeZone, Utc};
 use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 #[tokio::test]
@@ -340,41 +338,6 @@ fn print_chat_status_handles_pending_permissions() {
     };
 
     print_chat_status(&chat_session, true);
-}
-
-#[test]
-fn recent_sessions_path_uses_the_explicit_path_first() {
-    let path = recent_sessions_path_from(
-        Some(OsString::from("/tmp/acp-test.json")),
-        Some(PathBuf::from("/ignored")),
-    )
-    .expect("explicit paths should win");
-
-    assert_eq!(path, PathBuf::from("/tmp/acp-test.json"));
-}
-
-#[test]
-fn recent_sessions_path_falls_back_to_the_local_data_directory() {
-    let path = recent_sessions_path_from(None, Some(PathBuf::from("/tmp/local-data")))
-        .expect("fallback data dir should work");
-
-    assert_eq!(
-        path,
-        PathBuf::from("/tmp/local-data/acp-orchestrator/recent-sessions.json")
-    );
-}
-
-#[test]
-fn recent_sessions_path_requires_a_data_directory_when_no_override_is_set() {
-    let error = recent_sessions_path_from(None, None).expect_err("missing data dir should fail");
-
-    assert!(matches!(error, CliError::MissingRecentSessionDirectory));
-}
-
-#[test]
-fn create_recent_sessions_parent_skips_paths_without_a_directory_component() {
-    create_recent_sessions_parent(Path::new(""))
-        .expect("empty paths should not require directory creation");
 }
 
 async fn spawn_raw_http_server(response: &'static str) -> String {

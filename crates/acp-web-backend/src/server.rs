@@ -3,7 +3,8 @@ use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
     PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
-    SessionHistoryResponse, SessionSnapshot, SlashCompletionsResponse, StreamEvent,
+    SessionHistoryResponse, SessionListResponse, SessionSnapshot, SlashCompletionsResponse,
+    StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -78,7 +79,7 @@ impl AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/api/v1/sessions", post(create_session))
+        .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route("/api/v1/sessions/{session_id}", get(get_session))
         .route(
             "/api/v1/sessions/{session_id}/history",
@@ -118,6 +119,16 @@ async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
     })
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SessionListResponse>, AppError> {
+    let principal = extract_principal(&headers)?;
+    let sessions = state.store.list_owned_sessions(&principal.id).await;
+
+    Ok(Json(SessionListResponse { sessions }))
 }
 
 async fn create_session(
@@ -190,10 +201,7 @@ async fn get_session(
     headers: HeaderMap,
 ) -> Result<Json<CreateSessionResponse>, AppError> {
     let principal = extract_principal(&headers)?;
-    let session = state
-        .store
-        .session_snapshot(&principal.id, &session_id)
-        .await?;
+    let session = state.store.open_session(&principal.id, &session_id).await?;
 
     Ok(Json(CreateSessionResponse { session }))
 }

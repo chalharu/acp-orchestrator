@@ -1,16 +1,10 @@
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::{io, process::Stdio, time::Duration};
 
-use acp_app_support::{unique_temp_json_path, wait_for_health, wait_for_tcp_connect};
+use acp_app_support::{wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{MessageRole, SessionHistoryResponse};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
 use reqwest::Client;
-use serde_json::Value;
 use tokio::{
     io::AsyncWriteExt,
     net::TcpListener,
@@ -22,39 +16,37 @@ use tokio::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
-async fn session_list_reports_an_empty_cache() -> Result<()> {
-    let recent_path = unique_recent_sessions_path("empty");
-    let output = Command::new(env!("CARGO_BIN_EXE_acp-cli"))
-        .args(["session", "list"])
-        .env("ACP_RECENT_SESSIONS_PATH", &recent_path)
-        .output()
-        .await?;
+async fn session_list_reports_an_empty_owner_index() -> Result<()> {
+    let stack = TestStack::spawn("empty-list").await?;
+    let output = run_command([
+        "session",
+        "list",
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])
+    .await?;
 
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout)?.contains("no recent sessions recorded"));
+    assert!(String::from_utf8(output.stdout)?.contains("no sessions found for the current owner"));
     Ok(())
 }
 
 #[tokio::test]
 async fn chat_and_session_commands_roundtrip_against_a_backend() -> Result<()> {
     let stack = TestStack::spawn("roundtrip").await?;
-    let chat_stdout = run_new_chat_roundtrip(&stack).await?;
-    let session_id = read_recent_session_id(&stack.recent_path)?;
+    let (session_id, chat_stdout) = run_new_chat_roundtrip(&stack).await?;
 
     assert_chat_output(&chat_stdout);
     assert_assistant_history(&stack, &session_id).await?;
     assert_resume_and_list_commands(&stack, &session_id).await?;
-    close_session_and_clear_cache(&stack, &session_id).await?;
+    close_session_and_reopen_read_only(&stack, &session_id).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn chat_command_reports_usage_and_http_errors() -> Result<()> {
-    let recent_path = unique_recent_sessions_path("errors");
-
     let mode_error = Command::new(env!("CARGO_BIN_EXE_acp-cli"))
         .args(["chat", "--server-url", "http://127.0.0.1:9"])
-        .env("ACP_RECENT_SESSIONS_PATH", &recent_path)
         .output()
         .await?;
     assert!(!mode_error.status.success());
@@ -62,7 +54,6 @@ async fn chat_command_reports_usage_and_http_errors() -> Result<()> {
 
     let server_error = Command::new(env!("CARGO_BIN_EXE_acp-cli"))
         .args(["chat", "--new"])
-        .env("ACP_RECENT_SESSIONS_PATH", &recent_path)
         .output()
         .await?;
     assert!(!server_error.status.success());
@@ -70,16 +61,13 @@ async fn chat_command_reports_usage_and_http_errors() -> Result<()> {
 
     let stack = TestStack::spawn("errors-stack").await?;
 
-    let missing_session = run_command(
-        [
-            "chat",
-            "--session",
-            "s_missing",
-            "--server-url",
-            stack.backend_url.as_str(),
-        ],
-        &recent_path,
-    )
+    let missing_session = run_command([
+        "chat",
+        "--session",
+        "s_missing",
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])
     .await?;
     assert!(!missing_session.status.success());
     assert!(String::from_utf8(missing_session.stderr)?.contains("HttpStatus"));
@@ -90,10 +78,8 @@ async fn chat_command_reports_usage_and_http_errors() -> Result<()> {
 #[tokio::test]
 async fn chat_exits_cleanly_on_immediate_eof() -> Result<()> {
     let stack = TestStack::spawn("eof").await?;
-    let mut child = spawn_interactive_command(
-        ["chat", "--new", "--server-url", stack.backend_url.as_str()],
-        &stack.recent_path,
-    )?;
+    let mut child =
+        spawn_interactive_command(["chat", "--new", "--server-url", stack.backend_url.as_str()])?;
     drop(take_child_stdin(&mut child, "missing eof chat stdin")?);
     let output = child.wait_with_output().await?;
 
@@ -102,7 +88,6 @@ async fn chat_exits_cleanly_on_immediate_eof() -> Result<()> {
 }
 
 struct TestStack {
-    recent_path: PathBuf,
     client: Client,
     backend_url: String,
     backend_shutdown: Option<oneshot::Sender<()>>,
@@ -111,14 +96,13 @@ struct TestStack {
 
 impl TestStack {
     async fn spawn(label: &str) -> Result<Self> {
-        let recent_path = unique_recent_sessions_path(label);
+        let _ = label;
         let client = Client::builder().build()?;
         let (mock_address, mock_shutdown) = spawn_mock_server().await?;
         let (backend_url, backend_shutdown) = spawn_backend_server(mock_address).await?;
         wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
 
         Ok(Self {
-            recent_path,
             client,
             backend_url,
             backend_shutdown: Some(backend_shutdown),
@@ -138,18 +122,6 @@ impl Drop for TestStack {
     }
 }
 
-fn unique_recent_sessions_path(label: &str) -> PathBuf {
-    unique_temp_json_path("acp-cli", label)
-}
-
-fn read_recent_session_id(path: &Path) -> Result<String> {
-    let entries: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
-    Ok(entries[0]["session_id"]
-        .as_str()
-        .ok_or_else(|| io::Error::other("missing session id in recent session cache"))?
-        .to_string())
-}
-
 const CHAT_SCRIPT: [(&[u8], u64); 8] = [
     (b"\n/help\nhello from cli binary\n", 600),
     (b"verify permission\n", 300),
@@ -161,18 +133,17 @@ const CHAT_SCRIPT: [(&[u8], u64); 8] = [
     (b"/unknown\n/quit\n", 0),
 ];
 
-async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<String> {
-    let mut chat = spawn_interactive_command(
-        ["chat", "--new", "--server-url", stack.backend_url.as_str()],
-        &stack.recent_path,
-    )?;
+async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<(String, String)> {
+    let mut chat =
+        spawn_interactive_command(["chat", "--new", "--server-url", stack.backend_url.as_str()])?;
     let mut stdin = take_child_stdin(&mut chat, "missing chat stdin")?;
     write_chat_script(&mut stdin).await?;
     drop(stdin);
 
     let output = chat.wait_with_output().await?;
     assert!(output.status.success());
-    Ok(String::from_utf8(output.stdout)?)
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok((extract_session_id(&stdout)?, stdout))
 }
 
 async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
@@ -181,6 +152,13 @@ async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
         sleep(Duration::from_millis(delay_ms)).await;
     }
     Ok(())
+}
+
+fn extract_session_id(output: &str) -> Result<String> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("session: ").map(str::to_string))
+        .ok_or_else(|| io::Error::other("missing session id in chat output").into())
 }
 
 fn assert_chat_output(output: &str) {
@@ -219,16 +197,13 @@ async fn assert_assistant_history(stack: &TestStack, session_id: &str) -> Result
 }
 
 async fn assert_resume_and_list_commands(stack: &TestStack, session_id: &str) -> Result<()> {
-    let mut resumed = spawn_interactive_command(
-        [
-            "chat",
-            "--session",
-            session_id,
-            "--server-url",
-            stack.backend_url.as_str(),
-        ],
-        &stack.recent_path,
-    )?;
+    let mut resumed = spawn_interactive_command([
+        "chat",
+        "--session",
+        session_id,
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])?;
     let mut stdin = take_child_stdin(&mut resumed, "missing resumed chat stdin")?;
     stdin.write_all(b"/quit\n").await?;
     drop(stdin);
@@ -241,27 +216,57 @@ async fn assert_resume_and_list_commands(stack: &TestStack, session_id: &str) ->
     assert!(resumed_stdout.contains("[user] hello from cli binary"));
     assert!(resumed_stdout.contains("[assistant] mock assistant:"));
 
-    let list_output = run_command(["session", "list"], &stack.recent_path).await?;
+    let list_output = run_command([
+        "session",
+        "list",
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])
+    .await?;
     assert!(list_output.status.success());
-    assert!(String::from_utf8(list_output.stdout)?.contains(session_id));
+    let list_stdout = String::from_utf8(list_output.stdout)?;
+    assert!(list_stdout.contains(session_id));
+    assert!(list_stdout.contains("active"));
     Ok(())
 }
 
-async fn close_session_and_clear_cache(stack: &TestStack, session_id: &str) -> Result<()> {
-    let close_output = run_command(
-        [
-            "session",
-            "close",
-            session_id,
-            "--server-url",
-            stack.backend_url.as_str(),
-        ],
-        &stack.recent_path,
-    )
+async fn close_session_and_reopen_read_only(stack: &TestStack, session_id: &str) -> Result<()> {
+    let close_output = run_command([
+        "session",
+        "close",
+        session_id,
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])
     .await?;
     assert!(close_output.status.success());
     assert!(String::from_utf8(close_output.stdout)?.contains("closed"));
-    assert!(!fs::read_to_string(&stack.recent_path)?.contains(session_id));
+
+    let list_output = run_command([
+        "session",
+        "list",
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])
+    .await?;
+    assert!(list_output.status.success());
+    let list_stdout = String::from_utf8(list_output.stdout)?;
+    assert!(list_stdout.contains(session_id));
+    assert!(list_stdout.contains("closed"));
+
+    let read_only_output = run_command([
+        "chat",
+        "--session",
+        session_id,
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])
+    .await?;
+    assert!(read_only_output.status.success());
+    let read_only_stdout = String::from_utf8(read_only_output.stdout)?;
+    assert!(read_only_stdout.contains("[status] opened closed session as read-only transcript"));
+    assert!(read_only_stdout.contains("[user] hello from cli binary"));
+    assert!(read_only_stdout.contains("[assistant] mock assistant:"));
     Ok(())
 }
 
@@ -283,17 +288,11 @@ async fn fetch_history(
         .map_err(Into::into)
 }
 
-fn cli_command(recent_path: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_acp-cli"));
-    command.env("ACP_RECENT_SESSIONS_PATH", recent_path);
-    command
-}
-
-fn spawn_interactive_command<'a, I>(args: I, recent_path: &Path) -> Result<Child>
+fn spawn_interactive_command<'a, I>(args: I) -> Result<Child>
 where
     I: IntoIterator<Item = &'a str>,
 {
-    Ok(cli_command(recent_path)
+    Ok(Command::new(env!("CARGO_BIN_EXE_acp-cli"))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -301,11 +300,14 @@ where
         .spawn()?)
 }
 
-async fn run_command<'a, I>(args: I, recent_path: &Path) -> Result<std::process::Output>
+async fn run_command<'a, I>(args: I) -> Result<std::process::Output>
 where
     I: IntoIterator<Item = &'a str>,
 {
-    Ok(cli_command(recent_path).args(args).output().await?)
+    Ok(Command::new(env!("CARGO_BIN_EXE_acp-cli"))
+        .args(args)
+        .output()
+        .await?)
 }
 
 fn take_child_stdin(child: &mut Child, message: &str) -> Result<ChildStdin> {

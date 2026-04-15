@@ -243,7 +243,7 @@ flowchart LR
     subgraph presentation["Presentation Layer"]
         direction TB
         router["Axum Router<br/>auth / csrf / route split"]
-        httpHandlers["HTTP Handlers<br/>sessions / messages / history / completions"]
+        httpHandlers["HTTP Handlers<br/>session index / sessions / messages / history / completions"]
         sseHandlers["SSE Handlers<br/>snapshot / stream / heartbeat / resume"]
     end
 
@@ -251,7 +251,7 @@ flowchart LR
         direction TB
         sessionCommands["Session Command Use Cases<br/>CreateSession / CloseSession"]
         conversationCommands["Conversation Command Use Cases<br/>SendPrompt / CancelTurn"]
-        queryUseCases["Query / Stream Use Cases<br/>GetSessionSnapshot / GetHistoryWindow / AttachEventStream"]
+        queryUseCases["Query / Stream Use Cases<br/>ListOwnedSessions / GetSessionSnapshot / GetHistoryWindow / AttachEventStream"]
         permissionUseCases["Permission Use Cases<br/>ResolvePermissionRequest"]
         completionUseCases["Completion Use Cases<br/>ResolveSlashCompletions"]
     end
@@ -861,6 +861,10 @@ ACP 固有型に依存しません。
   - inbound ACP update を canonical event へ落とし込み、どの event を保存・配信するかを決める
 - `CancelTurn`
   - 実行中 turn の有無を見て cancel を発行し、結果を session state に反映する
+- `ListOwnedSessions`
+  - 認証済み principal が owner である session 一覧を recent activity 順で返す
+  - retention window 内にある closed session も state 付きで含め、front-end が attachable /
+    read-only を判別できるようにする
 - `GetSessionSnapshot`
   - 現在の transcript 要約、接続状態、worker 状態、mode / config 状態をまとめて返す
 - `GetHistoryWindow`
@@ -874,8 +878,8 @@ ACP 固有型に依存しません。
   - static command 定義と、`initialize` / `session/new` / `session/load` /
     `current_mode_update` で得た session metadata を統合し、UI 共通形式へ正規化する
 
-Application read model として `SessionSnapshotView`, `HistoryWindow`, `CompletionCandidate`,
-`ConnectionBadgeState` を組み立てます。
+Application read model として `OwnedSessionListView`, `SessionSnapshotView`, `HistoryWindow`,
+`CompletionCandidate`, `ConnectionBadgeState` を組み立てます。
 
 #### Infrastructure
 
@@ -920,7 +924,9 @@ Application read model として `SessionSnapshotView`, `HistoryWindow`, `Comple
   - working directory、環境変数、resource limit、process group、timeout、output cap を管理する
 - `SessionStateRepository`
   - session owner、session metadata、ACP sessionId、negotiated protocol/capabilities、TTL、
-    worker ひも付け、attach 数などの現在値を保存する single writer
+    recent activity 順序、worker ひも付け、attach 数などの現在値を保存する single writer
+  - recent activity は create / attach / prompt accept / permission resolve / cancel / close の
+    成功時に更新し、history 読み出しや stream delta 受信だけでは更新しない
 - `EventStore`
   - append-only canonical event と transcript snapshot を保持し、history/replay/reconnect の
     読み出しに使う single writer
@@ -989,6 +995,7 @@ backend は ACP の raw event をそのまま流しません。`SessionUpdateNor
 
 | Method | Path | 用途 | 認可 |
 | --- | --- | --- | --- |
+| `GET` | `/api/v1/sessions` | owner-scoped session 一覧取得 | 認証済み principal |
 | `POST` | `/api/v1/sessions` | session 作成 | 認証済み principal |
 | `GET` | `/api/v1/sessions/{id}` | session snapshot 取得 | session owner |
 | `GET` | `/api/v1/sessions/{id}/events` | SSE 購読 | session owner |
@@ -999,6 +1006,12 @@ backend は ACP の raw event をそのまま流しません。`SessionUpdateNor
 | `POST` | `/api/v1/sessions/{id}/close` | session 終了 | session owner |
 | `GET` | `/api/v1/completions/slash` | slash command 補完 | 認証済み principal + 指定 session の owner |
 | `GET` | `/healthz` | liveness / readiness | kube probe / internal monitor |
+
+`GET /api/v1/sessions` が返すのは system-wide な全件一覧ではなく、認証済み principal が
+owner である session 一覧です。retention window 内にある closed session も current state 付きで
+返し、front-end は attachable / read-only を判別できます。並び順の正本も backend が持ちます。
+recent activity は create / attach / prompt accept / permission resolve / cancel / close の
+成功時だけ更新し、history 読み出しや stream delta では並び替えません。
 
 `/api/v1/completions/slash` は ACP をそのまま中継する endpoint ではありません。
 ACP schema に completion 専用 RPC はありません。そのため、backend は active session を
@@ -1101,14 +1114,15 @@ browser 向け配信では CSP、`X-Content-Type-Options: nosniff`、strict same
 - Tool activity panel
 - Connection / worker state badge
 
-Recent session pane は backend 上の session 全件一覧ではなく、この browser から
-作成または attach した session への shortcut を表示する UI とします。
+Recent session pane は、backend が owner 単位で管理する session 一覧を recent activity 順で
+表示する UI とします。system-wide な全件一覧ではありません。
 
 ### 9.2 状態管理
 
 state は次の 3 層に分けます。
 
 - `Server State`
+  - owned session list / recent activity ordering
   - snapshot
   - history
   - modes / configOptions / 補完ソース metadata
@@ -1118,7 +1132,6 @@ state は次の 3 層に分けます。
   - pane selection
   - scroll position
   - draft input
-  - browser storage に保持する recent session shortcut
 
 ### 9.3 仮想スクロールを採る理由
 

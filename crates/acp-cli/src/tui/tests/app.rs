@@ -167,6 +167,19 @@ fn chat_app_recalls_submitted_inputs_and_restores_drafts() {
 }
 
 #[test]
+fn chat_app_ignores_blank_submitted_inputs() {
+    let mut app = ChatApp::new("s_test", "http://127.0.0.1:8080", false, &[], &[], vec![]);
+    for value in "draft".chars() {
+        app.insert_char(value);
+    }
+
+    app.record_submitted_input("   ");
+    app.recall_previous_input();
+
+    assert_eq!(app.input(), "draft");
+}
+
+#[test]
 fn chat_app_keeps_follow_mode_when_the_transcript_fits_the_viewport() {
     let mut app = ChatApp::new(
         "s_test",
@@ -231,4 +244,25 @@ fn chat_app_scroll_helpers_cover_follow_boundary_transitions() {
 
     app.scroll_down(3, 40, 10);
     assert!(app.follow_transcript());
+}
+
+#[test]
+fn chat_app_scroll_down_is_a_no_op_while_following_an_overflowing_transcript() {
+    let messages = (0..6)
+        .map(|index| assistant_message(&format!("m_{index}"), &format!("message {index}")))
+        .collect::<Vec<_>>();
+    let mut app = ChatApp::new(
+        "s_test",
+        "http://127.0.0.1:8080",
+        false,
+        &messages,
+        &[],
+        vec![],
+    );
+    let start = app.transcript_start(3, 40);
+
+    app.scroll_down(3, 40, 1);
+
+    assert!(app.follow_transcript());
+    assert_eq!(app.transcript_start(3, 40), start);
 }

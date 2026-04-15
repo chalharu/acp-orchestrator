@@ -192,6 +192,30 @@ async fn create_session_seeds_startup_hints_when_enabled() {
 }
 
 #[tokio::test]
+async fn create_session_skips_startup_hints_when_disabled() {
+    let store = Arc::new(SessionStore::new(4));
+    let state = AppState {
+        store,
+        reply_provider: Arc::new(StartupHintProvider {
+            hint: "should stay hidden".to_string(),
+        }),
+        startup_hints: false,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let response = create_session(State(state), headers)
+        .await
+        .expect("session creation should succeed");
+
+    assert_eq!(response.0, StatusCode::CREATED);
+    assert!(response.1.0.session.messages.is_empty());
+}
+
+#[tokio::test]
 async fn create_session_rolls_back_when_startup_hints_fail() {
     let store = Arc::new(SessionStore::new(1));
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));

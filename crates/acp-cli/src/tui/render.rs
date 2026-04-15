@@ -289,3 +289,20 @@ fn wrapped_rows(lines: &[String], width: usize) -> usize {
         })
         .sum()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn render_tool_status_pane_returns_when_the_inner_area_is_empty() {
+        let app = ChatApp::new("s_test", "http://127.0.0.1:8080", false, &[], &[], vec![]);
+        let backend = TestBackend::new(2, 2);
+        let mut terminal = Terminal::new(backend).expect("test terminal should build");
+
+        terminal
+            .draw(|frame| render_tool_status_pane(frame, frame.area(), &app))
+            .expect("tiny panes should still render without panicking");
+    }
+}

@@ -209,6 +209,26 @@ async fn pending_replies_are_ignored_after_session_close() {
 }
 
 #[tokio::test]
+async fn appended_assistant_messages_are_rejected_after_session_close() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    store
+        .close_session("alice", &session.id)
+        .await
+        .expect("closing the session should succeed");
+
+    let error = store
+        .append_assistant_message("alice", &session.id, "late reply".to_string())
+        .await
+        .expect_err("closed sessions should reject injected assistant messages");
+
+    assert_eq!(error, SessionStoreError::Closed);
+}
+
+#[tokio::test]
 async fn empty_prompts_are_rejected() {
     let store = SessionStore::new(4);
     let session = store

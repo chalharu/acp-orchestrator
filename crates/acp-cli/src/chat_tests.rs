@@ -138,6 +138,40 @@ async fn load_chat_session_loads_history_for_resumed_sessions() {
 }
 
 #[tokio::test]
+async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missing() {
+    let server_url = spawn_ordered_http_server(vec![
+        json_response(
+            &serde_json::to_vec(&CreateSessionResponse {
+                session: SessionSnapshot {
+                    id: "s_resume".to_string(),
+                    status: acp_contracts::SessionStatus::Active,
+                    latest_sequence: 2,
+                    messages: vec![acp_contracts::ConversationMessage {
+                        id: "m_snapshot".to_string(),
+                        role: MessageRole::Assistant,
+                        text: "from snapshot".to_string(),
+                        created_at: chrono::Utc::now(),
+                    }],
+                    pending_permissions: Vec::new(),
+                },
+            })
+            .expect("session response should serialize"),
+        ),
+        json_error_response("404 Not Found", "session not found"),
+    ])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let chat_session = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
+        .await
+        .expect("snapshot fallback should succeed");
+
+    assert!(chat_session.resumed);
+    assert_eq!(chat_session.resume_history.len(), 1);
+    assert_eq!(chat_session.resume_history[0].text, "from snapshot");
+}
+
+#[tokio::test]
 async fn load_chat_session_prunes_stale_recent_sessions_when_sessions_are_missing() {
     let recent_path = unique_temp_json_path("acp-cli", "stale-resume");
     with_recent_sessions_path(&recent_path, async {
@@ -254,6 +288,39 @@ async fn filter_recent_sessions_for_current_backend_only_keeps_current_resumable
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].session_id, "s_resume");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn filter_recent_sessions_for_current_backend_prunes_stale_entries() {
+    let recent_path = unique_temp_json_path("acp-cli", "filter-session-list-stale");
+    with_recent_sessions_path(&recent_path, async {
+        let server_url = spawn_ordered_http_server(vec![json_error_response(
+            "404 Not Found",
+            "session not found",
+        )])
+        .await;
+        record_recent_session(&RecentSessionEntry::new("s_stale", &server_url, Utc::now()))
+            .expect("stale recent session should record");
+
+        unsafe {
+            std::env::set_var("ACP_SERVER_URL", &server_url);
+            std::env::set_var("ACP_AUTH_TOKEN", "developer");
+        }
+
+        let filtered = filter_recent_sessions_for_current_backend(
+            load_recent_sessions().expect("recent sessions should load"),
+        )
+        .await
+        .expect("stale sessions should be filtered");
+
+        assert!(filtered.is_empty());
+        assert!(
+            !fs::read_to_string(&recent_path)
+                .expect("recent sessions should be readable")
+                .contains("s_stale")
+        );
     })
     .await;
 }

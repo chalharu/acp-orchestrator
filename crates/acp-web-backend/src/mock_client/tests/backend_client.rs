@@ -275,6 +275,25 @@ async fn default_reply_provider_cleanup_is_a_no_op() {
 }
 
 #[test]
+fn default_reply_provider_prime_session_is_a_no_op() {
+    #[derive(Debug)]
+    struct NoopProvider;
+
+    impl ReplyProvider for NoopProvider {
+        fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+            Box::pin(async { Ok(ReplyResult::NoOutput) })
+        }
+    }
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
+    let hint = runtime
+        .block_on(NoopProvider.prime_session("s_test"))
+        .expect("the default prime-session hook should succeed");
+
+    assert_eq!(hint, None);
+}
+
+#[test]
 fn permission_option_ids_reject_duplicate_once_choices() {
     let request = acp::RequestPermissionRequest::new(
         "mock_0",

@@ -154,6 +154,25 @@ fn render_tool_status_pane(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
         return;
     }
 
+    let (permission_lines, status_lines) = tool_status_lines(app);
+    let (permission_height, status_height) = tool_status_section_heights(inner, &permission_lines);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(permission_height),
+            Constraint::Min(status_height),
+        ])
+        .split(inner);
+
+    if permission_height > 0 {
+        render_tail_section(frame, sections[0], "pending permissions", &permission_lines);
+    }
+    if status_height > 0 {
+        render_tail_section(frame, sections[1], "recent status", &status_lines);
+    }
+}
+
+fn tool_status_lines(app: &ChatApp) -> (Vec<String>, Vec<String>) {
     let permission_lines = if app.pending_permissions().is_empty() {
         vec!["none".to_string()]
     } else {
@@ -171,30 +190,21 @@ fn render_tool_status_pane(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
             .collect()
     };
 
+    (permission_lines, status_lines)
+}
+
+fn tool_status_section_heights(inner: Rect, permission_lines: &[String]) -> (u16, u16) {
     let status_min_height = inner.height.min(4);
     let permission_height = inner
         .height
         .saturating_sub(status_min_height)
         .min(section_row_count(
             "pending permissions",
-            &permission_lines,
+            permission_lines,
             inner.width as usize,
         ) as u16);
     let status_height = inner.height.saturating_sub(permission_height);
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(permission_height),
-            Constraint::Min(status_height),
-        ])
-        .split(inner);
-
-    if permission_height > 0 {
-        render_tail_section(frame, sections[0], "pending permissions", &permission_lines);
-    }
-    if status_height > 0 {
-        render_tail_section(frame, sections[1], "recent status", &status_lines);
-    }
+    (permission_height, status_height)
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {

@@ -312,6 +312,62 @@ mod tests {
         )
     }
 
+    fn session_response(pending_permissions: Vec<PermissionRequest>) -> CreateSessionResponse {
+        CreateSessionResponse {
+            session: SessionSnapshot {
+                id: "s_test".to_string(),
+                status: SessionStatus::Active,
+                latest_sequence: 2,
+                messages: Vec::new(),
+                pending_permissions,
+            },
+        }
+    }
+
+    async fn spawn_session_server(response: CreateSessionResponse) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("server should bind");
+        let address = listener
+            .local_addr()
+            .expect("server address should be readable");
+        let payload = serde_json::to_vec(&response).expect("session payload should serialize");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response headers should write");
+            stream
+                .write_all(&payload)
+                .await
+                .expect("response body should write");
+        });
+
+        format!("http://{address}")
+    }
+
+    fn refresh_context<'a>(
+        runtime_handle: &'a Handle,
+        client: &'a Client,
+        server_url: &'a str,
+    ) -> UiContext<'a> {
+        UiContext {
+            runtime_handle,
+            client,
+            server_url,
+            auth_token: "developer",
+            session_id: "s_test",
+        }
+    }
+
     #[test]
     fn drain_events_requests_pending_permission_refresh_after_status_updates() {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -350,57 +406,58 @@ mod tests {
         assert!(!refresh_state.in_flight);
     }
 
-    #[tokio::test]
-    async fn launch_pending_permission_refresh_fetches_latest_permissions() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("server should bind");
-        let address = listener
-            .local_addr()
-            .expect("server address should be readable");
-        let payload = serde_json::to_vec(&CreateSessionResponse {
-            session: SessionSnapshot {
-                id: "s_test".to_string(),
-                status: SessionStatus::Active,
-                latest_sequence: 2,
-                messages: Vec::new(),
-                pending_permissions: Vec::new(),
-            },
-        })
-        .expect("session payload should serialize");
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("server should accept");
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                payload.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .expect("response headers should write");
-            stream
-                .write_all(&payload)
-                .await
-                .expect("response body should write");
-        });
+    #[test]
+    fn drain_events_records_refresh_errors() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut app = pending_permission_app();
+        let mut refresh_state = PendingPermissionRefreshState {
+            in_flight: true,
+            queued: false,
+        };
+        event_tx
+            .send(TuiEvent::PendingPermissionsRefreshed(Err(
+                "refresh failed".to_string()
+            )))
+            .expect("refresh errors should queue");
 
+        drain_events(&mut event_rx, &mut app, &mut refresh_state);
+
+        assert!(
+            app.status_entries()
+                .iter()
+                .any(|status| status == "refresh failed")
+        );
+        assert!(!refresh_state.in_flight);
+    }
+
+    #[tokio::test]
+    async fn launch_pending_permission_refresh_ignores_unqueued_requests() {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let client = Client::builder().build().expect("client should build");
         let runtime_handle = Handle::current();
-        let server_url = format!("http://{address}");
+        let mut refresh_state = PendingPermissionRefreshState::default();
+        let context = refresh_context(&runtime_handle, &client, "http://127.0.0.1:9");
+
+        launch_pending_permission_refresh(&context, &event_tx, &mut refresh_state);
+
+        assert!(!refresh_state.in_flight);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn launch_pending_permission_refresh_fetches_latest_permissions() {
+        let server_url = spawn_session_server(session_response(Vec::new())).await;
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let client = Client::builder().build().expect("client should build");
+        let runtime_handle = Handle::current();
         let mut refresh_state = PendingPermissionRefreshState {
             in_flight: false,
             queued: true,
         };
-        let context = UiContext {
-            runtime_handle: &runtime_handle,
-            client: &client,
-            server_url: &server_url,
-            auth_token: "developer",
-            session_id: "s_test",
-        };
+        let context = refresh_context(&runtime_handle, &client, &server_url);
 
         launch_pending_permission_refresh(&context, &event_tx, &mut refresh_state);
         assert!(refresh_state.in_flight);

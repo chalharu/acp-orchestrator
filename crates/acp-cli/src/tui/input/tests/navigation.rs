@@ -16,26 +16,31 @@ fn navigation_app() -> ChatApp {
     )
 }
 
-#[test]
-fn handle_key_recalls_history_with_arrow_keys() {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-    let client = Client::builder().build().expect("client should build");
-    let server_url = "http://127.0.0.1:9".to_string();
-    let auth_token = "developer".to_string();
-    let session_id = "s_test".to_string();
-    let context = build_context(
-        runtime.handle(),
-        &client,
-        &server_url,
-        &auth_token,
-        &session_id,
-    );
+fn history_navigation_app() -> ChatApp {
     let mut app = navigation_app();
     app.record_submitted_input("first");
     app.record_submitted_input("second");
-    for value in "draft".chars() {
-        app.insert_char(value);
+    app
+}
+
+fn set_input(app: &mut ChatApp, value: &str) {
+    for character in value.chars() {
+        app.insert_char(character);
     }
+}
+
+#[test]
+fn handle_key_recalls_recent_history_with_up() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
+    let client = Client::builder().build().expect("client should build");
+    let context = build_context(
+        runtime.handle(),
+        &client,
+        "http://127.0.0.1:9",
+        "developer",
+        "s_test",
+    );
+    let mut app = history_navigation_app();
 
     handle_key(
         &context,
@@ -55,15 +60,29 @@ fn handle_key_recalls_history_with_arrow_keys() {
     )
     .expect("second up should succeed");
     assert_eq!(app.input(), "first");
+}
+
+#[test]
+fn handle_key_restores_draft_after_history_navigation() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
+    let client = Client::builder().build().expect("client should build");
+    let context = build_context(
+        runtime.handle(),
+        &client,
+        "http://127.0.0.1:9",
+        "developer",
+        "s_test",
+    );
+    let mut app = history_navigation_app();
+    set_input(&mut app, "draft");
     handle_key(
         &context,
         &mut app,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
         3,
         8,
     )
-    .expect("down should succeed");
-    assert_eq!(app.input(), "second");
+    .expect("up should succeed");
     handle_key(
         &context,
         &mut app,

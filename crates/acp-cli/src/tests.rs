@@ -323,6 +323,26 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
 }
 
 #[test]
+fn print_chat_status_handles_pending_permissions() {
+    let chat_session = ChatSession {
+        session: SessionSnapshot {
+            id: "s_test".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 1,
+            messages: Vec::new(),
+            pending_permissions: vec![acp_contracts::PermissionRequest {
+                request_id: "req_1".to_string(),
+                summary: "read_text_file README.md".to_string(),
+            }],
+        },
+        resume_history: Vec::new(),
+        resumed: false,
+    };
+
+    print_chat_status(&chat_session, true);
+}
+
+#[test]
 fn recent_sessions_path_uses_the_explicit_path_first() {
     let path = recent_sessions_path_from(
         Some(OsString::from("/tmp/acp-test.json")),

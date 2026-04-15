@@ -1,5 +1,24 @@
 use super::*;
-use acp_contracts::{SessionHistoryResponse, SlashCompletionsResponse};
+use acp_contracts::{SessionHistoryResponse, SessionListResponse, SlashCompletionsResponse};
+
+pub(super) async fn list_sessions(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+) -> Result<SessionListResponse> {
+    let response = client
+        .get(format!("{base_url}/api/v1/sessions"))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "list sessions",
+        })?;
+    let response = ensure_success(response, "list sessions").await?;
+    response.json().await.context(DecodeResponseSnafu {
+        action: "list sessions",
+    })
+}
 
 pub(super) async fn create_session(
     client: &Client,

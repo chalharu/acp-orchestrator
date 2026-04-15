@@ -93,6 +93,78 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
 }
 
 #[tokio::test]
+async fn session_list_is_owner_scoped_and_keeps_retained_closed_sessions() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        acp_server: String::new(),
+        startup_hints: false,
+    })
+    .await?;
+
+    let first = stack.create_session("alice").await?;
+    let second = stack.create_session("alice").await?;
+    let bob = stack.create_session("bob").await?;
+    stack.close_session("alice", &first.session.id).await?;
+
+    let sessions = stack.list_sessions("alice").await?;
+
+    assert_eq!(sessions.sessions.len(), 2);
+    assert_eq!(sessions.sessions[0].id, first.session.id);
+    assert_eq!(
+        sessions.sessions[0].status,
+        acp_contracts::SessionStatus::Closed
+    );
+    assert_eq!(sessions.sessions[1].id, second.session.id);
+    assert_eq!(
+        sessions.sessions[1].status,
+        acp_contracts::SessionStatus::Active
+    );
+    assert!(
+        sessions
+            .sessions
+            .iter()
+            .all(|session| session.id != bob.session.id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn opening_a_session_moves_it_to_the_front_of_the_owned_session_list() -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        acp_server: String::new(),
+        startup_hints: false,
+    })
+    .await?;
+
+    let first = stack.create_session("alice").await?;
+    let second = stack.create_session("alice").await?;
+
+    let before = stack.list_sessions("alice").await?;
+    assert_eq!(
+        before
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.session.id.as_str(), first.session.id.as_str()]
+    );
+
+    let _ = stack.session_snapshot("alice", &first.session.id).await?;
+
+    let after = stack.list_sessions("alice").await?;
+    assert_eq!(
+        after
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.session.id.as_str(), second.session.id.as_str()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 128,

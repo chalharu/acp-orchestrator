@@ -3,7 +3,7 @@ use std::{future::pending, pin::Pin, time::Duration};
 use acp_app_support::{wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
     CancelTurnResponse, CreateSessionResponse, PromptRequest, ResolvePermissionRequest,
-    ResolvePermissionResponse,
+    ResolvePermissionResponse, SessionListResponse,
 };
 pub(super) use acp_contracts::{MessageRole, PermissionDecision, StreamEvent, StreamEventPayload};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
@@ -182,6 +182,22 @@ impl TestStack {
             .json()
             .await
             .context("decoding session snapshot response")
+    }
+
+    pub(super) async fn list_sessions(&self, token: &str) -> Result<SessionListResponse> {
+        let response = self
+            .client
+            .get(format!("{}/api/v1/sessions", self.backend_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("loading owned sessions")?
+            .error_for_status()
+            .context("owned session list request returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding owned session list response")
     }
 
     pub(super) async fn open_events(&self, token: &str, session_id: &str) -> Result<SseStream> {

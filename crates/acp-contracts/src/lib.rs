@@ -34,6 +34,18 @@ pub struct SessionSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionListItem {
+    pub id: String,
+    pub status: SessionStatus,
+    pub last_activity_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionListResponse {
+    pub sessions: Vec<SessionListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateSessionResponse {
     pub session: SessionSnapshot,
 }

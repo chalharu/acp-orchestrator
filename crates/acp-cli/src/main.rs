@@ -17,8 +17,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_args_delegates_to_the_cli_library() {
-        run_with_args(["acp", "session", "list"])
+        let error = run_with_args(["acp", "session", "list"])
             .await
-            .expect("session list should succeed");
+            .expect_err("delegated session list should surface cli errors");
+        assert!(matches!(
+            error,
+            acp_cli::CliError::MissingServerUrl { command } if command == "listing sessions"
+        ));
     }
 }

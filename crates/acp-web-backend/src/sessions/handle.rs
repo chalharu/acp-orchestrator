@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use acp_contracts::{
     ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    ResolvePermissionResponse, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    ResolvePermissionResponse, SessionListItem, SessionSnapshot, SessionStatus, StreamEvent,
+    StreamEventPayload,
 };
 use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, broadcast, oneshot, watch};
@@ -54,6 +55,8 @@ struct SessionData {
     owner: String,
     status: SessionStatus,
     closed_at: Option<DateTime<Utc>>,
+    last_activity_at: DateTime<Utc>,
+    recent_order: u64,
     latest_sequence: u64,
     next_prompt_order: u64,
     next_permission_request_id: u64,
@@ -65,7 +68,12 @@ struct SessionData {
 }
 
 impl SessionHandle {
-    pub(super) fn new(id: String, owner: String) -> Self {
+    pub(super) fn new(
+        id: String,
+        owner: String,
+        last_activity_at: DateTime<Utc>,
+        recent_order: u64,
+    ) -> Self {
         let (sender, _) = broadcast::channel(64);
         Self {
             sender,
@@ -74,6 +82,8 @@ impl SessionHandle {
                 owner,
                 status: SessionStatus::Active,
                 closed_at: None,
+                last_activity_at,
+                recent_order,
                 latest_sequence: 0,
                 next_prompt_order: 0,
                 next_permission_request_id: 1,
@@ -120,6 +130,18 @@ impl SessionHandle {
         collect_pending_permissions(&data)
     }
 
+    pub(super) async fn session_list_item_with_order(&self) -> (SessionListItem, u64) {
+        let data = self.data.lock().await;
+        (
+            SessionListItem {
+                id: data.id.clone(),
+                status: data.status.clone(),
+                last_activity_at: data.last_activity_at,
+            },
+            data.recent_order,
+        )
+    }
+
     pub(super) async fn append_message(
         &self,
         role: MessageRole,
@@ -135,6 +157,12 @@ impl SessionHandle {
 
     pub(super) async fn closed_at(&self) -> Option<DateTime<Utc>> {
         self.data.lock().await.closed_at
+    }
+
+    pub(super) async fn touch_recent_activity(&self, recent_order: u64) {
+        let mut data = self.data.lock().await;
+        data.last_activity_at = Utc::now();
+        data.recent_order = recent_order;
     }
 
     pub(super) async fn submit_user_prompt(

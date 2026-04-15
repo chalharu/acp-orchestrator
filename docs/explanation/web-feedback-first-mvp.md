@@ -72,7 +72,7 @@ browser を Web app へ開きます。
 
 - Web 起動: `cargo run -- --web`
 - browser open 先の例: `http://127.0.0.1:8080/app/`
-- browser open に失敗した場合: terminal に URL を表示し、手動 open を案内する
+- browser open に失敗した場合: terminal へ URL を表示し、手動 open を案内する
 
 launcher は backend の `/healthz` と asset 配信準備を確認してから browser を開きます。
 bundled mock を使う手動確認では、launcher と Web 画面の両方で次の prompt を標準トリガとして

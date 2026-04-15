@@ -172,6 +172,29 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
 }
 
 #[tokio::test]
+async fn load_chat_session_returns_non_404_history_errors() {
+    let server_url = spawn_ordered_http_server(vec![
+        json_response(
+            &serde_json::to_vec(&resumed_session_response())
+                .expect("session response should serialize"),
+        ),
+        json_error_response("500 Internal Server Error", "history unavailable"),
+    ])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let error = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
+        .await
+        .expect_err("unexpected history failures should surface");
+
+    assert!(matches!(
+        error,
+        CliError::HttpStatus { status, message, .. }
+            if status == StatusCode::INTERNAL_SERVER_ERROR && message == "history unavailable"
+    ));
+}
+
+#[tokio::test]
 async fn load_chat_session_prunes_stale_recent_sessions_when_sessions_are_missing() {
     let recent_path = unique_temp_json_path("acp-cli", "stale-resume");
     with_recent_sessions_path(&recent_path, async {
@@ -320,6 +343,44 @@ async fn filter_recent_sessions_for_current_backend_prunes_stale_entries() {
             !fs::read_to_string(&recent_path)
                 .expect("recent sessions should be readable")
                 .contains("s_stale")
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn filter_recent_sessions_for_current_backend_keeps_entries_on_non_404_errors() {
+    let recent_path = unique_temp_json_path("acp-cli", "filter-session-list-error");
+    with_recent_sessions_path(&recent_path, async {
+        let server_url = spawn_ordered_http_server(vec![json_error_response(
+            "500 Internal Server Error",
+            "backend unavailable",
+        )])
+        .await;
+        record_recent_session(&RecentSessionEntry::new(
+            "s_degraded",
+            &server_url,
+            Utc::now(),
+        ))
+        .expect("degraded recent session should record");
+
+        unsafe {
+            std::env::set_var("ACP_SERVER_URL", &server_url);
+            std::env::set_var("ACP_AUTH_TOKEN", "developer");
+        }
+
+        let filtered = filter_recent_sessions_for_current_backend(
+            load_recent_sessions().expect("recent sessions should load"),
+        )
+        .await
+        .expect("non-404 failures should keep the entry");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "s_degraded");
+        assert!(
+            fs::read_to_string(&recent_path)
+                .expect("recent sessions should be readable")
+                .contains("s_degraded")
         );
     })
     .await;

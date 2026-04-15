@@ -110,7 +110,7 @@ async fn handle_paste_submits_complete_lines_and_keeps_partial_input() {
 }
 
 #[tokio::test]
-async fn submit_current_input_routes_slash_commands_and_prompt_failures() {
+async fn submit_current_input_routes_slash_commands() {
     let (url, _request_line_rx) = spawn_completion_server(SlashCompletionsResponse {
         candidates: vec![command_candidate("/help", "/help", "Show help")],
     })
@@ -147,7 +147,10 @@ async fn submit_current_input_routes_slash_commands_and_prompt_failures() {
             .iter()
             .any(|status| status == "available slash commands refreshed")
     );
+}
 
+#[tokio::test]
+async fn submit_current_input_records_prompt_failures() {
     let client = Client::builder().build().expect("client should build");
     let runtime_handle = Handle::current();
     let auth_token = "developer".to_string();
@@ -181,7 +184,7 @@ async fn submit_current_input_routes_slash_commands_and_prompt_failures() {
 }
 
 #[tokio::test]
-async fn handle_key_enter_routes_plain_and_slash_input_through_submit_current_input() {
+async fn handle_key_enter_submits_plain_input() {
     let (prompt_url, prompt_request_line_rx, _prompt_body_rx) = spawn_prompt_server().await;
     let client = Client::builder().build().expect("client should build");
     let runtime_handle = Handle::current();
@@ -221,7 +224,10 @@ async fn handle_key_enter_routes_plain_and_slash_input_through_submit_current_in
             .expect("prompt request line should be captured"),
         "POST /api/v1/sessions/s_test/messages HTTP/1.1"
     );
+}
 
+#[tokio::test]
+async fn handle_key_enter_executes_slash_commands() {
     let (help_url, _request_line_rx) = spawn_completion_server(SlashCompletionsResponse {
         candidates: vec![command_candidate("/help", "/help", "Show help")],
     })

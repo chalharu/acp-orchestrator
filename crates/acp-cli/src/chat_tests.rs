@@ -114,48 +114,20 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
 async fn load_chat_session_loads_history_for_resumed_sessions() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(
-            &serde_json::to_vec(&SessionHistoryResponse {
-                session_id: "s_resume".to_string(),
-                messages: vec![acp_contracts::ConversationMessage {
-                    id: "m_1".to_string(),
-                    role: MessageRole::Assistant,
-                    text: "from history".to_string(),
-                    created_at: chrono::Utc::now(),
-                }],
-            })
-            .expect("history response should serialize"),
+            &serde_json::to_vec(&resumed_history_response())
+                .expect("history response should serialize"),
         ),
         json_response(
-            &serde_json::to_vec(&CreateSessionResponse {
-                session: SessionSnapshot {
-                    id: "s_resume".to_string(),
-                    status: acp_contracts::SessionStatus::Active,
-                    latest_sequence: 2,
-                    messages: Vec::new(),
-                    pending_permissions: vec![acp_contracts::PermissionRequest {
-                        request_id: "req_1".to_string(),
-                        summary: "read_text_file README.md".to_string(),
-                    }],
-                },
-            })
-            .expect("session response should serialize"),
+            &serde_json::to_vec(&resumed_session_response())
+                .expect("session response should serialize"),
         ),
     ])
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    let chat_session = load_chat_session(
-        &client,
-        &server_url,
-        &ChatArgs {
-            new: false,
-            session_id: Some("s_resume".to_string()),
-            server_url: Some(server_url.clone()),
-            auth_token: "developer".to_string(),
-        },
-    )
-    .await
-    .expect("resumed sessions should load");
+    let chat_session = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
+        .await
+        .expect("resumed sessions should load");
 
     assert!(chat_session.resumed);
     assert_eq!(chat_session.resume_history[0].text, "from history");
@@ -270,4 +242,40 @@ fn sse_response(payload: &[u8]) -> Vec<u8> {
     .into_iter()
     .chain(payload.iter().copied())
     .collect()
+}
+
+fn resumed_chat_args(server_url: &str) -> ChatArgs {
+    ChatArgs {
+        new: false,
+        session_id: Some("s_resume".to_string()),
+        server_url: Some(server_url.to_string()),
+        auth_token: "developer".to_string(),
+    }
+}
+
+fn resumed_history_response() -> SessionHistoryResponse {
+    SessionHistoryResponse {
+        session_id: "s_resume".to_string(),
+        messages: vec![acp_contracts::ConversationMessage {
+            id: "m_1".to_string(),
+            role: MessageRole::Assistant,
+            text: "from history".to_string(),
+            created_at: chrono::Utc::now(),
+        }],
+    }
+}
+
+fn resumed_session_response() -> CreateSessionResponse {
+    CreateSessionResponse {
+        session: SessionSnapshot {
+            id: "s_resume".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 2,
+            messages: Vec::new(),
+            pending_permissions: vec![acp_contracts::PermissionRequest {
+                request_id: "req_1".to_string(),
+                summary: "read_text_file README.md".to_string(),
+            }],
+        },
+    }
 }

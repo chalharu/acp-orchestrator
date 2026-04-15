@@ -11,9 +11,11 @@ use tokio::{
 };
 
 mod completion;
-mod events;
+mod editing;
+mod navigation;
 mod outcomes;
 mod submission;
+mod terminal;
 
 fn command_candidate(label: &str, insert_text: &str, detail: &str) -> CompletionCandidate {
     CompletionCandidate {

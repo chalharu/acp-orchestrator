@@ -1,6 +1,13 @@
 [bans]
 multiple-versions = "allow"
 
+[advisories]
+ignore = [
+  # Both advisories are currently pulled in transitively by ratatui.
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0002",
+]
+
 [licenses]
 version = 2
 allow = [

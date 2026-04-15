@@ -17,6 +17,7 @@ mod events;
 mod input;
 mod recent_sessions;
 mod repl_commands;
+mod tui;
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +31,7 @@ use recent_sessions::{
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
-struct ChatSession {
+pub(crate) struct ChatSession {
     session: SessionSnapshot,
     resume_history: Vec<ConversationMessage>,
     resumed: bool,
@@ -54,6 +55,9 @@ pub enum CliError {
         source: rustyline::error::ReadlineError,
     },
 
+    #[snafu(display("joining the interactive terminal UI task failed"))]
+    JoinInteractiveUi { source: tokio::task::JoinError },
+
     #[snafu(display("joining the prompt reader task failed"))]
     JoinPromptReader { source: tokio::task::JoinError },
 
@@ -67,6 +71,18 @@ pub enum CliError {
     ReadInteractivePrompt {
         source: rustyline::error::ReadlineError,
     },
+
+    #[snafu(display("setting up the terminal UI failed"))]
+    SetupTerminalUi { source: std::io::Error },
+
+    #[snafu(display("drawing the terminal UI failed"))]
+    DrawTerminalUi { source: std::io::Error },
+
+    #[snafu(display("polling for terminal input failed"))]
+    PollTerminalInput { source: std::io::Error },
+
+    #[snafu(display("reading terminal input failed"))]
+    ReadTerminalInput { source: std::io::Error },
 
     #[snafu(display("{action} request failed"))]
     SendRequest {
@@ -193,21 +209,31 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
     let server_url = require_server_url("chat", args.server_url.clone())?;
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
     let chat_session = load_chat_session(&client, &server_url, &args).await?;
-    let session_id = &chat_session.session.id;
-    let recent_entry = RecentSessionEntry::new(session_id, &server_url, Utc::now());
+    let session_id = chat_session.session.id.clone();
+    let recent_entry = RecentSessionEntry::new(&session_id, &server_url, Utc::now());
     record_recent_session(&recent_entry)?;
-    print_chat_banner(session_id, &server_url);
-    print_chat_status(&chat_session, interactive_completion_enabled());
+    if interactive_completion_enabled() {
+        return tui::run_chat_tui(client, server_url, args.auth_token, chat_session).await;
+    }
+
+    print_chat_banner(&chat_session.session.id, &server_url);
+    print_chat_status(&chat_session, false);
     let initial_snapshot_state = render_resume_history(&chat_session);
 
     let event_task = spawn_event_task(
         &client,
         &server_url,
         &args.auth_token,
-        session_id,
+        &chat_session.session.id,
         initial_snapshot_state,
     );
-    drive_repl(&client, &server_url, &args.auth_token, session_id).await?;
+    drive_repl(
+        &client,
+        &server_url,
+        &args.auth_token,
+        &chat_session.session.id,
+    )
+    .await?;
     event_task.abort();
     Ok(())
 }

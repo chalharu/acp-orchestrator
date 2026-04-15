@@ -1,0 +1,138 @@
+use std::time::Duration;
+
+use acp_contracts::CompletionCandidate;
+use reqwest::Client;
+use snafu::ResultExt;
+use tokio::{runtime::Handle, sync::mpsc};
+
+use crate::{
+    ChatSession, JoinInteractiveUiSnafu, Result,
+    events::{InitialSnapshotState, StreamUpdate, stream_updates},
+    repl_commands::load_command_catalog,
+};
+
+mod app;
+mod input;
+mod render;
+mod runtime;
+
+#[cfg(test)]
+mod tests;
+
+const SLASH_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+
+enum TuiEvent {
+    Stream(StreamUpdate),
+    StreamEnded(String),
+}
+
+struct StartupState {
+    command_catalog: Vec<CompletionCandidate>,
+    startup_statuses: Vec<String>,
+}
+
+pub(super) async fn run_chat_tui(
+    client: Client,
+    server_url: String,
+    auth_token: String,
+    chat_session: ChatSession,
+) -> Result<()> {
+    let initial_snapshot_state = chat_session.resumed.then(|| {
+        InitialSnapshotState::from_messages_and_permissions(
+            &chat_session.resume_history,
+            &chat_session.session.pending_permissions,
+        )
+    });
+    let (stream_task, event_rx) = spawn_stream_task(
+        client.clone(),
+        server_url.clone(),
+        auth_token.clone(),
+        &chat_session,
+        initial_snapshot_state,
+    );
+    let startup = prepare_startup_state(&client, &server_url, &auth_token, &chat_session).await;
+
+    let runtime_handle = Handle::current();
+    let ui_result = tokio::task::spawn_blocking(move || {
+        runtime::run_terminal_ui(
+            runtime_handle,
+            runtime::UiRunState::new(
+                client,
+                server_url,
+                auth_token,
+                chat_session,
+                startup.command_catalog,
+                startup.startup_statuses,
+                event_rx,
+            ),
+        )
+    })
+    .await;
+    stream_task.abort();
+    ui_result.context(JoinInteractiveUiSnafu)?
+}
+
+async fn prepare_startup_state(
+    client: &Client,
+    server_url: &str,
+    auth_token: &str,
+    chat_session: &ChatSession,
+) -> StartupState {
+    let mut startup_statuses = Vec::new();
+    let command_catalog = match tokio::time::timeout(
+        SLASH_COMPLETION_TIMEOUT,
+        load_command_catalog(client, server_url, auth_token, &chat_session.session.id),
+    )
+    .await
+    {
+        Ok(Ok(command_catalog)) => command_catalog,
+        Ok(Err(error)) => {
+            startup_statuses.push(error.to_string());
+            Vec::new()
+        }
+        Err(_) => {
+            startup_statuses.push("slash command catalog timed out".to_string());
+            Vec::new()
+        }
+    };
+
+    StartupState {
+        command_catalog,
+        startup_statuses,
+    }
+}
+
+fn spawn_stream_task(
+    client: Client,
+    server_url: String,
+    auth_token: String,
+    chat_session: &ChatSession,
+    initial_snapshot_state: Option<InitialSnapshotState>,
+) -> (
+    tokio::task::JoinHandle<()>,
+    mpsc::UnboundedReceiver<TuiEvent>,
+) {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let events_url = format!(
+        "{server_url}/api/v1/sessions/{}/events",
+        chat_session.session.id
+    );
+    let stream_task = tokio::spawn(async move {
+        let result = stream_updates(
+            client,
+            events_url,
+            auth_token,
+            initial_snapshot_state,
+            |update| {
+                let _ = event_tx.send(TuiEvent::Stream(update));
+            },
+        )
+        .await;
+        let message = result.err().map_or_else(
+            || "event stream ended".to_string(),
+            |error| format!("event stream ended: {error}"),
+        );
+        let _ = event_tx.send(TuiEvent::StreamEnded(message));
+    });
+    (stream_task, event_rx)
+}

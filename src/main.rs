@@ -211,6 +211,9 @@ fn print_chat_hints(cli_args: &[OsString], bundled_mock: bool) {
             "[hint] slash completion: on an interactive terminal, type `/` or `/approve ` and press TAB to inspect slash command candidates."
         );
         println!(
+            "[hint] transcript navigation: use PageUp/PageDown to review older output and End to return to the live tail."
+        );
+        println!(
             "[hint] session continuity: exit with `/quit`, then use `cargo run -- session list` and `cargo run -- chat --session <id>` to resume this bundled session."
         );
     }

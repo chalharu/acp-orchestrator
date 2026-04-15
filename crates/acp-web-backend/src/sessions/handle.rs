@@ -106,30 +106,18 @@ impl SessionHandle {
 
     pub(super) async fn snapshot(&self) -> SessionSnapshot {
         let data = self.data.lock().await;
-        let mut pending_permissions = data
-            .pending_permissions
-            .iter()
-            .map(|(request_id, pending)| {
-                (
-                    pending.request_order,
-                    PermissionRequest {
-                        request_id: request_id.clone(),
-                        summary: pending.summary.clone(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        pending_permissions.sort_by_key(|(request_order, _)| *request_order);
         SessionSnapshot {
             id: data.id.clone(),
             status: data.status.clone(),
             latest_sequence: data.latest_sequence,
             messages: data.messages.clone(),
-            pending_permissions: pending_permissions
-                .into_iter()
-                .map(|(_, request)| request)
-                .collect(),
+            pending_permissions: collect_pending_permissions(&data),
         }
+    }
+
+    pub(super) async fn pending_permissions(&self) -> Vec<PermissionRequest> {
+        let data = self.data.lock().await;
+        collect_pending_permissions(&data)
     }
 
     pub(super) async fn closed_at(&self) -> Option<DateTime<Utc>> {
@@ -405,4 +393,25 @@ impl SessionHandle {
             }
         }
     }
+}
+
+fn collect_pending_permissions(data: &SessionData) -> Vec<PermissionRequest> {
+    let mut pending_permissions = data
+        .pending_permissions
+        .iter()
+        .map(|(request_id, pending)| {
+            (
+                pending.request_order,
+                PermissionRequest {
+                    request_id: request_id.clone(),
+                    summary: pending.summary.clone(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    pending_permissions.sort_by_key(|(request_order, _)| *request_order);
+    pending_permissions
+        .into_iter()
+        .map(|(_, request)| request)
+        .collect()
 }

@@ -48,6 +48,11 @@ This starts or reuses the bundled ACP mock and web backend, then hands terminal
 I/O to the CLI frontend. Type a prompt, wait for the streamed assistant reply,
 and leave the REPL with `/quit`.
 
+On interactive terminals, type `/` or a partial slash command such as `/ap`,
+then press `TAB` to fetch slash-command candidates from the backend. After a
+permission request appears, `/approve` or `/deny` followed by `TAB` suggests
+pending request IDs.
+
 When running against the bundled mock stack, prompts containing the word
 `permission` still trigger a mock permission request. For reproducible manual
 verification, use the built-in mock prompts below:

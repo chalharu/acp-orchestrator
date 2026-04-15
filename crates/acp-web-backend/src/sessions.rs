@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use acp_contracts::{
-    ConversationMessage, PermissionDecision, ResolvePermissionResponse, SessionSnapshot,
-    StreamEvent,
+    ConversationMessage, PermissionDecision, PermissionRequest, ResolvePermissionResponse,
+    SessionSnapshot, StreamEvent,
 };
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
@@ -236,6 +236,23 @@ impl SessionStore {
     ) -> Result<Vec<ConversationMessage>, SessionStoreError> {
         let handle = self.authorized_handle(owner, session_id).await?;
         Ok(handle.snapshot().await.messages)
+    }
+
+    pub async fn session_pending_permissions(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<Vec<PermissionRequest>, SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        Ok(handle.pending_permissions().await)
+    }
+
+    pub async fn ensure_session_access(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<(), SessionStoreError> {
+        self.authorized_handle(owner, session_id).await.map(|_| ())
     }
 
     pub async fn session_events(

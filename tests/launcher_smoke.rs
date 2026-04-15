@@ -12,7 +12,7 @@ use tokio::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const BROKEN_PROXY_URL: &str = "http://127.0.0.1:9";
-const MANAGED_STACK_EXIT_AFTER_MS: &str = "5000";
+const MANAGED_STACK_EXIT_AFTER_MS: &str = "15000";
 
 #[tokio::test]
 async fn launcher_starts_the_full_stack_and_proxies_cli_io() -> Result<()> {
@@ -70,7 +70,7 @@ async fn assert_launcher_roundtrip_with_args(
     stdin.write_all(b"hello from launcher\n").await?;
     let (_session_id, _backend_url, mut captured_stdout) =
         read_session_connection(&mut reader).await?;
-    sleep(Duration::from_millis(600)).await;
+    captured_stdout.push_str(&read_until_output(&mut reader, "[assistant] mock assistant:").await?);
     captured_stdout.push_str(&quit_launcher(&mut child, &mut stdin, &mut reader).await?);
     assert_launcher_output(&captured_stdout);
 
@@ -83,30 +83,16 @@ async fn launcher_reuses_the_bundled_stack_across_invocations() -> Result<()> {
     let recent_path = unique_recent_sessions_path(label);
     let state_path = unique_launcher_state_path(label);
 
-    let (child, mut stdin, mut reader) = spawn_launcher(&recent_path, &state_path, false, &[])?;
-    let mut child = child;
-    stdin.write_all(b"hello from launcher\n").await?;
-    let (session_id, backend_url, mut first_output) = read_session_connection(&mut reader).await?;
-    sleep(Duration::from_millis(600)).await;
-    first_output.push_str(&quit_launcher(&mut child, &mut stdin, &mut reader).await?);
+    let (session_id, backend_url, _first_output) =
+        run_bundled_launcher_chat(&recent_path, &state_path).await?;
 
     let list_output = run_launcher_command(&recent_path, &state_path, ["session", "list"]).await?;
     assert!(list_output.status.success());
     let list_stdout = String::from_utf8(list_output.stdout)?;
     assert!(list_stdout.contains(&session_id));
 
-    let (resumed_child, mut resumed_stdin, mut resumed_reader) = spawn_launcher(
-        &recent_path,
-        &state_path,
-        false,
-        &["chat", "--session", session_id.as_str()],
-    )?;
-    let mut resumed_child = resumed_child;
-    let (resumed_session_id, resumed_backend_url, mut resumed_output) =
-        read_session_connection(&mut resumed_reader).await?;
-    resumed_output.push_str(
-        &quit_launcher(&mut resumed_child, &mut resumed_stdin, &mut resumed_reader).await?,
-    );
+    let (resumed_session_id, resumed_backend_url, resumed_output) =
+        resume_bundled_launcher_chat(&recent_path, &state_path, &session_id).await?;
 
     assert_eq!(resumed_session_id, session_id);
     assert_eq!(resumed_backend_url, backend_url);
@@ -175,6 +161,59 @@ async fn quit_launcher(
     let status = child.wait().await?;
     assert!(status.success());
     Ok(tail)
+}
+
+async fn run_bundled_launcher_chat(
+    recent_path: &PathBuf,
+    state_path: &PathBuf,
+) -> Result<(String, String, String)> {
+    let (child, mut stdin, mut reader) = spawn_launcher(recent_path, state_path, false, &[])?;
+    let mut child = child;
+    stdin.write_all(b"hello from launcher\n").await?;
+    let (session_id, backend_url, mut output) = read_session_connection(&mut reader).await?;
+    output.push_str(&read_until_output(&mut reader, "[assistant] mock assistant:").await?);
+    output.push_str(&quit_launcher(&mut child, &mut stdin, &mut reader).await?);
+    Ok((session_id, backend_url, output))
+}
+
+async fn resume_bundled_launcher_chat(
+    recent_path: &PathBuf,
+    state_path: &PathBuf,
+    session_id: &str,
+) -> Result<(String, String, String)> {
+    let (child, mut stdin, mut reader) = spawn_launcher(
+        recent_path,
+        state_path,
+        false,
+        &["chat", "--session", session_id],
+    )?;
+    let mut child = child;
+    let (resumed_session_id, resumed_backend_url, mut output) =
+        read_session_connection(&mut reader).await?;
+    output.push_str(&read_until_output(&mut reader, "[assistant] mock assistant:").await?);
+    output.push_str(&quit_launcher(&mut child, &mut stdin, &mut reader).await?);
+    Ok((resumed_session_id, resumed_backend_url, output))
+}
+
+async fn read_until_output(reader: &mut BufReader<ChildStdout>, needle: &str) -> Result<String> {
+    let mut captured = String::new();
+
+    for _ in 0..40 {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(_)) => {
+                captured.push_str(&line);
+                if captured.contains(needle) {
+                    return Ok(captured);
+                }
+            }
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => {}
+        }
+    }
+
+    Ok(captured)
 }
 
 fn assert_launcher_output(output: &str) {

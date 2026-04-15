@@ -1,5 +1,5 @@
 use super::*;
-use acp_contracts::SessionHistoryResponse;
+use acp_contracts::{SessionHistoryResponse, SlashCompletionsResponse};
 
 pub(super) async fn create_session(
     client: &Client,
@@ -149,6 +149,33 @@ pub(super) async fn resolve_permission(
     let response = ensure_success(response, "resolve permission").await?;
     response.json().await.context(DecodeResponseSnafu {
         action: "resolve permission",
+    })
+}
+
+pub(super) async fn get_slash_completions(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    session_id: &str,
+    prefix: &str,
+) -> Result<SlashCompletionsResponse> {
+    let mut completions_url = reqwest::Url::parse(&format!("{base_url}/api/v1/completions/slash"))
+        .expect("server URLs should be valid before querying slash completions");
+    completions_url
+        .query_pairs_mut()
+        .append_pair("sessionId", session_id)
+        .append_pair("prefix", prefix);
+    let response = client
+        .get(completions_url)
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "load slash completions",
+        })?;
+    let response = ensure_success(response, "load slash completions").await?;
+    response.json().await.context(DecodeResponseSnafu {
+        action: "load slash completions",
     })
 }
 

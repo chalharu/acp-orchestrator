@@ -3,11 +3,11 @@ use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
     PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
-    SessionHistoryResponse, StreamEvent,
+    SessionHistoryResponse, SlashCompletionsResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt, stream};
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
@@ -24,6 +25,7 @@ use tracing::info;
 use crate::sessions::TurnHandle;
 use crate::{
     auth::{AuthError, extract_principal},
+    completions::resolve_slash_completions,
     mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStore, SessionStoreError},
 };
@@ -88,6 +90,7 @@ pub fn app(state: AppState) -> Router {
             post(resolve_permission),
         )
         .route("/api/v1/sessions/{session_id}/close", post(close_session))
+        .route("/api/v1/completions/slash", get(get_slash_completions))
         .with_state(state)
 }
 
@@ -211,6 +214,31 @@ async fn resolve_permission(
         .await?;
 
     Ok(Json(resolution))
+}
+
+#[derive(Debug, Deserialize)]
+struct SlashCompletionsQuery {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(default)]
+    prefix: String,
+}
+
+async fn get_slash_completions(
+    State(state): State<AppState>,
+    Query(query): Query<SlashCompletionsQuery>,
+    headers: HeaderMap,
+) -> Result<Json<SlashCompletionsResponse>, AppError> {
+    let principal = extract_principal(&headers)?;
+    let response_future = resolve_slash_completions(
+        &state.store,
+        &principal.id,
+        &query.session_id,
+        &query.prefix,
+    );
+    let response = response_future.await?;
+
+    Ok(Json(response))
 }
 
 async fn stream_session_events(

@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     events::{InitialSnapshotState, render_event, stream_events},
     recent_sessions::{create_recent_sessions_parent, recent_sessions_path_from},
+    repl_commands::handle_repl_command,
 };
 use chrono::TimeZone;
 use std::path::Path;
@@ -108,6 +109,36 @@ async fn handle_repl_command_reports_permission_errors_without_failing() {
     let should_quit = handle_repl_command("/approve req_1", &client, &url, "developer", "s_test")
         .await
         .expect("permission errors should stay in the REPL");
+
+    assert!(!should_quit);
+}
+
+#[tokio::test]
+async fn handle_repl_command_reports_help_errors_without_failing() {
+    let url = spawn_raw_http_server(
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"help failed\"}",
+    )
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let should_quit = handle_repl_command("/help", &client, &url, "developer", "s_test")
+        .await
+        .expect("help failures should stay in the REPL");
+
+    assert!(!should_quit);
+}
+
+#[tokio::test]
+async fn handle_repl_command_handles_empty_help_catalogs() {
+    let url = spawn_raw_http_server(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"candidates\":[]}",
+    )
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let should_quit = handle_repl_command("/help", &client, &url, "developer", "s_test")
+        .await
+        .expect("empty help catalogs should stay in the REPL");
 
     assert!(!should_quit);
 }
@@ -289,6 +320,26 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
             &chat_session.session.pending_permissions,
         ))
     );
+}
+
+#[test]
+fn print_chat_status_handles_pending_permissions() {
+    let chat_session = ChatSession {
+        session: SessionSnapshot {
+            id: "s_test".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 1,
+            messages: Vec::new(),
+            pending_permissions: vec![acp_contracts::PermissionRequest {
+                request_id: "req_1".to_string(),
+                summary: "read_text_file README.md".to_string(),
+            }],
+        },
+        resume_history: Vec::new(),
+        resumed: false,
+    };
+
+    print_chat_status(&chat_session, true);
 }
 
 #[test]

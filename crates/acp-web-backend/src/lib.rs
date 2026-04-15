@@ -1,4 +1,5 @@
 pub mod auth;
+mod completions;
 mod mock_client;
 pub mod runtime;
 pub mod server;

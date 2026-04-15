@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     events::{InitialSnapshotState, render_event, stream_events},
     recent_sessions::{create_recent_sessions_parent, recent_sessions_path_from},
+    repl_commands::handle_repl_command,
 };
 use chrono::TimeZone;
 use std::path::Path;

@@ -1,9 +1,9 @@
 use crate::{
     Result,
-    api::{cancel_turn, resolve_permission},
+    api::{cancel_turn, get_slash_completions, resolve_permission},
     events::permission_decision_label,
 };
-use acp_contracts::PermissionDecision;
+use acp_contracts::{CompletionKind, PermissionDecision, SlashCommand, parse_slash_command};
 use reqwest::Client;
 
 pub(super) async fn handle_repl_command(
@@ -15,14 +15,18 @@ pub(super) async fn handle_repl_command(
 ) -> Result<bool> {
     let mut parts = command.split_whitespace();
     let name = parts.next().unwrap_or_default();
+    let Some(command) = parse_slash_command(name) else {
+        println!("[status] unknown command. Use `/help`.");
+        return Ok(false);
+    };
 
-    match name {
-        "/help" => {
-            print_help();
+    match command {
+        SlashCommand::Help => {
+            print_help(client, base_url, auth_token, session_id).await;
             Ok(false)
         }
-        "/quit" => Ok(true),
-        "/cancel" => {
+        SlashCommand::Quit => Ok(true),
+        SlashCommand::Cancel => {
             handle_cancel_command(
                 parts.next().is_some(),
                 client,
@@ -32,9 +36,9 @@ pub(super) async fn handle_repl_command(
             )
             .await
         }
-        "/approve" | "/deny" => {
+        SlashCommand::Approve | SlashCommand::Deny => {
             handle_permission_command(
-                name,
+                command,
                 parts.next(),
                 parts.next().is_some(),
                 client,
@@ -44,19 +48,37 @@ pub(super) async fn handle_repl_command(
             )
             .await
         }
-        _ => {
-            println!("[status] unknown command. Use `/help`.");
-            Ok(false)
-        }
     }
 }
 
-fn print_help() {
-    println!("/help");
-    println!("/quit");
-    println!("/cancel");
-    println!("/approve <request-id>");
-    println!("/deny <request-id>");
+async fn print_help(client: &Client, base_url: &str, auth_token: &str, session_id: &str) {
+    let response = match get_slash_completions(client, base_url, auth_token, session_id, "/").await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            println!("[status] {error}");
+            return;
+        }
+    };
+    let command_candidates = response
+        .candidates
+        .into_iter()
+        .filter(|candidate| candidate.kind == CompletionKind::Command)
+        .collect::<Vec<_>>();
+    if command_candidates.is_empty() {
+        println!("[status] no slash commands available");
+        return;
+    }
+
+    let label_width = command_candidates
+        .iter()
+        .map(|candidate| candidate.label.len())
+        .max()
+        .unwrap_or_default();
+    println!("[status] available slash commands:");
+    for candidate in command_candidates {
+        println!("{:<label_width$}  {}", candidate.label, candidate.detail);
+    }
 }
 
 async fn handle_cancel_command(
@@ -67,7 +89,7 @@ async fn handle_cancel_command(
     session_id: &str,
 ) -> Result<bool> {
     if has_extra_args {
-        println!("[status] usage: /cancel");
+        println!("[status] usage: {}", SlashCommand::Cancel.spec().label);
         return Ok(false);
     }
 
@@ -84,7 +106,7 @@ async fn handle_cancel_command(
 }
 
 async fn handle_permission_command(
-    name: &str,
+    command: SlashCommand,
     request_id: Option<&str>,
     has_extra_args: bool,
     client: &Client,
@@ -93,11 +115,11 @@ async fn handle_permission_command(
     session_id: &str,
 ) -> Result<bool> {
     let Some(request_id) = request_id else {
-        println!("[status] usage: {name} <request-id>");
+        println!("[status] usage: {}", command.spec().label);
         return Ok(false);
     };
     if has_extra_args {
-        println!("[status] usage: {name} <request-id>");
+        println!("[status] usage: {}", command.spec().label);
         return Ok(false);
     }
 
@@ -107,7 +129,7 @@ async fn handle_permission_command(
         auth_token,
         session_id,
         request_id,
-        permission_decision(name),
+        permission_decision(command),
     )
     .await
     {
@@ -121,8 +143,8 @@ async fn handle_permission_command(
     Ok(false)
 }
 
-fn permission_decision(name: &str) -> PermissionDecision {
-    if name == "/approve" {
+fn permission_decision(command: SlashCommand) -> PermissionDecision {
+    if command == SlashCommand::Approve {
         PermissionDecision::Approve
     } else {
         PermissionDecision::Deny

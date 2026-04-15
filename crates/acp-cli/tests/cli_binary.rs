@@ -186,10 +186,16 @@ async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
 fn assert_chat_output(output: &str) {
     assert!(output.contains("session: s_"));
     assert!(output.contains("connected to backend:"));
+    assert!(output.contains("[status] new session ready"));
+    assert!(output.contains("[status] available slash commands:"));
     assert!(output.contains("/help"));
+    assert!(output.contains("Show available slash commands"));
     assert!(output.contains("/cancel"));
+    assert!(output.contains("Cancel the running turn"));
     assert!(output.contains("/approve <request-id>"));
+    assert!(output.contains("Approve a pending permission request"));
     assert!(output.contains("/deny <request-id>"));
+    assert!(output.contains("Deny a pending permission request"));
     assert!(output.contains("[permission req_1] read_text_file README.md"));
     assert!(output.contains("[status] permission req_1 approved"));
     assert!(output.contains("[permission req_2] read_text_file README.md"));
@@ -231,6 +237,7 @@ async fn assert_resume_and_list_commands(stack: &TestStack, session_id: &str) ->
     assert!(resumed_output.status.success());
     let resumed_stdout = String::from_utf8(resumed_output.stdout)?;
     assert!(resumed_stdout.contains(session_id));
+    assert!(resumed_stdout.contains("[status] resumed existing session"));
     assert!(resumed_stdout.contains("[user] hello from cli binary"));
     assert!(resumed_stdout.contains("[assistant] mock assistant:"));
 

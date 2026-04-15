@@ -1,9 +1,4 @@
-use std::{
-    error::Error as StdError,
-    ffi::OsString,
-    io::{self, Write},
-    path::PathBuf,
-};
+use std::{error::Error as StdError, ffi::OsString, path::PathBuf};
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
@@ -19,20 +14,19 @@ use snafu::prelude::*;
 
 mod api;
 mod events;
+mod input;
 mod recent_sessions;
 mod repl_commands;
 
 #[cfg(test)]
 mod tests;
 
-use api::{
-    close_session, create_session, ensure_success, get_session, get_session_history, submit_prompt,
-};
+use api::{close_session, create_session, ensure_success, get_session, get_session_history};
 use events::{InitialSnapshotState, stream_events_to_stderr};
+use input::{drive_repl, interactive_completion_enabled};
 use recent_sessions::{
     RecentSessionEntry, load_recent_sessions, record_recent_session, remove_recent_session,
 };
-use repl_commands::handle_repl_command;
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
@@ -55,6 +49,11 @@ pub enum CliError {
     #[snafu(display("building the HTTP client failed"))]
     BuildHttpClient { source: reqwest::Error },
 
+    #[snafu(display("building the interactive line editor failed"))]
+    BuildInteractiveEditor {
+        source: rustyline::error::ReadlineError,
+    },
+
     #[snafu(display("joining the prompt reader task failed"))]
     JoinPromptReader { source: tokio::task::JoinError },
 
@@ -63,6 +62,11 @@ pub enum CliError {
 
     #[snafu(display("reading a prompt line failed"))]
     ReadPromptLine { source: std::io::Error },
+
+    #[snafu(display("reading interactive input failed"))]
+    ReadInteractivePrompt {
+        source: rustyline::error::ReadlineError,
+    },
 
     #[snafu(display("{action} request failed"))]
     SendRequest {
@@ -195,6 +199,7 @@ async fn run_chat(args: ChatArgs) -> Result<()> {
         Utc::now(),
     ))?;
     print_chat_banner(&chat_session.session.id, &server_url);
+    print_chat_status(&chat_session, interactive_completion_enabled());
     let initial_snapshot_state = render_resume_history(&chat_session);
 
     let event_task = spawn_event_task(
@@ -268,6 +273,21 @@ fn print_chat_banner(session_id: &str, server_url: &str) {
     println!("connected to backend: {server_url}");
 }
 
+fn print_chat_status(chat_session: &ChatSession, interactive_completion: bool) {
+    if chat_session.resumed {
+        println!("[status] resumed existing session");
+    } else {
+        println!("[status] new session ready");
+    }
+    if interactive_completion {
+        println!("[status] press TAB after `/` to view slash command candidates");
+    }
+    let pending_permissions = chat_session.session.pending_permissions.len();
+    if pending_permissions > 0 {
+        println!("[status] {pending_permissions} pending permission request(s) need attention");
+    }
+}
+
 fn spawn_event_task(
     client: &Client,
     server_url: &str,
@@ -282,30 +302,6 @@ fn spawn_event_task(
         auth_token.to_string(),
         initial_snapshot_state,
     ))
-}
-
-async fn drive_repl(
-    client: &Client,
-    base_url: &str,
-    auth_token: &str,
-    session_id: &str,
-) -> Result<()> {
-    loop {
-        let Some(line) = read_prompt_line().await? else {
-            return Ok(());
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('/') {
-            if handle_repl_command(trimmed, client, base_url, auth_token, session_id).await? {
-                return Ok(());
-            }
-            continue;
-        }
-        submit_prompt(client, base_url, auth_token, session_id, trimmed).await?;
-    }
 }
 
 async fn run_session(args: SessionArgs) -> Result<()> {
@@ -342,24 +338,4 @@ async fn run_session(args: SessionArgs) -> Result<()> {
 
 fn require_server_url(command: &'static str, server_url: Option<String>) -> Result<String> {
     server_url.ok_or_else(|| MissingServerUrlSnafu { command }.build())
-}
-
-async fn read_prompt_line() -> Result<Option<String>> {
-    tokio::task::spawn_blocking(|| -> Result<Option<String>> {
-        print!("> ");
-        io::stdout().flush().context(FlushPromptSnafu)?;
-
-        let mut buffer = String::new();
-        let bytes_read = io::stdin()
-            .read_line(&mut buffer)
-            .context(ReadPromptLineSnafu)?;
-
-        if bytes_read == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(buffer))
-        }
-    })
-    .await
-    .context(JoinPromptReaderSnafu)?
 }

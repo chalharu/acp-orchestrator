@@ -7,20 +7,31 @@ use std::{cell::RefCell, rc::Rc};
 
 #[derive(Debug, Clone)]
 pub(super) struct BackendAcpClient {
-    turn: TurnHandle,
+    turn: Option<TurnHandle>,
     collected: Rc<RefCell<String>>,
 }
 
 impl BackendAcpClient {
     pub(super) fn new(turn: TurnHandle) -> Self {
         Self {
-            turn,
+            turn: Some(turn),
+            collected: Rc::new(RefCell::new(String::new())),
+        }
+    }
+
+    pub(super) fn without_turn() -> Self {
+        Self {
+            turn: None,
             collected: Rc::new(RefCell::new(String::new())),
         }
     }
 
     pub(super) fn reply_text(&self) -> String {
         self.collected.borrow().clone()
+    }
+
+    pub(super) fn take_reply_text(&self) -> String {
+        std::mem::take(&mut *self.collected.borrow_mut())
     }
 }
 
@@ -30,6 +41,7 @@ impl acp::Client for BackendAcpClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
+        let turn = self.turn.clone().ok_or_else(acp::Error::internal_error)?;
         let (approve_option_id, deny_option_id) =
             permission_option_ids(&args).map_err(|_| acp::Error::invalid_params())?;
         let summary = args
@@ -38,8 +50,7 @@ impl acp::Client for BackendAcpClient {
             .title
             .clone()
             .unwrap_or_else(|| format!("tool {}", args.tool_call.tool_call_id));
-        let resolution = self
-            .turn
+        let resolution = turn
             .register_permission_request(summary, approve_option_id, deny_option_id)
             .await
             .map_err(to_acp_error)?;

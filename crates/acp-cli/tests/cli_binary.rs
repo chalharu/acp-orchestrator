@@ -101,27 +101,6 @@ async fn chat_exits_cleanly_on_immediate_eof() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn chat_enables_tab_hint_when_running_under_a_tty() -> Result<()> {
-    let stack = TestStack::spawn("tty").await?;
-    let mut child = spawn_tty_command(
-        ["chat", "--new", "--server-url", stack.backend_url.as_str()],
-        &stack.recent_path,
-    )?;
-    let mut stdin = take_child_stdin(&mut child, "missing tty chat stdin")?;
-    stdin.write_all(b"/quit\n").await?;
-    drop(stdin);
-
-    let output = child.wait_with_output().await?;
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)?
-            .contains("[status] press TAB after `/` to view slash command candidates")
-    );
-    Ok(())
-}
-
 struct TestStack {
     recent_path: PathBuf,
     client: Client,
@@ -322,43 +301,11 @@ where
         .spawn()?)
 }
 
-#[cfg(unix)]
-fn spawn_tty_command<'a, I>(args: I, recent_path: &Path) -> Result<Child>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let command = std::iter::once(env!("CARGO_BIN_EXE_acp-cli").to_string())
-        .chain(args.into_iter().map(str::to_string))
-        .map(|arg| shell_quote(&arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    Ok(Command::new("script")
-        .args([
-            "-qfec",
-            &format!(
-                "env ACP_RECENT_SESSIONS_PATH={} {}",
-                shell_quote(recent_path.to_string_lossy().as_ref()),
-                command
-            ),
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?)
-}
-
 async fn run_command<'a, I>(args: I, recent_path: &Path) -> Result<std::process::Output>
 where
     I: IntoIterator<Item = &'a str>,
 {
     Ok(cli_command(recent_path).args(args).output().await?)
-}
-
-#[cfg(unix)]
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn take_child_stdin(child: &mut Child, message: &str) -> Result<ChildStdin> {
@@ -386,6 +333,7 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
     let state = AppState::new(ServerConfig {
         session_cap: 8,
         acp_server: mock_address,
+        startup_hints: false,
     })?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

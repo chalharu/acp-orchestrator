@@ -5,7 +5,6 @@ use std::{
 };
 
 use acp_app_support::init_tracing;
-use acp_mock::{MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 use snafu::prelude::*;
 
 mod launcher_process;
@@ -186,7 +185,6 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
         cli_server_url_is_explicit(&launcher_args.cli_args),
     )
     .await?;
-    print_chat_hints(&launcher_args.cli_args, stack.bundled_mock());
     let cli_status = run_cli_foreground(
         &current_executable,
         launcher_args.cli_args,
@@ -197,23 +195,6 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     stack.shutdown().await?;
     ensure_success("cli frontend", cli_status)
-}
-
-fn print_chat_hints(cli_args: &[OsString], bundled_mock: bool) {
-    if is_bundled_mock_chat(cli_args, bundled_mock) {
-        println!(
-            "[hint] bundled mock verification: enter `{MANUAL_PERMISSION_TRIGGER}` to trigger a permission request, then answer with `/approve <request-id>` or `/deny <request-id>`."
-        );
-        println!(
-            "[hint] bundled mock verification: enter `{MANUAL_CANCEL_TRIGGER}` to start a delayed mock reply, then run `/cancel` before the assistant reply arrives."
-        );
-        println!(
-            "[hint] slash completion: on an interactive terminal, type `/` or `/approve ` and press TAB to inspect slash command candidates."
-        );
-        println!(
-            "[hint] session continuity: exit with `/quit`, then use `cargo run -- session list` and `cargo run -- chat --session <id>` to resume this bundled session."
-        );
-    }
 }
 
 async fn run_cli_foreground(
@@ -233,18 +214,14 @@ async fn run_cli_foreground(
     spawn_foreground_role(current_executable, "cli frontend", "cli", cli_args, &envs).await
 }
 
-fn is_bundled_mock_chat(cli_args: &[OsString], bundled_mock: bool) -> bool {
-    bundled_mock && cli_args.first().and_then(|arg| arg.to_str()) == Some("chat")
-}
-
 fn command_needs_backend(cli_args: &[OsString]) -> bool {
-    !matches!(
-        (
-            cli_args.first().and_then(|arg| arg.to_str()),
-            cli_args.get(1).and_then(|arg| arg.to_str()),
-        ),
-        (Some("session"), Some("list"))
-    )
+    let args = cli_args.iter().map(|arg| arg.to_str()).collect::<Vec<_>>();
+    let is_help_or_version = args
+        .iter()
+        .any(|arg| matches!(arg, Some("-h" | "--help" | "-V" | "--version")));
+    let is_session_list = matches!(args.as_slice(), [Some("session"), Some("list"), ..]);
+
+    !is_help_or_version && !is_session_list
 }
 
 fn cli_server_url_is_explicit(cli_args: &[OsString]) -> bool {

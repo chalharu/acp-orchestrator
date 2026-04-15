@@ -120,6 +120,19 @@ impl SessionHandle {
         collect_pending_permissions(&data)
     }
 
+    pub(super) async fn append_message(
+        &self,
+        role: MessageRole,
+        text: String,
+    ) -> Result<(), SessionStoreError> {
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+        let _ = Self::message_event(&mut data, role, text);
+        Ok(())
+    }
+
     pub(super) async fn closed_at(&self) -> Option<DateTime<Utc>> {
         self.data.lock().await.closed_at
     }

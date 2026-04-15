@@ -1,4 +1,4 @@
-use std::{error::Error as StdError, ffi::OsString, path::PathBuf};
+use std::{error::Error as StdError, ffi::OsString, future::Future, io::IsTerminal, path::PathBuf};
 
 use acp_app_support::{build_http_client_for_url, init_tracing};
 use acp_contracts::{
@@ -17,20 +17,24 @@ mod events;
 mod input;
 mod recent_sessions;
 mod repl_commands;
+mod tui;
 
+#[cfg(test)]
+mod chat_tests;
 #[cfg(test)]
 mod tests;
 
 use api::{close_session, create_session, ensure_success, get_session, get_session_history};
 use events::{InitialSnapshotState, stream_events_to_stderr};
-use input::{drive_repl, interactive_completion_enabled};
+use input::drive_repl;
 use recent_sessions::{
     RecentSessionEntry, load_recent_sessions, record_recent_session, remove_recent_session,
 };
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 
-struct ChatSession {
+#[derive(Debug)]
+pub(crate) struct ChatSession {
     session: SessionSnapshot,
     resume_history: Vec<ConversationMessage>,
     resumed: bool,
@@ -49,10 +53,8 @@ pub enum CliError {
     #[snafu(display("building the HTTP client failed"))]
     BuildHttpClient { source: reqwest::Error },
 
-    #[snafu(display("building the interactive line editor failed"))]
-    BuildInteractiveEditor {
-        source: rustyline::error::ReadlineError,
-    },
+    #[snafu(display("joining the interactive terminal UI task failed"))]
+    JoinInteractiveUi { source: tokio::task::JoinError },
 
     #[snafu(display("joining the prompt reader task failed"))]
     JoinPromptReader { source: tokio::task::JoinError },
@@ -63,10 +65,17 @@ pub enum CliError {
     #[snafu(display("reading a prompt line failed"))]
     ReadPromptLine { source: std::io::Error },
 
-    #[snafu(display("reading interactive input failed"))]
-    ReadInteractivePrompt {
-        source: rustyline::error::ReadlineError,
-    },
+    #[snafu(display("setting up the terminal UI failed"))]
+    SetupTerminalUi { source: std::io::Error },
+
+    #[snafu(display("drawing the terminal UI failed"))]
+    DrawTerminalUi { source: std::io::Error },
+
+    #[snafu(display("polling for terminal input failed"))]
+    PollTerminalInput { source: std::io::Error },
+
+    #[snafu(display("reading terminal input failed"))]
+    ReadTerminalInput { source: std::io::Error },
 
     #[snafu(display("{action} request failed"))]
     SendRequest {
@@ -188,28 +197,70 @@ where
 }
 
 async fn run_chat(args: ChatArgs) -> Result<()> {
+    run_chat_with_ui(args, interactive_terminal_available(), tui::run_chat_tui).await
+}
+
+async fn run_chat_with_handlers<RunUi, UiFuture, RunRepl, ReplFuture>(
+    args: ChatArgs,
+    interactive_ui: bool,
+    run_ui: RunUi,
+    run_repl: RunRepl,
+) -> Result<()>
+where
+    RunUi: FnOnce(Client, String, String, ChatSession) -> UiFuture,
+    UiFuture: Future<Output = Result<()>>,
+    RunRepl: FnOnce(Client, String, String, String) -> ReplFuture,
+    ReplFuture: Future<Output = Result<()>>,
+{
     ensure!(args.new || args.session_id.is_some(), ChatModeRequiredSnafu);
 
     let server_url = require_server_url("chat", args.server_url.clone())?;
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
     let chat_session = load_chat_session(&client, &server_url, &args).await?;
-    let session_id = &chat_session.session.id;
-    let recent_entry = RecentSessionEntry::new(session_id, &server_url, Utc::now());
+    let session_id = chat_session.session.id.clone();
+    let recent_entry = RecentSessionEntry::new(&session_id, &server_url, Utc::now());
     record_recent_session(&recent_entry)?;
-    print_chat_banner(session_id, &server_url);
-    print_chat_status(&chat_session, interactive_completion_enabled());
-    let initial_snapshot_state = render_resume_history(&chat_session);
+    if interactive_ui {
+        return run_ui(client, server_url, args.auth_token, chat_session).await;
+    }
 
+    print_chat_banner(&chat_session.session.id, &server_url);
+    print_chat_status(&chat_session, false);
+    let initial_snapshot_state = render_resume_history(&chat_session);
     let event_task = spawn_event_task(
         &client,
         &server_url,
         &args.auth_token,
-        session_id,
+        &chat_session.session.id,
         initial_snapshot_state,
     );
-    drive_repl(&client, &server_url, &args.auth_token, session_id).await?;
+    let repl_result = run_repl(client, server_url, args.auth_token, session_id).await;
     event_task.abort();
-    Ok(())
+    repl_result
+}
+
+async fn run_chat_with_ui<RunUi, UiFuture>(
+    args: ChatArgs,
+    interactive_ui: bool,
+    run_ui: RunUi,
+) -> Result<()>
+where
+    RunUi: FnOnce(Client, String, String, ChatSession) -> UiFuture,
+    UiFuture: Future<Output = Result<()>>,
+{
+    run_chat_with_handlers(
+        args,
+        interactive_ui,
+        run_ui,
+        |client, server_url, auth_token, session_id| async move {
+            drive_repl(&client, &server_url, &auth_token, &session_id).await
+        },
+    )
+    .await
+}
+
+fn interactive_terminal_available() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 async fn load_chat_session(
@@ -231,17 +282,38 @@ async fn load_chat_session(
         .session_id
         .as_deref()
         .expect("session id checked before chat execution");
-    // Load the explicit history endpoint for transcript rendering, then fetch
-    // the later session snapshot so pending permissions and SSE dedupe start
-    // from the latest known state.
-    let history = get_session_history(client, server_url, &args.auth_token, session_id).await?;
-    let session = get_session(client, server_url, &args.auth_token, session_id).await?;
+    let session = match get_session(client, server_url, &args.auth_token, session_id).await {
+        Ok(session) => session,
+        Err(error) => {
+            if is_session_not_found(&error) {
+                let _ = remove_recent_session(session_id);
+            }
+            return Err(error);
+        }
+    };
+    let resume_history =
+        match get_session_history(client, server_url, &args.auth_token, session_id).await {
+            Ok(history) => history.messages,
+            Err(error) if is_session_not_found(&error) => session.messages.clone(),
+            Err(error) => return Err(error),
+        };
 
     Ok(ChatSession {
         session,
-        resume_history: history.messages,
+        resume_history,
         resumed: true,
     })
+}
+
+fn is_session_not_found(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::HttpStatus {
+            status,
+            message,
+            ..
+        } if *status == StatusCode::NOT_FOUND && message == "session not found"
+    )
 }
 
 fn render_resume_history(chat_session: &ChatSession) -> Option<InitialSnapshotState> {
@@ -299,7 +371,8 @@ fn spawn_event_task(
 async fn run_session(args: SessionArgs) -> Result<()> {
     match args.command {
         SessionCommand::List => {
-            let entries = load_recent_sessions()?;
+            let entries =
+                filter_recent_sessions_for_current_backend(load_recent_sessions()?).await?;
             if entries.is_empty() {
                 println!("no recent sessions recorded");
                 return Ok(());
@@ -326,6 +399,33 @@ async fn run_session(args: SessionArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn filter_recent_sessions_for_current_backend(
+    entries: Vec<RecentSessionEntry>,
+) -> Result<Vec<RecentSessionEntry>> {
+    let Ok(server_url) = std::env::var("ACP_SERVER_URL") else {
+        return Ok(entries);
+    };
+    let auth_token = std::env::var("ACP_AUTH_TOKEN").unwrap_or_else(|_| "developer".to_string());
+    let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+    let mut filtered = Vec::new();
+
+    for entry in entries {
+        if entry.server_url != server_url {
+            continue;
+        }
+
+        match get_session(&client, &server_url, &auth_token, &entry.session_id).await {
+            Ok(_) => filtered.push(entry),
+            Err(error) if is_session_not_found(&error) => {
+                remove_recent_session(&entry.session_id)?;
+            }
+            Err(_) => filtered.push(entry),
+        }
+    }
+
+    Ok(filtered)
 }
 
 fn require_server_url(command: &'static str, server_url: Option<String>) -> Result<String> {

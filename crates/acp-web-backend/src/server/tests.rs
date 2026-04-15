@@ -8,6 +8,7 @@ fn default_server_config_points_to_the_local_acp_server() {
 
     assert_eq!(config.session_cap, 8);
     assert_eq!(config.acp_server, "127.0.0.1:8090");
+    assert!(!config.startup_hints);
 }
 
 #[test]
@@ -163,6 +164,168 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
 }
 
 #[tokio::test]
+async fn create_session_seeds_startup_hints_when_enabled() {
+    let store = Arc::new(SessionStore::new(4));
+    let state = AppState {
+        store: store.clone(),
+        reply_provider: Arc::new(StartupHintProvider {
+            hint: "bundled mock verification ready".to_string(),
+        }),
+        startup_hints: true,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let response = create_session(State(state), headers)
+        .await
+        .expect("session creation should succeed");
+
+    assert_eq!(response.0, StatusCode::CREATED);
+    assert_eq!(response.1.0.session.messages.len(), 1);
+    assert_eq!(
+        response.1.0.session.messages[0].text,
+        "bundled mock verification ready"
+    );
+}
+
+#[tokio::test]
+async fn create_session_skips_startup_hints_when_disabled() {
+    let store = Arc::new(SessionStore::new(4));
+    let state = AppState {
+        store,
+        reply_provider: Arc::new(StartupHintProvider {
+            hint: "should stay hidden".to_string(),
+        }),
+        startup_hints: false,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let response = create_session(State(state), headers)
+        .await
+        .expect("session creation should succeed");
+
+    assert_eq!(response.0, StatusCode::CREATED);
+    assert!(response.1.0.session.messages.is_empty());
+}
+
+#[tokio::test]
+async fn create_session_keeps_sessions_without_primeable_startup_hints() {
+    #[derive(Debug)]
+    struct NoStartupHintProvider;
+
+    impl ReplyProvider for NoStartupHintProvider {
+        fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+            Box::pin(async { Ok(ReplyResult::NoOutput) })
+        }
+    }
+
+    let store = Arc::new(SessionStore::new(4));
+    let state = AppState {
+        store,
+        reply_provider: Arc::new(NoStartupHintProvider),
+        startup_hints: true,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let response = create_session(State(state), headers)
+        .await
+        .expect("session creation should succeed");
+
+    assert_eq!(response.0, StatusCode::CREATED);
+    assert!(response.1.0.session.messages.is_empty());
+}
+
+#[tokio::test]
+async fn create_session_rolls_back_when_startup_hints_fail() {
+    let store = Arc::new(SessionStore::new(1));
+    let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState {
+        store: store.clone(),
+        reply_provider: Arc::new(FailingStartupHintProvider {
+            forgotten_sessions: forgotten_sessions.clone(),
+        }),
+        startup_hints: true,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let error = create_session(State(state), headers)
+        .await
+        .expect_err("failed startup hint priming should fail the request");
+
+    assert!(
+        matches!(error, AppError::Internal(message) if message.contains("startup hint priming failed"))
+    );
+    let rolled_back_session_id = forgotten_sessions
+        .lock()
+        .expect("cleanup tracking should not poison")
+        .first()
+        .cloned()
+        .expect("failed priming should forget the provisional session");
+    let snapshot_error = store
+        .session_snapshot("alice", &rolled_back_session_id)
+        .await
+        .expect_err("rolled back sessions should be removed");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+    store
+        .create_session("alice")
+        .await
+        .expect("rollback should free the session cap");
+}
+
+#[tokio::test]
+async fn create_session_reports_rollback_failures() {
+    let store = Arc::new(SessionStore::new(1));
+    let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState {
+        store: store.clone(),
+        reply_provider: Arc::new(RollbackFailingStartupHintProvider {
+            store: store.clone(),
+            owner: "alice".to_string(),
+            forgotten_sessions: forgotten_sessions.clone(),
+        }),
+        startup_hints: true,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let error = create_session(State(state), headers)
+        .await
+        .expect_err("rollback failures should surface as internal errors");
+
+    assert!(matches!(
+        error,
+        AppError::Internal(message)
+            if message.contains("startup hint priming failed")
+                && message.contains("session rollback failed: session not found")
+    ));
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn closing_sessions_notifies_reply_provider_cleanup() {
     let store = Arc::new(SessionStore::new(4));
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -301,6 +464,92 @@ struct TrackingReplyProvider {
 impl ReplyProvider for TrackingReplyProvider {
     fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
         Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        self.forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .push(session_id.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct StartupHintProvider {
+    hint: String,
+}
+
+impl ReplyProvider for StartupHintProvider {
+    fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn prime_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> crate::mock_client::PrimeSessionFuture<'a> {
+        let hint = self.hint.clone();
+        Box::pin(async move { Ok(Some(hint)) })
+    }
+}
+
+#[derive(Debug)]
+struct FailingStartupHintProvider {
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+}
+
+impl ReplyProvider for FailingStartupHintProvider {
+    fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn prime_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> crate::mock_client::PrimeSessionFuture<'a> {
+        Box::pin(async {
+            Err(MockClientError::TurnRuntime {
+                message: "startup hint priming failed".to_string(),
+            })
+        })
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        self.forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .push(session_id.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct RollbackFailingStartupHintProvider {
+    store: Arc<SessionStore>,
+    owner: String,
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+}
+
+impl ReplyProvider for RollbackFailingStartupHintProvider {
+    fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn prime_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> crate::mock_client::PrimeSessionFuture<'a> {
+        let store = self.store.clone();
+        let owner = self.owner.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            store
+                .discard_session(&owner, &session_id)
+                .await
+                .expect("the provisional session should exist before rollback");
+            Err(MockClientError::TurnRuntime {
+                message: "startup hint priming failed".to_string(),
+            })
+        })
     }
 
     fn forget_session(&self, session_id: &str) {

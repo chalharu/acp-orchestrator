@@ -90,6 +90,7 @@ async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()>
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
         acp_server: String::new(),
+        startup_hints: false,
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -116,6 +117,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
         acp_server: String::new(),
+        startup_hints: false,
     })
     .await?;
     let session = stack.create_session("alice").await?;

@@ -31,12 +31,14 @@ pub use runtime::{MockAppError, run_with_args};
 #[derive(Debug, Clone)]
 pub struct MockConfig {
     pub response_delay: Duration,
+    pub startup_hints: bool,
 }
 
 impl Default for MockConfig {
     fn default() -> Self {
         Self {
             response_delay: Duration::from_millis(120),
+            startup_hints: false,
         }
     }
 }
@@ -201,6 +203,12 @@ impl MockAgent {
     }
 }
 
+fn startup_hint_message() -> String {
+    format!(
+        "bundled mock verification ready.\nenter `{MANUAL_PERMISSION_TRIGGER}` to trigger a permission request, then answer with `/approve <request-id>` or `/deny <request-id>`.\nenter `{MANUAL_CANCEL_TRIGGER}` to start a delayed reply, then run `/cancel` before the assistant reply arrives.\nuse Up/Down to recall composer history, PageUp/PageDown to review older transcript lines, and End to follow the live tail.\nexit with `/quit`, then use `cargo run -- session list` and `cargo run -- chat --session <id>` to resume this bundled session."
+    )
+}
+
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MockAgent {
     async fn initialize(
@@ -225,7 +233,12 @@ impl acp::Agent for MockAgent {
         &self,
         _arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
-        Ok(acp::NewSessionResponse::new(self.state.next_session_id()))
+        let session_id = self.state.next_session_id();
+        if self.state.config.startup_hints {
+            self.send_reply(session_id.clone(), startup_hint_message())
+                .await?;
+        }
+        Ok(acp::NewSessionResponse::new(session_id))
     }
 
     async fn load_session(

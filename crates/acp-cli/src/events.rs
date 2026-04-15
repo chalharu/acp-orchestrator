@@ -11,6 +11,14 @@ pub(super) struct InitialSnapshotState {
     permission_request_ids: HashSet<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StreamUpdate {
+    ConversationMessage(ConversationMessage),
+    PermissionRequested(PermissionRequest),
+    SessionClosed { session_id: String, reason: String },
+    Status(String),
+}
+
 impl InitialSnapshotState {
     pub(super) fn from_messages_and_permissions(
         messages: &[ConversationMessage],
@@ -44,6 +52,26 @@ pub(super) async fn stream_events(
     auth_token: String,
     initial_snapshot_state: Option<InitialSnapshotState>,
 ) -> Result<()> {
+    stream_updates(
+        client,
+        events_url,
+        auth_token,
+        initial_snapshot_state,
+        |update| render_update(&update),
+    )
+    .await
+}
+
+pub(super) async fn stream_updates<F>(
+    client: Client,
+    events_url: String,
+    auth_token: String,
+    initial_snapshot_state: Option<InitialSnapshotState>,
+    mut handle_update: F,
+) -> Result<()>
+where
+    F: FnMut(StreamUpdate),
+{
     let response = client
         .get(events_url)
         .bearer_auth(auth_token)
@@ -58,40 +86,19 @@ pub(super) async fn stream_events(
     let mut initial_snapshot_state = initial_snapshot_state;
 
     while let Some(event) = stream.next().await {
-        let event = event.map_err(|source| CliError::ReadEventStream {
-            source: Box::new(source),
-        })?;
-        let payload: StreamEvent =
-            serde_json::from_str(&event.data).context(DecodeStreamEventSnafu)?;
-        if let StreamEventPayload::SessionSnapshot { session } = &payload.payload
-            && let Some(known_snapshot_state) = initial_snapshot_state.take()
-        {
-            render_initial_snapshot_delta(session, &known_snapshot_state);
-            continue;
+        let payload = decode_stream_event(event)?;
+        for update in stream_event_updates(payload, &mut initial_snapshot_state) {
+            handle_update(update);
         }
-        render_event(&payload);
     }
 
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn render_event(event: &StreamEvent) {
-    match &event.payload {
-        StreamEventPayload::SessionSnapshot { session } => {
-            render_resume_state(&session.messages, &session.pending_permissions);
-        }
-        StreamEventPayload::ConversationMessage { message } => {
-            render_message(message.role.clone(), &message.text);
-        }
-        StreamEventPayload::PermissionRequested { request } => {
-            render_permission_request(request);
-        }
-        StreamEventPayload::SessionClosed { reason, .. } => {
-            println!("[status] session closed: {reason}");
-        }
-        StreamEventPayload::Status { message } => {
-            println!("[status] {message}");
-        }
+    for update in event_updates(event.clone()) {
+        render_update(&update);
     }
 }
 
@@ -104,11 +111,88 @@ pub(super) fn render_resume_state(
         return;
     }
 
-    for message in messages {
-        render_message(message.role.clone(), &message.text);
+    for update in resume_state_updates(messages, pending_permissions) {
+        render_update(&update);
     }
-    for request in pending_permissions {
-        render_permission_request(request);
+}
+
+pub(super) fn permission_decision_label(decision: &PermissionDecision) -> &'static str {
+    match decision {
+        PermissionDecision::Approve => "approved",
+        PermissionDecision::Deny => "denied",
+    }
+}
+
+fn render_update(update: &StreamUpdate) {
+    match update {
+        StreamUpdate::ConversationMessage(message) => {
+            render_message(message.role.clone(), &message.text)
+        }
+        StreamUpdate::PermissionRequested(request) => render_permission_request(request),
+        StreamUpdate::SessionClosed { reason, .. } => println!("[status] session closed: {reason}"),
+        StreamUpdate::Status(message) => println!("[status] {message}"),
+    }
+}
+
+fn decode_stream_event<E>(
+    event: std::result::Result<eventsource_stream::Event, E>,
+) -> Result<StreamEvent>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let event = event.map_err(|source| CliError::ReadEventStream {
+        source: Box::new(source),
+    })?;
+    serde_json::from_str(&event.data).context(DecodeStreamEventSnafu)
+}
+
+fn resume_state_updates(
+    messages: &[ConversationMessage],
+    pending_permissions: &[PermissionRequest],
+) -> Vec<StreamUpdate> {
+    messages
+        .iter()
+        .cloned()
+        .map(StreamUpdate::ConversationMessage)
+        .chain(
+            pending_permissions
+                .iter()
+                .cloned()
+                .map(StreamUpdate::PermissionRequested),
+        )
+        .collect()
+}
+
+fn event_updates(event: StreamEvent) -> Vec<StreamUpdate> {
+    match event.payload {
+        StreamEventPayload::SessionSnapshot { session } => {
+            resume_state_updates(&session.messages, &session.pending_permissions)
+        }
+        StreamEventPayload::ConversationMessage { message } => {
+            vec![StreamUpdate::ConversationMessage(message)]
+        }
+        StreamEventPayload::PermissionRequested { request } => {
+            vec![StreamUpdate::PermissionRequested(request)]
+        }
+        StreamEventPayload::SessionClosed { session_id, reason } => {
+            vec![StreamUpdate::SessionClosed { session_id, reason }]
+        }
+        StreamEventPayload::Status { message } => vec![StreamUpdate::Status(message)],
+    }
+}
+
+fn stream_event_updates(
+    payload: StreamEvent,
+    initial_snapshot_state: &mut Option<InitialSnapshotState>,
+) -> Vec<StreamUpdate> {
+    match payload.payload {
+        StreamEventPayload::SessionSnapshot { session } => match initial_snapshot_state.take() {
+            Some(known_snapshot_state) => {
+                initial_snapshot_delta_updates(&session, &known_snapshot_state)
+            }
+            None => resume_state_updates(&session.messages, &session.pending_permissions),
+        },
+        _ => event_updates(payload),
     }
 }
 
@@ -123,20 +207,14 @@ fn render_permission_request(request: &PermissionRequest) {
     println!("[permission {}] {}", request.request_id, request.summary);
 }
 
-pub(super) fn permission_decision_label(decision: &PermissionDecision) -> &'static str {
-    match decision {
-        PermissionDecision::Approve => "approved",
-        PermissionDecision::Deny => "denied",
-    }
-}
-
-fn render_initial_snapshot_delta(
+fn initial_snapshot_delta_updates(
     session: &SessionSnapshot,
     known_snapshot_state: &InitialSnapshotState,
-) {
+) -> Vec<StreamUpdate> {
+    let mut updates = Vec::new();
     for message in &session.messages {
         if !known_snapshot_state.message_ids.contains(&message.id) {
-            render_message(message.role.clone(), &message.text);
+            updates.push(StreamUpdate::ConversationMessage(message.clone()));
         }
     }
     for request in &session.pending_permissions {
@@ -144,7 +222,8 @@ fn render_initial_snapshot_delta(
             .permission_request_ids
             .contains(&request.request_id)
         {
-            render_permission_request(request);
+            updates.push(StreamUpdate::PermissionRequested(request.clone()));
         }
     }
+    updates
 }

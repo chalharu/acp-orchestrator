@@ -9,15 +9,17 @@ acp-app-support.workspace = true
 acp-contracts.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 dirs.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
+ratatui.workspace = true
 reqwest.workspace = true
-rustyline.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 acp-app-support = { workspace = true, features = ["test-helpers"] }

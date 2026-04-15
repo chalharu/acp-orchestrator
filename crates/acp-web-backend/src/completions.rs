@@ -15,18 +15,19 @@ pub(crate) async fn resolve_slash_completions(
         Some(SlashCompletionQuery::RequestId {
             prefix: request_prefix,
             ..
-        }) => store
-            .session_pending_permissions(owner, session_id)
-            .await?
-            .iter()
-            .filter(|request| request.request_id.starts_with(request_prefix))
-            .map(|request| CompletionCandidate {
-                label: request.request_id.clone(),
-                insert_text: request.request_id.clone(),
-                detail: request.summary.clone(),
-                kind: CompletionKind::Parameter,
-            })
-            .collect(),
+        }) => {
+            let pending_permissions = store.session_pending_permissions(owner, session_id).await?;
+            pending_permissions
+                .iter()
+                .filter(|request| request.request_id.starts_with(request_prefix))
+                .map(|request| CompletionCandidate {
+                    label: request.request_id.clone(),
+                    insert_text: request.request_id.clone(),
+                    detail: request.summary.clone(),
+                    kind: CompletionKind::Parameter,
+                })
+                .collect()
+        }
         Some(SlashCompletionQuery::Commands {
             prefix: command_prefix,
         }) => {

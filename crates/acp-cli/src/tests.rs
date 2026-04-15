@@ -114,6 +114,36 @@ async fn handle_repl_command_reports_permission_errors_without_failing() {
 }
 
 #[tokio::test]
+async fn handle_repl_command_reports_help_errors_without_failing() {
+    let url = spawn_raw_http_server(
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"help failed\"}",
+    )
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let should_quit = handle_repl_command("/help", &client, &url, "developer", "s_test")
+        .await
+        .expect("help failures should stay in the REPL");
+
+    assert!(!should_quit);
+}
+
+#[tokio::test]
+async fn handle_repl_command_handles_empty_help_catalogs() {
+    let url = spawn_raw_http_server(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"candidates\":[]}",
+    )
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let should_quit = handle_repl_command("/help", &client, &url, "developer", "s_test")
+        .await
+        .expect("empty help catalogs should stay in the REPL");
+
+    assert!(!should_quit);
+}
+
+#[tokio::test]
 async fn stream_events_finishes_when_the_server_closes_the_stream() {
     let url = spawn_raw_http_server(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"sequence\":1,\"kind\":\"status\",\"message\":\"done\"}\n\n",

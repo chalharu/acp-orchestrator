@@ -230,13 +230,13 @@ async fn get_slash_completions(
     headers: HeaderMap,
 ) -> Result<Json<SlashCompletionsResponse>, AppError> {
     let principal = extract_principal(&headers)?;
-    let response = resolve_slash_completions(
+    let response_future = resolve_slash_completions(
         &state.store,
         &principal.id,
         &query.session_id,
         &query.prefix,
-    )
-    .await?;
+    );
+    let response = response_future.await?;
 
     Ok(Json(response))
 }

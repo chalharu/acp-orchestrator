@@ -360,6 +360,7 @@ mod tests {
                 prefix: "req_",
             })
         ));
+        assert!(classify_slash_completion_prefix("/approve req_1 extra").is_none());
         assert!(classify_slash_completion_prefix("/home/alice").is_none());
         assert!(classify_slash_completion_prefix("/quit now").is_none());
     }

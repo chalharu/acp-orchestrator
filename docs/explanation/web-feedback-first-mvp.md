@@ -104,9 +104,11 @@ cargo build -p acp-web-backend
 ```
 
 `trunk build` は `crates/acp-web-frontend/dist/` に JS loader と WASM binary を出力します。
-Backend はこの dist ディレクトリを runtime で参照し、fingerprinted bundle を
+Backend はこの dist ディレクトリを runtime で参照します。
+fingerprinted bundle は
 `/app/assets/acp-web-frontend.js` と `/app/assets/acp-web-frontend_bg.wasm`
-の stable alias から配信します。dist が存在しない場合は backend は 503 を返し、
+の stable alias から配信します。
+dist が存在しない場合、backend は 503 を返します。
 ブラウザには「frontend 未ビルド」を示すプレースホルダを表示します。
 
 開発中は `trunk serve` を使い、Axum backend を別プロセスで起動して proxy を通すことで

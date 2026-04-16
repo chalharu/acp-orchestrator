@@ -8,6 +8,8 @@ use acp_contracts::{
     ConversationMessage, CreateSessionResponse, MessageRole, PermissionRequest, PromptRequest,
     SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
 };
+use futures_channel::mpsc;
+use futures_util::StreamExt;
 use gloo_net::http::Request;
 use leptos::prelude::{Set, Update};
 use wasm_bindgen::{JsCast, closure::Closure};
@@ -20,6 +22,19 @@ pub struct SessionBootstrap {
     pub pending_permissions: Vec<(String, String)>,
     pub session_status: String,
 }
+
+enum StreamMessage {
+    Data(String),
+    Error,
+}
+
+const STREAM_EVENT_NAMES: [&str; 5] = [
+    "session.snapshot",
+    "conversation.message",
+    "tool.permission.requested",
+    "session.closed",
+    "status",
+];
 
 /// Read the CSRF token injected by the backend into
 /// `<meta name="acp-csrf-token" content="...">`.
@@ -117,89 +132,160 @@ pub async fn subscribe_sse(
     session_status: leptos::prelude::RwSignal<String>,
     error: leptos::prelude::RwSignal<Option<String>>,
 ) {
-    use futures_channel::mpsc;
-    use futures_util::StreamExt;
-
-    enum StreamMessage {
-        Data(String),
-        Error,
-    }
-
     let url = format!("/api/v1/sessions/{session_id}/events");
-    let event_source = match web_sys::EventSource::new(&url) {
-        Ok(event_source) => event_source,
-        Err(source) => {
-            error.set(Some(format!("Failed to open event stream: {source:?}")));
-            connection_status.set("error".to_string());
-            return;
-        }
+    let Some(event_source) = open_event_source(&url, error, connection_status) else {
+        return;
     };
 
     let (tx, mut rx) = mpsc::unbounded::<StreamMessage>();
-    for event_name in [
-        "session.snapshot",
-        "conversation.message",
-        "tool.permission.requested",
-        "session.closed",
-        "status",
-    ] {
-        let event_tx = tx.clone();
-        let listener = Closure::wrap(Box::new(move |event: MessageEvent| {
-            if let Some(data) = event.data().as_string() {
-                let _ = event_tx.unbounded_send(StreamMessage::Data(data));
-            }
-        }) as Box<dyn FnMut(MessageEvent)>);
+    if !register_stream_listeners(&event_source, &tx, error, connection_status) {
+        return;
+    }
+    drop(tx);
+    connection_status.set("connected".to_string());
 
-        if let Err(source) = event_source
-            .add_event_listener_with_callback(event_name, listener.as_ref().unchecked_ref())
-        {
-            event_source.close();
-            error.set(Some(format!(
-                "Failed to register stream listener for {event_name}: {source:?}"
-            )));
-            connection_status.set("error".to_string());
+    while let Some(message) = rx.next().await {
+        if !handle_stream_message(
+            message,
+            &event_source,
+            entries,
+            pending_permissions_signal,
+            connection_status,
+            session_status,
+            error,
+        ) {
             return;
         }
-        listener.forget();
     }
 
-    let error_tx = tx.clone();
+    event_source.close();
+}
+
+fn open_event_source(
+    url: &str,
+    error: leptos::prelude::RwSignal<Option<String>>,
+    connection_status: leptos::prelude::RwSignal<String>,
+) -> Option<web_sys::EventSource> {
+    match web_sys::EventSource::new(url) {
+        Ok(event_source) => Some(event_source),
+        Err(source) => {
+            error.set(Some(format!("Failed to open event stream: {source:?}")));
+            connection_status.set("error".to_string());
+            None
+        }
+    }
+}
+
+fn register_stream_listeners(
+    event_source: &web_sys::EventSource,
+    tx: &mpsc::UnboundedSender<StreamMessage>,
+    error: leptos::prelude::RwSignal<Option<String>>,
+    connection_status: leptos::prelude::RwSignal<String>,
+) -> bool {
+    for event_name in STREAM_EVENT_NAMES {
+        if !register_stream_listener(
+            event_source,
+            event_name,
+            tx.clone(),
+            error,
+            connection_status,
+        ) {
+            return false;
+        }
+    }
+    register_stream_error_listener(event_source, tx.clone());
+    true
+}
+
+fn register_stream_listener(
+    event_source: &web_sys::EventSource,
+    event_name: &str,
+    event_tx: mpsc::UnboundedSender<StreamMessage>,
+    error: leptos::prelude::RwSignal<Option<String>>,
+    connection_status: leptos::prelude::RwSignal<String>,
+) -> bool {
+    let listener = Closure::wrap(Box::new(move |event: MessageEvent| {
+        if let Some(data) = event.data().as_string() {
+            let _ = event_tx.unbounded_send(StreamMessage::Data(data));
+        }
+    }) as Box<dyn FnMut(MessageEvent)>);
+
+    if let Err(source) =
+        event_source.add_event_listener_with_callback(event_name, listener.as_ref().unchecked_ref())
+    {
+        event_source.close();
+        error.set(Some(format!(
+            "Failed to register stream listener for {event_name}: {source:?}"
+        )));
+        connection_status.set("error".to_string());
+        return false;
+    }
+
+    listener.forget();
+    true
+}
+
+fn register_stream_error_listener(
+    event_source: &web_sys::EventSource,
+    error_tx: mpsc::UnboundedSender<StreamMessage>,
+) {
     let error_listener = Closure::wrap(Box::new(move |_: web_sys::Event| {
         let _ = error_tx.unbounded_send(StreamMessage::Error);
     }) as Box<dyn FnMut(web_sys::Event)>);
     event_source.set_onerror(Some(error_listener.as_ref().unchecked_ref()));
     error_listener.forget();
+}
 
-    drop(tx);
-    connection_status.set("connected".to_string());
-
-    while let Some(message) = rx.next().await {
-        match message {
-            StreamMessage::Data(data) => {
-                let event = match serde_json::from_str::<StreamEvent>(&data) {
-                    Ok(event) => event,
-                    Err(source) => {
-                        event_source.close();
-                        error.set(Some(format!("Failed to decode stream event: {source}")));
-                        connection_status.set("error".to_string());
-                        return;
-                    }
-                };
-
-                connection_status.set("connected".to_string());
-                error.set(None);
-                handle_sse_event(event, entries, pending_permissions_signal, session_status);
-            }
-            StreamMessage::Error => {
-                connection_status.set("reconnecting".to_string());
-                error.set(Some(
-                    "Event stream disconnected; reconnecting...".to_string(),
-                ));
-            }
+fn handle_stream_message(
+    message: StreamMessage,
+    event_source: &web_sys::EventSource,
+    entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
+    pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
+    connection_status: leptos::prelude::RwSignal<String>,
+    session_status: leptos::prelude::RwSignal<String>,
+    error: leptos::prelude::RwSignal<Option<String>>,
+) -> bool {
+    match message {
+        StreamMessage::Data(data) => handle_stream_data(
+            &data,
+            event_source,
+            entries,
+            pending_permissions_signal,
+            connection_status,
+            session_status,
+            error,
+        ),
+        StreamMessage::Error => {
+            connection_status.set("reconnecting".to_string());
+            error.set(Some("Event stream disconnected; reconnecting...".to_string()));
+            true
         }
     }
+}
 
-    event_source.close();
+fn handle_stream_data(
+    data: &str,
+    event_source: &web_sys::EventSource,
+    entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
+    pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
+    connection_status: leptos::prelude::RwSignal<String>,
+    session_status: leptos::prelude::RwSignal<String>,
+    error: leptos::prelude::RwSignal<Option<String>>,
+) -> bool {
+    let event = match serde_json::from_str::<StreamEvent>(data) {
+        Ok(event) => event,
+        Err(source) => {
+            event_source.close();
+            error.set(Some(format!("Failed to decode stream event: {source}")));
+            connection_status.set("error".to_string());
+            return false;
+        }
+    };
+
+    connection_status.set("connected".to_string());
+    error.set(None);
+    handle_sse_event(event, entries, pending_permissions_signal, session_status);
+    true
 }
 
 fn handle_sse_event(

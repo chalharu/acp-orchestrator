@@ -3,43 +3,66 @@ use acp_contracts::CreateSessionResponse;
 
 #[tokio::test]
 async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Result<()> {
-    let stack = TestStack::spawn(ServerConfig {
+    let stack = spawn_browser_test_stack().await?;
+    let browser = build_browser_client()?;
+    let (csrf_token, session_id, mut events) =
+        bootstrap_browser_session(&browser, &stack.backend_url).await?;
+
+    submit_and_assert_browser_prompt(
+        &browser,
+        &stack.backend_url,
+        &session_id,
+        &csrf_token,
+        &mut events,
+        "hello through the browser shell",
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn spawn_browser_test_stack() -> Result<TestStack> {
+    TestStack::spawn(ServerConfig {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
         frontend_dist: None,
     })
-    .await?;
-    let browser = build_browser_client()?;
+    .await
+}
 
-    let app_document = load_browser_app_shell(&browser, &stack.backend_url).await?;
-    // The shell must expose the CSRF bootstrap meta and the Leptos mount point.
-    assert!(app_document.contains("name=\"acp-csrf-token\""));
-    assert!(app_document.contains("id=\"app-root\""));
+async fn bootstrap_browser_session(
+    browser: &Client,
+    backend_url: &str,
+) -> Result<(String, String, SseStream)> {
+    let app_document = load_browser_app_shell(browser, backend_url).await?;
+    assert_browser_shell(&app_document);
 
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
     let created: CreateSessionResponse =
-        create_browser_session(&browser, &stack.backend_url, &csrf_token).await?;
-
+        create_browser_session(browser, backend_url, &csrf_token).await?;
     let session_id = created.session.id.clone();
-    let mut events = open_cookie_events(&browser, &stack.backend_url, &session_id).await?;
+    let mut events = open_cookie_events(browser, backend_url, &session_id).await?;
     assert_snapshot_for_session(expect_next_event(&mut events).await?, &session_id);
+    Ok((csrf_token, session_id, events))
+}
 
-    submit_browser_prompt(
-        &browser,
-        &stack.backend_url,
-        &session_id,
-        &csrf_token,
-        "hello through the browser shell",
-    )
-    .await?;
+fn assert_browser_shell(app_document: &str) {
+    assert!(app_document.contains("name=\"acp-csrf-token\""));
+    assert!(app_document.contains("id=\"app-root\""));
+}
 
-    assert_user_message(
-        expect_next_event(&mut events).await?,
-        "hello through the browser shell",
-    );
-    assert_assistant_message(expect_next_event(&mut events).await?);
-
+async fn submit_and_assert_browser_prompt(
+    browser: &Client,
+    backend_url: &str,
+    session_id: &str,
+    csrf_token: &str,
+    events: &mut SseStream,
+    prompt: &str,
+) -> Result<()> {
+    submit_browser_prompt(browser, backend_url, session_id, csrf_token, prompt).await?;
+    assert_user_message(expect_next_event(events).await?, prompt);
+    assert_assistant_message(expect_next_event(events).await?);
     Ok(())
 }
 

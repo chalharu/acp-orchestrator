@@ -45,8 +45,8 @@ Types:
   - `cargo test --workspace`
   - `cargo clippy --workspace --all-targets -- -D warnings`
 - **Web frontend (Leptos CSR):** `crates/acp-web-frontend` is a standalone trunk
-  project that targets `wasm32-unknown-unknown` and is built separately from the
-  Cargo workspace. To build it locally:
+  project. It targets `wasm32-unknown-unknown`.
+  Build it separately from the Cargo workspace. To build it locally:
 
   ```sh
   rustup target add wasm32-unknown-unknown

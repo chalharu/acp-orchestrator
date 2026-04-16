@@ -1,8 +1,15 @@
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "transitive through Leptos in the standalone frontend crate until upstream replaces paste" },
+]
+unused-ignored-advisory = "allow"
+
 [bans]
 multiple-versions = "allow"
 
 [licenses]
 version = 2
+unused-allowed-license = "allow"
 allow = [
   "AGPL-3.0-only",
   "Apache-2.0",

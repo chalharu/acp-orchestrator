@@ -159,7 +159,6 @@ impl EntryRole {
 
 #[component]
 fn SessionView(session_id: String) -> impl IntoView {
-    let id = session_id.clone();
     let entries: RwSignal<Vec<TranscriptEntry>> = RwSignal::new(Vec::new());
     let pending_permissions: RwSignal<Vec<(String, String)>> = RwSignal::new(Vec::new());
     let error = RwSignal::new(None::<String>);
@@ -167,59 +166,18 @@ fn SessionView(session_id: String) -> impl IntoView {
     let session_status = RwSignal::new("loading".to_string());
     let busy = RwSignal::new(false);
 
-    // Bootstrap: load history + open SSE stream.
-    let sid = id.clone();
-    leptos::task::spawn_local({
-        let sid = sid.clone();
-        async move {
-            match api::load_session(&sid).await {
-                Ok(session) => {
-                    entries.set(session.entries);
-                    pending_permissions.set(session.pending_permissions);
-                    session_status.set(session.session_status);
-                }
-                Err(e) => {
-                    error.set(Some(e));
-                    connection_status.set("error".to_string());
-                    return;
-                }
-            }
+    spawn_session_bootstrap(
+        session_id.clone(),
+        entries,
+        pending_permissions,
+        connection_status,
+        session_status,
+        error,
+    );
 
-            api::subscribe_sse(
-                &sid,
-                entries,
-                pending_permissions,
-                connection_status,
-                session_status,
-                error,
-            )
-            .await;
-        }
-    });
-
-    let sid_for_submit = id.clone();
-    let on_submit = move |prompt: String| {
-        let sid = sid_for_submit.clone();
-        busy.set(true);
-        error.set(None);
-        leptos::task::spawn_local(async move {
-            if let Err(msg) = api::send_message(&sid, &prompt).await {
-                error.set(Some(msg));
-            }
-            busy.set(false);
-        });
-    };
-
-    let composer_busy = Signal::derive(move || busy.get() || session_status.get() == "closed");
-    let composer_status = Signal::derive(move || {
-        if busy.get() {
-            "Sending...".to_string()
-        } else if session_status.get() == "closed" {
-            "Session closed.".to_string()
-        } else {
-            format!("Session {}", session_status.get())
-        }
-    });
+    let composer_busy = session_composer_busy_signal(busy, session_status);
+    let composer_status = session_composer_status_signal(busy, session_status);
+    let on_submit = session_submit_callback(session_id.clone(), busy, error);
 
     view! {
         <main class="app-shell">
@@ -227,7 +185,7 @@ fn SessionView(session_id: String) -> impl IntoView {
                 backend_origin=window_origin()
                 connection_status=Signal::derive(move || connection_status.get())
                 session_status=Signal::derive(move || session_status.get())
-                route_summary=format!("Session: {}", id)
+                route_summary=format!("Session: {}", session_id)
             />
             <p class="top-link"><a href="/app/">"Start a fresh chat"</a></p>
             <ErrorBanner message=error />
@@ -236,10 +194,84 @@ fn SessionView(session_id: String) -> impl IntoView {
             <Composer
                 busy=composer_busy
                 status_text=composer_status
-                on_submit=Callback::new(on_submit)
+                on_submit=on_submit
             />
         </main>
     }
+}
+
+fn spawn_session_bootstrap(
+    session_id: String,
+    entries: RwSignal<Vec<TranscriptEntry>>,
+    pending_permissions: RwSignal<Vec<(String, String)>>,
+    connection_status: RwSignal<String>,
+    session_status: RwSignal<String>,
+    error: RwSignal<Option<String>>,
+) {
+    leptos::task::spawn_local(async move {
+        match api::load_session(&session_id).await {
+            Ok(session) => {
+                entries.set(session.entries);
+                pending_permissions.set(session.pending_permissions);
+                session_status.set(session.session_status);
+            }
+            Err(message) => {
+                error.set(Some(message));
+                connection_status.set("error".to_string());
+                return;
+            }
+        }
+
+        api::subscribe_sse(
+            &session_id,
+            entries,
+            pending_permissions,
+            connection_status,
+            session_status,
+            error,
+        )
+        .await;
+    });
+}
+
+fn session_submit_callback(
+    session_id: String,
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+) -> Callback<String> {
+    Callback::new(move |prompt: String| {
+        let session_id = session_id.clone();
+        busy.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            if let Err(message) = api::send_message(&session_id, &prompt).await {
+                error.set(Some(message));
+            }
+            busy.set(false);
+        });
+    })
+}
+
+fn session_composer_busy_signal(
+    busy: RwSignal<bool>,
+    session_status: RwSignal<String>,
+) -> Signal<bool> {
+    Signal::derive(move || busy.get() || session_status.get() == "closed")
+}
+
+fn session_composer_status_signal(
+    busy: RwSignal<bool>,
+    session_status: RwSignal<String>,
+) -> Signal<String> {
+    Signal::derive(move || {
+        if busy.get() {
+            "Sending...".to_string()
+        } else if session_status.get() == "closed" {
+            "Session closed.".to_string()
+        } else {
+            format!("Session {}", session_status.get())
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

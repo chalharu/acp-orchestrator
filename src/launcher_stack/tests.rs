@@ -89,6 +89,50 @@ fn launcher_lock_drop_tolerates_non_file_paths() {
     drop(LauncherLock { path });
 }
 
+#[test]
+fn try_acquire_launcher_lock_records_the_owner_pid() {
+    let lock_path = unique_temp_json_path("acp-launcher-lock", "owner-pid");
+
+    let lock = try_acquire_launcher_lock(&lock_path)
+        .expect("creating the launcher lock should succeed")
+        .expect("the lock should be acquired");
+
+    assert_eq!(
+        fs::read_to_string(&lock_path).expect("launcher lock should be readable"),
+        std::process::id().to_string()
+    );
+
+    drop(lock);
+}
+
+#[test]
+fn write_launcher_lock_owner_removes_the_lock_when_recording_the_owner_fails() {
+    #[derive(Default)]
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("boom"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let lock_path = unique_temp_json_path("acp-launcher-lock", "owner-write-failure");
+    fs::write(&lock_path, []).expect("launcher lock placeholder should write");
+
+    let error = write_launcher_lock_owner(&mut FailingWriter, &lock_path)
+        .expect_err("owner write failures should be surfaced");
+
+    assert!(matches!(
+        error,
+        crate::LauncherError::AcquireLauncherLock { .. }
+    ));
+    assert!(!lock_path.exists());
+}
+
 #[tokio::test]
 async fn prepare_persistent_stack_times_out_when_the_lock_stays_busy() {
     let state_path = unique_temp_json_path("acp-launcher-state", "busy-lock");
@@ -358,6 +402,27 @@ fn clear_stale_launcher_lock_handles_not_stale_files() {
             .expect("fresh launcher locks should be retained")
     );
     assert!(lock_path.exists());
+}
+
+#[test]
+fn clear_stale_launcher_lock_clears_dead_owner_locks_immediately() {
+    let lock_path = unique_temp_json_path("acp-launcher-lock", "dead-owner");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(":")
+        .spawn()
+        .expect("dead owner helper process should spawn");
+    let dead_owner_pid = child.id();
+    child
+        .wait()
+        .expect("dead owner helper process should exit cleanly");
+    fs::write(&lock_path, dead_owner_pid.to_string()).expect("launcher lock should write");
+
+    assert!(
+        clear_stale_launcher_lock(&lock_path, Duration::from_secs(3600))
+            .expect("dead owner launcher locks should be removed immediately")
+    );
+    assert!(!lock_path.exists());
 }
 
 #[test]

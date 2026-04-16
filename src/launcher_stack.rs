@@ -6,6 +6,7 @@ use std::{
     io::Write,
     net::IpAddr,
     path::{Path, PathBuf},
+    process,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -378,9 +379,7 @@ pub(crate) fn try_acquire_launcher_lock(lock_path: &Path) -> Result<Option<Launc
         .create_new(true)
         .open(lock_path)
     {
-        Ok(_) => Ok(Some(LauncherLock {
-            path: lock_path.to_path_buf(),
-        })),
+        Ok(mut file) => write_launcher_lock_owner(&mut file, lock_path).map(Some),
         Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
         Err(source) => Err(crate::LauncherError::AcquireLauncherLock {
             source,
@@ -400,6 +399,13 @@ pub(crate) fn clear_stale_launcher_lock(lock_path: &Path, stale_after: Duration)
             });
         }
     };
+    if metadata.is_file()
+        && launcher_lock_owner_pid(lock_path)
+            .is_some_and(|owner_pid| !launcher_lock_owner_is_running(owner_pid))
+    {
+        return remove_launcher_lock(lock_path);
+    }
+
     let modified = metadata
         .modified()
         .context(crate::ReadLauncherLockMetadataSnafu {
@@ -413,6 +419,48 @@ pub(crate) fn clear_stale_launcher_lock(lock_path: &Path, stale_after: Duration)
         return Ok(false);
     }
 
+    remove_launcher_lock(lock_path)
+}
+
+fn launcher_lock_owner_pid(lock_path: &Path) -> Option<u32> {
+    fs::read_to_string(lock_path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|owner_pid| *owner_pid != 0)
+}
+
+fn write_launcher_lock_owner<W: Write>(writer: &mut W, lock_path: &Path) -> Result<LauncherLock> {
+    if let Err(source) = writer.write_all(process::id().to_string().as_bytes()) {
+        let _ = fs::remove_file(lock_path);
+        return Err(crate::LauncherError::AcquireLauncherLock {
+            source,
+            path: lock_path.to_path_buf(),
+        });
+    }
+
+    Ok(LauncherLock {
+        path: lock_path.to_path_buf(),
+    })
+}
+
+#[cfg(unix)]
+fn launcher_lock_owner_is_running(owner_pid: u32) -> bool {
+    let result = unsafe { libc::kill(owner_pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn launcher_lock_owner_is_running(_owner_pid: u32) -> bool {
+    true
+}
+
+fn remove_launcher_lock(lock_path: &Path) -> Result<bool> {
     match fs::remove_file(lock_path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),

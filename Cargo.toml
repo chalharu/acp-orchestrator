@@ -67,6 +67,7 @@ acp-cli = { path = "crates/acp-cli" }
 acp-mock = { path = "crates/acp-mock" }
 acp-web-backend = { path = "crates/acp-web-backend" }
 dirs.workspace = true
+libc.workspace = true
 open.workspace = true
 reqwest.workspace = true
 serde.workspace = true

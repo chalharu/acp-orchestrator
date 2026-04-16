@@ -69,6 +69,7 @@ dependencies = [
  "acp-mock",
  "acp-web-backend",
  "dirs",
+ "libc",
  "open",
  "reqwest",
  "serde",

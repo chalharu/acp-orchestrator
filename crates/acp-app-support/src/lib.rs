@@ -102,6 +102,13 @@ pub fn build_http_client_for_url(
     if should_bypass_proxy_for_url(base_url) {
         builder = builder.no_proxy();
     }
+    if should_trust_invalid_loopback_cert_for_url(base_url) {
+        // Keep the self-signed loopback exception scoped to the original URL instead of
+        // allowing relaxed certificate validation to carry across redirects.
+        builder = builder
+            .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none());
+    }
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
@@ -109,18 +116,65 @@ pub fn build_http_client_for_url(
 }
 
 fn should_bypass_proxy_for_url(base_url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(base_url) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.trim_matches(|character| character == '[' || character == ']');
+    parse_base_url(base_url).is_some_and(|url| {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let host = host.trim_matches(|character| character == '[' || character == ']');
 
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
+fn should_trust_invalid_loopback_cert_for_url(base_url: &str) -> bool {
+    parse_base_url(base_url).is_some_and(|url| {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let host = host.trim_matches(|character| character == '[' || character == ']');
+
+        // Keep invalid-cert trust narrower than proxy bypass and only allow literal loopback IPs.
+        url.scheme().eq_ignore_ascii_case("https")
+            && host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
+fn parse_base_url(base_url: &str) -> Option<reqwest::Url> {
+    reqwest::Url::parse(base_url).ok()
+}
+
+pub async fn wait_for_http_success(
+    client: &Client,
+    url: &str,
+    attempts: usize,
+    delay: Duration,
+    probe_name: &str,
+) -> Result<(), BoxError> {
+    let mut last_failure = None;
+    for attempt in 0..attempts {
+        match client.get(url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last_failure = Some(format!("unexpected status {}", response.status()));
+            }
+            Err(error) => {
+                last_failure = Some(error.to_string());
+            }
+        }
+        if attempt + 1 < attempts {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    let detail = last_failure
+        .map(|failure| format!(": {failure}"))
+        .unwrap_or_default();
+    Err(io::Error::other(format!("{probe_name} did not succeed for {url}{detail}")).into())
 }
 
 pub async fn run_service_with_readiness<E, Ready, Serve, OnReady>(
@@ -176,16 +230,7 @@ pub async fn wait_for_health(
     delay: Duration,
 ) -> Result<(), BoxError> {
     let health_url = format!("{base_url}/healthz");
-    for _ in 0..attempts {
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        tokio::time::sleep(delay).await;
-    }
-
-    Err(io::Error::other(format!("health check did not succeed for {health_url}")).into())
+    wait_for_http_success(client, &health_url, attempts, delay, "health check").await
 }
 
 pub fn unique_temp_json_path(prefix: &str, label: &str) -> PathBuf {

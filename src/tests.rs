@@ -10,6 +10,7 @@ fn split_launcher_args_defaults_to_chat_new() {
         split_launcher_args(&args).expect("default launcher args should parse"),
         LauncherArgs {
             acp_server: None,
+            web: false,
             cli_args: vec![OsString::from("chat"), OsString::from("--new")],
         }
     );
@@ -27,6 +28,7 @@ fn split_launcher_args_preserves_explicit_arguments() {
         split_launcher_args(&args).expect("explicit launcher args should parse"),
         LauncherArgs {
             acp_server: None,
+            web: false,
             cli_args: vec![OsString::from("session"), OsString::from("list")],
         }
     );
@@ -44,6 +46,7 @@ fn split_launcher_args_extracts_the_acp_server_override() {
         split_launcher_args(&args).expect("ACP server overrides should parse"),
         LauncherArgs {
             acp_server: Some(OsString::from("127.0.0.1:8090")),
+            web: false,
             cli_args: vec![OsString::from("chat"), OsString::from("--new")],
         }
     );
@@ -82,6 +85,7 @@ fn split_launcher_args_extracts_the_equals_form_acp_server_override() {
         split_launcher_args(&args).expect("ACP server overrides should parse"),
         LauncherArgs {
             acp_server: Some(OsString::from("127.0.0.1:8090")),
+            web: false,
             cli_args: vec![OsString::from("chat"), OsString::from("--new")],
         }
     );
@@ -110,7 +114,41 @@ fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
         split_launcher_args(&args).expect("launcher args should parse"),
         LauncherArgs {
             acp_server: Some(OsString::from("127.0.0.1:8090")),
+            web: false,
             cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+        }
+    );
+}
+
+#[test]
+fn split_launcher_args_extracts_web_mode_without_defaulting_to_cli_chat() {
+    let args = vec![OsString::from("acp"), OsString::from("--web")];
+
+    assert_eq!(
+        split_launcher_args(&args).expect("web mode should parse"),
+        LauncherArgs {
+            acp_server: None,
+            web: true,
+            cli_args: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn split_launcher_args_supports_web_mode_with_an_acp_server_override() {
+    let args = vec![
+        OsString::from("acp"),
+        OsString::from("--web"),
+        OsString::from("--acp-server"),
+        OsString::from("127.0.0.1:8090"),
+    ];
+
+    assert_eq!(
+        split_launcher_args(&args).expect("web mode with ACP overrides should parse"),
+        LauncherArgs {
+            acp_server: Some(OsString::from("127.0.0.1:8090")),
+            web: true,
+            cli_args: Vec::new(),
         }
     );
 }

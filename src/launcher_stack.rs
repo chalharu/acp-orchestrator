@@ -113,6 +113,10 @@ impl LauncherStack {
         self.auth_token.as_deref()
     }
 
+    pub(crate) fn is_ephemeral(&self) -> bool {
+        self.ephemeral_children.is_some()
+    }
+
     pub(crate) async fn shutdown(&mut self) -> Result<()> {
         if let Some(children) = &mut self.ephemeral_children {
             let backend = &mut children.backend;

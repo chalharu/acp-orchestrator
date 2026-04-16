@@ -1,9 +1,8 @@
 use std::{process::Stdio, time::Duration};
 
-use acp_app_support::{read_startup_url, wait_for_tcp_connect};
+use acp_app_support::{build_http_client_for_url, read_startup_url, wait_for_tcp_connect};
 use acp_contracts::HealthResponse;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
-use reqwest::Client;
 use tokio::{net::TcpListener, process::Command, sync::oneshot, time::timeout};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -11,7 +10,6 @@ const BROKEN_PROXY_URL: &str = "http://127.0.0.1:9";
 
 #[tokio::test]
 async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()> {
-    let client = Client::builder().build()?;
     let (mock_address, mock_shutdown) = spawn_mock_server().await?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_acp-web-backend"));
     command
@@ -27,6 +25,7 @@ async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()>
     configure_broken_proxy_env(&mut command);
     let mut child = command.spawn()?;
     let base_url = read_startup_url(&mut child, "web backend listening on ").await?;
+    let client = build_http_client_for_url(&base_url, Some(Duration::from_secs(1)))?;
     let health: HealthResponse = client
         .get(format!("{base_url}/healthz"))
         .send()
@@ -35,6 +34,13 @@ async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()>
         .json()
         .await?;
     assert_eq!(health.status, "ok");
+    let app_response = client
+        .get(format!("{base_url}/app/"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let app_body = app_response.text().await?;
+    assert!(app_body.contains("ACP Web MVP slice 0"));
 
     let status = timeout(Duration::from_secs(2), child.wait()).await??;
     assert!(status.success());

@@ -53,6 +53,7 @@ async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
     }
     let args = LauncherArgs {
         acp_server: None,
+        web: false,
         cli_args: vec![OsString::from("chat"), OsString::from("--new")],
     };
 

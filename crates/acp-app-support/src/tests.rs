@@ -137,6 +137,8 @@ async fn listener_endpoint_formats_the_bound_address() {
 fn build_http_client_for_loopback_urls_succeeds() {
     build_http_client_for_url("http://127.0.0.1:8080", Some(Duration::from_secs(1)))
         .expect("loopback clients should build");
+    build_http_client_for_url("https://127.0.0.1:8443", Some(Duration::from_secs(1)))
+        .expect("loopback https clients should build");
 }
 
 #[test]
@@ -156,6 +158,22 @@ fn proxy_bypass_is_disabled_for_remote_and_invalid_urls() {
     assert!(!should_bypass_proxy_for_url("https://example.com"));
     assert!(!should_bypass_proxy_for_url("mailto:test@example.com"));
     assert!(!should_bypass_proxy_for_url("not-a-url"));
+}
+
+#[test]
+fn invalid_cert_trust_is_limited_to_literal_loopback_https() {
+    assert!(should_trust_invalid_loopback_cert_for_url(
+        "https://127.0.0.1:8443"
+    ));
+    assert!(!should_trust_invalid_loopback_cert_for_url(
+        "https://localhost:8443"
+    ));
+    assert!(!should_trust_invalid_loopback_cert_for_url(
+        "http://127.0.0.1:8080"
+    ));
+    assert!(!should_trust_invalid_loopback_cert_for_url(
+        "https://example.com"
+    ));
 }
 
 #[tokio::test]
@@ -215,6 +233,46 @@ async fn wait_for_health_reports_failures_after_exhausting_retries() {
         .expect_err("unreachable health endpoints should fail");
 
     assert!(error.to_string().contains("health check did not succeed"));
+}
+
+#[tokio::test]
+async fn wait_for_http_success_succeeds_when_the_endpoint_is_ready() {
+    let client = Client::builder().build().expect("test client should build");
+    let (base_url, handle) = spawn_health_server().await;
+    let app_url = format!("{base_url}/app/");
+
+    wait_for_http_success(
+        &client,
+        &app_url,
+        10,
+        Duration::from_millis(5),
+        "browser entrypoint",
+    )
+    .await
+    .expect("HTTP success wait should succeed");
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn wait_for_http_success_reports_failures_after_exhausting_retries() {
+    let client = Client::builder().build().expect("test client should build");
+
+    let error = wait_for_http_success(
+        &client,
+        "http://127.0.0.1:9/app/",
+        2,
+        Duration::from_millis(1),
+        "browser entrypoint",
+    )
+    .await
+    .expect_err("unreachable endpoints should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("browser entrypoint did not succeed")
+    );
 }
 
 #[tokio::test]

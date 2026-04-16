@@ -1,6 +1,14 @@
 use super::*;
 use crate::mock_client::{ReplyFuture, ReplyResult};
+use axum::{
+    body::to_bytes,
+    http::{
+        HeaderValue,
+        header::{COOKIE, SET_COOKIE},
+    },
+};
 use std::sync::{Arc as StdArc, Mutex};
+use tokio::time::timeout;
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -59,17 +67,119 @@ fn app_errors_map_to_the_expected_status_codes() {
 
 #[test]
 fn auth_errors_become_unauthorized_responses() {
-    let missing: AppError = AuthError::MissingAuthorization.into();
-    let invalid: AppError = AuthError::InvalidAuthorization.into();
+    let missing: AppError = AuthError::MissingAuthentication.into();
+    let invalid: AppError = AuthError::InvalidAuthentication.into();
 
     assert!(matches!(
         missing,
-        AppError::Unauthorized(message) if message == "missing bearer token"
+        AppError::Unauthorized(message) if message == "missing authentication"
     ));
     assert!(matches!(
         invalid,
-        AppError::Unauthorized(message) if message == "invalid bearer token"
+        AppError::Unauthorized(message) if message == "invalid authentication"
     ));
+}
+
+#[test]
+fn csrf_errors_become_forbidden_responses() {
+    let missing: AppError = AuthError::MissingCsrfToken.into();
+    let invalid: AppError = AuthError::InvalidCsrfToken.into();
+
+    assert!(matches!(
+        missing,
+        AppError::Forbidden(message) if message == "missing csrf token"
+    ));
+    assert!(matches!(
+        invalid,
+        AppError::Forbidden(message) if message == "invalid csrf token"
+    ));
+}
+
+#[tokio::test]
+async fn app_entrypoint_bootstraps_browser_cookies_and_markup() {
+    let response = app_entrypoint(HeaderMap::new()).await;
+    let set_cookies = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    assert_eq!(set_cookies.len(), 2);
+    assert!(
+        set_cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("acp_session=") && cookie.contains("HttpOnly"))
+    );
+    assert!(
+        set_cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("acp_csrf=") && !cookie.contains("HttpOnly"))
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("ACP Web MVP slice 0"));
+    assert!(body.contains("name=\"acp-csrf-token\""));
+    assert!(body.contains("/app/sessions/{id}"));
+}
+
+#[tokio::test]
+async fn app_entrypoint_replaces_invalid_cookie_values_before_rendering() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        COOKIE,
+        HeaderValue::from_static(r#"acp_session=not-a-uuid; acp_csrf="><bad"#),
+    );
+
+    let response = app_entrypoint(headers).await;
+    let set_cookies = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    assert_eq!(set_cookies.len(), 2);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(!body.contains(r#""><bad"#));
+}
+
+#[tokio::test]
+async fn draining_empty_connection_tasks_returns_immediately() {
+    let mut connections = tokio::task::JoinSet::new();
+
+    timeout(
+        Duration::from_millis(50),
+        drain_connection_tasks(&mut connections),
+    )
+    .await
+    .expect("empty connection sets should not wait for the shutdown grace period");
+}
+
+#[tokio::test]
+async fn draining_pending_connection_tasks_aborts_after_the_grace_period() {
+    let mut connections = tokio::task::JoinSet::new();
+    connections.spawn(std::future::pending::<()>());
+
+    timeout(
+        Duration::from_secs(2),
+        drain_connection_tasks(&mut connections),
+    )
+    .await
+    .expect("pending connections should be aborted after the shutdown grace period");
+
+    assert!(connections.is_empty());
 }
 
 #[test]

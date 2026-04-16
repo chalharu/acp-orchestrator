@@ -218,7 +218,7 @@ async fn read_until_output(reader: &mut BufReader<ChildStdout>, needle: &str) ->
 
 fn assert_launcher_output(output: &str) {
     assert!(output.contains("session: s_"));
-    assert!(output.contains("connected to backend: http://127.0.0.1:"));
+    assert!(output.contains("connected to backend: https://127.0.0.1:"));
     assert!(output.contains("[assistant] mock assistant:"));
 }
 

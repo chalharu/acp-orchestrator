@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::{
     env,
     ffi::OsString,
@@ -10,8 +8,6 @@ use std::{
 
 use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
 use snafu::prelude::*;
-#[cfg(test)]
-use tokio::sync::Mutex;
 
 mod launcher_process;
 mod launcher_stack;
@@ -25,47 +21,6 @@ pub(crate) use launcher_process::{read_startup_url, terminate_child};
 pub(crate) use launcher_stack::launcher_state_path_from;
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
-
-#[cfg(test)]
-pub(crate) fn test_env_lock() -> &'static Mutex<()> {
-    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_ENV_LOCK.get_or_init(|| Mutex::const_new(()))
-}
-
-#[cfg(test)]
-pub(crate) struct TestAcpServerUrlGuard {
-    previous: Option<OsString>,
-}
-
-#[cfg(test)]
-impl Drop for TestAcpServerUrlGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            unsafe {
-                env::set_var("ACP_SERVER_URL", previous);
-            }
-        } else {
-            unsafe {
-                env::remove_var("ACP_SERVER_URL");
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn test_acp_server_url_guard(value: Option<&str>) -> TestAcpServerUrlGuard {
-    let previous = env::var_os("ACP_SERVER_URL");
-    if let Some(value) = value {
-        unsafe {
-            env::set_var("ACP_SERVER_URL", value);
-        }
-    } else {
-        unsafe {
-            env::remove_var("ACP_SERVER_URL");
-        }
-    }
-    TestAcpServerUrlGuard { previous }
-}
 
 #[derive(Debug, Snafu)]
 enum LauncherError {

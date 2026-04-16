@@ -1,11 +1,49 @@
 use super::*;
-use std::{process::Stdio, time::Duration};
+use std::{process::Stdio, sync::OnceLock, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     process::Command,
-    sync::MutexGuard,
+    sync::{Mutex, MutexGuard},
 };
+
+static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    TEST_ENV_LOCK.get_or_init(|| Mutex::const_new(()))
+}
+
+pub(crate) struct TestAcpServerUrlGuard {
+    previous: Option<OsString>,
+}
+
+impl Drop for TestAcpServerUrlGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            unsafe {
+                std::env::set_var("ACP_SERVER_URL", previous);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("ACP_SERVER_URL");
+            }
+        }
+    }
+}
+
+pub(crate) fn test_acp_server_url_guard(value: Option<&str>) -> TestAcpServerUrlGuard {
+    let previous = std::env::var_os("ACP_SERVER_URL");
+    if let Some(value) = value {
+        unsafe {
+            std::env::set_var("ACP_SERVER_URL", value);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("ACP_SERVER_URL");
+        }
+    }
+    TestAcpServerUrlGuard { previous }
+}
 
 #[test]
 fn split_launcher_args_defaults_to_chat_new() {
@@ -40,24 +78,6 @@ fn split_launcher_args_preserves_explicit_arguments() {
 }
 
 #[test]
-fn split_launcher_args_extracts_the_acp_server_override() {
-    let args = vec![
-        OsString::from("acp"),
-        OsString::from("--acp-server"),
-        OsString::from("127.0.0.1:8090"),
-    ];
-
-    assert_eq!(
-        split_launcher_args(&args).expect("ACP server overrides should parse"),
-        LauncherArgs {
-            acp_server: Some(OsString::from("127.0.0.1:8090")),
-            web: false,
-            cli_args: vec![OsString::from("chat"), OsString::from("--new")],
-        }
-    );
-}
-
-#[test]
 fn split_launcher_args_requires_an_acp_server_value() {
     let args = vec![OsString::from("acp"), OsString::from("--acp-server")];
 
@@ -80,23 +100,6 @@ fn split_launcher_args_rejects_an_empty_acp_server_value() {
 }
 
 #[test]
-fn split_launcher_args_extracts_the_equals_form_acp_server_override() {
-    let args = vec![
-        OsString::from("acp"),
-        OsString::from("--acp-server=127.0.0.1:8090"),
-    ];
-
-    assert_eq!(
-        split_launcher_args(&args).expect("ACP server overrides should parse"),
-        LauncherArgs {
-            acp_server: Some(OsString::from("127.0.0.1:8090")),
-            web: false,
-            cli_args: vec![OsString::from("chat"), OsString::from("--new")],
-        }
-    );
-}
-
-#[test]
 fn split_launcher_args_rejects_an_empty_equals_form_acp_server_override() {
     let args = vec![OsString::from("acp"), OsString::from("--acp-server=")];
 
@@ -106,23 +109,25 @@ fn split_launcher_args_rejects_an_empty_equals_form_acp_server_override() {
 }
 
 #[test]
-fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
-    let args = vec![
-        OsString::from("acp"),
-        OsString::from("--acp-server"),
-        OsString::from("127.0.0.1:8090"),
-        OsString::from("chat"),
-        OsString::from("--new"),
+fn split_launcher_args_extracts_supported_acp_server_overrides() {
+    let cases = [
+        vec!["acp", "--acp-server", "127.0.0.1:8090"],
+        vec!["acp", "--acp-server=127.0.0.1:8090"],
+        vec!["acp", "--acp-server", "127.0.0.1:8090", "chat", "--new"],
     ];
 
-    assert_eq!(
-        split_launcher_args(&args).expect("launcher args should parse"),
-        LauncherArgs {
-            acp_server: Some(OsString::from("127.0.0.1:8090")),
-            web: false,
-            cli_args: vec![OsString::from("chat"), OsString::from("--new")],
-        }
-    );
+    for raw_args in cases {
+        let args = raw_args.into_iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            split_launcher_args(&args).expect("ACP server overrides should parse"),
+            LauncherArgs {
+                acp_server: Some(OsString::from("127.0.0.1:8090")),
+                web: false,
+                cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            }
+        );
+    }
 }
 
 #[test]
@@ -173,7 +178,7 @@ fn web_backend_url_prefers_the_stack_value() {
 #[test]
 fn web_backend_url_falls_back_to_the_environment() {
     let _guard = lock_acp_server_url();
-    let _url_guard = crate::test_acp_server_url_guard(Some("https://127.0.0.1:9443"));
+    let _url_guard = test_acp_server_url_guard(Some("https://127.0.0.1:9443"));
 
     let backend_url = web_backend_url(&launcher_stack::LauncherStack::direct())
         .expect("environment backend URLs should be used");
@@ -184,7 +189,7 @@ fn web_backend_url_falls_back_to_the_environment() {
 #[test]
 fn web_backend_url_requires_a_value_from_the_stack_or_environment() {
     let _guard = lock_acp_server_url();
-    let _url_guard = crate::test_acp_server_url_guard(None);
+    let _url_guard = test_acp_server_url_guard(None);
 
     let error = web_backend_url(&launcher_stack::LauncherStack::direct())
         .expect_err("missing backend URLs should fail");
@@ -195,10 +200,10 @@ fn web_backend_url_requires_a_value_from_the_stack_or_environment() {
 #[test]
 fn acp_server_url_guard_restores_previous_values() {
     let _guard = lock_acp_server_url();
-    let _original = crate::test_acp_server_url_guard(Some("https://127.0.0.1:1111"));
+    let _original = test_acp_server_url_guard(Some("https://127.0.0.1:1111"));
 
     {
-        let _restore = crate::test_acp_server_url_guard(Some("https://127.0.0.1:2222"));
+        let _restore = test_acp_server_url_guard(Some("https://127.0.0.1:2222"));
         assert_eq!(
             std::env::var("ACP_SERVER_URL").ok().as_deref(),
             Some("https://127.0.0.1:2222")
@@ -380,7 +385,7 @@ fn finish_cli_launch_preserves_cli_errors_after_cleanup() {
 #[tokio::test]
 async fn run_web_launcher_with_signal_cleans_up_after_entrypoint_failures() {
     let _guard = lock_acp_server_url_async().await;
-    let _url_guard = crate::test_acp_server_url_guard(None);
+    let _url_guard = test_acp_server_url_guard(None);
     let mut stack = launcher_stack::LauncherStack::direct();
 
     let error = run_web_launcher_with_signal(&mut stack, std::future::pending())
@@ -414,7 +419,7 @@ async fn run_launcher_routes_web_mode_through_the_web_launcher() {
     let (base_url, handle) =
         spawn_single_response_http_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
     let _guard = lock_acp_server_url_async().await;
-    let _url_guard = crate::test_acp_server_url_guard(Some(base_url.as_str()));
+    let _url_guard = test_acp_server_url_guard(Some(base_url.as_str()));
 
     let result = run_launcher(
         Path::new("/bin/true"),
@@ -680,11 +685,11 @@ async fn run_backend_role_can_start_without_a_test_shutdown() {
 }
 
 fn lock_acp_server_url() -> MutexGuard<'static, ()> {
-    crate::test_env_lock().blocking_lock()
+    test_env_lock().blocking_lock()
 }
 
 async fn lock_acp_server_url_async() -> MutexGuard<'static, ()> {
-    crate::test_env_lock().lock().await
+    test_env_lock().lock().await
 }
 
 async fn spawn_single_response_http_server(

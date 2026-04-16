@@ -149,9 +149,18 @@ async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<(String, String)> {
 async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
     for (input, delay_ms) in CHAT_SCRIPT {
         stdin.write_all(input).await?;
-        sleep(Duration::from_millis(delay_ms)).await;
+        sleep(chat_script_delay(delay_ms)).await;
     }
     Ok(())
+}
+
+fn chat_script_delay(delay_ms: u64) -> Duration {
+    let scaled_delay_ms = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        delay_ms.saturating_mul(5)
+    } else {
+        delay_ms
+    };
+    Duration::from_millis(scaled_delay_ms)
 }
 
 fn extract_session_id(output: &str) -> Result<String> {

@@ -65,8 +65,8 @@ async fn launcher_stacks_report_when_children_are_ephemeral() {
 
 #[tokio::test]
 async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
-    let _guard = crate::test_env_lock().lock().await;
-    let _url_guard = crate::test_acp_server_url_guard(Some("http://127.0.0.1:8080"));
+    let _guard = crate::tests::test_env_lock().lock().await;
+    let _url_guard = crate::tests::test_acp_server_url_guard(Some("http://127.0.0.1:8080"));
     let args = LauncherArgs {
         acp_server: None,
         web: false,

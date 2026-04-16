@@ -488,7 +488,7 @@ async fn run_web_foreground_returns_ok_even_when_opening_the_browser_fails() {
         spawn_single_response_http_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
     let stack = launcher_stack::LauncherStack::persistent(base_url, "token".to_string());
 
-    run_web_foreground(&stack)
+    run_web_foreground_with(&stack, |_| Err(std::io::Error::other("boom")))
         .await
         .expect("web foreground launch should still succeed");
 

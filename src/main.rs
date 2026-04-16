@@ -321,11 +321,22 @@ async fn run_cli_foreground(
 }
 
 async fn run_web_foreground(stack: &launcher_stack::LauncherStack) -> Result<()> {
+    run_web_foreground_with(stack, |app_url| open::that_detached(app_url)).await
+}
+
+async fn run_web_foreground_with<F, E>(
+    stack: &launcher_stack::LauncherStack,
+    open_browser: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> std::result::Result<(), E>,
+    E: std::fmt::Display,
+{
     let backend_url = web_backend_url(stack)?;
     let app_url = wait_for_web_entrypoint(&backend_url).await?;
     println!("opening browser: {app_url}");
 
-    if let Err(error) = open::that_detached(&app_url) {
+    if let Err(error) = open_browser(&app_url) {
         eprintln!("failed to open the browser automatically: {error}");
     }
 

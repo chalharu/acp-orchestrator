@@ -1,6 +1,49 @@
 use super::*;
-use std::{process::Stdio, time::Duration};
-use tokio::process::Command;
+use std::{process::Stdio, sync::OnceLock, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    process::Command,
+    sync::{Mutex, MutexGuard},
+};
+
+static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    TEST_ENV_LOCK.get_or_init(|| Mutex::const_new(()))
+}
+
+pub(crate) struct TestAcpServerUrlGuard {
+    previous: Option<OsString>,
+}
+
+impl Drop for TestAcpServerUrlGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            unsafe {
+                std::env::set_var("ACP_SERVER_URL", previous);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("ACP_SERVER_URL");
+            }
+        }
+    }
+}
+
+pub(crate) fn test_acp_server_url_guard(value: Option<&str>) -> TestAcpServerUrlGuard {
+    let previous = std::env::var_os("ACP_SERVER_URL");
+    if let Some(value) = value {
+        unsafe {
+            std::env::set_var("ACP_SERVER_URL", value);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("ACP_SERVER_URL");
+        }
+    }
+    TestAcpServerUrlGuard { previous }
+}
 
 #[test]
 fn split_launcher_args_defaults_to_chat_new() {
@@ -10,6 +53,7 @@ fn split_launcher_args_defaults_to_chat_new() {
         split_launcher_args(&args).expect("default launcher args should parse"),
         LauncherArgs {
             acp_server: None,
+            web: false,
             cli_args: vec![OsString::from("chat"), OsString::from("--new")],
         }
     );
@@ -27,24 +71,8 @@ fn split_launcher_args_preserves_explicit_arguments() {
         split_launcher_args(&args).expect("explicit launcher args should parse"),
         LauncherArgs {
             acp_server: None,
+            web: false,
             cli_args: vec![OsString::from("session"), OsString::from("list")],
-        }
-    );
-}
-
-#[test]
-fn split_launcher_args_extracts_the_acp_server_override() {
-    let args = vec![
-        OsString::from("acp"),
-        OsString::from("--acp-server"),
-        OsString::from("127.0.0.1:8090"),
-    ];
-
-    assert_eq!(
-        split_launcher_args(&args).expect("ACP server overrides should parse"),
-        LauncherArgs {
-            acp_server: Some(OsString::from("127.0.0.1:8090")),
-            cli_args: vec![OsString::from("chat"), OsString::from("--new")],
         }
     );
 }
@@ -72,22 +100,6 @@ fn split_launcher_args_rejects_an_empty_acp_server_value() {
 }
 
 #[test]
-fn split_launcher_args_extracts_the_equals_form_acp_server_override() {
-    let args = vec![
-        OsString::from("acp"),
-        OsString::from("--acp-server=127.0.0.1:8090"),
-    ];
-
-    assert_eq!(
-        split_launcher_args(&args).expect("ACP server overrides should parse"),
-        LauncherArgs {
-            acp_server: Some(OsString::from("127.0.0.1:8090")),
-            cli_args: vec![OsString::from("chat"), OsString::from("--new")],
-        }
-    );
-}
-
-#[test]
 fn split_launcher_args_rejects_an_empty_equals_form_acp_server_override() {
     let args = vec![OsString::from("acp"), OsString::from("--acp-server=")];
 
@@ -97,21 +109,110 @@ fn split_launcher_args_rejects_an_empty_equals_form_acp_server_override() {
 }
 
 #[test]
-fn split_launcher_args_keeps_non_launcher_args_for_the_cli() {
+fn split_launcher_args_extracts_supported_acp_server_overrides() {
+    let cases = [
+        vec!["acp", "--acp-server", "127.0.0.1:8090"],
+        vec!["acp", "--acp-server=127.0.0.1:8090"],
+        vec!["acp", "--acp-server", "127.0.0.1:8090", "chat", "--new"],
+    ];
+
+    for raw_args in cases {
+        let args = raw_args.into_iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            split_launcher_args(&args).expect("ACP server overrides should parse"),
+            LauncherArgs {
+                acp_server: Some(OsString::from("127.0.0.1:8090")),
+                web: false,
+                cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            }
+        );
+    }
+}
+
+#[test]
+fn split_launcher_args_extracts_web_mode_without_defaulting_to_cli_chat() {
+    let args = vec![OsString::from("acp"), OsString::from("--web")];
+
+    assert_eq!(
+        split_launcher_args(&args).expect("web mode should parse"),
+        LauncherArgs {
+            acp_server: None,
+            web: true,
+            cli_args: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn split_launcher_args_supports_web_mode_with_an_acp_server_override() {
     let args = vec![
         OsString::from("acp"),
+        OsString::from("--web"),
         OsString::from("--acp-server"),
         OsString::from("127.0.0.1:8090"),
-        OsString::from("chat"),
-        OsString::from("--new"),
     ];
 
     assert_eq!(
-        split_launcher_args(&args).expect("launcher args should parse"),
+        split_launcher_args(&args).expect("web mode with ACP overrides should parse"),
         LauncherArgs {
             acp_server: Some(OsString::from("127.0.0.1:8090")),
-            cli_args: vec![OsString::from("chat"), OsString::from("--new")],
+            web: true,
+            cli_args: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn web_backend_url_prefers_the_stack_value() {
+    let stack = launcher_stack::LauncherStack::persistent(
+        "https://127.0.0.1:8443".to_string(),
+        "token".to_string(),
+    );
+
+    let backend_url = web_backend_url(&stack).expect("stack backend URLs should win");
+
+    assert_eq!(backend_url, "https://127.0.0.1:8443");
+}
+
+#[test]
+fn web_backend_url_falls_back_to_the_environment() {
+    let _guard = lock_acp_server_url();
+    let _url_guard = test_acp_server_url_guard(Some("https://127.0.0.1:9443"));
+
+    let backend_url = web_backend_url(&launcher_stack::LauncherStack::direct())
+        .expect("environment backend URLs should be used");
+
+    assert_eq!(backend_url, "https://127.0.0.1:9443");
+}
+
+#[test]
+fn web_backend_url_requires_a_value_from_the_stack_or_environment() {
+    let _guard = lock_acp_server_url();
+    let _url_guard = test_acp_server_url_guard(None);
+
+    let error = web_backend_url(&launcher_stack::LauncherStack::direct())
+        .expect_err("missing backend URLs should fail");
+
+    assert!(matches!(error, LauncherError::MissingBackendUrl));
+}
+
+#[test]
+fn acp_server_url_guard_restores_previous_values() {
+    let _guard = lock_acp_server_url();
+    let _original = test_acp_server_url_guard(Some("https://127.0.0.1:1111"));
+
+    {
+        let _restore = test_acp_server_url_guard(Some("https://127.0.0.1:2222"));
+        assert_eq!(
+            std::env::var("ACP_SERVER_URL").ok().as_deref(),
+            Some("https://127.0.0.1:2222")
+        );
+    }
+
+    assert_eq!(
+        std::env::var("ACP_SERVER_URL").ok().as_deref(),
+        Some("https://127.0.0.1:1111")
     );
 }
 
@@ -223,6 +324,176 @@ async fn run_with_args_requires_an_internal_role_name() {
     .expect_err("missing internal role should fail");
 
     assert!(matches!(error, LauncherError::MissingInternalRole));
+}
+
+#[test]
+fn finish_web_shutdown_propagates_signal_errors_after_cleanup() {
+    let error = finish_web_shutdown(
+        Err(LauncherError::WaitForWebShutdownSignal {
+            source: std::io::Error::other("signal wait failed"),
+        }),
+        Ok(()),
+    )
+    .expect_err("signal errors should win");
+
+    assert!(matches!(
+        error,
+        LauncherError::WaitForWebShutdownSignal { .. }
+    ));
+}
+
+#[test]
+fn finish_web_launch_cleanup_tolerates_shutdown_errors() {
+    finish_web_launch_cleanup(Err(LauncherError::ChildExit {
+        role: "web backend",
+        code: Some(9),
+    }));
+}
+
+#[test]
+fn finish_web_shutdown_preserves_signal_errors_when_cleanup_also_fails() {
+    let error = finish_web_shutdown(
+        Err(LauncherError::WaitForWebShutdownSignal {
+            source: std::io::Error::other("signal wait failed"),
+        }),
+        Err(LauncherError::ChildExit {
+            role: "web backend",
+            code: Some(9),
+        }),
+    )
+    .expect_err("signal errors should still win");
+
+    assert!(matches!(
+        error,
+        LauncherError::WaitForWebShutdownSignal { .. }
+    ));
+}
+
+#[test]
+fn finish_cli_launch_preserves_cli_errors_after_cleanup() {
+    let error = finish_cli_launch(
+        Err(LauncherError::RunCli {
+            message: "boom".to_string(),
+        }),
+        Ok(()),
+    )
+    .expect_err("CLI errors should win");
+
+    assert!(matches!(error, LauncherError::RunCli { .. }));
+}
+
+#[tokio::test]
+async fn run_web_launcher_with_signal_cleans_up_after_entrypoint_failures() {
+    let _guard = lock_acp_server_url_async().await;
+    let _url_guard = test_acp_server_url_guard(None);
+    let mut stack = launcher_stack::LauncherStack::direct();
+
+    let error = run_web_launcher_with_signal(&mut stack, std::future::pending())
+        .await
+        .expect_err("missing backend URLs should fail");
+
+    assert!(matches!(error, LauncherError::MissingBackendUrl));
+    assert!(!stack.is_ephemeral());
+}
+
+#[tokio::test]
+async fn run_web_launcher_with_signal_shuts_down_ephemeral_stacks() {
+    let (base_url, handle) =
+        spawn_single_response_http_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+    let backend = spawn_sleep_child().await;
+    let mut stack =
+        launcher_stack::LauncherStack::ephemeral(backend, None, base_url, "token".to_string());
+
+    run_web_launcher_with_signal(&mut stack, std::future::ready(Ok(())))
+        .await
+        .expect("ephemeral web launches should shut down after the signal");
+
+    assert!(!stack.is_ephemeral());
+    assert!(stack.auth_token().is_none());
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn run_launcher_routes_web_mode_through_the_web_launcher() {
+    let (base_url, handle) =
+        spawn_single_response_http_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+    let _guard = lock_acp_server_url_async().await;
+    let _url_guard = test_acp_server_url_guard(Some(base_url.as_str()));
+
+    let result = run_launcher(
+        Path::new("/bin/true"),
+        LauncherArgs {
+            acp_server: None,
+            web: true,
+            cli_args: Vec::new(),
+        },
+    )
+    .await;
+
+    handle.abort();
+    let _ = handle.await;
+    result.expect("web launcher routing should succeed");
+}
+
+#[test]
+fn finish_cli_launch_preserves_cli_errors_when_cleanup_also_fails() {
+    let error = finish_cli_launch(
+        Err(LauncherError::RunCli {
+            message: "boom".to_string(),
+        }),
+        Err(LauncherError::ChildExit {
+            role: "web backend",
+            code: Some(9),
+        }),
+    )
+    .expect_err("CLI errors should still win");
+
+    assert!(matches!(error, LauncherError::RunCli { .. }));
+}
+
+#[tokio::test]
+async fn wait_for_web_entrypoint_succeeds_when_the_app_route_is_ready() {
+    let (base_url, handle) =
+        spawn_single_response_http_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+
+    let app_url = wait_for_web_entrypoint(&base_url)
+        .await
+        .expect("web readiness should succeed");
+
+    assert_eq!(app_url, format!("{base_url}/app/"));
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn wait_for_web_entrypoint_reports_failures() {
+    let (base_url, handle) = spawn_single_response_http_server(
+        "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
+    )
+    .await;
+
+    let error = wait_for_web_entrypoint(&base_url)
+        .await
+        .expect_err("503 responses should fail");
+
+    assert!(matches!(error, LauncherError::WaitForWebEntryPoint { .. }));
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn run_web_foreground_returns_ok_even_when_opening_the_browser_fails() {
+    let (base_url, handle) =
+        spawn_single_response_http_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+    let stack = launcher_stack::LauncherStack::persistent(base_url, "token".to_string());
+
+    run_web_foreground_with(&stack, |_| Err(std::io::Error::other("boom")))
+        .await
+        .expect("web foreground launch should still succeed");
+
+    handle.abort();
+    let _ = handle.await;
 }
 
 #[tokio::test]
@@ -411,4 +682,40 @@ async fn run_backend_role_can_start_without_a_test_shutdown() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     handle.abort();
     let _ = handle.await;
+}
+
+fn lock_acp_server_url() -> MutexGuard<'static, ()> {
+    test_env_lock().blocking_lock()
+}
+
+async fn lock_acp_server_url_async() -> MutexGuard<'static, ()> {
+    test_env_lock().lock().await
+}
+
+async fn spawn_single_response_http_server(
+    response: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("HTTP listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("HTTP listener should expose its address");
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    (format!("http://{address}"), handle)
+}
+
+async fn spawn_sleep_child() -> tokio::process::Child {
+    Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .spawn()
+        .expect("sleep child should spawn")
 }

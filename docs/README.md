@@ -16,8 +16,9 @@
 
 - Overview: `README.md`
   - リポジトリの目的、スコープ、現在の作業軸、ローカル試行手順をつかむ
-  - bundled mock の手動確認 prompt（`verify permission` / `verify cancel`）、
-    slice 5 の multi-pane terminal UI、slash command 補完、`session list` /
+  - bundled mock の手動確認 prompt（`verify permission` / `verify cancel`）を確認する
+  - slice 0 の `cargo run -- --web` browser launcher もここで確認する
+  - slice 5 の multi-pane terminal UI、slash command 補完、`session list` /
     `chat --session` による session 復帰手順もここで確認する
 - Explanation: `docs/explanation/acp-web-cli-architecture.md`
   - ACP Orchestrator の target architecture、責務分離、設計判断を理解する

@@ -1,6 +1,6 @@
 use std::{future::pending, pin::Pin, time::Duration};
 
-use acp_app_support::{wait_for_health, wait_for_tcp_connect};
+use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
     CancelTurnResponse, CreateSessionResponse, PromptRequest, ResolvePermissionRequest,
     ResolvePermissionResponse, SessionListResponse,
@@ -34,9 +34,10 @@ pub(super) struct TestStack {
 
 impl TestStack {
     pub(super) async fn spawn(mut backend_config: ServerConfig) -> Result<Self> {
-        let client = Client::builder().build().context("building test client")?;
         let mock_shutdown = maybe_spawn_mock_server(&mut backend_config).await?;
         let (backend_url, backend_shutdown_tx) = spawn_backend_server(backend_config).await?;
+        let client =
+            build_http_client_for_url(&backend_url, None).context("building test client")?;
         wait_for_stack_health(&client, &backend_url).await?;
 
         Ok(Self {
@@ -264,7 +265,7 @@ async fn spawn_backend_server(
         }
     });
 
-    Ok((format!("http://{backend_address}"), backend_shutdown_tx))
+    Ok((format!("https://{backend_address}"), backend_shutdown_tx))
 }
 
 impl Drop for TestStack {
@@ -324,7 +325,7 @@ pub(super) async fn spawn_direct_backend_server(
     let handle =
         tokio::spawn(async move { serve_backend_with_shutdown(listener, state, pending()).await });
 
-    Ok((format!("http://{address}"), handle))
+    Ok((format!("https://{address}"), handle))
 }
 
 pub(super) async fn spawn_graceful_mock_server()
@@ -366,5 +367,5 @@ pub(super) async fn spawn_graceful_backend_server(
         serve_backend_with_shutdown(listener, state, shutdown).await
     });
 
-    Ok((format!("http://{address}"), shutdown_tx, handle))
+    Ok((format!("https://{address}"), shutdown_tx, handle))
 }

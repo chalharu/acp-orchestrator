@@ -52,8 +52,9 @@ async fn direct_mock_server_accepts_tcp_connections() -> Result<()> {
 
 #[tokio::test]
 async fn direct_backend_server_reports_health() -> Result<()> {
-    let client = Client::builder().build().context("building test client")?;
     let (base_url, handle) = spawn_direct_backend_server("127.0.0.1:9".to_string()).await?;
+    let client = acp_app_support::build_http_client_for_url(&base_url, None)
+        .context("building test client")?;
 
     acp_app_support::wait_for_health(&client, &base_url, 50, Duration::from_millis(50))
         .await
@@ -82,9 +83,10 @@ async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
 
 #[tokio::test]
 async fn graceful_backend_server_shutdown_completes_cleanly() -> Result<()> {
-    let client = Client::builder().build().context("building test client")?;
     let (base_url, shutdown, handle) =
         spawn_graceful_backend_server("127.0.0.1:9".to_string()).await?;
+    let client = acp_app_support::build_http_client_for_url(&base_url, None)
+        .context("building test client")?;
 
     acp_app_support::wait_for_health(&client, &base_url, 50, Duration::from_millis(50))
         .await

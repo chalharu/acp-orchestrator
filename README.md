@@ -54,6 +54,17 @@ composer, and tool/status pane. Use `PageUp` / `PageDown` to switch the
 transcript into manual scroll mode. Use `End` to jump back to the live tail,
 then leave chat with `/quit`.
 
+Open the browser-facing slice-0 Web launcher from the same repo root:
+
+```bash
+cargo run -- --web
+```
+
+This starts or reuses the bundled mock/backend. It prints the loopback HTTPS
+app URL and attempts to open `/app/` in your browser. The backend uses a local
+development certificate for loopback HTTPS. Your browser or OS may require a
+one-time trust or confirmation step before the page loads cleanly.
+
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
 
@@ -108,5 +119,5 @@ cargo run -p acp-web-backend -- --port 8080 --acp-server 127.0.0.1:8090
 Run the CLI frontend against that backend:
 
 ```bash
-cargo run -p acp-cli -- chat --new --server-url http://127.0.0.1:8080
+cargo run -p acp-cli -- chat --new --server-url https://127.0.0.1:8080
 ```

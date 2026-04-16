@@ -3,7 +3,7 @@ use std::{env, ffi::OsString};
 use acp_app_support::{
     BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
     build_http_client_for_url, listener_endpoint, print_startup_line, run_service_with_readiness,
-    shutdown_signal, wait_for_health,
+    shutdown_signal, wait_for_health, wait_for_http_success,
 };
 use clap::Parser;
 use snafu::prelude::*;
@@ -14,6 +14,18 @@ type Result<T, E = BackendAppError> = std::result::Result<T, E>;
 const READY_CHECK_ATTEMPTS: usize = 50;
 const READY_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const READY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn wait_for_app_entrypoint(client: &reqwest::Client, base_url: &str) -> Result<(), BoxError> {
+    let app_url = format!("{base_url}/app/");
+    wait_for_http_success(
+        client,
+        &app_url,
+        READY_CHECK_ATTEMPTS,
+        READY_CHECK_DELAY,
+        "browser entrypoint",
+    )
+    .await
+}
 
 fn map_service_readiness_error(error: ServiceReadinessError<BoxError>) -> BackendAppError {
     match error {
@@ -79,7 +91,7 @@ async fn run(cli: Cli) -> Result<()> {
     let listener = bind_listener(&cli.listen.host, cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
-    let endpoint = listener_endpoint(&listener, "web backend", "http://")
+    let endpoint = listener_endpoint(&listener, "web backend", "https://")
         .map_err(|source| BackendAppError::Setup { source })?;
 
     let state = AppState::new(ServerConfig {
@@ -90,7 +102,10 @@ async fn run(cli: Cli) -> Result<()> {
     .context(BuildStateSnafu)?;
     let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
         .context(BuildHttpClientSnafu)?;
-    let ready = wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
+    let ready = async {
+        wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY).await?;
+        wait_for_app_entrypoint(&client, &endpoint).await
+    };
     let serve = serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms));
 
     run_service_with_readiness(ready, serve, || {

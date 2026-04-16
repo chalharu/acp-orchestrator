@@ -1,6 +1,6 @@
 use std::{io, process::Stdio, time::Duration};
 
-use acp_app_support::{wait_for_health, wait_for_tcp_connect};
+use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{MessageRole, SessionHistoryResponse};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
@@ -97,9 +97,9 @@ struct TestStack {
 impl TestStack {
     async fn spawn(label: &str) -> Result<Self> {
         let _ = label;
-        let client = Client::builder().build()?;
         let (mock_address, mock_shutdown) = spawn_mock_server().await?;
         let (backend_url, backend_shutdown) = spawn_backend_server(mock_address).await?;
+        let client = build_http_client_for_url(&backend_url, None)?;
         wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
 
         Ok(Self {
@@ -149,9 +149,18 @@ async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<(String, String)> {
 async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
     for (input, delay_ms) in CHAT_SCRIPT {
         stdin.write_all(input).await?;
-        sleep(Duration::from_millis(delay_ms)).await;
+        sleep(chat_script_delay(delay_ms)).await;
     }
     Ok(())
+}
+
+fn chat_script_delay(delay_ms: u64) -> Duration {
+    let scaled_delay_ms = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        delay_ms.saturating_mul(5)
+    } else {
+        delay_ms
+    };
+    Duration::from_millis(scaled_delay_ms)
 }
 
 fn extract_session_id(output: &str) -> Result<String> {
@@ -350,5 +359,5 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
             .expect("backend server should stop cleanly");
     });
 
-    Ok((format!("http://{address}"), shutdown_tx))
+    Ok((format!("https://{address}"), shutdown_tx))
 }

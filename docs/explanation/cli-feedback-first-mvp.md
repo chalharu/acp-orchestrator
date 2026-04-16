@@ -124,7 +124,7 @@ session では live session を再開します。retained closed session では 
 ```text
 $ cargo run
 session: s_01H...
-connected to backend: http://127.0.0.1:8080
+connected to backend: https://127.0.0.1:8080
 
 > README の要点を教えて
 [assistant] ACP Orchestrator は ...

@@ -1,10 +1,12 @@
 use std::{
     env,
     ffi::OsString,
+    future::Future,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use acp_app_support::init_tracing;
+use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
 use snafu::prelude::*;
 
 mod launcher_process;
@@ -79,6 +81,9 @@ enum LauncherError {
     #[snafu(display("unknown internal role `{role}`"))]
     UnknownInternalRole { role: String },
 
+    #[snafu(display("missing a backend URL for web launch"))]
+    MissingBackendUrl,
+
     #[snafu(display("running the cli child failed: {message}"))]
     RunCli { message: String },
 
@@ -87,6 +92,15 @@ enum LauncherError {
 
     #[snafu(display("running the backend child failed: {message}"))]
     RunBackend { message: String },
+
+    #[snafu(display("building the web launch client failed"))]
+    BuildWebClient { source: reqwest::Error },
+
+    #[snafu(display("waiting for the web browser entrypoint failed"))]
+    WaitForWebEntryPoint { source: BoxError },
+
+    #[snafu(display("waiting for the web launcher shutdown signal failed"))]
+    WaitForWebShutdownSignal { source: std::io::Error },
 
     #[snafu(display("creating the launcher state directory {} failed", path.display()))]
     CreateLauncherStateDirectory {
@@ -166,6 +180,7 @@ enum LauncherError {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct LauncherArgs {
     acp_server: Option<OsString>,
+    web: bool,
     cli_args: Vec<OsString>,
 }
 
@@ -178,23 +193,114 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     let current_executable = env::current_exe().context(CurrentExecutableSnafu)?;
     let launcher_args = split_launcher_args(&args)?;
+    run_launcher(&current_executable, launcher_args).await
+}
+
+async fn run_launcher(current_executable: &Path, launcher_args: LauncherArgs) -> Result<()> {
     let mut stack = prepare_launcher_stack(
-        &current_executable,
+        current_executable,
         &launcher_args,
-        command_needs_backend(&launcher_args.cli_args),
+        launcher_args.web || command_needs_backend(&launcher_args.cli_args),
         cli_server_url_is_explicit(&launcher_args.cli_args),
     )
     .await?;
+    if launcher_args.web {
+        return run_web_launcher(&mut stack).await;
+    }
+    run_cli_launcher(current_executable, launcher_args.cli_args, &mut stack).await
+}
+
+async fn run_web_launcher(stack: &mut launcher_stack::LauncherStack) -> Result<()> {
+    run_web_launcher_with_signal(stack, tokio::signal::ctrl_c()).await
+}
+
+async fn run_web_launcher_with_signal<F>(
+    stack: &mut launcher_stack::LauncherStack,
+    shutdown_signal: F,
+) -> Result<()>
+where
+    F: Future<Output = std::io::Result<()>>,
+{
+    if let Err(error) = run_web_foreground(stack).await {
+        cleanup_after_web_launch_error(stack).await;
+        return Err(error);
+    }
+    if stack.is_ephemeral() {
+        wait_for_web_shutdown_with_signal(stack, shutdown_signal).await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_after_web_launch_error(stack: &mut launcher_stack::LauncherStack) {
+    finish_web_launch_cleanup(stack.shutdown().await);
+}
+
+fn finish_web_launch_cleanup(shutdown_result: Result<(), LauncherError>) {
+    if let Err(shutdown_error) = shutdown_result {
+        tracing::warn!(%shutdown_error, "web launcher cleanup failed after an entrypoint error");
+    }
+}
+
+async fn wait_for_web_shutdown_with_signal<F>(
+    stack: &mut launcher_stack::LauncherStack,
+    shutdown_signal: F,
+) -> Result<()>
+where
+    F: Future<Output = std::io::Result<()>>,
+{
+    let wait_for_shutdown_signal = shutdown_signal.await.context(WaitForWebShutdownSignalSnafu);
+    let shutdown_result = stack.shutdown().await;
+    finish_web_shutdown(wait_for_shutdown_signal, shutdown_result)
+}
+
+fn finish_web_shutdown(
+    wait_for_shutdown_signal: Result<(), LauncherError>,
+    shutdown_result: Result<(), LauncherError>,
+) -> Result<()> {
+    if let Err(wait_error) = wait_for_shutdown_signal {
+        if let Err(shutdown_error) = shutdown_result {
+            tracing::warn!(%shutdown_error, "web launcher cleanup failed after waiting for the shutdown signal");
+        }
+        return Err(wait_error);
+    }
+    shutdown_result
+}
+
+async fn run_cli_launcher(
+    current_executable: &Path,
+    cli_args: Vec<OsString>,
+    stack: &mut launcher_stack::LauncherStack,
+) -> Result<()> {
     let cli_status = run_cli_foreground(
-        &current_executable,
-        launcher_args.cli_args,
+        current_executable,
+        cli_args,
         stack.backend_url(),
         stack.auth_token(),
     )
-    .await?;
+    .await;
+    let shutdown_result = stack.shutdown().await;
+    finish_cli_launch(cli_status, shutdown_result)
+}
 
-    stack.shutdown().await?;
-    ensure_success("cli frontend", cli_status)
+fn finish_cli_launch(
+    cli_status: Result<std::process::ExitStatus, LauncherError>,
+    shutdown_result: Result<(), LauncherError>,
+) -> Result<()> {
+    match cli_status {
+        Ok(status) => {
+            shutdown_result?;
+            ensure_success("cli frontend", status)
+        }
+        Err(error) => {
+            if let Err(shutdown_error) = shutdown_result {
+                tracing::warn!(
+                    %shutdown_error,
+                    "launcher cleanup failed after the CLI frontend returned an error"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn run_cli_foreground(
@@ -214,6 +320,59 @@ async fn run_cli_foreground(
     spawn_foreground_role(current_executable, "cli frontend", "cli", cli_args, &envs).await
 }
 
+async fn run_web_foreground(stack: &launcher_stack::LauncherStack) -> Result<()> {
+    run_web_foreground_with(stack, |app_url| open::that_detached(app_url)).await
+}
+
+async fn run_web_foreground_with<F, E>(
+    stack: &launcher_stack::LauncherStack,
+    open_browser: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> std::result::Result<(), E>,
+    E: std::fmt::Display,
+{
+    let backend_url = web_backend_url(stack)?;
+    let app_url = wait_for_web_entrypoint(&backend_url).await?;
+    println!("opening browser: {app_url}");
+
+    if let Err(error) = open_browser(&app_url) {
+        eprintln!("failed to open the browser automatically: {error}");
+    }
+
+    Ok(())
+}
+
+fn web_backend_url(stack: &launcher_stack::LauncherStack) -> Result<String> {
+    if let Some(backend_url) = stack.backend_url() {
+        return Ok(backend_url.to_string());
+    }
+
+    env::var("ACP_SERVER_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| MissingBackendUrlSnafu.build())
+}
+
+async fn wait_for_web_entrypoint(backend_url: &str) -> Result<String> {
+    const WEB_READY_ATTEMPTS: usize = 50;
+    const WEB_READY_DELAY: Duration = Duration::from_millis(100);
+    const WEB_READY_TIMEOUT: Duration = Duration::from_millis(500);
+
+    let client = build_http_client_for_url(backend_url, Some(WEB_READY_TIMEOUT))
+        .context(BuildWebClientSnafu)?;
+    let app_url = format!("{}/app/", backend_url.trim_end_matches('/'));
+    wait_for_http_success(
+        &client,
+        &app_url,
+        WEB_READY_ATTEMPTS,
+        WEB_READY_DELAY,
+        "browser entrypoint",
+    )
+    .await
+    .map_err(|source| LauncherError::WaitForWebEntryPoint { source })?;
+    Ok(app_url)
+}
 fn command_needs_backend(cli_args: &[OsString]) -> bool {
     let args = cli_args.iter().map(|arg| arg.to_str()).collect::<Vec<_>>();
     let is_help_or_version = args
@@ -253,30 +412,56 @@ fn split_launcher_args(all_args: &[OsString]) -> Result<LauncherArgs> {
     let mut args = all_args.iter().skip(1).cloned();
 
     while let Some(arg) = args.next() {
-        if arg.as_os_str() == "--acp-server" {
-            let value = args.next().ok_or_else(|| MissingAcpServerSnafu.build())?;
-            if value.is_empty() {
-                return MissingAcpServerSnafu.fail();
-            }
-            launcher_args.acp_server = Some(value);
-        } else if let Some(value) = arg
-            .to_str()
-            .and_then(|value| value.strip_prefix("--acp-server="))
-        {
-            if value.is_empty() {
-                return MissingAcpServerSnafu.fail();
-            }
-            launcher_args.acp_server = Some(OsString::from(value));
-        } else {
-            launcher_args.cli_args.push(arg);
+        if arg.as_os_str() == "--web" {
+            launcher_args.web = true;
+            continue;
         }
+        if let Some(acp_server) = parse_acp_server_arg(&arg, &mut args)? {
+            launcher_args.acp_server = Some(acp_server);
+            continue;
+        }
+        launcher_args.cli_args.push(arg);
     }
 
-    if launcher_args.cli_args.is_empty() {
+    apply_default_cli_args(&mut launcher_args);
+    Ok(launcher_args)
+}
+
+fn parse_acp_server_arg<I>(arg: &OsString, args: &mut I) -> Result<Option<OsString>>
+where
+    I: Iterator<Item = OsString>,
+{
+    if arg.as_os_str() == "--acp-server" {
+        return next_acp_server_arg(args).map(Some);
+    }
+    let Some(value) = arg
+        .to_str()
+        .and_then(|value| value.strip_prefix("--acp-server="))
+    else {
+        return Ok(None);
+    };
+    validate_acp_server_arg(OsString::from(value)).map(Some)
+}
+
+fn next_acp_server_arg<I>(args: &mut I) -> Result<OsString>
+where
+    I: Iterator<Item = OsString>,
+{
+    let value = args.next().ok_or_else(|| MissingAcpServerSnafu.build())?;
+    validate_acp_server_arg(value)
+}
+
+fn validate_acp_server_arg(value: OsString) -> Result<OsString> {
+    if value.is_empty() {
+        return MissingAcpServerSnafu.fail();
+    }
+    Ok(value)
+}
+
+fn apply_default_cli_args(launcher_args: &mut LauncherArgs) {
+    if !launcher_args.web && launcher_args.cli_args.is_empty() {
         launcher_args.cli_args = vec!["chat".into(), "--new".into()];
     }
-
-    Ok(launcher_args)
 }
 async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<()> {
     match role.to_string_lossy().as_ref() {

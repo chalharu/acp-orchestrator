@@ -441,74 +441,17 @@ fn append_cookie_if_missing(
     }
 }
 
-fn app_shell_document(csrf_token: &str) -> Html<String> {
-    Html(format!(
-        r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="acp-api-base" content="/api/v1">
-    <meta name="acp-csrf-token" content="{csrf_token}">
-    <title>ACP Web chat</title>
-    <link rel="stylesheet" href="/app/assets/app.css">
-  </head>
-  <body>
-    <main class="app-shell">
-      <header class="app-header">
-        <div class="app-header__copy">
-          <p class="eyebrow">ACP Web MVP slice 1</p>
-          <h1>ACP Web chat</h1>
-          <p id="route-summary" class="muted">Send the first prompt to create a session and move to <code>/app/sessions/{{id}}</code>.</p>
-        </div>
-        <dl class="status-grid" aria-label="session status">
-          <div>
-            <dt>Backend</dt>
-            <dd id="backend-origin"></dd>
-          </div>
-          <div>
-            <dt>Connection</dt>
-            <dd id="connection-status">bootstrapping</dd>
-          </div>
-          <div>
-            <dt>Session</dt>
-            <dd id="session-status">new</dd>
-          </div>
-        </dl>
-      </header>
-
-      <p class="top-link"><a href="/app/">Start a fresh chat</a></p>
-
-      <div id="error-banner" class="banner" hidden role="alert"></div>
-
-      <section class="panel transcript-panel" aria-label="conversation transcript">
-        <ol id="transcript" class="transcript"></ol>
-      </section>
-
-      <section id="pending-permissions-panel" class="panel pending-panel" hidden aria-live="polite">
-        <h2>Pending permissions</h2>
-        <p class="muted">Slice 1 renders pending requests and transcript updates. Approve/deny controls arrive in the next slice.</p>
-        <ul id="pending-permissions" class="pending-list"></ul>
-      </section>
-
-      <form id="composer-form" class="panel composer" autocomplete="off">
-        <label for="composer-input">Prompt</label>
-        <textarea id="composer-input" name="prompt" rows="4" placeholder="Ask ACP something…"></textarea>
-        <div class="composer__footer">
-          <p id="composer-status" class="muted">Ready for your first prompt.</p>
-          <button id="composer-submit" type="submit">Send</button>
-        </div>
-      </form>
-    </main>
-    <script src="/app/assets/app.js"></script>
-  </body>
-</html>
-"#
-    ))
-}
-
+const APP_SHELL_DOCUMENT_TEMPLATE: &str = include_str!("app_assets/app.html");
 const APP_STYLESHEET: &str = include_str!("app_assets/app.css");
 const APP_JAVASCRIPT: &str = include_str!("app_assets/app.js");
+
+fn app_shell_document(csrf_token: &str) -> Html<String> {
+    assert!(
+        APP_SHELL_DOCUMENT_TEMPLATE.contains("__ACP_CSRF_TOKEN__"),
+        "app.html must contain the __ACP_CSRF_TOKEN__ sentinel",
+    );
+    Html(APP_SHELL_DOCUMENT_TEMPLATE.replace("__ACP_CSRF_TOKEN__", csrf_token))
+}
 
 fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue {
     let http_only = if http_only { "; HttpOnly" } else { "" };

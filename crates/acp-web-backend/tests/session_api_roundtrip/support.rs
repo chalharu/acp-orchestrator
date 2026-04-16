@@ -35,6 +35,60 @@ pub(super) fn build_browser_client() -> Result<Client> {
         .context("building cookie-authenticated browser client")
 }
 
+pub(super) async fn load_browser_app_shell(client: &Client, backend_url: &str) -> Result<String> {
+    client
+        .get(format!("{backend_url}/app/"))
+        .send()
+        .await
+        .context("loading the browser app shell")?
+        .error_for_status()
+        .context("browser app shell returned an error")?
+        .text()
+        .await
+        .context("reading the browser app shell")
+}
+
+pub(super) async fn create_browser_session(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+) -> Result<CreateSessionResponse> {
+    client
+        .post(format!("{backend_url}/api/v1/sessions"))
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .context("creating a cookie-authenticated browser session")?
+        .error_for_status()
+        .context("cookie-authenticated browser session creation returned an error")?
+        .json()
+        .await
+        .context("decoding the created browser session")
+}
+
+pub(super) async fn submit_browser_prompt(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+    csrf_token: &str,
+    prompt: &str,
+) -> Result<()> {
+    client
+        .post(format!(
+            "{backend_url}/api/v1/sessions/{session_id}/messages"
+        ))
+        .header("x-csrf-token", csrf_token)
+        .json(&PromptRequest {
+            text: prompt.to_string(),
+        })
+        .send()
+        .await
+        .context("submitting a browser-authenticated prompt")?
+        .error_for_status()
+        .context("browser-authenticated prompt submission returned an error")?;
+    Ok(())
+}
+
 pub(super) async fn open_cookie_events(
     client: &Client,
     backend_url: &str,
@@ -57,17 +111,22 @@ pub(super) async fn open_cookie_events(
 }
 
 pub(super) fn extract_meta_content(document: &str, name: &str) -> Result<String> {
-    let needle = format!(r#"<meta name="{name}" content=""#);
-    let start = document
-        .find(&needle)
+    let name_needle = format!(r#"name="{name}""#);
+    let tag = document
+        .lines()
+        .find(|line| line.contains("<meta ") && line.contains(&name_needle))
         .context("meta tag was not present in the app shell")?
-        + needle.len();
-    let end = document[start..]
+        .trim();
+    let content_start = tag
+        .find(r#"content=""#)
+        .context("meta tag did not contain a content attribute")?
+        + r#"content=""#.len();
+    let content_end = tag[content_start..]
         .find('"')
         .context("meta tag content did not terminate")?
-        + start;
+        + content_start;
 
-    Ok(document[start..end].to_string())
+    Ok(tag[content_start..content_end].to_string())
 }
 
 pub(super) struct TestStack {

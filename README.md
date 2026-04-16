@@ -65,10 +65,10 @@ app URL and attempts to open `/app/` in your browser. The backend uses a local
 development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
 
-The current Web slice serves a minimal single-column chat page. The first prompt
-creates a browser-owned session, moves the URL to `/app/sessions/<id>`, loads
-saved transcript state on direct session routes, and continues receiving live
-events over SSE.
+The current Web slice serves a minimal single-column chat page.
+The first prompt creates a browser-owned session and moves the URL to
+`/app/sessions/<id>`. Direct session routes load saved transcript state and keep
+receiving live events over SSE.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.

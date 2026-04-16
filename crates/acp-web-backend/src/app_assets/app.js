@@ -1,6 +1,7 @@
 (() => {
-	const apiBase = readMetaContent("acp-api-base");
-	const csrfToken = readMetaContent("acp-csrf-token");
+	const SESSION_ROUTE_PATTERN = /^\/app\/sessions\/([^/]+)$/;
+	const SESSION_ID_PATTERN =
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 	const elements = {
 		backendOrigin: document.getElementById("backend-origin"),
 		connectionStatus: document.getElementById("connection-status"),
@@ -15,6 +16,9 @@
 		composerStatus: document.getElementById("composer-status"),
 		composerSubmit: document.getElementById("composer-submit"),
 	};
+	const apiBasePath = normalizeApiBasePath(readMetaContent("acp-api-base"));
+	const csrfToken = readMetaContent("acp-csrf-token");
+	const origin = globalThis.location.origin;
 	const state = {
 		sessionId: null,
 		sessionStatus: null,
@@ -28,11 +32,23 @@
 		sending: false,
 	};
 
-	elements.backendOrigin.textContent = window.location.origin;
+	elements.backendOrigin.textContent = origin;
 	updateSessionRouteSummary();
 	renderEmptyTranscript();
 	updateConnectionStatus("bootstrapping");
 	updateSessionStatus("new");
+
+	if (!apiBasePath) {
+		showFatalBootstrapError(
+			"The app shell is missing a valid same-origin API base path.",
+		);
+		return;
+	}
+	if (!csrfToken) {
+		showFatalBootstrapError("The app shell is missing a CSRF token.");
+		return;
+	}
+
 	updateComposerState();
 
 	elements.composerForm.addEventListener("submit", (event) => {
@@ -51,25 +67,89 @@
 		}
 	});
 
-	window.addEventListener("popstate", () => {
+	globalThis.addEventListener("popstate", () => {
 		void bootstrapFromLocation();
 	});
 
 	void bootstrapFromLocation();
 
 	function readMetaContent(name) {
-		const element = document.querySelector('meta[name="' + name + '"]');
-		return element ? element.getAttribute("content") || "" : "";
+		const element = document.querySelector(`meta[name="${name}"]`);
+		return element?.getAttribute("content") ?? "";
+	}
+
+	function normalizeApiBasePath(value) {
+		const trimmed = typeof value === "string" ? value.trim() : "";
+		if (
+			trimmed.length === 0 ||
+			!trimmed.startsWith("/") ||
+			trimmed.startsWith("//")
+		) {
+			return null;
+		}
+		return trimmed === "/" ? "" : trimmed.replace(/\/+$/, "");
+	}
+
+	function normalizeSessionId(value) {
+		if (typeof value !== "string") {
+			return null;
+		}
+		const normalized = value.trim().toLowerCase();
+		return SESSION_ID_PATTERN.test(normalized) ? normalized : null;
+	}
+
+	function requireSessionId(value, context) {
+		const sessionId = normalizeSessionId(value);
+		if (!sessionId) {
+			throw new Error(
+				`The backend returned an invalid session id while ${context}.`,
+			);
+		}
+		return sessionId;
+	}
+
+	function buildApiUrl(pathname) {
+		return new URL(`${apiBasePath}${pathname}`, origin).toString();
+	}
+
+	function buildSessionApiUrl(sessionId, suffix = "") {
+		const normalizedSessionId = requireSessionId(
+			sessionId,
+			"building a session request",
+		);
+		return buildApiUrl(`/sessions/${normalizedSessionId}${suffix}`);
+	}
+
+	function buildSessionRoutePath(sessionId) {
+		return `/app/sessions/${requireSessionId(sessionId, "building a session route")}`;
+	}
+
+	function readSessionEnvelope(payload, context) {
+		const session = payload?.session;
+		if (!session) {
+			throw new Error(
+				`The backend returned an invalid session payload while ${context}.`,
+			);
+		}
+		return {
+			...session,
+			id: requireSessionId(session.id, context),
+		};
+	}
+
+	function errorMessage(error) {
+		return error instanceof Error ? error.message : String(error);
 	}
 
 	function parseSessionIdFromLocation() {
-		const match = window.location.pathname.match(/^\/app\/sessions\/([^/]+)$/);
+		const match = SESSION_ROUTE_PATTERN.exec(globalThis.location.pathname);
 		if (!match) {
 			return null;
 		}
 		try {
-			return decodeURIComponent(match[1]);
-		} catch (_error) {
+			return normalizeSessionId(decodeURIComponent(match[1]));
+		} catch (error) {
+			console.warn("Discarding an invalid session route.", error);
 			return null;
 		}
 	}
@@ -102,9 +182,14 @@
 	}
 
 	async function attachExistingSession(sessionId, routeRevision) {
+		const normalizedSessionId = requireSessionId(
+			sessionId,
+			"loading a session route",
+		);
+
 		closeEventSource();
 		clearBanner();
-		state.sessionId = sessionId;
+		state.sessionId = normalizedSessionId;
 		state.sessionStatus = "loading";
 		state.pendingPermissions = [];
 		state.messageIds = new Set();
@@ -117,27 +202,35 @@
 		updateComposerState();
 
 		try {
-			const encodedSessionId = encodeURIComponent(sessionId);
 			const [snapshotResponse, historyResponse] = await Promise.all([
-				fetchJson(apiBase + "/sessions/" + encodedSessionId),
-				fetchJson(apiBase + "/sessions/" + encodedSessionId + "/history"),
+				fetchJson(buildSessionApiUrl(normalizedSessionId)),
+				fetchJson(buildSessionApiUrl(normalizedSessionId, "/history")),
 			]);
-			if (!routeRevisionIsCurrent(routeRevision, sessionId)) {
+			if (!routeRevisionIsCurrent(routeRevision, normalizedSessionId)) {
 				return;
 			}
 
-			const session = snapshotResponse.session;
+			const session = readSessionEnvelope(
+				snapshotResponse,
+				"loading a session",
+			);
+			if (session.id !== normalizedSessionId) {
+				throw new Error(
+					"The backend returned a snapshot for a different session.",
+				);
+			}
+
 			state.sessionId = session.id;
 			state.sessionStatus = session.status;
 			state.latestSequence = Math.max(
 				state.latestSequence,
-				session.latest_sequence || 0,
+				session.latest_sequence ?? 0,
 			);
 			updateSessionStatus(session.status);
 			updateSessionRouteSummary();
-			renderMessages(historyResponse.messages || []);
-			renderMessages(session.messages || []);
-			setPendingPermissions(session.pending_permissions || []);
+			renderMessages(historyResponse.messages ?? []);
+			renderMessages(session.messages ?? []);
+			setPendingPermissions(session.pending_permissions ?? []);
 			updateComposerState();
 			if (session.status === "closed") {
 				updateConnectionStatus("closed");
@@ -149,19 +242,19 @@
 				return;
 			}
 
-			connectEventStream(session.id, routeRevision);
+			connectEventStream(routeRevision);
 		} catch (error) {
-			if (!routeRevisionIsCurrent(routeRevision, sessionId)) {
+			if (!routeRevisionIsCurrent(routeRevision, normalizedSessionId)) {
 				return;
 			}
 			state.sessionStatus = "error";
 			updateConnectionStatus("error");
 			updateSessionStatus("error");
-			showBanner(error.message);
+			showBanner(errorMessage(error));
 			appendTranscriptEntry(
 				"status",
 				"status",
-				"Failed to load this session. Use “Start a fresh chat” to recover.",
+				'Failed to load this session. Use "Start a fresh chat" to recover.',
 			);
 			updateComposerState();
 		}
@@ -186,19 +279,13 @@
 				}
 			}
 
-			await postJson(
-				apiBase + "/sessions/" + encodeURIComponent(sessionId) + "/messages",
-				{ text: text },
-			);
+			await postJson(buildSessionApiUrl(sessionId, "/messages"), { text });
 			elements.composerInput.value = "";
 			updateComposerState();
 		} catch (error) {
-			showBanner(error.message);
-			appendTranscriptEntry(
-				"status",
-				"status",
-				"Send failed: " + error.message,
-			);
+			const message = errorMessage(error);
+			showBanner(message);
+			appendTranscriptEntry("status", "status", `Send failed: ${message}`);
 		} finally {
 			state.sending = false;
 			updateComposerState();
@@ -213,8 +300,8 @@
 		const routeRevision = state.routeRevision;
 		state.creatingSession = (async () => {
 			updateConnectionStatus("creating session");
-			const response = await postJson(apiBase + "/sessions", {});
-			const session = response.session;
+			const response = await postJson(buildApiUrl("/sessions"), {});
+			const session = readSessionEnvelope(response, "creating a session");
 			if (!routeRevisionIsCurrent(routeRevision, null)) {
 				void closeStaleSession(session.id);
 				return null;
@@ -222,17 +309,17 @@
 
 			state.sessionId = session.id;
 			state.sessionStatus = session.status;
-			state.latestSequence = session.latest_sequence || 0;
+			state.latestSequence = session.latest_sequence ?? 0;
 			state.messageIds = new Set();
 			renderTranscriptEntries([]);
-			renderMessages(session.messages || []);
-			setPendingPermissions(session.pending_permissions || []);
+			renderMessages(session.messages ?? []);
+			setPendingPermissions(session.pending_permissions ?? []);
 			updateSessionStatus(session.status);
-			const nextPath = "/app/sessions/" + encodeURIComponent(session.id);
-			window.history.pushState({}, "", nextPath);
+			const nextPath = buildSessionRoutePath(session.id);
+			globalThis.history.pushState({}, "", nextPath);
 			const nextRouteRevision = claimRouteRevision();
 			updateSessionRouteSummary();
-			connectEventStream(session.id, nextRouteRevision);
+			connectEventStream(nextRouteRevision);
 			return session.id;
 		})();
 
@@ -243,13 +330,19 @@
 		}
 	}
 
-	function connectEventStream(sessionId, routeRevision) {
+	function connectEventStream(routeRevision) {
+		const sessionId = parseSessionIdFromLocation();
+		if (!sessionId) {
+			handleProtocolError(
+				"The current route does not contain a valid session id.",
+			);
+			return;
+		}
+
 		closeEventSource();
 		updateConnectionStatus("connecting");
 		updateSessionRouteSummary();
-		const source = new EventSource(
-			apiBase + "/sessions/" + encodeURIComponent(sessionId) + "/events",
-		);
+		const source = new EventSource(buildSessionApiUrl(sessionId, "/events"));
 		state.eventSource = source;
 
 		source.onopen = () => {
@@ -272,22 +365,29 @@
 				return;
 			}
 			const payload = parseEventPayload(event);
-			if (!payload || !payload.session) {
+			if (!payload?.session) {
 				return;
 			}
 
-			const session = payload.session;
-			state.sessionId = session.id;
-			state.sessionStatus = session.status;
+			const snapshotSessionId = normalizeSessionId(payload.session.id);
+			if (!snapshotSessionId || snapshotSessionId !== sessionId) {
+				handleProtocolError(
+					"Received a session snapshot for an unexpected session.",
+				);
+				return;
+			}
+
+			state.sessionId = snapshotSessionId;
+			state.sessionStatus = payload.session.status;
 			state.latestSequence = Math.max(
 				state.latestSequence,
-				session.latest_sequence || 0,
+				payload.session.latest_sequence ?? 0,
 			);
 			updateConnectionStatus("live");
-			updateSessionStatus(session.status);
+			updateSessionStatus(payload.session.status);
 			updateSessionRouteSummary();
-			renderMessages(session.messages || []);
-			setPendingPermissions(session.pending_permissions || []);
+			renderMessages(payload.session.messages ?? []);
+			setPendingPermissions(payload.session.pending_permissions ?? []);
 			updateComposerState();
 			clearBanner();
 		});
@@ -297,12 +397,12 @@
 				return;
 			}
 			const payload = parseEventPayload(event);
-			if (!payload || !payload.message) {
+			if (!payload?.message) {
 				return;
 			}
 			state.latestSequence = Math.max(
 				state.latestSequence,
-				payload.sequence || 0,
+				payload.sequence ?? 0,
 			);
 			renderMessages([payload.message]);
 		});
@@ -312,12 +412,12 @@
 				return;
 			}
 			const payload = parseEventPayload(event);
-			if (!payload || !payload.request) {
+			if (!payload?.request) {
 				return;
 			}
 			state.latestSequence = Math.max(
 				state.latestSequence,
-				payload.sequence || 0,
+				payload.sequence ?? 0,
 			);
 			setPendingPermissions(
 				state.pendingPermissions
@@ -329,7 +429,7 @@
 			appendTranscriptEntry(
 				"status",
 				"permission",
-				"[" + payload.request.request_id + "] " + payload.request.summary,
+				`[${payload.request.request_id}] ${payload.request.summary}`,
 			);
 		});
 
@@ -343,7 +443,7 @@
 			}
 			state.latestSequence = Math.max(
 				state.latestSequence,
-				payload.sequence || 0,
+				payload.sequence ?? 0,
 			);
 			appendTranscriptEntry("status", "status", payload.message);
 		});
@@ -358,7 +458,7 @@
 			}
 			state.latestSequence = Math.max(
 				state.latestSequence,
-				payload.sequence || 0,
+				payload.sequence ?? 0,
 			);
 			state.sessionStatus = "closed";
 			closeEventSource();
@@ -370,9 +470,30 @@
 			appendTranscriptEntry(
 				"status",
 				"status",
-				payload.reason || "Session closed.",
+				payload.reason ?? "Session closed.",
 			);
 		});
+	}
+
+	function showFatalBootstrapError(message) {
+		state.sessionStatus = "error";
+		updateConnectionStatus("error");
+		updateSessionStatus("error");
+		showBanner(message);
+		appendTranscriptEntry("status", "status", message);
+		elements.composerInput.disabled = true;
+		elements.composerSubmit.disabled = true;
+		elements.composerStatus.textContent = message;
+	}
+
+	function handleProtocolError(message) {
+		closeEventSource();
+		state.sessionStatus = "error";
+		updateConnectionStatus("error");
+		updateSessionStatus("error");
+		updateComposerState();
+		showBanner(message);
+		appendTranscriptEntry("status", "status", message);
 	}
 
 	function closeEventSource() {
@@ -406,10 +527,10 @@
 	}
 
 	async function fetchJson(url, options) {
-		const response = await fetch(
-			url,
-			Object.assign({ credentials: "same-origin" }, options || {}),
-		);
+		const response = await fetch(url, {
+			credentials: "same-origin",
+			...(options ?? {}),
+		});
 		if (!response.ok) {
 			throw new Error(await readErrorMessage(response));
 		}
@@ -429,10 +550,7 @@
 
 	async function closeStaleSession(sessionId) {
 		try {
-			await postJson(
-				apiBase + "/sessions/" + encodeURIComponent(sessionId) + "/close",
-				{},
-			);
+			await postJson(buildSessionApiUrl(sessionId, "/close"), {});
 		} catch (error) {
 			console.warn("Failed to close a stale browser session.", error);
 		}
@@ -441,23 +559,20 @@
 	async function readErrorMessage(response) {
 		try {
 			const payload = await response.json();
-			if (
-				payload &&
-				typeof payload.error === "string" &&
-				payload.error.length > 0
-			) {
+			if (typeof payload?.error === "string" && payload.error.length > 0) {
 				return payload.error;
 			}
-		} catch (_error) {
-			// Fall back to status text below.
+		} catch (error) {
+			console.warn("Failed to decode a backend error payload.", error);
 		}
-		return "Request failed with " + response.status + " " + response.statusText;
+		return `Request failed with ${response.status} ${response.statusText}`;
 	}
 
 	function parseEventPayload(event) {
 		try {
 			return JSON.parse(event.data);
-		} catch (_error) {
+		} catch (error) {
+			console.warn("Failed to decode a live event payload.", error);
 			showBanner("Received an unreadable live event from the backend.");
 			return null;
 		}
@@ -465,7 +580,7 @@
 
 	function renderMessages(messages) {
 		messages.forEach((message) => {
-			if (!message || !message.id || state.messageIds.has(message.id)) {
+			if (!message?.id || state.messageIds.has(message.id)) {
 				return;
 			}
 			state.messageIds.add(message.id);
@@ -485,7 +600,7 @@
 		elements.pendingPanel.hidden = requests.length === 0;
 		requests.forEach((request) => {
 			const item = document.createElement("li");
-			item.textContent = "[" + request.request_id + "] " + request.summary;
+			item.textContent = `[${request.request_id}] ${request.summary}`;
 			elements.pendingPermissions.appendChild(item);
 		});
 	}
@@ -500,7 +615,7 @@
 
 	function appendTranscriptEntry(kind, label, text, timestamp) {
 		const item = document.createElement("li");
-		item.className = "transcript-entry transcript-entry--" + kind;
+		item.className = `transcript-entry transcript-entry--${kind}`;
 
 		const meta = document.createElement("div");
 		meta.className = "transcript-entry__meta";
@@ -560,16 +675,11 @@
 
 	function updateSessionRouteSummary() {
 		if (state.sessionId) {
-			elements.routeSummary.textContent =
-				"Attached to " +
-				state.sessionId +
-				" at " +
-				window.location.pathname +
-				".";
-		} else {
-			elements.routeSummary.textContent =
-				"Send the first prompt to create a session and move to /app/sessions/{id}.";
+			elements.routeSummary.textContent = `Attached to ${state.sessionId} at ${globalThis.location.pathname}.`;
+			return;
 		}
+		elements.routeSummary.textContent =
+			"Send the first prompt to create a session and move to /app/sessions/{id}.";
 	}
 
 	function updateComposerState() {

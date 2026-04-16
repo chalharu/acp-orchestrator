@@ -1,5 +1,5 @@
 use super::support::*;
-use acp_contracts::{CreateSessionResponse, PromptRequest};
+use acp_contracts::CreateSessionResponse;
 
 #[tokio::test]
 async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Result<()> {
@@ -11,69 +11,60 @@ async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Re
     .await?;
     let browser = build_browser_client()?;
 
-    let app_document = browser
-        .get(format!("{}/app/", stack.backend_url))
-        .send()
-        .await
-        .context("loading the browser app shell")?
-        .error_for_status()
-        .context("browser app shell returned an error")?
-        .text()
-        .await
-        .context("reading the browser app shell")?;
+    let app_document = load_browser_app_shell(&browser, &stack.backend_url).await?;
     assert!(app_document.contains("ACP Web MVP slice 1"));
 
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
-    let created: CreateSessionResponse = browser
-        .post(format!("{}/api/v1/sessions", stack.backend_url))
-        .header("x-csrf-token", &csrf_token)
-        .send()
-        .await
-        .context("creating a cookie-authenticated browser session")?
-        .error_for_status()
-        .context("cookie-authenticated browser session creation returned an error")?
-        .json()
-        .await
-        .context("decoding the created browser session")?;
+    let created: CreateSessionResponse =
+        create_browser_session(&browser, &stack.backend_url, &csrf_token).await?;
 
     let session_id = created.session.id.clone();
     let mut events = open_cookie_events(&browser, &stack.backend_url, &session_id).await?;
-    let snapshot = expect_next_event(&mut events).await?;
-    assert!(matches!(
-        snapshot.payload,
-        StreamEventPayload::SessionSnapshot { ref session } if session.id == session_id
-    ));
+    assert_snapshot_for_session(expect_next_event(&mut events).await?, &session_id);
 
-    browser
-        .post(format!(
-            "{}/api/v1/sessions/{session_id}/messages",
-            stack.backend_url
-        ))
-        .header("x-csrf-token", &csrf_token)
-        .json(&PromptRequest {
-            text: "hello through the browser shell".to_string(),
-        })
-        .send()
-        .await
-        .context("submitting a browser-authenticated prompt")?
-        .error_for_status()
-        .context("browser-authenticated prompt submission returned an error")?;
+    submit_browser_prompt(
+        &browser,
+        &stack.backend_url,
+        &session_id,
+        &csrf_token,
+        "hello through the browser shell",
+    )
+    .await?;
 
-    let user_message = expect_next_event(&mut events).await?;
-    assert!(matches!(
-        user_message.payload,
-        StreamEventPayload::ConversationMessage { ref message }
-            if matches!(message.role, MessageRole::User)
-                && message.text == "hello through the browser shell"
-    ));
-
-    let assistant_message = expect_next_event(&mut events).await?;
-    assert!(matches!(
-        assistant_message.payload,
-        StreamEventPayload::ConversationMessage { ref message }
-            if matches!(message.role, MessageRole::Assistant)
-                && message.text.starts_with("mock assistant:")
-    ));
+    assert_user_message(
+        expect_next_event(&mut events).await?,
+        "hello through the browser shell",
+    );
+    assert_assistant_message(expect_next_event(&mut events).await?);
 
     Ok(())
+}
+
+fn assert_snapshot_for_session(event: StreamEvent, session_id: &str) {
+    match event.payload {
+        StreamEventPayload::SessionSnapshot { session } => {
+            assert_eq!(session.id, session_id);
+        }
+        payload => panic!("expected session snapshot event, got {payload:?}"),
+    }
+}
+
+fn assert_user_message(event: StreamEvent, expected_text: &str) {
+    match event.payload {
+        StreamEventPayload::ConversationMessage { message } => {
+            assert!(matches!(message.role, MessageRole::User));
+            assert_eq!(message.text, expected_text);
+        }
+        payload => panic!("expected user message event, got {payload:?}"),
+    }
+}
+
+fn assert_assistant_message(event: StreamEvent) {
+    match event.payload {
+        StreamEventPayload::ConversationMessage { message } => {
+            assert!(matches!(message.role, MessageRole::Assistant));
+            assert!(message.text.starts_with("mock assistant:"));
+        }
+        payload => panic!("expected assistant message event, got {payload:?}"),
+    }
 }

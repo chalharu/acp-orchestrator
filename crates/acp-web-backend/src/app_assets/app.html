@@ -7,54 +7,19 @@
     <meta name="acp-csrf-token" content="__ACP_CSRF_TOKEN__">
     <title>ACP Web chat</title>
     <link rel="stylesheet" href="/app/assets/app.css">
+    <!--
+      The Leptos CSR bundle is initialized by wasm-init.js, which imports
+      the stable backend-served loader alias (acp-web-frontend.js) and calls
+      init() to load the compiled WebAssembly module.
+    -->
+    <script type="module" src="/app/assets/wasm-init.js"></script>
   </head>
   <body>
-    <main class="app-shell">
-      <header class="app-header">
-        <div class="app-header__copy">
-          <p class="eyebrow">ACP Web MVP slice 1</p>
-          <h1>ACP Web chat</h1>
-          <p id="route-summary" class="muted">Send the first prompt to create a session and move to <code>/app/sessions/{id}</code>.</p>
-        </div>
-        <dl class="status-grid" aria-label="session status">
-          <div>
-            <dt>Backend</dt>
-            <dd id="backend-origin"></dd>
-          </div>
-          <div>
-            <dt>Connection</dt>
-            <dd id="connection-status">bootstrapping</dd>
-          </div>
-          <div>
-            <dt>Session</dt>
-            <dd id="session-status">new</dd>
-          </div>
-        </dl>
-      </header>
-
-      <p class="top-link"><a href="/app/">Start a fresh chat</a></p>
-
-      <div id="error-banner" class="banner" hidden role="alert"></div>
-
-      <section class="panel transcript-panel" aria-label="conversation transcript">
-        <ol id="transcript" class="transcript"></ol>
-      </section>
-
-      <section id="pending-permissions-panel" class="panel pending-panel" hidden aria-live="polite">
-        <h2>Pending permissions</h2>
-        <p class="muted">Slice 1 renders pending requests and transcript updates. Approve/deny controls arrive in the next slice.</p>
-        <ul id="pending-permissions" class="pending-list"></ul>
-      </section>
-
-      <form id="composer-form" class="panel composer" autocomplete="off">
-        <label for="composer-input">Prompt</label>
-        <textarea id="composer-input" name="prompt" rows="4" placeholder="Ask ACP something…"></textarea>
-        <div class="composer__footer">
-          <p id="composer-status" class="muted">Ready for your first prompt.</p>
-          <button id="composer-submit" type="submit">Send</button>
-        </div>
-      </form>
-    </main>
-    <script src="/app/assets/app.js"></script>
+    <!-- Leptos mounts the entire UI into this element. -->
+    <div id="app-root">
+      <noscript>
+        <p>ACP Web requires JavaScript and WebAssembly to run.</p>
+      </noscript>
+    </div>
   </body>
 </html>

@@ -175,6 +175,9 @@ enum LauncherError {
         source: std::io::Error,
         path: PathBuf,
     },
+
+    #[snafu(display("building the web frontend failed: {message}"))]
+    FrontendBuild { message: String },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -197,17 +200,108 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 }
 
 async fn run_launcher(current_executable: &Path, launcher_args: LauncherArgs) -> Result<()> {
+    let needs_backend = launcher_args.web || command_needs_backend(&launcher_args.cli_args);
+    let cli_server_url_explicit = cli_server_url_is_explicit(&launcher_args.cli_args);
+
+    // For web mode, build the Leptos/WASM frontend before spawning the backend
+    // so the backend can be given a valid --frontend-dist path.
+    // Skip the build when an external backend is already provided via
+    // ACP_SERVER_URL (direct stack) – in that case we can't configure its dist.
+    let frontend_dist = if launcher_args.web
+        && needs_backend
+        && !cli_server_url_explicit
+        && env::var_os("ACP_SERVER_URL").is_none()
+    {
+        let dist = frontend_dist_path();
+        ensure_frontend_built(&dist).await?;
+        Some(dist)
+    } else {
+        None
+    };
+
     let mut stack = prepare_launcher_stack(
         current_executable,
         &launcher_args,
-        launcher_args.web || command_needs_backend(&launcher_args.cli_args),
-        cli_server_url_is_explicit(&launcher_args.cli_args),
+        needs_backend,
+        cli_server_url_explicit,
+        frontend_dist.as_deref(),
     )
     .await?;
     if launcher_args.web {
         return run_web_launcher(&mut stack).await;
     }
     run_cli_launcher(current_executable, launcher_args.cli_args, &mut stack).await
+}
+
+/// Returns the Trunk dist directory for the web frontend.
+/// The path is anchored to the repository root so `cargo run -- --web`
+/// keeps working even when launched outside the repo root.
+fn frontend_dist_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates")
+        .join("acp-web-frontend")
+        .join("dist")
+}
+
+/// Ensures the Leptos/WASM frontend bundle exists in `dist`.
+/// Runs `trunk build --release` in the frontend crate directory when the
+/// compiled artefacts are absent.
+async fn ensure_frontend_built(dist: &Path) -> Result<()> {
+    if frontend_bundle_exists(dist, is_frontend_javascript_asset)
+        && frontend_bundle_exists(dist, is_frontend_wasm_asset)
+    {
+        return Ok(());
+    }
+
+    eprintln!(
+        "web frontend not built yet – running `trunk build --release` in crates/acp-web-frontend/ …"
+    );
+    eprintln!("(re-run with `trunk build --release` in that directory to rebuild manually)");
+
+    let status = tokio::process::Command::new("trunk")
+        .args(["build", "--release"])
+        .current_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("crates")
+                .join("acp-web-frontend"),
+        )
+        .status()
+        .await
+        .map_err(|source| {
+            let detail = if source.kind() == std::io::ErrorKind::NotFound {
+                "trunk not found – install it with `cargo install trunk`".to_string()
+            } else {
+                source.to_string()
+            };
+            LauncherError::FrontendBuild { message: detail }
+        })?;
+
+    if !status.success() {
+        return Err(LauncherError::FrontendBuild {
+            message: format!(
+                "`trunk build --release` failed with exit code {:?}",
+                status.code()
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn frontend_bundle_exists(dist: &Path, predicate: fn(&str) -> bool) -> bool {
+    std::fs::read_dir(dist)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+        .any(|entry| entry.file_name().to_str().is_some_and(predicate))
+}
+
+fn is_frontend_javascript_asset(file_name: &str) -> bool {
+    file_name.starts_with("acp-web-frontend") && file_name.ends_with(".js")
+}
+
+fn is_frontend_wasm_asset(file_name: &str) -> bool {
+    file_name.starts_with("acp-web-frontend") && file_name.ends_with("_bg.wasm")
 }
 
 async fn run_web_launcher(stack: &mut launcher_stack::LauncherStack) -> Result<()> {

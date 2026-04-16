@@ -124,12 +124,13 @@ async fn app_entrypoint_bootstraps_browser_cookies_and_chat_shell_markup() {
         .expect("entrypoint body should be readable");
     let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
 
-    assert!(body.contains("ACP Web MVP slice 1"));
+    // Shell document includes the CSRF bootstrap meta tag and the WASM loader.
     assert!(body.contains("name=\"acp-csrf-token\""));
-    assert!(body.contains("id=\"transcript\""));
-    assert!(body.contains("id=\"composer-input\""));
-    assert!(body.contains("/app/assets/app.js"));
-    assert!(body.contains("/app/sessions/{id}"));
+    assert!(body.contains("wasm-init.js"));
+    // The mount point element is present so the Leptos CSR app can attach.
+    assert!(body.contains("id=\"app-root\""));
+    // No hand-authored application JS is referenced.
+    assert!(!body.contains("app.js"));
 }
 
 #[tokio::test]
@@ -167,8 +168,9 @@ async fn app_session_entrypoint_reuses_the_app_shell() {
         .expect("entrypoint body should be readable");
     let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
 
-    assert!(body.contains("ACP Web MVP slice 1"));
-    assert!(body.contains("Start a fresh chat"));
+    // Both route variants serve the same Leptos CSR shell.
+    assert!(body.contains("id=\"app-root\""));
+    assert!(body.contains("wasm-init.js"));
 }
 
 #[tokio::test]
@@ -181,6 +183,116 @@ async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
 
     assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
     assert_eq!(location.to_str().ok(), Some("/app/"));
+}
+
+#[tokio::test]
+async fn app_shell_csp_permits_wasm_execution() {
+    let response = app_entrypoint(HeaderMap::new()).await;
+    let csp = response
+        .headers()
+        .get("content-security-policy")
+        .expect("app shell should include a CSP header")
+        .to_str()
+        .expect("CSP header should be valid UTF-8");
+
+    // WebAssembly execution requires 'wasm-unsafe-eval' in script-src.
+    assert!(
+        csp.contains("'wasm-unsafe-eval'"),
+        "CSP script-src must include 'wasm-unsafe-eval' for WASM; got: {csp}",
+    );
+}
+
+#[tokio::test]
+async fn wasm_init_script_responds_with_javascript_content_type() {
+    let response = wasm_init_script().await;
+    let ct = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("wasm-init.js response should include content-type")
+        .to_str()
+        .expect("content-type should be valid UTF-8");
+
+    assert!(ct.starts_with("application/javascript"), "got: {ct}");
+}
+
+#[tokio::test]
+async fn wasm_glue_js_returns_503_when_frontend_dist_is_not_configured() {
+    let state = test_state(); // frontend_dist = None
+    let response = wasm_glue_javascript(State(state)).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn wasm_glue_js_responds_with_javascript_content_type_when_dist_is_configured() {
+    let dist = write_temp_frontend_dist();
+    let state = AppState {
+        store: Arc::new(SessionStore::new(1)),
+        reply_provider: Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+        startup_hints: false,
+        frontend_dist: Some(Arc::new(dist.clone())),
+    };
+
+    let response = wasm_glue_javascript(State(state)).await;
+
+    let ct = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("WASM glue JS response should include content-type")
+        .to_str()
+        .expect("content-type should be valid UTF-8");
+
+    assert!(ct.starts_with("application/javascript"), "got: {ct}");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn wasm_binary_returns_503_when_frontend_dist_is_not_configured() {
+    let state = test_state(); // frontend_dist = None
+    let response = wasm_binary(State(state)).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn wasm_binary_responds_with_wasm_content_type_when_dist_is_configured() {
+    let dist = write_temp_frontend_dist();
+    let state = AppState {
+        store: Arc::new(SessionStore::new(1)),
+        reply_provider: Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+        startup_hints: false,
+        frontend_dist: Some(Arc::new(dist.clone())),
+    };
+
+    let response = wasm_binary(State(state)).await;
+
+    let ct = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("WASM binary response should include content-type")
+        .to_str()
+        .expect("content-type should be valid UTF-8");
+
+    assert_eq!(ct, "application/wasm", "got: {ct}");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Creates a temporary directory that looks like a minimal Trunk dist directory.
+fn write_temp_frontend_dist() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("acp-test-frontend-dist-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dist dir should be creatable");
+    std::fs::write(dir.join("acp-web-frontend-test.js"), b"// stub js loader")
+        .expect("stub JS should be writable");
+    std::fs::write(
+        dir.join("acp-web-frontend-test_bg.wasm"),
+        b"\x00asm\x01\x00\x00\x00", // minimal valid WASM header
+    )
+    .expect("stub WASM should be writable");
+    dir
 }
 
 #[tokio::test]
@@ -647,6 +759,7 @@ async fn create_session_seeds_startup_hints_when_enabled() {
             hint: "bundled mock verification ready".to_string(),
         }),
         startup_hints: true,
+        frontend_dist: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -675,6 +788,7 @@ async fn create_session_skips_startup_hints_when_disabled() {
             hint: "should stay hidden".to_string(),
         }),
         startup_hints: false,
+        frontend_dist: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -706,6 +820,7 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         store,
         reply_provider: Arc::new(NoStartupHintProvider),
         startup_hints: true,
+        frontend_dist: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -731,6 +846,7 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         startup_hints: true,
+        frontend_dist: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -774,6 +890,7 @@ async fn create_session_reports_rollback_failures() {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         startup_hints: true,
+        frontend_dist: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert(

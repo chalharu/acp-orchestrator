@@ -55,8 +55,10 @@ async fn assert_backend_endpoints(base_url: &str) -> Result<()> {
         .error_for_status()?
         .text()
         .await?;
-    assert!(app_body.contains("ACP Web MVP slice 1"));
-    assert!(app_body.contains("/app/assets/app.js"));
+    // The shell must contain the CSRF bootstrap meta and the Leptos mount point.
+    assert!(app_body.contains("name=\"acp-csrf-token\""));
+    assert!(app_body.contains("wasm-init.js"));
+    assert!(app_body.contains("id=\"app-root\""));
     Ok(())
 }
 

@@ -6,6 +6,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
 
@@ -49,6 +50,7 @@ async fn session_lookup_rejects_different_principal() -> Result<()> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -74,6 +76,7 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
         session_cap: 1,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
 
@@ -98,6 +101,7 @@ async fn session_list_is_owner_scoped_and_keeps_retained_closed_sessions() -> Re
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
 
@@ -134,6 +138,7 @@ async fn opening_a_session_moves_it_to_the_front_of_the_owned_session_list() -> 
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
 
@@ -170,6 +175,7 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
         session_cap: 128,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
 
@@ -220,6 +226,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -252,6 +259,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let session = stack.create_session("alice").await?;

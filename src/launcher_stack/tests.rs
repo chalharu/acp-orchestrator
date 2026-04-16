@@ -73,7 +73,7 @@ async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
         cli_args: vec![OsString::from("chat"), OsString::from("--new")],
     };
 
-    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args, true, false)
+    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args, true, false, None)
         .await
         .expect("explicit ACP_SERVER_URL should skip launcher-managed services");
 
@@ -148,6 +148,7 @@ async fn prepare_persistent_stack_times_out_when_the_lock_stays_busy() {
         1,
         Duration::ZERO,
         Duration::from_secs(3600),
+        None,
     )
     .await
     .expect_err("busy launcher locks should eventually time out");
@@ -172,6 +173,7 @@ async fn prepare_persistent_stack_clears_stale_locks_before_timing_out() {
         1,
         Duration::ZERO,
         Duration::ZERO,
+        None,
     )
     .await
     .expect_err("without reusable state the launcher should still time out");
@@ -211,6 +213,7 @@ async fn prepare_persistent_stack_uses_the_final_reuse_check() {
         0,
         Duration::ZERO,
         Duration::ZERO,
+        None,
     )
     .await
     .expect("the final reuse check should return the healthy stack");
@@ -250,6 +253,7 @@ async fn spawn_or_reuse_locked_stack_reuses_existing_state() {
         &state_path,
         &test_launcher_identity("current"),
         lock,
+        None,
     )
     .await
     .expect("the existing healthy stack should be reused");
@@ -265,7 +269,7 @@ async fn reusable_launcher_state_clears_invalid_json_without_a_lock() {
     fs::write(&state_path, "{invalid").expect("invalid launcher state should write");
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
             .await
             .expect("invalid json should be ignored"),
         None
@@ -281,7 +285,7 @@ async fn reusable_launcher_state_keeps_invalid_json_while_the_lock_exists() {
     fs::write(&lock_path, []).expect("launcher lock should write");
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
             .await
             .expect("invalid json should be ignored while locked"),
         None
@@ -294,7 +298,7 @@ async fn reusable_launcher_state_propagates_non_parse_read_errors() {
     let state_path = unique_temp_json_path("acp-launcher-state", "read-error");
     fs::create_dir_all(&state_path).expect("state path directory should be creatable");
 
-    let error = reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+    let error = reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
         .await
         .expect_err("non-parse read failures should still be surfaced");
 
@@ -325,7 +329,7 @@ async fn reusable_launcher_state_treats_invalid_backend_urls_as_unhealthy() {
     .expect("launcher state should save");
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
             .await
             .expect("invalid backend urls should be ignored"),
         None
@@ -356,7 +360,7 @@ async fn reusable_launcher_state_rejects_identity_mismatches() {
     .expect("launcher state should save");
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("new-binary"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("new-binary"), None)
             .await
             .expect("identity mismatches should be ignored"),
         None
@@ -465,9 +469,10 @@ fi
 "#,
     );
 
-    let error = spawn_persistent_bundled_backend(&script, &test_launcher_identity("spawn-failure"))
-        .await
-        .expect_err("backend startup failures should be returned");
+    let error =
+        spawn_persistent_bundled_backend(&script, &test_launcher_identity("spawn-failure"), None)
+            .await
+            .expect_err("backend startup failures should be returned");
 
     assert!(matches!(
         error,
@@ -653,6 +658,7 @@ fn test_launcher_state_with_identity(
     LauncherState {
         backend_url: backend_url.to_string(),
         mock_address: mock_address.map(str::to_string),
+        frontend_dist: None,
         auth_token: "launcher-auth-token".to_string(),
         launcher_identity,
     }

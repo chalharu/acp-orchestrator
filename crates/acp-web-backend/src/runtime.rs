@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString};
+use std::{env, ffi::OsString, path::PathBuf};
 
 use acp_app_support::{
     BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
@@ -69,6 +69,11 @@ struct Cli {
     acp_server: Option<String>,
     #[arg(long, default_value_t = false)]
     startup_hints: bool,
+    /// Directory containing the Trunk-compiled Leptos CSR bundle.
+    /// The backend serves the fingerprinted output through stable alias routes.
+    /// When absent the WASM asset routes return 503 until the frontend is built.
+    #[arg(long)]
+    frontend_dist: Option<PathBuf>,
 }
 
 fn resolve_acp_server(
@@ -98,6 +103,7 @@ async fn run(cli: Cli) -> Result<()> {
         session_cap: cli.session_cap,
         acp_server,
         startup_hints: cli.startup_hints,
+        frontend_dist: cli.frontend_dist,
     })
     .context(BuildStateSnafu)?;
     let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
@@ -139,6 +145,7 @@ mod tests {
             session_cap: 8,
             acp_server: acp_server.map(str::to_string),
             startup_hints: false,
+            frontend_dist: None,
         }
     }
 

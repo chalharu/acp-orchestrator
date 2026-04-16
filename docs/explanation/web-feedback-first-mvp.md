@@ -82,6 +82,36 @@ single-page chat** にします。ただし実装技術は最初から Leptos CS
 - bundled feedback flow の bind 先: `127.0.0.1` のみ
 - browser open に失敗した場合: terminal へ URL を表示し、手動 open を案内する
 
+#### Leptos CSR ビルドパイプライン (slice 1 以降)
+
+Slice 1 から browser 側の実装は `crates/acp-web-frontend/` の Leptos CSR crate で
+行います。この crate は Cargo workspace とは独立した **trunk プロジェクト**であり、
+通常の `cargo build` や `cargo test` は対象外です。ビルド手順は次の通りです。
+
+```sh
+# 1. wasm32 ターゲットを追加（初回のみ）
+rustup target add wasm32-unknown-unknown
+
+# 2. trunk を用意（バイナリを https://github.com/trunk-rs/trunk からインストール）
+# 例: cargo install trunk --locked
+# または prebuilt バイナリを PATH に配置
+
+# 3. frontend をビルド（repo root または crates/acp-web-frontend から実行）
+cd crates/acp-web-frontend && trunk build --release
+
+# 4. backend をビルド / 起動
+cargo build -p acp-web-backend
+```
+
+`trunk build` は `crates/acp-web-frontend/dist/` に JS loader と WASM binary を出力します。
+Backend はこの dist ディレクトリを runtime で参照し、fingerprinted bundle を
+`/app/assets/acp-web-frontend.js` と `/app/assets/acp-web-frontend_bg.wasm`
+の stable alias から配信します。dist が存在しない場合は backend は 503 を返し、
+ブラウザには「frontend 未ビルド」を示すプレースホルダを表示します。
+
+開発中は `trunk serve` を使い、Axum backend を別プロセスで起動して proxy を通すことで
+ホットリロードを実現できます（production での個別 serve は不要です）。
+
 launcher は backend の `/healthz` と asset 配信準備に加えて、Web entrypoint の
 browser-bootstrap readiness を確認してから browser を開きます。`/healthz` は process の
 liveness/readiness 用であり、それだけで auth cookie / CSRF 初期化まで完了した根拠にはしません。

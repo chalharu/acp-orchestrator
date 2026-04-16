@@ -44,6 +44,19 @@ Types:
   - `cargo fmt --all`
   - `cargo test --workspace`
   - `cargo clippy --workspace --all-targets -- -D warnings`
+- **Web frontend (Leptos CSR):** `crates/acp-web-frontend` is a standalone trunk
+  project that targets `wasm32-unknown-unknown` and is built separately from the
+  Cargo workspace. To build it locally:
+
+  ```sh
+  rustup target add wasm32-unknown-unknown
+  cargo install trunk --locked          # or grab the prebuilt binary
+  cd crates/acp-web-frontend && trunk build --release
+  ```
+
+  The backend serves the generated `dist/` bundle at runtime through stable
+  `/app/assets/acp-web-frontend*.{js,wasm}` aliases.
+  Normal `cargo build/test --workspace` commands skip the frontend crate.
 - If a change is coverage-sensitive or a PR is failing Sonar coverage, mirror the
   hosted coverage job with
   `cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1`.

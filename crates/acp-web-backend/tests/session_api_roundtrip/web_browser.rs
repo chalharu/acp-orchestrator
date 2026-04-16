@@ -7,12 +7,15 @@ async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Re
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let browser = build_browser_client()?;
 
     let app_document = load_browser_app_shell(&browser, &stack.backend_url).await?;
-    assert!(app_document.contains("ACP Web MVP slice 1"));
+    // The shell must expose the CSRF bootstrap meta and the Leptos mount point.
+    assert!(app_document.contains("name=\"acp-csrf-token\""));
+    assert!(app_document.contains("id=\"app-root\""));
 
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
     let created: CreateSessionResponse =

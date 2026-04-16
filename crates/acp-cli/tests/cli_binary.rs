@@ -158,7 +158,7 @@ fn chat_script_delay(delay_ms: u64) -> Duration {
     let scaled_delay_ms = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
         delay_ms.saturating_mul(5)
     } else {
-        delay_ms
+        delay_ms.saturating_mul(2)
     };
     Duration::from_millis(scaled_delay_ms)
 }
@@ -345,6 +345,7 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        frontend_dist: None,
     })?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

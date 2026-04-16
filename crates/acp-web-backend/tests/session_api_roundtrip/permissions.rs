@@ -94,6 +94,7 @@ async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()>
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let session = stack.create_session("alice").await?;
@@ -121,6 +122,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let session = stack.create_session("alice").await?;

@@ -418,6 +418,7 @@ pub(super) async fn spawn_direct_backend_server(
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        frontend_dist: None,
     })
     .context("building direct backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -455,6 +456,7 @@ pub(super) async fn spawn_graceful_backend_server(
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        frontend_dist: None,
     })
     .context("building graceful backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")

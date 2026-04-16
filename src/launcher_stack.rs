@@ -10,7 +10,9 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
+use acp_app_support::{
+    build_http_client_for_url, wait_for_health, wait_for_http_success, wait_for_tcp_connect,
+};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use tokio::process::Child;
@@ -51,6 +53,8 @@ struct LauncherState {
     backend_url: String,
     #[serde(default)]
     mock_address: Option<String>,
+    #[serde(default)]
+    frontend_dist: Option<String>,
     auth_token: String,
     launcher_identity: LauncherIdentity,
 }
@@ -137,19 +141,20 @@ pub(crate) async fn prepare_launcher_stack(
     launcher_args: &LauncherArgs,
     needs_backend: bool,
     cli_server_url_explicit: bool,
+    frontend_dist: Option<&Path>,
 ) -> Result<LauncherStack> {
     if !needs_backend || cli_server_url_explicit {
         return Ok(LauncherStack::direct());
     }
 
     if let Some(acp_server) = launcher_args.acp_server.clone() {
-        return spawn_ephemeral_stack(current_executable, acp_server).await;
+        return spawn_ephemeral_stack(current_executable, acp_server, frontend_dist).await;
     }
     if env::var_os("ACP_SERVER_URL").is_some() {
         return Ok(LauncherStack::direct());
     }
 
-    prepare_persistent_bundled_stack(current_executable).await
+    prepare_persistent_bundled_stack(current_executable, frontend_dist).await
 }
 
 pub(crate) fn launcher_state_path_from(
@@ -217,6 +222,7 @@ fn current_launcher_identity(current_executable: &Path) -> Result<LauncherIdenti
 async fn spawn_ephemeral_stack(
     current_executable: &Path,
     acp_server: OsString,
+    frontend_dist: Option<&Path>,
 ) -> Result<LauncherStack> {
     let auth_token = Uuid::new_v4().to_string();
     let SpawnedService {
@@ -226,7 +232,7 @@ async fn spawn_ephemeral_stack(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(acp_server, false),
+        backend_role_args(acp_server, false, frontend_dist),
         &[],
         true,
     )
@@ -240,7 +246,10 @@ async fn spawn_ephemeral_stack(
     ))
 }
 
-async fn prepare_persistent_bundled_stack(current_executable: &Path) -> Result<LauncherStack> {
+async fn prepare_persistent_bundled_stack(
+    current_executable: &Path,
+    frontend_dist: Option<&Path>,
+) -> Result<LauncherStack> {
     let state_path = launcher_state_path()?;
     let launcher_identity = current_launcher_identity(current_executable)?;
     prepare_persistent_bundled_stack_with_retry(
@@ -250,6 +259,7 @@ async fn prepare_persistent_bundled_stack(current_executable: &Path) -> Result<L
         STACK_LOCK_WAIT_ATTEMPTS,
         STACK_LOCK_WAIT_DELAY,
         STACK_LOCK_STALE_AFTER,
+        frontend_dist,
     )
     .await
 }
@@ -261,11 +271,14 @@ async fn prepare_persistent_bundled_stack_with_retry(
     lock_wait_attempts: usize,
     lock_wait_delay: Duration,
     lock_stale_after: Duration,
+    frontend_dist: Option<&Path>,
 ) -> Result<LauncherStack> {
     let lock_path = launcher_lock_path_from(state_path);
 
     for _ in 0..lock_wait_attempts {
-        if let Some(state) = reusable_launcher_state(state_path, launcher_identity).await? {
+        if let Some(state) =
+            reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
+        {
             return Ok(LauncherStack::persistent(
                 state.backend_url,
                 state.auth_token,
@@ -278,6 +291,7 @@ async fn prepare_persistent_bundled_stack_with_retry(
                 state_path,
                 launcher_identity,
                 lock,
+                frontend_dist,
             )
             .await;
         }
@@ -287,7 +301,9 @@ async fn prepare_persistent_bundled_stack_with_retry(
         tokio::time::sleep(lock_wait_delay).await;
     }
 
-    if let Some(state) = reusable_launcher_state(state_path, launcher_identity).await? {
+    if let Some(state) =
+        reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
+    {
         return Ok(LauncherStack::persistent(
             state.backend_url,
             state.auth_token,
@@ -302,8 +318,11 @@ async fn spawn_or_reuse_locked_stack(
     state_path: &Path,
     launcher_identity: &LauncherIdentity,
     _lock: LauncherLock,
+    frontend_dist: Option<&Path>,
 ) -> Result<LauncherStack> {
-    if let Some(state) = reusable_launcher_state(state_path, launcher_identity).await? {
+    if let Some(state) =
+        reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
+    {
         return Ok(LauncherStack::persistent(
             state.backend_url,
             state.auth_token,
@@ -311,7 +330,8 @@ async fn spawn_or_reuse_locked_stack(
     }
 
     let (mut mock, mut backend, state) =
-        spawn_persistent_bundled_backend(current_executable, launcher_identity).await?;
+        spawn_persistent_bundled_backend(current_executable, launcher_identity, frontend_dist)
+            .await?;
     persist_launcher_state_or_shutdown(state_path, &state, &mut backend, &mut mock).await?;
     let backend_url = state.backend_url.clone();
     let auth_token = state.auth_token.clone();
@@ -324,6 +344,7 @@ async fn spawn_or_reuse_locked_stack(
 async fn reusable_launcher_state(
     state_path: &Path,
     launcher_identity: &LauncherIdentity,
+    frontend_dist: Option<&Path>,
 ) -> Result<Option<LauncherState>> {
     let state = match load_launcher_state(state_path) {
         Ok(Some(state)) => state,
@@ -336,6 +357,9 @@ async fn reusable_launcher_state(
     };
 
     if state.launcher_identity != *launcher_identity {
+        return Ok(None);
+    }
+    if !launcher_state_supports_frontend(&state, frontend_dist) {
         return Ok(None);
     }
     let is_healthy = managed_stack_is_healthy(&state).await;
@@ -474,6 +498,7 @@ fn remove_launcher_lock(lock_path: &Path) -> Result<bool> {
 async fn spawn_persistent_bundled_backend(
     current_executable: &Path,
     launcher_identity: &LauncherIdentity,
+    frontend_dist: Option<&Path>,
 ) -> Result<(Child, Child, LauncherState)> {
     let auth_token = Uuid::new_v4().to_string();
     let SpawnedService {
@@ -493,7 +518,7 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(OsString::from(&mock_address), true),
+        backend_role_args(OsString::from(&mock_address), true, frontend_dist),
         &[],
         false,
     )
@@ -508,6 +533,7 @@ async fn spawn_persistent_bundled_backend(
             LauncherState {
                 backend_url: endpoint,
                 mock_address: Some(mock_address),
+                frontend_dist: frontend_dist.map(path_to_string),
                 auth_token,
                 launcher_identity: launcher_identity.clone(),
             },
@@ -534,7 +560,11 @@ async fn persist_launcher_state_or_shutdown(
     Ok(())
 }
 
-fn backend_role_args(acp_server: OsString, startup_hints: bool) -> Vec<OsString> {
+fn backend_role_args(
+    acp_server: OsString,
+    startup_hints: bool,
+    frontend_dist: Option<&Path>,
+) -> Vec<OsString> {
     let mut args = vec![
         "--port".into(),
         "0".into(),
@@ -544,8 +574,26 @@ fn backend_role_args(acp_server: OsString, startup_hints: bool) -> Vec<OsString>
     if startup_hints {
         args.push("--startup-hints".into());
     }
+    if let Some(dist) = frontend_dist {
+        args.push("--frontend-dist".into());
+        args.push(dist.as_os_str().to_owned());
+    }
     append_stack_exit_after_ms(&mut args);
     args
+}
+
+fn launcher_state_supports_frontend(
+    state: &LauncherState,
+    requested_frontend_dist: Option<&Path>,
+) -> bool {
+    match requested_frontend_dist.map(path_to_string) {
+        Some(requested) => state.frontend_dist.as_deref() == Some(requested.as_str()),
+        None => true,
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 fn mock_role_args(startup_hints: bool) -> Vec<OsString> {
@@ -631,16 +679,32 @@ async fn managed_stack_is_healthy(state: &LauncherState) -> bool {
 
         let timeout = Some(STACK_READY_TIMEOUT);
         let client = build_http_client_for_url(&state.backend_url, timeout).ok()?;
-        Some(
-            wait_for_health(
+        let backend_ready = wait_for_health(
+            &client,
+            &state.backend_url,
+            STACK_READY_ATTEMPTS,
+            STACK_READY_DELAY,
+        )
+        .await
+        .is_ok();
+        let frontend_ready = if state.frontend_dist.is_some() {
+            let frontend_asset_url = format!(
+                "{}/app/assets/acp-web-frontend.js",
+                state.backend_url.trim_end_matches('/')
+            );
+            wait_for_http_success(
                 &client,
-                &state.backend_url,
+                &frontend_asset_url,
                 STACK_READY_ATTEMPTS,
                 STACK_READY_DELAY,
+                "web frontend asset",
             )
             .await
-            .is_ok(),
-        )
+            .is_ok()
+        } else {
+            true
+        };
+        Some(backend_ready && frontend_ready)
     }
     .await
     .unwrap_or(false)

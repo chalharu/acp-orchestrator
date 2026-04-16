@@ -1,5 +1,12 @@
 use std::{
-    convert::Infallible, fmt::Display, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc,
+    convert::Infallible,
+    fmt::Display,
+    future::Future,
+    io,
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -58,6 +65,10 @@ pub struct ServerConfig {
     pub session_cap: usize,
     pub acp_server: String,
     pub startup_hints: bool,
+    /// Directory containing the Trunk-compiled Leptos CSR bundle.
+    /// The backend serves the fingerprinted files through stable alias routes.
+    /// When `None`, the WASM asset routes return `503 Service Unavailable`.
+    pub frontend_dist: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +77,7 @@ impl Default for ServerConfig {
             session_cap: 8,
             acp_server: "127.0.0.1:8090".to_string(),
             startup_hints: false,
+            frontend_dist: None,
         }
     }
 }
@@ -75,6 +87,8 @@ pub struct AppState {
     store: Arc<SessionStore>,
     reply_provider: Arc<dyn ReplyProvider>,
     startup_hints: bool,
+    /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
+    frontend_dist: Option<Arc<PathBuf>>,
 }
 
 impl AppState {
@@ -83,6 +97,7 @@ impl AppState {
             store: Arc::new(SessionStore::new(config.session_cap)),
             reply_provider: Arc::new(MockClient::new(config.acp_server)?),
             startup_hints: config.startup_hints,
+            frontend_dist: config.frontend_dist.map(Arc::new),
         })
     }
 
@@ -94,6 +109,7 @@ impl AppState {
             store,
             reply_provider,
             startup_hints: false,
+            frontend_dist: None,
         }
     }
 }
@@ -104,7 +120,11 @@ pub fn app(state: AppState) -> Router {
         .route("/app", get(redirect_to_app))
         .route("/app/", get(app_entrypoint))
         .route("/app/assets/app.css", get(app_stylesheet))
-        .route("/app/assets/app.js", get(app_javascript))
+        .route("/app/assets/wasm-init.js", get(wasm_init_script))
+        .route("/app/assets/acp-web-frontend.js", get(wasm_glue_javascript))
+        .route("/app/assets/acp-web-frontend_bg.wasm", get(wasm_binary))
+        .route("/app/assets/acp_web_frontend.js", get(wasm_glue_javascript))
+        .route("/app/assets/acp_web_frontend_bg.wasm", get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route("/api/v1/sessions/{session_id}", get(get_session))
@@ -345,11 +365,110 @@ async fn app_session_entrypoint(Path(_session_id): Path<String>, headers: Header
 }
 
 async fn app_stylesheet() -> Response {
-    app_asset_response("text/css; charset=utf-8", APP_STYLESHEET)
+    app_static_text_response("text/css; charset=utf-8", APP_STYLESHEET)
 }
 
-async fn app_javascript() -> Response {
-    app_asset_response("application/javascript; charset=utf-8", APP_JAVASCRIPT)
+async fn wasm_init_script() -> Response {
+    app_static_text_response("application/javascript; charset=utf-8", WASM_INIT_JS)
+}
+
+/// Serve the wasm-bindgen JS loader from the Trunk dist directory at runtime.
+async fn wasm_glue_javascript(State(state): State<AppState>) -> Response {
+    let Some(dist) = state.frontend_dist.as_deref() else {
+        return frontend_unavailable_response("wasm_glue_javascript: frontend_dist not configured");
+    };
+    let asset_path = match frontend_javascript_asset_path(dist) {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(%err, "failed to locate frontend javascript bundle");
+            return frontend_unavailable_response("wasm_glue_javascript: file not found");
+        }
+    };
+
+    match tokio::fs::read_to_string(&asset_path).await {
+        Ok(content) => app_dynamic_text_response("application/javascript; charset=utf-8", content),
+        Err(err) => {
+            tracing::warn!(%err, path = %asset_path.display(), "failed to read frontend javascript bundle");
+            frontend_unavailable_response("wasm_glue_javascript: file not found")
+        }
+    }
+}
+
+/// Serve the compiled WebAssembly binary from the Trunk dist directory at runtime.
+async fn wasm_binary(State(state): State<AppState>) -> Response {
+    let Some(dist) = state.frontend_dist.as_deref() else {
+        return frontend_unavailable_response("wasm_binary: frontend_dist not configured");
+    };
+    let asset_path = match frontend_wasm_asset_path(dist) {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(%err, "failed to locate frontend wasm bundle");
+            return frontend_unavailable_response("wasm_binary: file not found");
+        }
+    };
+
+    match tokio::fs::read(&asset_path).await {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/wasm"));
+            headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            headers.insert(
+                "x-content-type-options",
+                HeaderValue::from_static("nosniff"),
+            );
+            headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+            (headers, bytes).into_response()
+        }
+        Err(err) => {
+            tracing::warn!(%err, path = %asset_path.display(), "failed to read frontend wasm bundle");
+            frontend_unavailable_response("wasm_binary: file not found")
+        }
+    }
+}
+
+fn frontend_javascript_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
+    frontend_asset_path(
+        dist,
+        is_frontend_javascript_asset,
+        "frontend javascript bundle",
+    )
+}
+
+fn frontend_wasm_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
+    frontend_asset_path(dist, is_frontend_wasm_asset, "frontend wasm bundle")
+}
+
+fn frontend_asset_path(
+    dist: &FsPath,
+    predicate: fn(&str) -> bool,
+    asset_kind: &'static str,
+) -> io::Result<PathBuf> {
+    std::fs::read_dir(dist)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(predicate)
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("missing {asset_kind}")))
+}
+
+fn is_frontend_javascript_asset(file_name: &str) -> bool {
+    file_name.starts_with("acp-web-frontend") && file_name.ends_with(".js")
+}
+
+fn is_frontend_wasm_asset(file_name: &str) -> bool {
+    file_name.starts_with("acp-web-frontend") && file_name.ends_with("_bg.wasm")
+}
+
+fn frontend_unavailable_response(detail: &'static str) -> Response {
+    tracing::debug!(detail, "frontend WASM assets not available");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Web frontend assets not available. Run `cargo run -- --web` to build and serve them.",
+    )
+        .into_response()
 }
 
 fn app_shell_response(headers: &HeaderMap) -> Response {
@@ -368,7 +487,20 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
         .into_response()
 }
 
-fn app_asset_response(content_type: &'static str, body: &'static str) -> Response {
+fn app_static_text_response(content_type: &'static str, body: &'static str) -> Response {
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+
+    (response_headers, body).into_response()
+}
+
+fn app_dynamic_text_response(content_type: &'static str, body: String) -> Response {
     let mut response_headers = HeaderMap::new();
     response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -403,7 +535,7 @@ fn build_app_shell_headers(
     response_headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'",
+            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'",
         ),
     );
     response_headers.insert(
@@ -443,7 +575,7 @@ fn append_cookie_if_missing(
 
 const APP_SHELL_DOCUMENT_TEMPLATE: &str = include_str!("app_assets/app.html");
 const APP_STYLESHEET: &str = include_str!("app_assets/app.css");
-const APP_JAVASCRIPT: &str = include_str!("app_assets/app.js");
+const WASM_INIT_JS: &str = include_str!("app_assets/wasm-init.js");
 
 fn app_shell_document(csrf_token: &str) -> Html<String> {
     assert!(

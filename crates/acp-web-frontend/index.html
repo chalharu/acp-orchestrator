@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!--
+      NOTE: The CSRF token meta tag is intentionally absent here.
+      In production the Axum backend serves its own shell
+      (crates/acp-web-backend/src/app_assets/app.html) with the
+      real `acp-csrf-token` injected at request time.
+      This file is only the Trunk build template; it is not served
+      to end-users.
+    -->
+    <title>ACP Web chat</title>
+    <!--
+      Trunk compiles the crate and injects a <script> tag here with
+      fingerprinted asset names. The Axum backend serves those files
+      through stable `/app/assets/acp-web-frontend*.{js,wasm}` aliases.
+    -->
+    <link data-trunk rel="rust" data-wasm-opt="z" data-no-sri />
+  </head>
+  <body>
+    <!-- Leptos mounts the entire UI into this element. -->
+    <div id="app-root"></div>
+  </body>
+</html>

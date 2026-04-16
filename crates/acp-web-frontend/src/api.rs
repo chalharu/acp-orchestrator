@@ -257,7 +257,9 @@ fn handle_stream_message(
         ),
         StreamMessage::Error => {
             connection_status.set("reconnecting".to_string());
-            error.set(Some("Event stream disconnected; reconnecting...".to_string()));
+            error.set(Some(
+                "Event stream disconnected; reconnecting...".to_string(),
+            ));
             true
         }
     }

@@ -97,7 +97,7 @@ fn csrf_errors_become_forbidden_responses() {
 }
 
 #[tokio::test]
-async fn app_entrypoint_bootstraps_browser_cookies_and_markup() {
+async fn app_entrypoint_bootstraps_browser_cookies_and_chat_shell_markup() {
     let response = app_entrypoint(HeaderMap::new()).await;
     let set_cookies = response
         .headers()
@@ -124,8 +124,11 @@ async fn app_entrypoint_bootstraps_browser_cookies_and_markup() {
         .expect("entrypoint body should be readable");
     let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
 
-    assert!(body.contains("ACP Web MVP slice 0"));
+    assert!(body.contains("ACP Web MVP slice 1"));
     assert!(body.contains("name=\"acp-csrf-token\""));
+    assert!(body.contains("id=\"transcript\""));
+    assert!(body.contains("id=\"composer-input\""));
+    assert!(body.contains("/app/assets/app.js"));
     assert!(body.contains("/app/sessions/{id}"));
 }
 
@@ -164,7 +167,8 @@ async fn app_session_entrypoint_reuses_the_app_shell() {
         .expect("entrypoint body should be readable");
     let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
 
-    assert!(body.contains("ACP Web MVP slice 0"));
+    assert!(body.contains("ACP Web MVP slice 1"));
+    assert!(body.contains("Start a fresh chat"));
 }
 
 #[tokio::test]

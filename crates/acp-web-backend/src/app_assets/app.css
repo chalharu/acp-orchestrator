@@ -1,0 +1,241 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #101725;
+  color: #ebf1ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top, rgba(84, 134, 255, 0.22), transparent 32%),
+    linear-gradient(180deg, #111827 0%, #09111f 100%);
+}
+
+code {
+  font-family:
+    ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.app-shell {
+  width: min(840px, calc(100vw - 2rem));
+  margin: 0 auto;
+  padding: 1.25rem 0 2rem;
+}
+
+.app-header,
+.panel {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(15, 23, 42, 0.9);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+  border-radius: 18px;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem;
+}
+
+.app-header__copy h1,
+.pending-panel h2 {
+  margin: 0;
+}
+
+.app-header__copy p {
+  margin: 0.35rem 0 0;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.77rem;
+  color: #60a5fa;
+}
+
+.muted {
+  color: #bfd1f8;
+}
+
+.status-grid {
+  margin: 0;
+  min-width: 240px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0.85rem;
+}
+
+.status-grid div {
+  padding: 0.75rem;
+  border-radius: 12px;
+  background: rgba(30, 41, 59, 0.9);
+}
+
+.status-grid dt {
+  font-size: 0.75rem;
+  color: #93c5fd;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.status-grid dd {
+  margin: 0.25rem 0 0;
+  font-weight: 600;
+}
+
+.top-link {
+  margin: 0.85rem 0 1rem;
+}
+
+.top-link a {
+  color: #93c5fd;
+}
+
+.banner {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 14px;
+  background: rgba(127, 29, 29, 0.92);
+  border: 1px solid rgba(252, 165, 165, 0.4);
+  color: #fee2e2;
+}
+
+.transcript-panel {
+  padding: 1rem;
+}
+
+.transcript {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.transcript-entry {
+  border-radius: 14px;
+  padding: 0.95rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.transcript-entry__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.82rem;
+  color: #9db6ec;
+}
+
+.transcript-entry__body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.transcript-entry--user {
+  background: rgba(37, 99, 235, 0.22);
+}
+
+.transcript-entry--assistant {
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.transcript-entry--status {
+  background: rgba(71, 85, 105, 0.55);
+}
+
+.transcript-entry--empty {
+  border-style: dashed;
+  color: #bfd1f8;
+}
+
+.pending-panel,
+.composer {
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.pending-list {
+  margin: 0.75rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.pending-list li + li {
+  margin-top: 0.45rem;
+}
+
+.composer label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.7rem;
+}
+
+.composer textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  padding: 0.95rem 1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(15, 23, 42, 0.75);
+  color: inherit;
+  font: inherit;
+}
+
+.composer textarea:disabled,
+.composer button:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
+.composer__footer {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.composer__footer p {
+  margin: 0;
+}
+
+.composer button {
+  padding: 0.72rem 1.1rem;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 700;
+  color: #08111f;
+  background: linear-gradient(135deg, #60a5fa, #22c55e);
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    width: min(100vw - 1rem, 840px);
+    padding-top: 0.5rem;
+  }
+
+  .app-header {
+    padding: 1rem;
+  }
+
+  .transcript {
+    min-height: 280px;
+  }
+}

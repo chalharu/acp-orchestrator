@@ -25,6 +25,51 @@ pub(super) async fn expect_next_event(stream: &mut SseStream) -> Result<StreamEv
     next.context("SSE stream ended unexpectedly")?
 }
 
+pub(super) fn build_browser_client() -> Result<Client> {
+    Client::builder()
+        .cookie_store(true)
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .context("building cookie-authenticated browser client")
+}
+
+pub(super) async fn open_cookie_events(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+) -> Result<SseStream> {
+    let response = client
+        .get(format!("{backend_url}/api/v1/sessions/{session_id}/events"))
+        .send()
+        .await
+        .context("opening cookie-authenticated event stream")?
+        .error_for_status()
+        .context("cookie-authenticated event stream returned an error")?;
+
+    let stream = response.bytes_stream().eventsource().map(|event| {
+        let event = event.context("reading cookie-authenticated event")?;
+        serde_json::from_str(&event.data).context("decoding cookie-authenticated event payload")
+    });
+
+    Ok(Box::pin(stream))
+}
+
+pub(super) fn extract_meta_content(document: &str, name: &str) -> Result<String> {
+    let needle = format!(r#"<meta name="{name}" content=""#);
+    let start = document
+        .find(&needle)
+        .context("meta tag was not present in the app shell")?
+        + needle.len();
+    let end = document[start..]
+        .find('"')
+        .context("meta tag content did not terminate")?
+        + start;
+
+    Ok(document[start..end].to_string())
+}
+
 pub(super) struct TestStack {
     pub(super) backend_url: String,
     pub(super) client: Client,

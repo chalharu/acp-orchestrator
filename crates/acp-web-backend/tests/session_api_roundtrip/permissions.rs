@@ -26,6 +26,7 @@ async fn permission_requests_can_be_approved_through_http() -> Result<()> {
         .await?;
     assert_eq!(resolution.request_id, "req_1");
 
+    assert_snapshot_without_pending_permissions(expect_next_event(&mut flow.events).await?);
     assert_assistant_message(expect_next_event(&mut flow.events).await?);
 
     Ok(())
@@ -46,6 +47,7 @@ async fn permission_requests_can_be_denied_without_recording_an_assistant_reply(
         )
         .await?;
     assert_eq!(resolution.request_id, "req_1");
+    assert_snapshot_without_pending_permissions(expect_next_event(&mut flow.events).await?);
     sleep(Duration::from_millis(100)).await;
 
     let history = flow
@@ -80,6 +82,7 @@ async fn cancelling_a_pending_permission_turn_returns_a_status_event() -> Result
     let cancelled = flow.stack.cancel_turn("alice", &flow.session_id).await?;
     assert!(cancelled.cancelled);
 
+    assert_snapshot_without_pending_permissions(expect_next_event(&mut flow.events).await?);
     assert_cancelled_status(expect_next_event(&mut flow.events).await?);
 
     Ok(())
@@ -150,6 +153,13 @@ fn assert_snapshot(event: StreamEvent) {
     assert!(matches!(
         event.payload,
         StreamEventPayload::SessionSnapshot { .. }
+    ));
+}
+
+fn assert_snapshot_without_pending_permissions(event: StreamEvent) {
+    assert!(matches!(
+        event.payload,
+        StreamEventPayload::SessionSnapshot { session } if session.pending_permissions.is_empty()
     ));
 }
 

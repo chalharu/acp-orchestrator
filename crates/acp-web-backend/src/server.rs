@@ -103,6 +103,8 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/app", get(redirect_to_app))
         .route("/app/", get(app_entrypoint))
+        .route("/app/assets/app.css", get(app_stylesheet))
+        .route("/app/assets/app.js", get(app_javascript))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route("/api/v1/sessions/{session_id}", get(get_session))
@@ -342,6 +344,14 @@ async fn app_session_entrypoint(Path(_session_id): Path<String>, headers: Header
     app_shell_response(&headers)
 }
 
+async fn app_stylesheet() -> Response {
+    app_asset_response("text/css; charset=utf-8", APP_STYLESHEET)
+}
+
+async fn app_javascript() -> Response {
+    app_asset_response("application/javascript; charset=utf-8", APP_JAVASCRIPT)
+}
+
 fn app_shell_response(headers: &HeaderMap) -> Response {
     let (existing_session_id, session_id) = app_shell_cookie(headers, SESSION_COOKIE_NAME);
     let (existing_csrf_token, csrf_token) = app_shell_cookie(headers, CSRF_COOKIE_NAME);
@@ -356,6 +366,19 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
         app_shell_document(&csrf_token),
     )
         .into_response()
+}
+
+fn app_asset_response(content_type: &'static str, body: &'static str) -> Response {
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+
+    (response_headers, body).into_response()
 }
 
 fn app_shell_cookie(headers: &HeaderMap, name: &str) -> (Option<String>, String) {
@@ -380,7 +403,7 @@ fn build_app_shell_headers(
     response_headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'",
         ),
     );
     response_headers.insert(
@@ -427,38 +450,83 @@ fn app_shell_document(csrf_token: &str) -> Html<String> {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="acp-api-base" content="/api/v1">
     <meta name="acp-csrf-token" content="{csrf_token}">
-    <title>ACP Web MVP slice 0</title>
+    <title>ACP Web chat</title>
+    <link rel="stylesheet" href="/app/assets/app.css">
   </head>
   <body>
-    <main>
-      <h1>ACP Web MVP slice 0</h1>
-      <p>Loopback HTTPS browser entrypoint is ready.</p>
-      <p>This slice fixes the launcher, auth cookie bootstrap, and CSRF bootstrap before the chat UI arrives.</p>
-      <p>Route vocabulary is fixed at <code>/app/</code> and <code>/app/sessions/{{id}}</code>.</p>
+    <main class="app-shell">
+      <header class="app-header">
+        <div class="app-header__copy">
+          <p class="eyebrow">ACP Web MVP slice 1</p>
+          <h1>ACP Web chat</h1>
+          <p id="route-summary" class="muted">Send the first prompt to create a session and move to <code>/app/sessions/{{id}}</code>.</p>
+        </div>
+        <dl class="status-grid" aria-label="session status">
+          <div>
+            <dt>Backend</dt>
+            <dd id="backend-origin"></dd>
+          </div>
+          <div>
+            <dt>Connection</dt>
+            <dd id="connection-status">bootstrapping</dd>
+          </div>
+          <div>
+            <dt>Session</dt>
+            <dd id="session-status">new</dd>
+          </div>
+        </dl>
+      </header>
+
+      <p class="top-link"><a href="/app/">Start a fresh chat</a></p>
+
+      <div id="error-banner" class="banner" hidden role="alert"></div>
+
+      <section class="panel transcript-panel" aria-label="conversation transcript">
+        <ol id="transcript" class="transcript"></ol>
+      </section>
+
+      <section id="pending-permissions-panel" class="panel pending-panel" hidden aria-live="polite">
+        <h2>Pending permissions</h2>
+        <p class="muted">Slice 1 renders pending requests and transcript updates. Approve/deny controls arrive in the next slice.</p>
+        <ul id="pending-permissions" class="pending-list"></ul>
+      </section>
+
+      <form id="composer-form" class="panel composer" autocomplete="off">
+        <label for="composer-input">Prompt</label>
+        <textarea id="composer-input" name="prompt" rows="4" placeholder="Ask ACP something…"></textarea>
+        <div class="composer__footer">
+          <p id="composer-status" class="muted">Ready for your first prompt.</p>
+          <button id="composer-submit" type="submit">Send</button>
+        </div>
+      </form>
     </main>
+    <script src="/app/assets/app.js"></script>
   </body>
 </html>
 "#
     ))
 }
 
+const APP_STYLESHEET: &str = include_str!("app_assets/app.css");
+const APP_JAVASCRIPT: &str = include_str!("app_assets/app.js");
+
 fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue {
     let http_only = if http_only { "; HttpOnly" } else { "" };
     assert!(
         name.bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
-        "slice 0 cookie names must stay header-safe",
+        "web app cookie names must stay header-safe",
     );
     assert!(
         value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-        "slice 0 cookie values must stay UUID-safe",
+        "web app cookie values must stay UUID-safe",
     );
     HeaderValue::from_str(&format!(
         "{name}={value}; Path=/; SameSite=Strict; Secure{http_only}"
     ))
-    .expect("slice 0 cookies should serialize into response headers")
+    .expect("web app cookies should serialize into response headers")
 }
 
 fn cookie_uuid_value(headers: &HeaderMap, name: &str) -> Option<String> {

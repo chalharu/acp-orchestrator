@@ -1,0 +1,79 @@
+{
+  "tools": [
+    {
+      "id": "control-plane-rust-fmt",
+      "command": "bash",
+      "args": [
+        ".github/scripts/post-tool-use-rust.sh",
+        "fmt-check"
+      ],
+      "appendFiles": true
+    },
+    {
+      "id": "control-plane-rust-clippy-fix",
+      "command": "bash",
+      "args": [
+        ".github/scripts/post-tool-use-rust.sh",
+        "clippy"
+      ],
+      "appendFiles": true
+    },
+    {
+      "id": "control-plane-rust-clippy-check",
+      "command": "bash",
+      "args": [
+        ".github/scripts/post-tool-use-rust.sh",
+        "clippy"
+      ],
+      "appendFiles": true
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "scripts",
+      "matcher": [
+        "\\.(?:[cm]?[jt]s|[jt]sx)$"
+      ],
+      "steps": [
+        {
+          "tools": [
+            "biome-check-write",
+            "biome-check-write-npx"
+          ],
+          "runtimeFailureLabel": "Biome hook runtime failed:"
+        },
+        {
+          "tools": [
+            "biome-check",
+            "biome-check-npx"
+          ],
+          "reportFailure": true,
+          "failureLabel": "Biome reported unresolved issues:",
+          "runtimeFailureLabel": "Biome hook runtime failed:"
+        }
+      ]
+    },
+    {
+      "id": "rust",
+      "matcher": [
+        "\\.rs$"
+      ],
+      "steps": [
+        {
+          "tools": [
+            "control-plane-rust-fmt"
+          ],
+          "reportFailure": true,
+          "failureLabel": "Rust formatter reported unresolved issues:"
+        },
+        {
+          "tools": [
+            "control-plane-rust-clippy-check"
+          ],
+          "reportFailure": true,
+          "failureLabel": "Rust linter reported unresolved issues:"
+        }
+      ]
+    }
+  ]
+}

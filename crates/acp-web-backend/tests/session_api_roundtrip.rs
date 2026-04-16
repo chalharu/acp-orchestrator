@@ -6,3 +6,5 @@ mod lifecycle;
 mod permissions;
 #[path = "session_api_roundtrip/support.rs"]
 mod support;
+#[path = "session_api_roundtrip/web_browser.rs"]
+mod web_browser;

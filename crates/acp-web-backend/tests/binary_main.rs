@@ -55,7 +55,8 @@ async fn assert_backend_endpoints(base_url: &str) -> Result<()> {
         .error_for_status()?
         .text()
         .await?;
-    assert!(app_body.contains("ACP Web MVP slice 0"));
+    assert!(app_body.contains("ACP Web MVP slice 1"));
+    assert!(app_body.contains("/app/assets/app.js"));
     Ok(())
 }
 

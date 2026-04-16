@@ -202,22 +202,8 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 async fn run_launcher(current_executable: &Path, launcher_args: LauncherArgs) -> Result<()> {
     let needs_backend = launcher_args.web || command_needs_backend(&launcher_args.cli_args);
     let cli_server_url_explicit = cli_server_url_is_explicit(&launcher_args.cli_args);
-
-    // For web mode, build the Leptos/WASM frontend before spawning the backend
-    // so the backend can be given a valid --frontend-dist path.
-    // Skip the build when an external backend is already provided via
-    // ACP_SERVER_URL (direct stack) – in that case we can't configure its dist.
-    let frontend_dist = if launcher_args.web
-        && needs_backend
-        && !cli_server_url_explicit
-        && env::var_os("ACP_SERVER_URL").is_none()
-    {
-        let dist = frontend_dist_path();
-        ensure_frontend_built(&dist).await?;
-        Some(dist)
-    } else {
-        None
-    };
+    let frontend_dist =
+        prepare_frontend_dist(&launcher_args, needs_backend, cli_server_url_explicit).await?;
 
     let mut stack = prepare_launcher_stack(
         current_executable,
@@ -233,14 +219,46 @@ async fn run_launcher(current_executable: &Path, launcher_args: LauncherArgs) ->
     run_cli_launcher(current_executable, launcher_args.cli_args, &mut stack).await
 }
 
+async fn prepare_frontend_dist(
+    launcher_args: &LauncherArgs,
+    needs_backend: bool,
+    cli_server_url_explicit: bool,
+) -> Result<Option<PathBuf>> {
+    // For web mode, build the Leptos/WASM frontend before spawning the backend
+    // so the backend can be given a valid --frontend-dist path.
+    // Skip the build when an external backend is already provided via
+    // ACP_SERVER_URL (direct stack) – in that case we can't configure its dist.
+    if !should_prepare_frontend_dist(launcher_args, needs_backend, cli_server_url_explicit) {
+        return Ok(None);
+    }
+
+    let dist = frontend_dist_path();
+    ensure_frontend_built(&dist).await?;
+    Ok(Some(dist))
+}
+
+fn should_prepare_frontend_dist(
+    launcher_args: &LauncherArgs,
+    needs_backend: bool,
+    cli_server_url_explicit: bool,
+) -> bool {
+    launcher_args.web
+        && needs_backend
+        && !cli_server_url_explicit
+        && env::var_os("ACP_SERVER_URL").is_none()
+}
+
+fn frontend_crate_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates")
+        .join("acp-web-frontend")
+}
+
 /// Returns the Trunk dist directory for the web frontend.
 /// The path is anchored to the repository root so `cargo run -- --web`
 /// keeps working even when launched outside the repo root.
 fn frontend_dist_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates")
-        .join("acp-web-frontend")
-        .join("dist")
+    frontend_crate_path().join("dist")
 }
 
 /// Ensures the Leptos/WASM frontend bundle exists in `dist`.
@@ -260,11 +278,7 @@ async fn ensure_frontend_built(dist: &Path) -> Result<()> {
 
     let status = tokio::process::Command::new("trunk")
         .args(["build", "--release"])
-        .current_dir(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("crates")
-                .join("acp-web-frontend"),
-        )
+        .current_dir(frontend_crate_path())
         .status()
         .await
         .map_err(|source| {

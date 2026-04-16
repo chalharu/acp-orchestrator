@@ -369,6 +369,59 @@ async fn reusable_launcher_state_rejects_identity_mismatches() {
     health_task.abort();
 }
 
+#[tokio::test]
+async fn reusable_launcher_state_rejects_frontend_dist_mismatches() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "frontend-mismatch");
+    let requested_frontend_dist =
+        unique_temp_json_path("acp-launcher-frontend", "requested").with_extension("");
+    let stored_frontend_dist =
+        unique_temp_json_path("acp-launcher-frontend", "stored").with_extension("");
+    let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
+    state.frontend_dist = Some(path_to_string(&stored_frontend_dist));
+    save_launcher_state(&state_path, &state).expect("launcher state should save");
+
+    assert_eq!(
+        reusable_launcher_state(
+            &state_path,
+            &test_launcher_identity("current"),
+            Some(&requested_frontend_dist),
+        )
+        .await
+        .expect("frontend mismatches should be ignored"),
+        None
+    );
+}
+
+#[test]
+fn backend_role_args_include_frontend_dist_when_requested() {
+    let frontend_dist = Path::new("/tmp/acp-frontend-dist");
+    let args = backend_role_args(OsString::from("127.0.0.1:8090"), true, Some(frontend_dist));
+
+    assert!(args.windows(2).any(|window| {
+        window
+            == [
+                OsString::from("--frontend-dist"),
+                frontend_dist.as_os_str().to_owned(),
+            ]
+    }));
+}
+
+#[test]
+fn launcher_state_supports_frontend_requires_matching_dist_paths() {
+    let frontend_dist = Path::new("/tmp/acp-frontend-dist");
+    let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
+    state.frontend_dist = Some(path_to_string(frontend_dist));
+
+    assert!(launcher_state_supports_frontend(
+        &state,
+        Some(frontend_dist)
+    ));
+    assert!(!launcher_state_supports_frontend(
+        &state,
+        Some(Path::new("/tmp/other-frontend-dist")),
+    ));
+}
+
 #[test]
 fn warn_and_maybe_clear_invalid_launcher_state_tolerates_directory_paths() {
     init_tracing();
@@ -624,6 +677,28 @@ async fn managed_stack_is_healthy_rejects_non_loopback_backend_urls() {
         ))
         .await
     );
+}
+
+#[tokio::test]
+async fn managed_stack_is_healthy_checks_frontend_assets_for_web_stacks() {
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock listener should bind");
+    let mut state = test_launcher_state(
+        &backend_url,
+        Some(
+            &mock_listener
+                .local_addr()
+                .expect("mock listener address should be readable")
+                .to_string(),
+        ),
+    );
+    state.frontend_dist = Some("/tmp/acp-frontend-dist".to_string());
+
+    assert!(managed_stack_is_healthy(&state).await);
+
+    health_task.abort();
 }
 
 #[test]

@@ -216,6 +216,24 @@ async fn wasm_init_script_responds_with_javascript_content_type() {
 }
 
 #[tokio::test]
+async fn app_stylesheet_responds_with_css_content_type() {
+    let response = app_stylesheet().await;
+    let ct = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("app.css response should include content-type")
+        .to_str()
+        .expect("content-type should be valid UTF-8")
+        .to_string();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("app.css body should be readable");
+
+    assert!(ct.starts_with("text/css"), "got: {ct}");
+    assert!(!body.is_empty());
+}
+
+#[tokio::test]
 async fn wasm_glue_js_returns_503_when_frontend_dist_is_not_configured() {
     let state = test_state(); // frontend_dist = None
     let response = wasm_glue_javascript(State(state)).await;
@@ -224,18 +242,31 @@ async fn wasm_glue_js_returns_503_when_frontend_dist_is_not_configured() {
 }
 
 #[tokio::test]
-async fn wasm_glue_js_responds_with_javascript_content_type_when_dist_is_configured() {
-    let dist = write_temp_frontend_dist();
-    let state = AppState {
-        store: Arc::new(SessionStore::new(1)),
-        reply_provider: Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-        startup_hints: false,
-        frontend_dist: Some(Arc::new(dist.clone())),
-    };
+async fn wasm_glue_js_returns_503_when_frontend_js_bundle_is_missing() {
+    let response = wasm_glue_javascript(State(test_state_with_frontend_dist(
+        write_temp_frontend_dist_with(false, true),
+    )))
+    .await;
 
-    let response = wasm_glue_javascript(State(state)).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn wasm_glue_js_returns_503_when_frontend_js_bundle_cannot_be_read() {
+    let response = wasm_glue_javascript(State(test_state_with_frontend_dist(
+        write_temp_frontend_dist_with_unreadable_javascript(),
+    )))
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn wasm_glue_js_responds_with_javascript_content_type_when_dist_is_configured() {
+    let response = wasm_glue_javascript(State(test_state_with_frontend_dist(
+        write_temp_frontend_dist(),
+    )))
+    .await;
 
     let ct = response
         .headers()
@@ -257,18 +288,31 @@ async fn wasm_binary_returns_503_when_frontend_dist_is_not_configured() {
 }
 
 #[tokio::test]
-async fn wasm_binary_responds_with_wasm_content_type_when_dist_is_configured() {
-    let dist = write_temp_frontend_dist();
-    let state = AppState {
-        store: Arc::new(SessionStore::new(1)),
-        reply_provider: Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-        startup_hints: false,
-        frontend_dist: Some(Arc::new(dist.clone())),
-    };
+async fn wasm_binary_returns_503_when_frontend_wasm_bundle_is_missing() {
+    let response = wasm_binary(State(test_state_with_frontend_dist(
+        write_temp_frontend_dist_with(true, false),
+    )))
+    .await;
 
-    let response = wasm_binary(State(state)).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn wasm_binary_returns_503_when_frontend_wasm_bundle_cannot_be_read() {
+    let response = wasm_binary(State(test_state_with_frontend_dist(
+        write_temp_frontend_dist_with_unreadable_wasm(),
+    )))
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn wasm_binary_responds_with_wasm_content_type_when_dist_is_configured() {
+    let response = wasm_binary(State(test_state_with_frontend_dist(
+        write_temp_frontend_dist(),
+    )))
+    .await;
 
     let ct = response
         .headers()
@@ -283,16 +327,52 @@ async fn wasm_binary_responds_with_wasm_content_type_when_dist_is_configured() {
 
 /// Creates a temporary directory that looks like a minimal Trunk dist directory.
 fn write_temp_frontend_dist() -> std::path::PathBuf {
+    write_temp_frontend_dist_with(true, true)
+}
+
+fn write_temp_frontend_dist_with(
+    include_javascript: bool,
+    include_wasm: bool,
+) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("acp-test-frontend-dist-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("temp dist dir should be creatable");
-    std::fs::write(dir.join("acp-web-frontend-test.js"), b"// stub js loader")
-        .expect("stub JS should be writable");
-    std::fs::write(
-        dir.join("acp-web-frontend-test_bg.wasm"),
-        b"\x00asm\x01\x00\x00\x00", // minimal valid WASM header
-    )
-    .expect("stub WASM should be writable");
+    if include_javascript {
+        std::fs::write(dir.join("acp-web-frontend-test.js"), b"// stub js loader")
+            .expect("stub JS should be writable");
+    }
+    if include_wasm {
+        std::fs::write(
+            dir.join("acp-web-frontend-test_bg.wasm"),
+            b"\x00asm\x01\x00\x00\x00", // minimal valid WASM header
+        )
+        .expect("stub WASM should be writable");
+    }
     dir
+}
+
+fn write_temp_frontend_dist_with_unreadable_javascript() -> std::path::PathBuf {
+    let dir = write_temp_frontend_dist_with(false, true);
+    std::fs::create_dir(dir.join("acp-web-frontend-test.js"))
+        .expect("stub unreadable JS directory should be creatable");
+    dir
+}
+
+fn write_temp_frontend_dist_with_unreadable_wasm() -> std::path::PathBuf {
+    let dir = write_temp_frontend_dist_with(true, false);
+    std::fs::create_dir(dir.join("acp-web-frontend-test_bg.wasm"))
+        .expect("stub unreadable WASM directory should be creatable");
+    dir
+}
+
+fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
+    AppState {
+        store: Arc::new(SessionStore::new(1)),
+        reply_provider: Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+        startup_hints: false,
+        frontend_dist: Some(Arc::new(dist)),
+    }
 }
 
 #[tokio::test]

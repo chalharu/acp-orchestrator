@@ -575,7 +575,7 @@ fn append_cookie_if_missing(
 
 const APP_SHELL_DOCUMENT_TEMPLATE: &str = include_str!("app_assets/app.html");
 const APP_STYLESHEET: &str = include_str!("app_assets/app.css");
-const WASM_INIT_JS: &str = include_str!("app_assets/wasm-init.js");
+const WASM_INIT_JS: &str = "import init from \"./acp-web-frontend.js\";\n\nawait init();\n";
 
 fn app_shell_document(csrf_token: &str) -> Html<String> {
     assert!(

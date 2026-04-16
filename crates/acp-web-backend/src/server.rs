@@ -1,4 +1,7 @@
-use std::{convert::Infallible, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible, fmt::Display, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc,
+    time::Duration,
+};
 
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
@@ -143,89 +146,159 @@ where
         tokio::select! {
             _ = &mut shutdown => break,
             next = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = next {
-                    tracing::warn!(%error, "web backend connection task aborted");
-                }
+                log_connection_task_join_result(next);
             }
             accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, _)) => {
-                        consecutive_transient_accept_errors = 0;
-                        let acceptor = tls_acceptor.clone();
-                        let service = TowerToHyperService::new(app.clone());
-                        let mut connection_shutdown = shutdown_rx.clone();
-                        connections.spawn(async move {
-                            let tls_stream = match acceptor.accept(stream).await {
-                                Ok(stream) => stream,
-                                Err(error) => {
-                                    tracing::warn!(%error, "failed to complete the loopback TLS handshake");
-                                    return;
-                                }
-                            };
-                            let io = TokioIo::new(tls_stream);
-                            let connection = http1::Builder::new().serve_connection(io, service);
-                            tokio::pin!(connection);
-
-                            tokio::select! {
-                                result = &mut connection => {
-                                    if let Err(error) = result {
-                                        tracing::warn!(%error, "web backend connection failed");
-                                    }
-                                }
-                                changed = connection_shutdown.changed() => {
-                                    if changed.is_ok() && *connection_shutdown.borrow() {
-                                        connection.as_mut().graceful_shutdown();
-                                        match tokio::time::timeout(
-                                            CONNECTION_SHUTDOWN_GRACE_PERIOD,
-                                            connection.as_mut(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok(())) => {}
-                                            Ok(Err(error)) => {
-                                                tracing::warn!(%error, "web backend connection failed during graceful shutdown");
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!("web backend connection exceeded the graceful shutdown deadline");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    Err(error) if accept_error_is_transient(&error) => {
-                        consecutive_transient_accept_errors += 1;
-                        if consecutive_transient_accept_errors > MAX_CONSECUTIVE_TRANSIENT_ACCEPT_ERRORS {
-                            tracing::error!(
-                                %error,
-                                failures = consecutive_transient_accept_errors,
-                                "too many transient accept failures while serving the web backend"
-                            );
-                            shutdown_connections(&shutdown_tx, &mut connections).await;
-                            return Err(error);
-                        }
-                        tracing::warn!(
-                            %error,
-                            failures = consecutive_transient_accept_errors,
-                            "transient accept failure while serving the web backend"
-                        );
-                        tokio::select! {
-                            _ = &mut shutdown => break,
-                            _ = tokio::time::sleep(ACCEPT_ERROR_BACKOFF) => {}
-                        }
-                    }
-                    Err(error) => {
-                        shutdown_connections(&shutdown_tx, &mut connections).await;
-                        return Err(error);
-                    }
-                }
+                let should_break = matches!(
+                    handle_accept_result(
+                    accepted,
+                    &mut consecutive_transient_accept_errors,
+                    AcceptContext {
+                        connections: &mut connections,
+                        tls_acceptor: &tls_acceptor,
+                        app: &app,
+                        shutdown_rx: &shutdown_rx,
+                        shutdown_tx: &shutdown_tx,
+                    },
+                    shutdown.as_mut(),
+                )
+                    .await?,
+                    AcceptLoopAction::Break
+                );
+                if should_break { break; }
             }
         }
     }
 
     shutdown_connections(&shutdown_tx, &mut connections).await;
     Ok(())
+}
+
+fn log_connection_task_join_result(next: Option<Result<(), tokio::task::JoinError>>) {
+    if let Some(Err(error)) = next {
+        tracing::warn!(%error, "web backend connection task aborted");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptLoopAction {
+    Continue,
+    Break,
+}
+
+struct AcceptContext<'a> {
+    connections: &'a mut JoinSet<()>,
+    tls_acceptor: &'a TlsAcceptor,
+    app: &'a Router,
+    shutdown_rx: &'a watch::Receiver<bool>,
+    shutdown_tx: &'a watch::Sender<bool>,
+}
+
+async fn handle_accept_result<F>(
+    accepted: io::Result<(tokio::net::TcpStream, SocketAddr)>,
+    consecutive_transient_accept_errors: &mut usize,
+    context: AcceptContext<'_>,
+    shutdown: Pin<&mut F>,
+) -> io::Result<AcceptLoopAction>
+where
+    F: Future<Output = ()>,
+{
+    match accepted {
+        Ok((stream, _)) => {
+            *consecutive_transient_accept_errors = 0;
+            spawn_connection_task(
+                context.connections,
+                context.tls_acceptor.clone(),
+                context.app.clone(),
+                context.shutdown_rx.clone(),
+                stream,
+            );
+            Ok(AcceptLoopAction::Continue)
+        }
+        Err(error) if accept_error_is_transient(&error) => {
+            *consecutive_transient_accept_errors += 1;
+            if *consecutive_transient_accept_errors > MAX_CONSECUTIVE_TRANSIENT_ACCEPT_ERRORS {
+                tracing::error!(
+                    %error,
+                    failures = *consecutive_transient_accept_errors,
+                    "too many transient accept failures while serving the web backend"
+                );
+                shutdown_connections(context.shutdown_tx, context.connections).await;
+                return Err(error);
+            }
+            tracing::warn!(
+                %error,
+                failures = *consecutive_transient_accept_errors,
+                "transient accept failure while serving the web backend"
+            );
+            Ok(wait_for_accept_retry_or_shutdown(shutdown).await)
+        }
+        Err(error) => {
+            shutdown_connections(context.shutdown_tx, context.connections).await;
+            Err(error)
+        }
+    }
+}
+
+async fn wait_for_accept_retry_or_shutdown<F>(shutdown: Pin<&mut F>) -> AcceptLoopAction
+where
+    F: Future<Output = ()>,
+{
+    tokio::select! {
+        _ = shutdown => AcceptLoopAction::Break,
+        _ = tokio::time::sleep(ACCEPT_ERROR_BACKOFF) => AcceptLoopAction::Continue,
+    }
+}
+
+fn log_connection_result<E: Display>(result: Result<(), E>) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "web backend connection failed");
+    }
+}
+
+fn spawn_connection_task(
+    connections: &mut JoinSet<()>,
+    acceptor: TlsAcceptor,
+    app: Router,
+    mut connection_shutdown: watch::Receiver<bool>,
+    stream: tokio::net::TcpStream,
+) {
+    connections.spawn(async move {
+        let tls_stream = match acceptor.accept(stream).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(%error, "failed to complete the loopback TLS handshake");
+                return;
+            }
+        };
+        let io = TokioIo::new(tls_stream);
+        let connection = http1::Builder::new().serve_connection(io, TowerToHyperService::new(app));
+        tokio::pin!(connection);
+
+        #[rustfmt::skip]
+        tokio::select! {
+            result = &mut connection => log_connection_result(result),
+            changed = connection_shutdown.changed() => {
+                if changed.is_ok() && *connection_shutdown.borrow() { connection.as_mut().graceful_shutdown(); finish_connection_after_shutdown(connection.as_mut()).await; }
+            }
+        }
+    });
+}
+
+async fn finish_connection_after_shutdown<F, E>(connection: Pin<&mut F>)
+where
+    F: Future<Output = Result<(), E>>,
+    E: Display,
+{
+    match tokio::time::timeout(CONNECTION_SHUTDOWN_GRACE_PERIOD, connection).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "web backend connection failed during graceful shutdown");
+        }
+        Err(_) => {
+            tracing::warn!("web backend connection exceeded the graceful shutdown deadline");
+        }
+    }
 }
 
 async fn shutdown_connections(shutdown_tx: &watch::Sender<bool>, connections: &mut JoinSet<()>) {
@@ -244,9 +317,7 @@ async fn drain_connection_tasks(connections: &mut JoinSet<()>) {
                 return;
             }
             next = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = next {
-                    tracing::warn!(%error, "web backend connection task aborted");
-                }
+                log_connection_task_join_result(next);
             }
             else => return,
         }
@@ -272,15 +343,35 @@ async fn app_session_entrypoint(Path(_session_id): Path<String>, headers: Header
 }
 
 fn app_shell_response(headers: &HeaderMap) -> Response {
-    let existing_session_id = cookie_uuid_value(headers, SESSION_COOKIE_NAME);
-    let session_id = existing_session_id
-        .clone()
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let existing_csrf_token = cookie_uuid_value(headers, CSRF_COOKIE_NAME);
-    let csrf_token = existing_csrf_token
-        .clone()
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let (existing_session_id, session_id) = app_shell_cookie(headers, SESSION_COOKIE_NAME);
+    let (existing_csrf_token, csrf_token) = app_shell_cookie(headers, CSRF_COOKIE_NAME);
 
+    (
+        build_app_shell_headers(
+            existing_session_id.as_deref(),
+            &session_id,
+            existing_csrf_token.as_deref(),
+            &csrf_token,
+        ),
+        app_shell_document(&csrf_token),
+    )
+        .into_response()
+}
+
+fn app_shell_cookie(headers: &HeaderMap, name: &str) -> (Option<String>, String) {
+    let existing = cookie_uuid_value(headers, name);
+    let value = existing
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    (existing, value)
+}
+
+fn build_app_shell_headers(
+    existing_session_id: Option<&str>,
+    session_id: &str,
+    existing_csrf_token: Option<&str>,
+    csrf_token: &str,
+) -> HeaderMap {
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         CONTENT_TYPE,
@@ -298,24 +389,38 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
     );
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    append_cookie_if_missing(
+        &mut response_headers,
+        existing_session_id,
+        SESSION_COOKIE_NAME,
+        session_id,
+        true,
+    );
+    append_cookie_if_missing(
+        &mut response_headers,
+        existing_csrf_token,
+        CSRF_COOKIE_NAME,
+        csrf_token,
+        false,
+    );
+    response_headers
+}
 
-    if existing_session_id.is_none() {
-        response_headers.append(
-            SET_COOKIE,
-            build_cookie_header(SESSION_COOKIE_NAME, &session_id, true),
-        );
+fn append_cookie_if_missing(
+    headers: &mut HeaderMap,
+    existing: Option<&str>,
+    name: &str,
+    value: &str,
+    http_only: bool,
+) {
+    if existing.is_none() {
+        headers.append(SET_COOKIE, build_cookie_header(name, value, http_only));
     }
-    if existing_csrf_token.is_none() {
-        response_headers.append(
-            SET_COOKIE,
-            build_cookie_header(CSRF_COOKIE_NAME, &csrf_token, false),
-        );
-    }
+}
 
-    (
-        response_headers,
-        Html(format!(
-            r#"<!doctype html>
+fn app_shell_document(csrf_token: &str) -> Html<String> {
+    Html(format!(
+        r#"<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -334,9 +439,7 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
   </body>
 </html>
 "#
-        )),
-    )
-        .into_response()
+    ))
 }
 
 fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue {

@@ -176,6 +176,13 @@ fn invalid_cert_trust_is_limited_to_literal_loopback_https() {
     ));
 }
 
+#[test]
+fn invalid_cert_trust_is_disabled_for_hostless_urls() {
+    assert!(!should_trust_invalid_loopback_cert_for_url(
+        "file:///tmp/acp.sock"
+    ));
+}
+
 #[tokio::test]
 async fn wait_for_tcp_connect_succeeds_when_the_listener_is_ready() {
     let listener = TcpListener::bind("127.0.0.1:0")

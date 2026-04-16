@@ -60,9 +60,9 @@ Open the browser-facing slice-0 Web launcher from the same repo root:
 cargo run -- --web
 ```
 
-This starts or reuses the bundled mock/backend, prints the loopback HTTPS app
-URL, and attempts to open `/app/` in your browser. The backend uses a local
-development certificate for loopback HTTPS, so your browser or OS may require a
+This starts or reuses the bundled mock/backend. It prints the loopback HTTPS
+app URL and attempts to open `/app/` in your browser. The backend uses a local
+development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode

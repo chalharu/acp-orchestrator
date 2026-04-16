@@ -76,7 +76,7 @@ impl Drop for LauncherLock {
 }
 
 impl LauncherStack {
-    fn direct() -> Self {
+    pub(crate) fn direct() -> Self {
         Self {
             backend_url: None,
             auth_token: None,
@@ -84,7 +84,7 @@ impl LauncherStack {
         }
     }
 
-    fn persistent(backend_url: String, auth_token: String) -> Self {
+    pub(crate) fn persistent(backend_url: String, auth_token: String) -> Self {
         Self {
             backend_url: Some(backend_url),
             auth_token: Some(auth_token),
@@ -92,7 +92,7 @@ impl LauncherStack {
         }
     }
 
-    fn ephemeral(
+    pub(crate) fn ephemeral(
         backend: Child,
         mock: Option<Child>,
         backend_url: String,

@@ -11,21 +11,34 @@ const BROKEN_PROXY_URL: &str = "http://127.0.0.1:9";
 #[tokio::test]
 async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()> {
     let (mock_address, mock_shutdown) = spawn_mock_server().await?;
+    let mut child = spawn_backend_binary(&mock_address)?;
+    let base_url = read_startup_url(&mut child, "web backend listening on ").await?;
+    assert_backend_endpoints(&base_url).await?;
+
+    let status = timeout(Duration::from_secs(2), child.wait()).await??;
+    assert!(status.success());
+    let _ = mock_shutdown.send(());
+    Ok(())
+}
+
+fn spawn_backend_binary(mock_address: &str) -> Result<tokio::process::Child> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_acp-web-backend"));
     command
         .arg("--port")
         .arg("0")
         .arg("--acp-server")
-        .arg(&mock_address)
+        .arg(mock_address)
         .arg("--exit-after-ms")
         .arg("500")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     configure_broken_proxy_env(&mut command);
-    let mut child = command.spawn()?;
-    let base_url = read_startup_url(&mut child, "web backend listening on ").await?;
-    let client = build_http_client_for_url(&base_url, Some(Duration::from_secs(1)))?;
+    command.spawn().map_err(Into::into)
+}
+
+async fn assert_backend_endpoints(base_url: &str) -> Result<()> {
+    let client = build_http_client_for_url(base_url, Some(Duration::from_secs(1)))?;
     let health: HealthResponse = client
         .get(format!("{base_url}/healthz"))
         .send()
@@ -34,17 +47,15 @@ async fn backend_binary_serves_health_checks_even_with_proxy_env() -> Result<()>
         .json()
         .await?;
     assert_eq!(health.status, "ok");
-    let app_response = client
+
+    let app_body = client
         .get(format!("{base_url}/app/"))
         .send()
         .await?
-        .error_for_status()?;
-    let app_body = app_response.text().await?;
+        .error_for_status()?
+        .text()
+        .await?;
     assert!(app_body.contains("ACP Web MVP slice 0"));
-
-    let status = timeout(Duration::from_secs(2), child.wait()).await??;
-    assert!(status.success());
-    let _ = mock_shutdown.send(());
     Ok(())
 }
 

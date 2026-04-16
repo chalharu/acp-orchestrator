@@ -1,12 +1,17 @@
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::{
     env,
     ffi::OsString,
+    future::Future,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
 use snafu::prelude::*;
+#[cfg(test)]
+use tokio::sync::Mutex;
 
 mod launcher_process;
 mod launcher_stack;
@@ -20,6 +25,47 @@ pub(crate) use launcher_process::{read_startup_url, terminate_child};
 pub(crate) use launcher_stack::launcher_state_path_from;
 
 type Result<T, E = LauncherError> = std::result::Result<T, E>;
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_ENV_LOCK.get_or_init(|| Mutex::const_new(()))
+}
+
+#[cfg(test)]
+pub(crate) struct TestAcpServerUrlGuard {
+    previous: Option<OsString>,
+}
+
+#[cfg(test)]
+impl Drop for TestAcpServerUrlGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            unsafe {
+                env::set_var("ACP_SERVER_URL", previous);
+            }
+        } else {
+            unsafe {
+                env::remove_var("ACP_SERVER_URL");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_acp_server_url_guard(value: Option<&str>) -> TestAcpServerUrlGuard {
+    let previous = env::var_os("ACP_SERVER_URL");
+    if let Some(value) = value {
+        unsafe {
+            env::set_var("ACP_SERVER_URL", value);
+        }
+    } else {
+        unsafe {
+            env::remove_var("ACP_SERVER_URL");
+        }
+    }
+    TestAcpServerUrlGuard { previous }
+}
 
 #[derive(Debug, Snafu)]
 enum LauncherError {
@@ -192,44 +238,99 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 
     let current_executable = env::current_exe().context(CurrentExecutableSnafu)?;
     let launcher_args = split_launcher_args(&args)?;
+    run_launcher(&current_executable, launcher_args).await
+}
+
+async fn run_launcher(current_executable: &Path, launcher_args: LauncherArgs) -> Result<()> {
     let mut stack = prepare_launcher_stack(
-        &current_executable,
+        current_executable,
         &launcher_args,
         launcher_args.web || command_needs_backend(&launcher_args.cli_args),
         cli_server_url_is_explicit(&launcher_args.cli_args),
     )
     .await?;
     if launcher_args.web {
-        let result = run_web_foreground(&stack).await;
-        if result.is_err() {
-            if let Err(shutdown_error) = stack.shutdown().await {
-                tracing::warn!(%shutdown_error, "web launcher cleanup failed after an entrypoint error");
-            }
-            return result;
-        }
-        if stack.is_ephemeral() {
-            let wait_for_shutdown_signal = tokio::signal::ctrl_c()
-                .await
-                .context(WaitForWebShutdownSignalSnafu);
-            let shutdown_result = stack.shutdown().await;
-            if let Err(wait_error) = wait_for_shutdown_signal {
-                if let Err(shutdown_error) = shutdown_result {
-                    tracing::warn!(%shutdown_error, "web launcher cleanup failed after waiting for the shutdown signal");
-                }
-                return Err(wait_error);
-            }
-            shutdown_result?;
-        }
-        return Ok(());
+        return run_web_launcher(&mut stack).await;
     }
+    run_cli_launcher(current_executable, launcher_args.cli_args, &mut stack).await
+}
+
+async fn run_web_launcher(stack: &mut launcher_stack::LauncherStack) -> Result<()> {
+    run_web_launcher_with_signal(stack, tokio::signal::ctrl_c()).await
+}
+
+async fn run_web_launcher_with_signal<F>(
+    stack: &mut launcher_stack::LauncherStack,
+    shutdown_signal: F,
+) -> Result<()>
+where
+    F: Future<Output = std::io::Result<()>>,
+{
+    if let Err(error) = run_web_foreground(stack).await {
+        cleanup_after_web_launch_error(stack).await;
+        return Err(error);
+    }
+    if stack.is_ephemeral() {
+        wait_for_web_shutdown_with_signal(stack, shutdown_signal).await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_after_web_launch_error(stack: &mut launcher_stack::LauncherStack) {
+    finish_web_launch_cleanup(stack.shutdown().await);
+}
+
+fn finish_web_launch_cleanup(shutdown_result: Result<(), LauncherError>) {
+    if let Err(shutdown_error) = shutdown_result {
+        tracing::warn!(%shutdown_error, "web launcher cleanup failed after an entrypoint error");
+    }
+}
+
+async fn wait_for_web_shutdown_with_signal<F>(
+    stack: &mut launcher_stack::LauncherStack,
+    shutdown_signal: F,
+) -> Result<()>
+where
+    F: Future<Output = std::io::Result<()>>,
+{
+    let wait_for_shutdown_signal = shutdown_signal.await.context(WaitForWebShutdownSignalSnafu);
+    let shutdown_result = stack.shutdown().await;
+    finish_web_shutdown(wait_for_shutdown_signal, shutdown_result)
+}
+
+fn finish_web_shutdown(
+    wait_for_shutdown_signal: Result<(), LauncherError>,
+    shutdown_result: Result<(), LauncherError>,
+) -> Result<()> {
+    if let Err(wait_error) = wait_for_shutdown_signal {
+        if let Err(shutdown_error) = shutdown_result {
+            tracing::warn!(%shutdown_error, "web launcher cleanup failed after waiting for the shutdown signal");
+        }
+        return Err(wait_error);
+    }
+    shutdown_result
+}
+
+async fn run_cli_launcher(
+    current_executable: &Path,
+    cli_args: Vec<OsString>,
+    stack: &mut launcher_stack::LauncherStack,
+) -> Result<()> {
     let cli_status = run_cli_foreground(
-        &current_executable,
-        launcher_args.cli_args,
+        current_executable,
+        cli_args,
         stack.backend_url(),
         stack.auth_token(),
     )
     .await;
     let shutdown_result = stack.shutdown().await;
+    finish_cli_launch(cli_status, shutdown_result)
+}
+
+fn finish_cli_launch(
+    cli_status: Result<std::process::ExitStatus, LauncherError>,
+    shutdown_result: Result<(), LauncherError>,
+) -> Result<()> {
     match cli_status {
         Ok(status) => {
             shutdown_result?;
@@ -237,7 +338,10 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
         }
         Err(error) => {
             if let Err(shutdown_error) = shutdown_result {
-                tracing::warn!(%shutdown_error, "launcher cleanup failed after the CLI frontend returned an error");
+                tracing::warn!(
+                    %shutdown_error,
+                    "launcher cleanup failed after the CLI frontend returned an error"
+                );
             }
             Err(error)
         }
@@ -342,32 +446,56 @@ fn split_launcher_args(all_args: &[OsString]) -> Result<LauncherArgs> {
     let mut args = all_args.iter().skip(1).cloned();
 
     while let Some(arg) = args.next() {
-        if arg.as_os_str() == "--acp-server" {
-            let value = args.next().ok_or_else(|| MissingAcpServerSnafu.build())?;
-            if value.is_empty() {
-                return MissingAcpServerSnafu.fail();
-            }
-            launcher_args.acp_server = Some(value);
-        } else if arg.as_os_str() == "--web" {
+        if arg.as_os_str() == "--web" {
             launcher_args.web = true;
-        } else if let Some(value) = arg
-            .to_str()
-            .and_then(|value| value.strip_prefix("--acp-server="))
-        {
-            if value.is_empty() {
-                return MissingAcpServerSnafu.fail();
-            }
-            launcher_args.acp_server = Some(OsString::from(value));
-        } else {
-            launcher_args.cli_args.push(arg);
+            continue;
         }
+        if let Some(acp_server) = parse_acp_server_arg(&arg, &mut args)? {
+            launcher_args.acp_server = Some(acp_server);
+            continue;
+        }
+        launcher_args.cli_args.push(arg);
     }
 
+    apply_default_cli_args(&mut launcher_args);
+    Ok(launcher_args)
+}
+
+fn parse_acp_server_arg<I>(arg: &OsString, args: &mut I) -> Result<Option<OsString>>
+where
+    I: Iterator<Item = OsString>,
+{
+    if arg.as_os_str() == "--acp-server" {
+        return next_acp_server_arg(args).map(Some);
+    }
+    let Some(value) = arg
+        .to_str()
+        .and_then(|value| value.strip_prefix("--acp-server="))
+    else {
+        return Ok(None);
+    };
+    validate_acp_server_arg(OsString::from(value)).map(Some)
+}
+
+fn next_acp_server_arg<I>(args: &mut I) -> Result<OsString>
+where
+    I: Iterator<Item = OsString>,
+{
+    let value = args.next().ok_or_else(|| MissingAcpServerSnafu.build())?;
+    validate_acp_server_arg(value)
+}
+
+fn validate_acp_server_arg(value: OsString) -> Result<OsString> {
+    if value.is_empty() {
+        return MissingAcpServerSnafu.fail();
+    }
+    Ok(value)
+}
+
+fn apply_default_cli_args(launcher_args: &mut LauncherArgs) {
     if !launcher_args.web && launcher_args.cli_args.is_empty() {
         launcher_args.cli_args = vec!["chat".into(), "--new".into()];
     }
-
-    Ok(launcher_args)
 }
 async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<()> {
     match role.to_string_lossy().as_ref() {

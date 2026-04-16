@@ -11,10 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     process::Command,
-    sync::Mutex,
 };
-
-static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[test]
 fn launcher_state_path_uses_home_dir_without_data_dir() {
@@ -45,12 +42,31 @@ async fn shutdown_terminates_optional_mock_children() {
 }
 
 #[tokio::test]
+async fn launcher_stacks_report_when_children_are_ephemeral() {
+    let persistent = LauncherStack::persistent(
+        "http://127.0.0.1:1".to_string(),
+        "launcher-auth-token".to_string(),
+    );
+    let mut ephemeral = LauncherStack::ephemeral(
+        spawn_sleep_child().await,
+        None,
+        "http://127.0.0.1:1".to_string(),
+        "launcher-auth-token".to_string(),
+    );
+
+    assert!(!persistent.is_ephemeral());
+    assert!(ephemeral.is_ephemeral());
+
+    ephemeral
+        .shutdown()
+        .await
+        .expect("ephemeral launcher stacks should shut down cleanly");
+}
+
+#[tokio::test]
 async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
-    let _guard = ENV_LOCK.lock().await;
-    // SAFETY: the test holds a process-wide mutex while mutating the environment.
-    unsafe {
-        std::env::set_var("ACP_SERVER_URL", "http://127.0.0.1:8080");
-    }
+    let _guard = crate::test_env_lock().lock().await;
+    let _url_guard = crate::test_acp_server_url_guard(Some("http://127.0.0.1:8080"));
     let args = LauncherArgs {
         acp_server: None,
         web: false,
@@ -62,10 +78,6 @@ async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
         .expect("explicit ACP_SERVER_URL should skip launcher-managed services");
 
     assert!(stack.backend_url().is_none());
-    // SAFETY: the test holds a process-wide mutex while mutating the environment.
-    unsafe {
-        std::env::remove_var("ACP_SERVER_URL");
-    }
 }
 
 #[test]

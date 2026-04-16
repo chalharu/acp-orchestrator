@@ -1,5 +1,6 @@
 use super::*;
 use crate::mock_client::{ReplyFuture, ReplyResult};
+use acp_app_support::build_http_client_for_url;
 use axum::{
     body::to_bytes,
     http::{
@@ -156,6 +157,367 @@ async fn app_entrypoint_replaces_invalid_cookie_values_before_rendering() {
 }
 
 #[tokio::test]
+async fn app_session_entrypoint_reuses_the_app_shell() {
+    let response = app_session_entrypoint(Path("session-id".to_string()), HeaderMap::new()).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("ACP Web MVP slice 0"));
+}
+
+#[tokio::test]
+async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_app().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/"));
+}
+
+#[tokio::test]
+async fn serving_with_shutdown_handles_successful_connections() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("test listener should expose its address");
+    let base_url = format!("https://{address}");
+    let client = build_http_client_for_url(&base_url, Some(Duration::from_secs(1)))
+        .expect("loopback clients should build");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        serve_with_shutdown(listener, test_state(), async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+
+    let response = client
+        .get(format!("{base_url}/healthz"))
+        .send()
+        .await
+        .expect("health requests should reach the server");
+    response
+        .error_for_status()
+        .expect("health requests should succeed")
+        .bytes()
+        .await
+        .expect("health responses should be readable");
+
+    drop(client);
+    tokio::task::yield_now().await;
+    shutdown_tx
+        .send(())
+        .expect("shutdown signals should reach the server");
+
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("the server should stop promptly")
+        .expect("the server task should join")
+        .expect("serving should shut down cleanly");
+}
+
+#[tokio::test]
+async fn aborted_connection_tasks_are_logged_without_panicking() {
+    let mut connections = tokio::task::JoinSet::new();
+    connections.spawn(async {
+        panic!("boom");
+    });
+
+    let next = connections.join_next().await;
+    log_connection_task_join_result(next);
+
+    assert!(connections.is_empty());
+}
+
+#[test]
+fn connection_results_are_logged_without_panicking() {
+    log_connection_result(Ok::<(), std::io::Error>(()));
+    log_connection_result(Err(std::io::Error::other("boom")));
+}
+
+#[tokio::test]
+async fn successful_accepts_reset_transient_failure_counts() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("test listener should expose its address");
+    let client = tokio::spawn(tokio::net::TcpStream::connect(address));
+    let accepted = listener
+        .accept()
+        .await
+        .expect("accepted test streams should connect");
+    let client = client
+        .await
+        .expect("client connect task should finish")
+        .expect("client should connect");
+    let mut failures = 3usize;
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let acceptor =
+        build_loopback_tls_acceptor(address).expect("loopback certificates should build");
+    let router = test_router();
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+
+    let action = handle_accept_result(
+        Ok(accepted),
+        &mut failures,
+        AcceptContext {
+            connections: &mut connections,
+            tls_acceptor: &acceptor,
+            app: &router,
+            shutdown_rx: &shutdown_rx,
+            shutdown_tx: &shutdown_tx,
+        },
+        shutdown.as_mut(),
+    )
+    .await
+    .expect("successful accepts should continue serving");
+
+    assert_eq!(action, AcceptLoopAction::Continue);
+    assert_eq!(failures, 0);
+
+    drop(client);
+    timeout(Duration::from_secs(1), connections.join_next())
+        .await
+        .expect("the spawned TLS task should observe the failed handshake");
+}
+
+#[tokio::test]
+async fn transient_accept_failures_retry_after_backoff() {
+    let mut failures = 0usize;
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let acceptor = build_loopback_tls_acceptor(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback socket addresses should parse"),
+    )
+    .expect("loopback certificates should build");
+    let router = test_router();
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+
+    let action = handle_accept_result(
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        &mut failures,
+        AcceptContext {
+            connections: &mut connections,
+            tls_acceptor: &acceptor,
+            app: &router,
+            shutdown_rx: &shutdown_rx,
+            shutdown_tx: &shutdown_tx,
+        },
+        shutdown.as_mut(),
+    )
+    .await
+    .expect("retryable accept errors should not fail serving");
+
+    assert_eq!(action, AcceptLoopAction::Continue);
+    assert_eq!(failures, 1);
+}
+
+#[tokio::test]
+async fn transient_accept_failures_break_when_shutdown_arrives() {
+    let mut failures = 0usize;
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let acceptor = build_loopback_tls_acceptor(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback socket addresses should parse"),
+    )
+    .expect("loopback certificates should build");
+    let router = test_router();
+    let shutdown = std::future::ready(());
+    tokio::pin!(shutdown);
+
+    let action = handle_accept_result(
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        &mut failures,
+        AcceptContext {
+            connections: &mut connections,
+            tls_acceptor: &acceptor,
+            app: &router,
+            shutdown_rx: &shutdown_rx,
+            shutdown_tx: &shutdown_tx,
+        },
+        shutdown.as_mut(),
+    )
+    .await
+    .expect("shutdown during backoff should stop serving cleanly");
+
+    assert_eq!(action, AcceptLoopAction::Break);
+    assert_eq!(failures, 1);
+}
+
+#[tokio::test]
+async fn too_many_transient_accept_failures_stop_serving() {
+    let mut failures = MAX_CONSECUTIVE_TRANSIENT_ACCEPT_ERRORS;
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let acceptor = build_loopback_tls_acceptor(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback socket addresses should parse"),
+    )
+    .expect("loopback certificates should build");
+    let router = test_router();
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+
+    let error = handle_accept_result(
+        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        &mut failures,
+        AcceptContext {
+            connections: &mut connections,
+            tls_acceptor: &acceptor,
+            app: &router,
+            shutdown_rx: &shutdown_rx,
+            shutdown_tx: &shutdown_tx,
+        },
+        shutdown.as_mut(),
+    )
+    .await
+    .expect_err("too many retryable failures should stop serving");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(failures, MAX_CONSECUTIVE_TRANSIENT_ACCEPT_ERRORS + 1);
+}
+
+#[tokio::test]
+async fn fatal_accept_failures_stop_serving_immediately() {
+    let mut failures = 0usize;
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let acceptor = build_loopback_tls_acceptor(
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback socket addresses should parse"),
+    )
+    .expect("loopback certificates should build");
+    let router = test_router();
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+
+    let error = handle_accept_result(
+        Err(std::io::Error::other("boom")),
+        &mut failures,
+        AcceptContext {
+            connections: &mut connections,
+            tls_acceptor: &acceptor,
+            app: &router,
+            shutdown_rx: &shutdown_rx,
+            shutdown_tx: &shutdown_tx,
+        },
+        shutdown.as_mut(),
+    )
+    .await
+    .expect_err("fatal accept errors should stop serving");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(failures, 0);
+}
+
+#[tokio::test]
+async fn spawned_connection_tasks_handle_failed_tls_handshakes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("test listener should expose its address");
+    let client = tokio::spawn(tokio::net::TcpStream::connect(address));
+    let (stream, _) = listener
+        .accept()
+        .await
+        .expect("accepted test streams should connect");
+    let client = client
+        .await
+        .expect("client connect task should finish")
+        .expect("client should connect");
+    let mut connections = tokio::task::JoinSet::new();
+    let (_, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    spawn_connection_task(
+        &mut connections,
+        build_loopback_tls_acceptor(address).expect("loopback certificates should build"),
+        test_router(),
+        shutdown_rx,
+        stream,
+    );
+
+    drop(client);
+    timeout(Duration::from_secs(1), connections.join_next())
+        .await
+        .expect("failed TLS handshakes should finish promptly");
+}
+
+#[tokio::test]
+async fn spawned_connection_tasks_honor_shutdown_signals() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("test listener should expose its address");
+    let base_url = format!("https://{address}");
+    let client = build_http_client_for_url(&base_url, Some(Duration::from_secs(1)))
+        .expect("loopback clients should build");
+    let request = tokio::spawn({
+        let client = client.clone();
+        let url = format!("{base_url}/healthz");
+        async move {
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .expect("health requests should reach the server");
+            response
+                .error_for_status()
+                .expect("health requests should succeed")
+                .bytes()
+                .await
+                .expect("health responses should be readable")
+        }
+    });
+    let (stream, _) = listener
+        .accept()
+        .await
+        .expect("accepted test streams should connect");
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    spawn_connection_task(
+        &mut connections,
+        build_loopback_tls_acceptor(address).expect("loopback certificates should build"),
+        test_router(),
+        shutdown_rx,
+        stream,
+    );
+
+    request
+        .await
+        .expect("the client request should finish successfully");
+    shutdown_tx
+        .send(true)
+        .expect("shutdown signals should be broadcast");
+
+    timeout(Duration::from_secs(1), connections.join_next())
+        .await
+        .expect("shutdown should drain active connections");
+}
+
+#[tokio::test]
 async fn draining_empty_connection_tasks_returns_immediately() {
     let mut connections = tokio::task::JoinSet::new();
 
@@ -180,6 +542,95 @@ async fn draining_pending_connection_tasks_aborts_after_the_grace_period() {
     .expect("pending connections should be aborted after the shutdown grace period");
 
     assert!(connections.is_empty());
+}
+
+#[tokio::test]
+async fn draining_connection_tasks_tolerates_aborted_join_handles() {
+    let mut connections = tokio::task::JoinSet::new();
+    connections.spawn(async {
+        panic!("boom");
+    });
+
+    timeout(
+        Duration::from_secs(1),
+        drain_connection_tasks(&mut connections),
+    )
+    .await
+    .expect("aborted connection tasks should still drain promptly");
+
+    assert!(connections.is_empty());
+}
+
+#[tokio::test]
+async fn graceful_connection_shutdown_returns_after_success() {
+    let future = std::future::ready(Ok::<(), std::io::Error>(()));
+    tokio::pin!(future);
+
+    finish_connection_after_shutdown(future.as_mut()).await;
+}
+
+#[tokio::test]
+async fn graceful_connection_shutdown_handles_connection_errors() {
+    let future = std::future::ready(Err::<(), _>(std::io::Error::other("boom")));
+    tokio::pin!(future);
+
+    finish_connection_after_shutdown(future.as_mut()).await;
+}
+
+#[tokio::test]
+async fn graceful_connection_shutdown_times_out_pending_connections() {
+    let future = std::future::pending::<std::io::Result<()>>();
+    tokio::pin!(future);
+
+    timeout(
+        Duration::from_secs(1),
+        finish_connection_after_shutdown(future.as_mut()),
+    )
+    .await
+    .expect("pending connections should stop after the graceful shutdown deadline");
+}
+
+#[test]
+fn loopback_tls_acceptor_supports_additional_loopback_addresses() {
+    let address = "127.0.0.2:8443"
+        .parse()
+        .expect("loopback socket addresses should parse");
+
+    build_loopback_tls_acceptor(address).expect("loopback certificates should build");
+}
+
+#[test]
+fn transient_accept_errors_cover_standard_retryable_kinds() {
+    for kind in [
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::WouldBlock,
+    ] {
+        assert!(accept_error_is_transient(&std::io::Error::from(kind)));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn transient_accept_errors_cover_retryable_errno_values() {
+    for errno in [
+        libc::ECONNABORTED,
+        libc::EINTR,
+        libc::EMFILE,
+        libc::ENFILE,
+        libc::ENOBUFS,
+        libc::ENOMEM,
+    ] {
+        assert!(accept_error_is_transient(
+            &std::io::Error::from_raw_os_error(errno)
+        ));
+    }
+}
+
+#[test]
+fn transient_accept_errors_reject_fatal_errors() {
+    assert!(!accept_error_is_transient(&std::io::Error::other("boom")));
 }
 
 #[test]
@@ -668,4 +1119,17 @@ impl ReplyProvider for RollbackFailingStartupHintProvider {
             .expect("cleanup tracking should not poison")
             .push(session_id.to_string());
     }
+}
+
+fn test_router() -> Router {
+    app(test_state())
+}
+
+fn test_state() -> AppState {
+    AppState::with_dependencies(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(StaticReplyProvider {
+            reply: "test reply".to_string(),
+        }),
+    )
 }

@@ -70,20 +70,43 @@ a:hover {
 }
 
 #app-root {
+  min-height: 100vh;
   padding: 0 1rem;
 }
 
 .app-shell {
-  width: min(760px, 100%);
+  width: min(820px, 100%);
   margin: 0 auto;
-  padding: 1.5rem 0 2rem;
+  padding: 1rem 0;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
 }
 
 .app-shell--home {
-  padding-top: min(18vh, 9rem);
+  min-height: 100dvh;
+  justify-content: center;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+.app-shell--session {
+  height: 100dvh;
+  min-height: 100dvh;
+  padding-top: 0.75rem;
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.chat-topbar,
+.chat-dock {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.chat-body {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .shell-nav {
@@ -144,9 +167,25 @@ a:hover {
   list-style: none;
   margin: 0;
   padding: 0;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.transcript-viewport {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 0.25rem;
+}
+
+.transcript-empty {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 1.5rem 0;
 }
 
 .transcript-entry {
@@ -167,6 +206,14 @@ a:hover {
   border-style: dashed;
   background: transparent;
   color: var(--ink-soft);
+}
+
+.transcript-spacer {
+  height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
 }
 
 .pending-list {
@@ -207,7 +254,8 @@ a:hover {
 
 .composer textarea {
   width: 100%;
-  min-height: 124px;
+  min-height: 104px;
+  max-height: min(40vh, 320px);
   resize: vertical;
   padding: 0.9rem 1rem;
   border: 1px solid var(--line);
@@ -222,6 +270,13 @@ a:hover {
 
 .composer__status {
   margin-right: auto;
+}
+
+.composer__actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 button {
@@ -291,12 +346,17 @@ textarea:focus-visible {
   }
 
   .app-shell--home {
-    padding-top: 3rem;
+    justify-content: center;
+  }
+
+  .app-shell--session {
+    padding-top: 0.5rem;
   }
 
   .pending-list__actions,
   .pending-panel__footer,
-  .composer__footer {
+  .composer__footer,
+  .composer__actions {
     flex-direction: column;
     align-items: stretch;
   }

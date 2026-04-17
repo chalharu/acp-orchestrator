@@ -12,16 +12,30 @@ use acp_contracts::{
 use futures_channel::mpsc;
 use futures_util::StreamExt;
 use gloo_net::http::Request;
-use leptos::prelude::{Set, Update};
+use leptos::prelude::{GetUntracked, Set, Update};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::MessageEvent;
 
-use crate::{EntryRole, TranscriptEntry};
+use crate::{
+    EntryRole, TranscriptEntry, TurnState, should_apply_snapshot_turn_state,
+    should_release_turn_state_for_assistant_message, should_release_turn_state_for_status,
+    turn_state_for_snapshot,
+};
 
 pub struct SessionBootstrap {
     pub entries: Vec<TranscriptEntry>,
     pub pending_permissions: Vec<(String, String)>,
     pub session_status: String,
+}
+
+#[derive(Clone, Copy)]
+struct StreamSignals {
+    entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
+    pending_permissions: leptos::prelude::RwSignal<Vec<(String, String)>>,
+    connection_status: leptos::prelude::RwSignal<String>,
+    session_status: leptos::prelude::RwSignal<String>,
+    turn_state: leptos::prelude::RwSignal<TurnState>,
+    error: leptos::prelude::RwSignal<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,8 +72,8 @@ pub fn csrf_token() -> String {
         .unwrap_or_default()
 }
 
-/// Create a new session and immediately post the first prompt.
-pub async fn create_session_and_send(prompt: &str) -> Result<String, String> {
+/// Create a new session.
+pub async fn create_session() -> Result<String, String> {
     let csrf = csrf_token();
     let response = Request::post("/api/v1/sessions")
         .header("x-csrf-token", &csrf)
@@ -73,9 +87,7 @@ pub async fn create_session_and_send(prompt: &str) -> Result<String, String> {
 
     let created: CreateSessionResponse =
         response.json().await.map_err(|error| error.to_string())?;
-    let session_id = created.session.id.clone();
-    send_message(&session_id, prompt).await?;
-    Ok(session_id)
+    Ok(created.session.id)
 }
 
 /// Load the current snapshot for an existing session.
@@ -168,30 +180,32 @@ pub async fn subscribe_sse(
     pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
     connection_status: leptos::prelude::RwSignal<String>,
     session_status: leptos::prelude::RwSignal<String>,
+    turn_state: leptos::prelude::RwSignal<TurnState>,
     error: leptos::prelude::RwSignal<Option<String>>,
 ) {
+    let signals = StreamSignals {
+        entries,
+        pending_permissions: pending_permissions_signal,
+        connection_status,
+        session_status,
+        turn_state,
+        error,
+    };
     let url = format!("/api/v1/sessions/{session_id}/events");
-    let Some(event_source) = open_event_source(&url, error, connection_status) else {
+    let Some(event_source) = open_event_source(&url, signals.error, signals.connection_status)
+    else {
         return;
     };
 
     let (tx, mut rx) = mpsc::unbounded::<StreamMessage>();
-    if !register_stream_listeners(&event_source, &tx, error, connection_status) {
+    if !register_stream_listeners(&event_source, &tx, signals.error, signals.connection_status) {
         return;
     }
     drop(tx);
-    connection_status.set("connected".to_string());
+    signals.connection_status.set("connected".to_string());
 
     while let Some(message) = rx.next().await {
-        if !handle_stream_message(
-            message,
-            &event_source,
-            entries,
-            pending_permissions_signal,
-            connection_status,
-            session_status,
-            error,
-        ) {
+        if !handle_stream_message(message, &event_source, signals) {
             return;
         }
     }
@@ -277,25 +291,13 @@ fn register_stream_error_listener(
 fn handle_stream_message(
     message: StreamMessage,
     event_source: &web_sys::EventSource,
-    entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
-    pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
-    connection_status: leptos::prelude::RwSignal<String>,
-    session_status: leptos::prelude::RwSignal<String>,
-    error: leptos::prelude::RwSignal<Option<String>>,
+    signals: StreamSignals,
 ) -> bool {
     match message {
-        StreamMessage::Data(data) => handle_stream_data(
-            &data,
-            event_source,
-            entries,
-            pending_permissions_signal,
-            connection_status,
-            session_status,
-            error,
-        ),
+        StreamMessage::Data(data) => handle_stream_data(&data, event_source, signals),
         StreamMessage::Error => {
-            connection_status.set("reconnecting".to_string());
-            error.set(Some(
+            signals.connection_status.set("reconnecting".to_string());
+            signals.error.set(Some(
                 "Event stream disconnected; reconnecting...".to_string(),
             ));
             true
@@ -306,25 +308,29 @@ fn handle_stream_message(
 fn handle_stream_data(
     data: &str,
     event_source: &web_sys::EventSource,
-    entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
-    pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
-    connection_status: leptos::prelude::RwSignal<String>,
-    session_status: leptos::prelude::RwSignal<String>,
-    error: leptos::prelude::RwSignal<Option<String>>,
+    signals: StreamSignals,
 ) -> bool {
     let event = match serde_json::from_str::<StreamEvent>(data) {
         Ok(event) => event,
         Err(source) => {
             event_source.close();
-            error.set(Some(format!("Failed to decode stream event: {source}")));
-            connection_status.set("error".to_string());
+            signals
+                .error
+                .set(Some(format!("Failed to decode stream event: {source}")));
+            signals.connection_status.set("error".to_string());
             return false;
         }
     };
 
-    connection_status.set("connected".to_string());
-    error.set(None);
-    handle_sse_event(event, entries, pending_permissions_signal, session_status);
+    signals.connection_status.set("connected".to_string());
+    signals.error.set(None);
+    handle_sse_event(
+        event,
+        signals.entries,
+        signals.pending_permissions,
+        signals.session_status,
+        signals.turn_state,
+    );
     true
 }
 
@@ -333,6 +339,7 @@ fn handle_sse_event(
     entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
     pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
     session_status: leptos::prelude::RwSignal<String>,
+    turn_state: leptos::prelude::RwSignal<TurnState>,
 ) {
     let StreamEvent { sequence, payload } = event;
 
@@ -340,15 +347,28 @@ fn handle_sse_event(
         StreamEventPayload::SessionSnapshot { session } => {
             let bootstrap = session_bootstrap_from_snapshot(session);
             session_status.set(bootstrap.session_status);
+            let current_turn_state = turn_state.get_untracked();
+            if should_apply_snapshot_turn_state(current_turn_state) {
+                turn_state.set(turn_state_for_snapshot(&bootstrap.pending_permissions));
+            }
             pending_permissions_signal.set(bootstrap.pending_permissions);
             entries.set(bootstrap.entries);
         }
         StreamEventPayload::ConversationMessage { message } => {
+            let is_assistant_message = matches!(message.role, MessageRole::Assistant);
+            let mut appended = false;
             entries.update(|current_entries| {
                 if !current_entries.iter().any(|entry| entry.id == message.id) {
+                    appended = true;
                     current_entries.push(message_to_entry(message));
                 }
             });
+            if appended
+                && is_assistant_message
+                && should_release_turn_state_for_assistant_message(turn_state.get_untracked())
+            {
+                turn_state.set(TurnState::Idle);
+            }
         }
         StreamEventPayload::PermissionRequested { request } => {
             pending_permissions_signal.update(|current_permissions| {
@@ -359,12 +379,17 @@ fn handle_sse_event(
                     current_permissions.push((request.request_id, request.summary));
                 }
             });
+            turn_state.set(TurnState::AwaitingPermission);
         }
         StreamEventPayload::SessionClosed { reason, .. } => {
             session_status.set("closed".to_string());
+            turn_state.set(TurnState::Idle);
             push_status_entry(entries, sequence, reason);
         }
         StreamEventPayload::Status { message } => {
+            if should_release_turn_state_for_status(turn_state.get_untracked()) {
+                turn_state.set(TurnState::Idle);
+            }
             push_status_entry(entries, sequence, message);
         }
     }

@@ -620,6 +620,39 @@ async fn ensure_frontend_built_rebuilds_stale_dist() {
 }
 
 #[test]
+fn frontend_bundle_paths_reports_non_directory_dist_errors() {
+    let frontend_root = write_temp_frontend_root("dist-read-error");
+    let dist = frontend_root.join("dist-file");
+    fs::write(&dist, "not a directory").expect("dist file should be writable");
+
+    let error = frontend_bundle_paths(&dist).expect_err("non-directory dist should fail");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message }
+            if message.contains("reading") && message.contains("dist-file")
+    ));
+}
+
+#[test]
+fn latest_frontend_input_modified_reports_missing_frontend_inputs() {
+    let frontend_root =
+        unique_temp_json_path("acp-web-frontend-root", "empty-root").with_extension("");
+    fs::create_dir_all(frontend_root.join("src"))
+        .expect("empty frontend src directory should be creatable");
+
+    let error = latest_frontend_input_modified(&frontend_root)
+        .expect_err("empty frontend roots should fail");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message }
+            if message
+                == format!("no frontend inputs were found under {}", frontend_root.display())
+    ));
+}
+
+#[test]
 fn finish_cli_launch_preserves_cli_errors_when_cleanup_also_fails() {
     let error = finish_cli_launch(
         Err(LauncherError::RunCli {

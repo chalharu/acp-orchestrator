@@ -497,3 +497,24 @@ fn collect_pending_permissions(data: &SessionData) -> Vec<PermissionRequest> {
         .map(|(_, request)| request)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn prepare_delete_sets_closed_at_for_already_closed_sessions() {
+        let handle = SessionHandle::new("s_test".to_string(), "alice".to_string(), Utc::now(), 1);
+        {
+            let mut data = handle.data.lock().await;
+            data.status = SessionStatus::Closed;
+            data.closed_at = None;
+        }
+
+        handle.prepare_delete().await;
+
+        let data = handle.data.lock().await;
+        assert_eq!(data.status, SessionStatus::Closed);
+        assert!(data.closed_at.is_some());
+    }
+}

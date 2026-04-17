@@ -926,8 +926,8 @@ Application read model として、`OwnedSessionListView` と `SessionSnapshotVi
   - session owner、session metadata、ACP sessionId、negotiated protocol/capabilities を保存する
     single writer
   - TTL、recent activity 順序、worker ひも付け、attach 数などの現在値も同じ repository で管理する
-  - current MVP では recent activity は create / prompt accept の成功時に更新し、
-    session snapshot 読み出し、permission resolve、cancel、close、history 読み出し、
+  - current MVP では recent activity は create / prompt accept の成功時に更新する
+  - session snapshot 読み出し、permission resolve、cancel、close、history 読み出し、
     stream delta 受信だけでは更新しない
 - `EventStore`
   - append-only canonical event と transcript snapshot を保持し、history/replay/reconnect の
@@ -1014,7 +1014,9 @@ backend は ACP の raw event をそのまま流しません。`SessionUpdateNor
 `GET /api/v1/sessions` が返すのは system-wide な全件一覧ではなく、認証済み principal が
 owner である session 一覧です。retention window 内にある closed session も current state 付きで
 返し、front-end は attachable / read-only を判別できます。session title metadata と並び順の正本も
-backend が持ちます。current MVP の recent activity は create / prompt accept の成功時だけ更新し、
+backend が持ちます。
+
+current MVP の recent activity は create / prompt accept の成功時だけ更新します。
 session snapshot 読み出し、permission resolve、cancel、close、history 読み出しや stream delta
 では並び替えません。
 

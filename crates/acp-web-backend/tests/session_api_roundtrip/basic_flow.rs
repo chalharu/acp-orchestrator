@@ -1,5 +1,39 @@
 use super::support::*;
 
+async fn assert_invalid_rename_title(title: String, expected_message: &str) -> Result<()> {
+    let stack = TestStack::spawn(ServerConfig {
+        session_cap: 8,
+        acp_server: String::new(),
+        startup_hints: false,
+        frontend_dist: None,
+    })
+    .await?;
+    let session = stack.create_session("alice").await?;
+
+    let response = stack
+        .client
+        .patch(format!(
+            "{}/api/v1/sessions/{}",
+            stack.backend_url, session.session.id
+        ))
+        .bearer_auth("alice")
+        .json(&acp_contracts::RenameSessionRequest { title })
+        .send()
+        .await
+        .context("sending invalid rename request")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        response
+            .text()
+            .await
+            .context("reading invalid rename response")?
+            .contains(expected_message)
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
@@ -299,6 +333,16 @@ async fn session_can_be_renamed_and_title_appears_in_list_and_snapshot() -> Resu
     assert_eq!(list.sessions[0].title, "My renamed session");
 
     Ok(())
+}
+
+#[tokio::test]
+async fn rename_session_rejects_blank_titles() -> Result<()> {
+    assert_invalid_rename_title("   ".to_string(), "title must not be empty").await
+}
+
+#[tokio::test]
+async fn rename_session_rejects_titles_over_500_characters() -> Result<()> {
+    assert_invalid_rename_title("x".repeat(501), "title must not exceed 500 characters").await
 }
 
 #[tokio::test]

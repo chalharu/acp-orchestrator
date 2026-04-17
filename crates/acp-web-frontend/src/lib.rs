@@ -242,6 +242,24 @@ struct SessionMainSignals {
     pending_action_busy: Signal<bool>,
 }
 
+#[derive(Clone, Copy)]
+struct SessionSidebarItemSignals {
+    is_renaming: Signal<bool>,
+    is_deleting: Signal<bool>,
+    is_saving_rename: Signal<bool>,
+    rename_action_disabled: Signal<bool>,
+    delete_action_disabled: Signal<bool>,
+    save_rename_disabled: Signal<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct SessionSidebarItemCallbacks {
+    begin_rename: Callback<()>,
+    cancel_rename: Callback<()>,
+    commit_rename: Callback<()>,
+    delete_session: Callback<()>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SidebarSession {
     id: String,
@@ -255,29 +273,44 @@ struct SidebarSession {
 fn SessionView(session_id: String) -> impl IntoView {
     let signals = session_signals();
     let sidebar_open = RwSignal::new(default_sidebar_open());
-    let current_session_deleting = {
-        let session_id = session_id.clone();
-        Signal::derive(move || {
-            signals.deleting_session_id.get().as_deref() == Some(session_id.as_str())
-        })
-    };
+    let current_session_deleting = current_session_deleting_signal(session_id.clone(), signals);
+    restore_session_draft(&session_id, signals);
+    persist_session_draft(session_id.clone(), signals.draft);
+    spawn_session_bootstrap(session_id.clone(), signals);
 
-    // Load persisted draft before bootstrap so it is in place when the
-    // composer renders for the first time.
-    let stored_draft = load_draft(&session_id);
+    session_view_content(
+        session_id.clone(),
+        signals,
+        session_composer_signals(signals, current_session_deleting),
+        session_view_callbacks(session_id, signals),
+        sidebar_open,
+    )
+}
+
+fn current_session_deleting_signal(session_id: String, signals: SessionSignals) -> Signal<bool> {
+    Signal::derive(move || {
+        signals.deleting_session_id.get().as_deref() == Some(session_id.as_str())
+    })
+}
+
+fn restore_session_draft(session_id: &str, signals: SessionSignals) {
+    let stored_draft = load_draft(session_id);
     if !stored_draft.is_empty() {
         signals.draft.set(stored_draft);
     }
+}
 
-    // Persist draft changes to sessionStorage across navigations.
-    let session_id_for_draft = session_id.clone();
+fn persist_session_draft(session_id: String, draft: RwSignal<String>) {
     Effect::new(move |_| {
-        save_draft(&session_id_for_draft, &signals.draft.get());
+        save_draft(&session_id, &draft.get());
     });
+}
 
-    spawn_session_bootstrap(session_id.clone(), signals);
-
-    let composer = SessionComposerSignals {
+fn session_composer_signals(
+    signals: SessionSignals,
+    current_session_deleting: Signal<bool>,
+) -> SessionComposerSignals {
+    SessionComposerSignals {
         disabled: session_composer_disabled_signal(
             signals.turn_state,
             signals.session_status,
@@ -298,20 +331,20 @@ fn SessionView(session_id: String) -> impl IntoView {
             signals.pending_action_busy,
             current_session_deleting,
         ),
-    };
-    let on_submit = session_submit_callback(session_id.clone(), signals);
-    let (on_approve, on_deny, on_cancel) =
-        session_permission_callbacks(session_id.clone(), signals);
-    let callbacks = SessionViewCallbacks {
-        submit: on_submit,
-        approve: on_approve,
-        deny: on_deny,
-        cancel: on_cancel,
-        rename_session: rename_session_callback(signals),
-        delete_session: delete_session_callback(session_id.clone(), signals),
-    };
+    }
+}
 
-    session_view_content(session_id, signals, composer, callbacks, sidebar_open)
+fn session_view_callbacks(session_id: String, signals: SessionSignals) -> SessionViewCallbacks {
+    let (approve, deny, cancel) = session_permission_callbacks(session_id.clone(), signals);
+
+    SessionViewCallbacks {
+        submit: session_submit_callback(session_id.clone(), signals),
+        approve,
+        deny,
+        cancel,
+        rename_session: rename_session_callback(signals),
+        delete_session: delete_session_callback(session_id, signals),
+    }
 }
 
 fn session_signals() -> SessionSignals {
@@ -343,37 +376,9 @@ fn session_view_content(
     callbacks: SessionViewCallbacks,
     sidebar_open: RwSignal<bool>,
 ) -> impl IntoView {
-    let entries = signals.entries;
-    let pending_permissions = signals.pending_permissions;
-    let pending_action_busy = signals.pending_action_busy;
-    let action_error = signals.action_error;
-    let connection_error = signals.connection_error;
-    let session_list = signals.session_list;
-    let session_list_loaded = signals.session_list_loaded;
-    let session_list_error = signals.session_list_error;
-    let deleting_session_id = signals.deleting_session_id;
-    let combined_error = Signal::derive(move || action_error.get().or(connection_error.get()));
-    let delete_disabled = Signal::derive(move || {
-        session_action_busy(signals.turn_state.get(), pending_action_busy.get(), false)
-    });
     let draft = signals.draft;
-    let shell_signals = SessionShellSignals {
-        sessions: Signal::derive(move || session_list.get()),
-        session_list_loaded: Signal::derive(move || session_list_loaded.get()),
-        session_list_error: Signal::derive(move || session_list_error.get()),
-        deleting_session_id: Signal::derive(move || deleting_session_id.get()),
-        delete_disabled,
-        renaming_session_id: signals.renaming_session_id,
-        saving_rename_session_id: Signal::derive(move || signals.saving_rename_session_id.get()),
-        rename_draft: signals.rename_draft,
-    };
-    let main_signals = SessionMainSignals {
-        session_status: Signal::derive(move || signals.session_status.get()),
-        topbar_message: combined_error,
-        entries: Signal::derive(move || entries.get()),
-        pending_permissions: Signal::derive(move || pending_permissions.get()),
-        pending_action_busy: Signal::derive(move || pending_action_busy.get()),
-    };
+    let shell_signals = session_shell_signals(signals);
+    let main_signals = session_main_signals(signals);
 
     view! {
         <main class="app-shell app-shell--session">
@@ -387,6 +392,43 @@ fn session_view_content(
                 draft=draft
             />
         </main>
+    }
+}
+
+fn session_shell_signals(signals: SessionSignals) -> SessionShellSignals {
+    let session_list = signals.session_list;
+    let session_list_loaded = signals.session_list_loaded;
+    let session_list_error = signals.session_list_error;
+    let deleting_session_id = signals.deleting_session_id;
+    let pending_action_busy = signals.pending_action_busy;
+
+    SessionShellSignals {
+        sessions: Signal::derive(move || session_list.get()),
+        session_list_loaded: Signal::derive(move || session_list_loaded.get()),
+        session_list_error: Signal::derive(move || session_list_error.get()),
+        deleting_session_id: Signal::derive(move || deleting_session_id.get()),
+        delete_disabled: Signal::derive(move || {
+            session_action_busy(signals.turn_state.get(), pending_action_busy.get(), false)
+        }),
+        renaming_session_id: signals.renaming_session_id,
+        saving_rename_session_id: Signal::derive(move || signals.saving_rename_session_id.get()),
+        rename_draft: signals.rename_draft,
+    }
+}
+
+fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
+    let entries = signals.entries;
+    let pending_permissions = signals.pending_permissions;
+    let pending_action_busy = signals.pending_action_busy;
+    let action_error = signals.action_error;
+    let connection_error = signals.connection_error;
+
+    SessionMainSignals {
+        session_status: Signal::derive(move || signals.session_status.get()),
+        topbar_message: Signal::derive(move || action_error.get().or(connection_error.get())),
+        entries: Signal::derive(move || entries.get()),
+        pending_permissions: Signal::derive(move || pending_permissions.get()),
+        pending_action_busy: Signal::derive(move || pending_action_busy.get()),
     }
 }
 
@@ -616,56 +658,29 @@ fn SessionSidebarNav(
                     view! { <p class="session-sidebar__empty muted">"Loading sessions..."</p> }
                 }
             >
-                <SessionSidebarListOrEmpty
-                    session_items=session_items
-                    session_list_error=session_list_error
-                    deleting_session_id=deleting_session_id
-                    delete_disabled=delete_disabled
-                    renaming_session_id=renaming_session_id
-                    saving_rename_session_id=saving_rename_session_id
-                    rename_draft=rename_draft
-                    on_rename_session=on_rename_session
-                    on_delete_session=on_delete_session
-                />
+                <Show
+                    when=move || !session_items.get().is_empty()
+                    fallback=move || {
+                        view! {
+                            <p class="session-sidebar__empty muted">
+                                {move || session_sidebar_empty_message(session_list_error.get().is_some())}
+                            </p>
+                        }
+                    }
+                >
+                    <SessionSidebarList
+                        session_items=session_items
+                        deleting_session_id=deleting_session_id
+                        delete_disabled=delete_disabled
+                        renaming_session_id=renaming_session_id
+                        saving_rename_session_id=saving_rename_session_id
+                        rename_draft=rename_draft
+                        on_rename_session=on_rename_session
+                        on_delete_session=on_delete_session
+                    />
+                </Show>
             </Show>
         </nav>
-    }
-}
-
-#[component]
-fn SessionSidebarListOrEmpty(
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
-    view! {
-        <Show
-            when=move || !session_items.get().is_empty()
-            fallback=move || {
-                view! {
-                    <p class="session-sidebar__empty muted">
-                        {move || session_sidebar_empty_message(session_list_error.get().is_some())}
-                    </p>
-                }
-            }
-        >
-            <SessionSidebarList
-                session_items=session_items
-                deleting_session_id=deleting_session_id
-                delete_disabled=delete_disabled
-                renaming_session_id=renaming_session_id
-                saving_rename_session_id=saving_rename_session_id
-                rename_draft=rename_draft
-                on_rename_session=on_rename_session
-                on_delete_session=on_delete_session
-            />
-        </Show>
     }
 }
 
@@ -711,54 +726,69 @@ fn SessionSidebarList(
     }
 }
 
-#[component]
-fn SessionSidebarItem(
-    item: SidebarSession,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
+fn session_sidebar_item_signals(
+    session_id: String,
+    is_current: bool,
+    deleting_session_id: Signal<Option<String>>,
+    delete_disabled: Signal<bool>,
     renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
     rename_draft: RwSignal<String>,
+) -> SessionSidebarItemSignals {
+    let renaming_session_id_value = session_id.clone();
+    let deleting_session_id_value = session_id.clone();
+    let saving_session_id_value = session_id;
+    let is_renaming = Signal::derive(move || {
+        renaming_session_id.get().as_deref() == Some(renaming_session_id_value.as_str())
+    });
+    let is_deleting = Signal::derive(move || {
+        deleting_session_id.get().as_deref() == Some(deleting_session_id_value.as_str())
+    });
+    let is_saving_rename = Signal::derive(move || {
+        saving_rename_session_id.get().as_deref() == Some(saving_session_id_value.as_str())
+    });
+    let rename_action_disabled =
+        Signal::derive(move || is_deleting.get() || saving_rename_session_id.get().is_some());
+    let delete_action_disabled = Signal::derive(move || {
+        is_deleting.get()
+            || deleting_session_id.get().is_some()
+            || saving_rename_session_id.get().is_some()
+            || (is_current && delete_disabled.get())
+    });
+    let save_rename_disabled =
+        Signal::derive(move || is_saving_rename.get() || rename_draft.get().trim().is_empty());
+
+    SessionSidebarItemSignals {
+        is_renaming,
+        is_deleting,
+        is_saving_rename,
+        rename_action_disabled,
+        delete_action_disabled,
+        save_rename_disabled,
+    }
+}
+
+fn session_sidebar_item_callbacks(
+    session_id: String,
+    title_for_rename_init: String,
+    rename_draft: RwSignal<String>,
+    renaming_session_id: RwSignal<Option<String>>,
+    is_saving_rename: Signal<bool>,
     on_rename_session: Callback<(String, String)>,
     on_delete_session: Callback<String>,
-) -> impl IntoView {
-    let session_id = item.id.clone();
-    let is_current = item.is_current;
-    let is_closed = item.is_closed;
-    let href = item.href.clone();
-    let title = item.title.clone();
-    let title_for_rename_init = item.title.clone();
-
-    let is_renaming = {
+) -> SessionSidebarItemCallbacks {
+    let begin_rename = {
         let session_id = session_id.clone();
-        Signal::derive(move || renaming_session_id.get().as_deref() == Some(session_id.as_str()))
-    };
-    let is_deleting = {
-        let session_id = session_id.clone();
-        Signal::derive(move || deleting_session_id.get().as_deref() == Some(session_id.as_str()))
-    };
-    let is_saving_rename = {
-        let session_id = session_id.clone();
-        Signal::derive(move || {
-            saving_rename_session_id.get().as_deref() == Some(session_id.as_str())
-        })
-    };
-
-    // Use Callback wrappers so the closures are Copy + callable multiple times
-    // (the fallback view of <Show> is an Fn, so all captured closures must be Fn too).
-    let on_begin_rename: Callback<web_sys::MouseEvent> = {
-        let session_id = session_id.clone();
-        Callback::new(move |_| {
+        Callback::new(move |()| {
             rename_draft.set(title_for_rename_init.clone());
             renaming_session_id.set(Some(session_id.clone()));
         })
     };
-    let on_cancel_rename: Callback<web_sys::MouseEvent> = Callback::new(move |_| {
+    let cancel_rename = Callback::new(move |()| {
         rename_draft.set(String::new());
         renaming_session_id.set(None);
     });
-
-    let on_commit_rename: Callback<()> = {
+    let commit_rename = {
         let session_id = session_id.clone();
         Callback::new(move |()| {
             if is_saving_rename.get_untracked() {
@@ -772,110 +802,188 @@ fn SessionSidebarItem(
             }
         })
     };
-    let on_delete: Callback<web_sys::MouseEvent> = {
-        let session_id = session_id.clone();
-        Callback::new(move |_| on_delete_session.run(session_id.clone()))
-    };
+    let delete_session = Callback::new(move |()| on_delete_session.run(session_id.clone()));
+
+    SessionSidebarItemCallbacks {
+        begin_rename,
+        cancel_rename,
+        commit_rename,
+        delete_session,
+    }
+}
+
+#[component]
+fn SessionSidebarItem(
+    item: SidebarSession,
+    #[prop(into)] deleting_session_id: Signal<Option<String>>,
+    #[prop(into)] delete_disabled: Signal<bool>,
+    renaming_session_id: RwSignal<Option<String>>,
+    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
+    rename_draft: RwSignal<String>,
+    on_rename_session: Callback<(String, String)>,
+    on_delete_session: Callback<String>,
+) -> impl IntoView {
+    let is_current = item.is_current;
+    let is_closed = item.is_closed;
+    let href = item.href.clone();
+    let title = item.title.clone();
+    let item_signals = session_sidebar_item_signals(
+        item.id.clone(),
+        is_current,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+    );
+    let callbacks = session_sidebar_item_callbacks(
+        item.id,
+        item.title,
+        rename_draft,
+        renaming_session_id,
+        item_signals.is_saving_rename,
+        on_rename_session,
+        on_delete_session,
+    );
 
     view! {
         <li class=move || session_sidebar_item_class(is_current, is_closed)>
             <Show
-                when=move || is_renaming.get()
+                when=move || item_signals.is_renaming.get()
                 fallback={
                     let href = href.clone();
                     let title = title.clone();
                     move || {
                         view! {
-                            <a
-                                class="session-sidebar__session-link"
+                            <SessionSidebarItemDisplay
                                 href=href.clone()
-                                aria-current=if is_current { Some("page") } else { None }
-                            >
-                                <span class="session-sidebar__session-title">{title.clone()}</span>
-                            </a>
-                            <button
-                                type="button"
-                                class="session-sidebar__action-btn"
-                                title="Rename"
-                                on:click=move |ev| on_begin_rename.run(ev)
-                                prop:disabled=move || {
-                                    is_deleting.get() || saving_rename_session_id.get().is_some()
-                                }
-                            >
-                                <span aria-hidden="true">{"✎"}</span>
-                                <span class="sr-only">"Rename session"</span>
-                            </button>
-                            <button
-                                type="button"
-                                class="session-sidebar__action-btn session-sidebar__action-btn--danger"
-                                title="Delete"
-                                on:click=move |ev| on_delete.run(ev)
-                                prop:disabled=move || {
-                                    is_deleting.get()
-                                        || deleting_session_id.get().is_some()
-                                        || saving_rename_session_id.get().is_some()
-                                        || (is_current && delete_disabled.get())
-                                }
-                            >
-                                <Show
-                                    when=move || is_deleting.get()
-                                    fallback=|| view! { <span aria-hidden="true">{"✕"}</span> }
-                                >
-                                    <span aria-hidden="true">{"…"}</span>
-                                </Show>
-                                <span class="sr-only">
-                                    {move || if is_deleting.get() { "Deleting…" } else { "Delete session" }}
-                                </span>
-                            </button>
+                                title=title.clone()
+                                is_current=is_current
+                                is_deleting=item_signals.is_deleting
+                                rename_action_disabled=item_signals.rename_action_disabled
+                                delete_action_disabled=item_signals.delete_action_disabled
+                                on_begin_rename=callbacks.begin_rename
+                                on_delete=callbacks.delete_session
+                            />
                         }
                     }
                 }
             >
-                <input
-                    class="session-sidebar__rename-input"
-                    type="text"
-                    autofocus=true
-                    maxlength="500"
-                    prop:value=move || rename_draft.get()
-                    prop:disabled=move || is_saving_rename.get()
-                    on:input=move |ev| {
-                        rename_draft.set(event_target_value(&ev));
-                    }
-                    on:keydown=move |ev: web_sys::KeyboardEvent| {
-                        match ev.key().as_str() {
-                            "Enter" => { ev.prevent_default(); on_commit_rename.run(()); }
-                            "Escape" => { ev.prevent_default(); renaming_session_id.set(None); }
-                            _ => {}
-                        }
-                    }
+                <SessionSidebarRenameForm
+                    rename_draft=rename_draft
+                    is_saving_rename=item_signals.is_saving_rename
+                    save_disabled=item_signals.save_rename_disabled
+                    on_commit_rename=callbacks.commit_rename
+                    on_cancel_rename=callbacks.cancel_rename
                 />
-                <button
-                    type="button"
-                    class="session-sidebar__action-btn"
-                    on:click=move |_| on_commit_rename.run(())
-                    prop:disabled=move || {
-                        is_saving_rename.get() || rename_draft.get().trim().is_empty()
-                    }
-                >
-                    <Show
-                        when=move || is_saving_rename.get()
-                        fallback=|| view! { <span aria-hidden="true">{"✓"}</span> }
-                    >
-                        <span aria-hidden="true">{"…"}</span>
-                    </Show>
-                    <span class="sr-only">"Save title"</span>
-                </button>
-                <button
-                    type="button"
-                    class="session-sidebar__action-btn"
-                    on:click=move |ev| on_cancel_rename.run(ev)
-                    prop:disabled=move || is_saving_rename.get()
-                >
-                    <span aria-hidden="true">{"✕"}</span>
-                    <span class="sr-only">"Cancel rename"</span>
-                </button>
             </Show>
         </li>
+    }
+}
+
+#[component]
+fn SessionSidebarItemDisplay(
+    href: String,
+    title: String,
+    is_current: bool,
+    #[prop(into)] is_deleting: Signal<bool>,
+    #[prop(into)] rename_action_disabled: Signal<bool>,
+    #[prop(into)] delete_action_disabled: Signal<bool>,
+    on_begin_rename: Callback<()>,
+    on_delete: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <a
+            class="session-sidebar__session-link"
+            href=href
+            aria-current=if is_current { Some("page") } else { None }
+        >
+            <span class="session-sidebar__session-title">{title}</span>
+        </a>
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            title="Rename"
+            on:click=move |_| on_begin_rename.run(())
+            prop:disabled=move || rename_action_disabled.get()
+        >
+            <span aria-hidden="true">{"✎"}</span>
+            <span class="sr-only">"Rename session"</span>
+        </button>
+        <button
+            type="button"
+            class="session-sidebar__action-btn session-sidebar__action-btn--danger"
+            title="Delete"
+            on:click=move |_| on_delete.run(())
+            prop:disabled=move || delete_action_disabled.get()
+        >
+            <Show
+                when=move || is_deleting.get()
+                fallback=|| view! { <span aria-hidden="true">{"✕"}</span> }
+            >
+                <span aria-hidden="true">{"…"}</span>
+            </Show>
+            <span class="sr-only">
+                {move || if is_deleting.get() { "Deleting…" } else { "Delete session" }}
+            </span>
+        </button>
+    }
+}
+
+#[component]
+fn SessionSidebarRenameForm(
+    rename_draft: RwSignal<String>,
+    #[prop(into)] is_saving_rename: Signal<bool>,
+    #[prop(into)] save_disabled: Signal<bool>,
+    on_commit_rename: Callback<()>,
+    on_cancel_rename: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <input
+            class="session-sidebar__rename-input"
+            type="text"
+            autofocus=true
+            maxlength="500"
+            prop:value=move || rename_draft.get()
+            prop:disabled=move || is_saving_rename.get()
+            on:input=move |ev| {
+                rename_draft.set(event_target_value(&ev));
+            }
+            on:keydown=move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
+                "Enter" => {
+                    ev.prevent_default();
+                    on_commit_rename.run(());
+                }
+                "Escape" => {
+                    ev.prevent_default();
+                    on_cancel_rename.run(());
+                }
+                _ => {}
+            }
+        />
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            on:click=move |_| on_commit_rename.run(())
+            prop:disabled=move || save_disabled.get()
+        >
+            <Show
+                when=move || is_saving_rename.get()
+                fallback=|| view! { <span aria-hidden="true">{"✓"}</span> }
+            >
+                <span aria-hidden="true">{"…"}</span>
+            </Show>
+            <span class="sr-only">"Save title"</span>
+        </button>
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            on:click=move |_| on_cancel_rename.run(())
+            prop:disabled=move || is_saving_rename.get()
+        >
+            <span aria-hidden="true">{"✕"}</span>
+            <span class="sr-only">"Cancel rename"</span>
+        </button>
     }
 }
 
@@ -1217,24 +1325,13 @@ fn delete_session_callback(
     signals: SessionSignals,
 ) -> Callback<String> {
     Callback::new(move |session_id: String| {
-        let current_session_id = current_session_id.clone();
-        let is_deleting_current = session_id == current_session_id;
-
-        if signals.deleting_session_id.get_untracked().is_some() {
-            return;
-        }
-        if is_deleting_current
-            && session_action_busy(
-                signals.turn_state.get_untracked(),
-                signals.pending_action_busy.get_untracked(),
-                false,
-            )
-        {
+        if delete_session_is_blocked(&session_id, &current_session_id, signals) {
             return;
         }
 
         signals.deleting_session_id.set(Some(session_id.clone()));
         signals.session_list_error.set(None);
+        let is_deleting_current = session_id == current_session_id;
 
         leptos::task::spawn_local(async move {
             match api::delete_session(&session_id).await {
@@ -1244,36 +1341,57 @@ fn delete_session_callback(
                         .session_list
                         .update(|list| remove_session_from_list(list, &session_id));
                     if is_deleting_current {
-                        // Navigate away: pick the next available session or home.
-                        let next_dest = signals
-                            .session_list
-                            .get_untracked()
-                            .into_iter()
-                            .next()
-                            .map(|s| format!("/app/sessions/{}", s.id))
-                            .unwrap_or_else(|| "/app/".to_string());
-                        if let Err(message) = navigate_to(&next_dest) {
-                            stop_live_stream(signals);
-                            signals.pending_permissions.set(Vec::new());
-                            signals.turn_state.set(TurnState::Idle);
-                            signals.session_status.set(SessionLifecycle::Unavailable);
-                            signals.session_list_error.set(Some(message));
-                            signals.deleting_session_id.set(None);
-                        } else {
-                            stop_live_stream(signals);
-                        }
+                        finish_current_session_delete(signals);
                     } else {
-                        refresh_session_list(signals).await;
-                        signals.deleting_session_id.set(None);
+                        finish_other_session_delete(signals).await;
                     }
                 }
-                Err(message) => {
-                    signals.session_list_error.set(Some(message));
-                    signals.deleting_session_id.set(None);
-                }
+                Err(message) => handle_delete_session_error(message, signals),
             }
         });
     })
+}
+
+fn delete_session_is_blocked(
+    session_id: &str,
+    current_session_id: &str,
+    signals: SessionSignals,
+) -> bool {
+    signals.deleting_session_id.get_untracked().is_some()
+        || (session_id == current_session_id
+            && session_action_busy(
+                signals.turn_state.get_untracked(),
+                signals.pending_action_busy.get_untracked(),
+                false,
+            ))
+}
+
+fn finish_current_session_delete(signals: SessionSignals) {
+    let next_dest = next_session_destination(&signals.session_list.get_untracked());
+
+    match navigate_to(&next_dest) {
+        Ok(()) => stop_live_stream(signals),
+        Err(message) => handle_current_session_delete_navigation_error(message, signals),
+    }
+}
+
+async fn finish_other_session_delete(signals: SessionSignals) {
+    refresh_session_list(signals).await;
+    signals.deleting_session_id.set(None);
+}
+
+fn handle_current_session_delete_navigation_error(message: String, signals: SessionSignals) {
+    stop_live_stream(signals);
+    signals.pending_permissions.set(Vec::new());
+    signals.turn_state.set(TurnState::Idle);
+    signals.session_status.set(SessionLifecycle::Unavailable);
+    signals.session_list_error.set(Some(message));
+    signals.deleting_session_id.set(None);
+}
+
+fn handle_delete_session_error(message: String, signals: SessionSignals) {
+    signals.session_list_error.set(Some(message));
+    signals.deleting_session_id.set(None);
 }
 
 fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
@@ -1688,6 +1806,13 @@ fn remove_session_from_list(sessions: &mut Vec<SessionListItem>, session_id: &st
     sessions.retain(|session| session.id != session_id);
 }
 
+fn next_session_destination(sessions: &[SessionListItem]) -> String {
+    sessions
+        .first()
+        .map(|session| format!("/app/sessions/{}", session.id))
+        .unwrap_or_else(|| "/app/".to_string())
+}
+
 fn rename_session_in_list(sessions: &mut [SessionListItem], session_id: &str, title: String) {
     if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
         session.title = title;
@@ -1782,13 +1907,46 @@ pub(crate) fn turn_state_for_snapshot(pending_permissions: &[PendingPermission])
 mod tests {
     use super::{
         EntryRole, PendingPermission, SessionLifecycle, SidebarSession, TurnState,
-        mark_session_closed, remove_session_from_list, rename_session_in_list, session_action_busy,
-        session_bootstrap_from_snapshot, session_composer_cancel_visible,
-        session_composer_disabled, session_composer_status_message, should_release_turn_state,
-        sidebar_sessions, turn_state_for_snapshot,
+        mark_session_closed, next_session_destination, remove_session_from_list,
+        rename_session_in_list, session_action_busy, session_bootstrap_from_snapshot,
+        session_composer_cancel_visible, session_composer_disabled,
+        session_composer_status_message, should_release_turn_state, sidebar_sessions,
+        turn_state_for_snapshot,
     };
-    use acp_contracts::{SessionListItem, SessionResponse, SessionStatus};
+    use acp_contracts::{
+        ConversationMessage, MessageRole, PermissionRequest, SessionListItem, SessionResponse,
+        SessionSnapshot, SessionStatus,
+    };
     use chrono::{TimeZone, Utc};
+
+    fn sample_session_bootstrap_response() -> SessionResponse {
+        SessionResponse {
+            session: SessionSnapshot {
+                id: "s_123".to_string(),
+                title: "My test session".to_string(),
+                status: SessionStatus::Closed,
+                latest_sequence: 8,
+                messages: vec![
+                    ConversationMessage {
+                        id: "m_user".to_string(),
+                        role: MessageRole::User,
+                        text: "hello".to_string(),
+                        created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+                    },
+                    ConversationMessage {
+                        id: "m_assistant".to_string(),
+                        role: MessageRole::Assistant,
+                        text: "world".to_string(),
+                        created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 1).unwrap(),
+                    },
+                ],
+                pending_permissions: vec![PermissionRequest {
+                    request_id: "req_1".to_string(),
+                    summary: "read README.md".to_string(),
+                }],
+            },
+        }
+    }
 
     #[test]
     fn session_composer_is_disabled_while_a_reply_is_pending() {
@@ -1880,39 +2038,8 @@ mod tests {
 
     #[test]
     fn session_bootstrap_from_snapshot_maps_messages_and_permissions() {
-        let body = serde_json::json!({
-            "session": {
-                "id": "s_123",
-                "title": "My test session",
-                "status": "closed",
-                "latest_sequence": 8,
-                "messages": [
-                    {
-                        "id": "m_user",
-                        "role": "user",
-                        "text": "hello",
-                        "created_at": "2026-04-17T01:00:00Z"
-                    },
-                    {
-                        "id": "m_assistant",
-                        "role": "assistant",
-                        "text": "world",
-                        "created_at": "2026-04-17T01:00:01Z"
-                    }
-                ],
-                "pending_permissions": [{
-                    "request_id": "req_1",
-                    "summary": "read README.md"
-                }]
-            }
-        })
-        .to_string();
-
-        let bootstrap = session_bootstrap_from_snapshot(
-            serde_json::from_str::<SessionResponse>(&body)
-                .expect("wrapped session payload should decode")
-                .session,
-        );
+        let bootstrap =
+            session_bootstrap_from_snapshot(sample_session_bootstrap_response().session);
 
         assert_eq!(bootstrap.session_status, SessionLifecycle::Closed);
         assert_eq!(bootstrap.entries.len(), 3);
@@ -2038,6 +2165,19 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "s_keep");
+    }
+
+    #[test]
+    fn next_session_destination_uses_first_session_or_home() {
+        let sessions = vec![SessionListItem {
+            id: "s_keep".to_string(),
+            title: "Keep me".to_string(),
+            status: SessionStatus::Active,
+            last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 2).unwrap(),
+        }];
+
+        assert_eq!(next_session_destination(&sessions), "/app/sessions/s_keep");
+        assert_eq!(next_session_destination(&[]), "/app/");
     }
 
     #[test]

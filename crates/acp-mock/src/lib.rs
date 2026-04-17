@@ -205,7 +205,7 @@ impl MockAgent {
 
 fn startup_hint_message() -> String {
     format!(
-        "bundled mock verification ready.\nenter `{MANUAL_PERMISSION_TRIGGER}` to trigger a permission request, then answer with `/approve <request-id>` or `/deny <request-id>`.\nenter `{MANUAL_CANCEL_TRIGGER}` to start a delayed reply, then run `/cancel` before the assistant reply arrives.\nuse Up/Down to recall composer history, PageUp/PageDown to review older transcript lines, and End to follow the live tail.\nexit with `/quit`, then use `cargo run -- session list` and `cargo run -- chat --session <id>` to resume this bundled session."
+        "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
     )
 }
 

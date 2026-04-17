@@ -38,11 +38,11 @@ pub(crate) fn reply_for(prompt: &str) -> String {
 }
 
 pub(super) fn prompt_requires_permission(prompt: &str) -> bool {
-    prompt.to_ascii_lowercase().contains("permission")
+    normalized_prompt(prompt) == MANUAL_PERMISSION_TRIGGER
 }
 
 pub(crate) fn response_delay_for(prompt: &str, default_delay: Duration) -> Duration {
-    if prompt.to_ascii_lowercase().contains(MANUAL_CANCEL_TRIGGER) {
+    if normalized_prompt(prompt) == MANUAL_CANCEL_TRIGGER {
         MANUAL_CANCEL_RESPONSE_DELAY
     } else {
         default_delay
@@ -73,4 +73,12 @@ fn truncate(value: &str, max_len: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn normalized_prompt(prompt: &str) -> String {
+    prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }

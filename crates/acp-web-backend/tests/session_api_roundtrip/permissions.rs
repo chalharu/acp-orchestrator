@@ -1,5 +1,6 @@
 use super::support::*;
 use acp_contracts::ResolvePermissionRequest;
+use acp_mock::MANUAL_PERMISSION_TRIGGER;
 use std::time::Duration;
 
 struct PendingPermissionFlow {
@@ -55,7 +56,7 @@ async fn permission_requests_can_be_denied_without_recording_an_assistant_reply(
         .session_history("alice", &flow.session_id)
         .await?;
     assert_eq!(history.messages.len(), 1);
-    assert_eq!(history.messages[0].text, "permission please");
+    assert_eq!(history.messages[0].text, MANUAL_PERMISSION_TRIGGER);
 
     Ok(())
 }
@@ -131,7 +132,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
 
     assert_snapshot(expect_next_event(&mut events).await?);
     stack
-        .submit_prompt("alice", &session_id, "permission please")
+        .submit_prompt("alice", &session_id, MANUAL_PERMISSION_TRIGGER)
         .await?;
     assert_user_message(expect_next_event(&mut events).await?);
 

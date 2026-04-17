@@ -126,7 +126,7 @@ const CHAT_SCRIPT: [(&[u8], u64); 8] = [
     (b"\n/help\nhello from cli binary\n", 600),
     (b"verify permission\n", 300),
     (b"/approve req_1\n", 300),
-    (b"verify permission again\n", 300),
+    (b"verify permission\n", 300),
     (b"/deny req_2\n", 300),
     (b"verify cancel\n", 300),
     (b"/cancel\n", 300),

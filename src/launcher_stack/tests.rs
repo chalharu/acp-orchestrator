@@ -342,6 +342,25 @@ async fn reusable_launcher_state_rejects_frontend_dist_mismatches() {
     );
 }
 
+#[tokio::test]
+async fn reusable_launcher_state_rejects_startup_hint_mismatches() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "startup-hints");
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = bind_mock_listener().await;
+    let mut state = test_launcher_state(&backend_url, Some(&listener_address(&mock_listener)));
+    state.startup_hints = false;
+    write_launcher_state_fixture(&state_path, state);
+
+    assert_eq!(
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
+            .await
+            .expect("startup hint mismatches should be ignored"),
+        None
+    );
+
+    health_task.abort();
+}
+
 #[test]
 fn backend_role_args_include_frontend_dist_when_requested() {
     let frontend_dist = Path::new("/tmp/acp-frontend-dist");
@@ -357,10 +376,24 @@ fn backend_role_args_include_frontend_dist_when_requested() {
 }
 
 #[test]
+fn backend_role_args_include_startup_hints_when_enabled() {
+    let args = backend_role_args(OsString::from("127.0.0.1:8090"), true, None);
+
+    assert!(args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
 fn backend_role_args_omit_startup_hints_when_disabled() {
     let args = backend_role_args(OsString::from("127.0.0.1:8090"), false, None);
 
     assert!(!args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
+fn mock_role_args_include_startup_hints_when_enabled() {
+    let args = mock_role_args(true);
+
+    assert!(args.iter().any(|arg| arg == "--startup-hints"));
 }
 
 #[test]
@@ -371,19 +404,27 @@ fn mock_role_args_omit_startup_hints_when_disabled() {
 }
 
 #[test]
-fn launcher_state_supports_frontend_requires_matching_dist_paths() {
+fn launcher_state_supports_requested_stack_requires_matching_dist_paths() {
     let frontend_dist = Path::new("/tmp/acp-frontend-dist");
     let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
     state.frontend_dist = Some(path_to_string(frontend_dist));
 
-    assert!(launcher_state_supports_frontend(
+    assert!(launcher_state_supports_requested_stack(
         &state,
         Some(frontend_dist)
     ));
-    assert!(!launcher_state_supports_frontend(
+    assert!(!launcher_state_supports_requested_stack(
         &state,
         Some(Path::new("/tmp/other-frontend-dist")),
     ));
+}
+
+#[test]
+fn launcher_state_supports_requested_stack_requires_startup_hints() {
+    let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
+    state.startup_hints = false;
+
+    assert!(!launcher_state_supports_requested_stack(&state, None));
 }
 
 #[test]
@@ -688,6 +729,7 @@ fn test_launcher_state_with_identity(
         backend_url: backend_url.to_string(),
         mock_address: mock_address.map(str::to_string),
         frontend_dist: None,
+        startup_hints: BUNDLED_STARTUP_HINTS,
         auth_token: "launcher-auth-token".to_string(),
         launcher_identity,
     }

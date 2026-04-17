@@ -35,6 +35,7 @@ const STACK_READY_TIMEOUT: Duration = Duration::from_millis(250);
 const STACK_LOCK_WAIT_ATTEMPTS: usize = 600;
 const STACK_LOCK_WAIT_DELAY: Duration = Duration::from_millis(125);
 const STACK_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+const BUNDLED_STARTUP_HINTS: bool = true;
 
 #[derive(Debug)]
 pub(crate) struct LauncherStack {
@@ -56,6 +57,8 @@ struct LauncherState {
     mock_address: Option<String>,
     #[serde(default)]
     frontend_dist: Option<String>,
+    #[serde(default)]
+    startup_hints: bool,
     auth_token: String,
     launcher_identity: LauncherIdentity,
 }
@@ -351,7 +354,7 @@ async fn reusable_launcher_state(
     if state.launcher_identity != *launcher_identity {
         return Ok(None);
     }
-    if !launcher_state_supports_frontend(&state, frontend_dist) {
+    if !launcher_state_supports_requested_stack(&state, frontend_dist) {
         return Ok(None);
     }
     let is_healthy = managed_stack_is_healthy(&state).await;
@@ -500,7 +503,7 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "acp mock",
         "mock",
-        mock_role_args(false),
+        mock_role_args(BUNDLED_STARTUP_HINTS),
         &[],
         false,
     )
@@ -510,7 +513,11 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(OsString::from(&mock_address), false, frontend_dist),
+        backend_role_args(
+            OsString::from(&mock_address),
+            BUNDLED_STARTUP_HINTS,
+            frontend_dist,
+        ),
         &[],
         false,
     )
@@ -526,6 +533,7 @@ async fn spawn_persistent_bundled_backend(
                 backend_url: endpoint,
                 mock_address: Some(mock_address),
                 frontend_dist: frontend_dist.map(path_to_string),
+                startup_hints: BUNDLED_STARTUP_HINTS,
                 auth_token,
                 launcher_identity: launcher_identity.clone(),
             },
@@ -588,14 +596,16 @@ async fn reusable_persistent_stack(
         .map(|state| state.map(persistent_stack_from_state))
 }
 
-fn launcher_state_supports_frontend(
+fn launcher_state_supports_requested_stack(
     state: &LauncherState,
     requested_frontend_dist: Option<&Path>,
 ) -> bool {
-    match requested_frontend_dist.map(path_to_string) {
+    let frontend_matches = match requested_frontend_dist.map(path_to_string) {
         Some(requested) => state.frontend_dist.as_deref() == Some(requested.as_str()),
         None => true,
-    }
+    };
+
+    frontend_matches && state.startup_hints == BUNDLED_STARTUP_HINTS
 }
 
 fn path_to_string(path: &Path) -> String {

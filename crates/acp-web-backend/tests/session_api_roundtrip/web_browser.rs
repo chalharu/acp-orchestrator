@@ -1,5 +1,6 @@
 use super::support::*;
 use acp_contracts::CreateSessionResponse;
+use acp_mock::MANUAL_PERMISSION_TRIGGER;
 
 #[tokio::test]
 async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Result<()> {
@@ -134,10 +135,10 @@ async fn submit_permission_prompt_and_wait(
         backend_url,
         session_id,
         csrf_token,
-        "permission please",
+        MANUAL_PERMISSION_TRIGGER,
     )
     .await?;
-    assert_user_message(expect_next_event(events).await?, "permission please");
+    assert_user_message(expect_next_event(events).await?, MANUAL_PERMISSION_TRIGGER);
     next_permission_request(events).await
 }
 

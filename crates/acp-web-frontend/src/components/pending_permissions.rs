@@ -17,15 +17,6 @@ pub fn PendingPermissions(
     view! {
         <Show when=move || !items.get().is_empty()>
             <section class="panel pending-panel" aria-live="polite">
-                <div class="section-heading section-heading--compact">
-                    <div>
-                        <p class="eyebrow">"Attention"</p>
-                        <h2>"Pending permissions"</h2>
-                    </div>
-                    <p class="section-heading__meta">
-                        "Resolve the request to continue this turn, or cancel it."
-                    </p>
-                </div>
                 <ul class="pending-list">
                     <For
                         each=move || items.get()
@@ -59,20 +50,20 @@ fn PendingPermissionItem(
 ) -> impl IntoView {
     view! {
         <li class="pending-list__item">
-            <p class="pending-list__request-id">{request_id.clone()}</p>
+            <p class="pending-list__label">"Permission required"</p>
             <p class="pending-list__summary">{summary}</p>
             <div class="pending-list__actions">
                 <PendingPermissionActionButton
                     request_id=request_id.clone()
                     label="Approve"
-                    button_class=None
+                    button_class="pending-list__button--primary"
                     busy=busy
                     on_click=on_approve
                 />
                 <PendingPermissionActionButton
                     request_id=request_id
                     label="Deny"
-                    button_class=Some("pending-list__button--secondary")
+                    button_class="pending-list__button--secondary"
                     busy=busy
                     on_click=on_deny
                 />
@@ -85,14 +76,14 @@ fn PendingPermissionItem(
 fn PendingPermissionActionButton(
     request_id: String,
     label: &'static str,
-    button_class: Option<&'static str>,
+    button_class: &'static str,
     #[prop(into)] busy: Signal<bool>,
     on_click: Callback<String>,
 ) -> impl IntoView {
     view! {
         <button
             type="button"
-            class=button_class.unwrap_or_default()
+            class=button_class
             on:click=move |_| on_click.run(request_id.clone())
             prop:disabled=move || busy.get()
         >
@@ -114,7 +105,7 @@ fn PendingPermissionFooter(
                 on:click=move |_| on_cancel.run(())
                 prop:disabled=move || busy.get()
             >
-                "Cancel turn"
+                "Cancel"
             </button>
         </div>
     }

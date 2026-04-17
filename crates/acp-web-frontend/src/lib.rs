@@ -15,7 +15,7 @@ use acp_contracts::PermissionDecision;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use components::{Composer, ErrorBanner, Header, PendingPermissions, Transcript};
+use components::{Composer, ErrorBanner, PendingPermissions, Transcript};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -52,15 +52,10 @@ fn App() -> impl IntoView {
             AppRoute::NotFound => {
                 view! {
                     <main class="app-shell">
-                        <Header
-                            backend_origin=window_origin()
-                            connection_status=Signal::derive(|| "ready".to_string())
-                            session_status=Signal::derive(|| "unknown".to_string())
-                            route_summary="This route is not available in the current web shell."
-                                .to_string()
-                        />
-                        <p class="top-link"><a href="/app/">"Start a new chat"</a></p>
-                        <section class="panel">
+                        <nav class="shell-nav">
+                            <a href="/app/">"New chat"</a>
+                        </nav>
+                        <section class="panel empty-state">
                             <p class="muted">"Page not found."</p>
                         </section>
                     </main>
@@ -75,7 +70,7 @@ fn App() -> impl IntoView {
 // Home page  –  /app/
 // ---------------------------------------------------------------------------
 
-/// Landing page. Shows an empty transcript and a composer.
+/// Landing page. Shows only the composer.
 /// On first prompt submit it creates a new session then navigates to
 /// `/app/sessions/{id}`.
 #[component]
@@ -105,19 +100,11 @@ fn HomePage() -> impl IntoView {
     };
 
     view! {
-        <main class="app-shell">
-            <Header
-                backend_origin=window_origin()
-                connection_status=Signal::derive(|| "ready".to_string())
-                session_status=Signal::derive(|| "new".to_string())
-                route_summary="Send the first prompt here to create a session and move into the conversation view."
-            />
-            <p class="top-link"><a href="/app/">"Start a new chat"</a></p>
+        <main class="app-shell app-shell--home">
             <ErrorBanner message=error />
-            <Transcript entries=Signal::derive(Vec::new) />
             <Composer
                 busy=Signal::derive(move || busy.get())
-                status_text=Signal::derive(|| "Ready for your first prompt.".to_string())
+                status_text=Signal::derive(String::new)
                 draft=draft
                 on_submit=Callback::new(on_submit)
             />
@@ -222,13 +209,7 @@ fn SessionView(session_id: String) -> impl IntoView {
         cancel: on_cancel,
     };
 
-    session_view_content(
-        session_id,
-        signals,
-        composer_busy,
-        composer_status,
-        callbacks,
-    )
+    session_view_content(signals, composer_busy, composer_status, callbacks)
 }
 
 fn session_signals() -> SessionSignals {
@@ -245,7 +226,6 @@ fn session_signals() -> SessionSignals {
 }
 
 fn session_view_content(
-    session_id: String,
     signals: SessionSignals,
     composer_busy: Signal<bool>,
     composer_status: Signal<String>,
@@ -255,8 +235,6 @@ fn session_view_content(
     let pending_permissions = signals.pending_permissions;
     let pending_action_busy = signals.pending_action_busy;
     let error = signals.error;
-    let connection_status = signals.connection_status;
-    let session_status = signals.session_status;
     let draft = signals.draft;
     let SessionViewCallbacks {
         submit: on_submit,
@@ -267,13 +245,9 @@ fn session_view_content(
 
     view! {
         <main class="app-shell">
-            <Header
-                backend_origin=window_origin()
-                connection_status=Signal::derive(move || connection_status.get())
-                session_status=Signal::derive(move || session_status.get())
-                route_summary=format!("You are viewing session {session_id}.")
-            />
-            <p class="top-link"><a href="/app/">"Start a new chat"</a></p>
+            <nav class="shell-nav">
+                <a href="/app/">"New chat"</a>
+            </nav>
             <ErrorBanner message=error />
             <Transcript entries=Signal::derive(move || entries.get()) />
             <PendingPermissions
@@ -455,12 +429,6 @@ fn session_composer_status_signal(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn window_origin() -> String {
-    web_sys::window()
-        .and_then(|w| w.location().origin().ok())
-        .unwrap_or_default()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppRoute {
     Home,
@@ -509,15 +477,14 @@ fn session_composer_status_message(
     if busy {
         "Sending...".to_string()
     } else if has_pending_permissions {
-        "Resolve or cancel the pending permission request before sending another prompt."
-            .to_string()
+        "Resolve the request below before sending another message.".to_string()
     } else {
         match session_status {
-            "active" => "Session active.".to_string(),
-            "closed" => "Session closed.".to_string(),
-            "loading" => "Loading session...".to_string(),
+            "active" => String::new(),
+            "closed" => "This session is closed.".to_string(),
+            "loading" => "Connecting...".to_string(),
             "unavailable" | "error" => "Session unavailable. Start a fresh chat.".to_string(),
-            status => format!("Session {status}"),
+            status => format!("Session {status}."),
         }
     }
 }
@@ -535,7 +502,12 @@ mod tests {
     fn session_composer_prompts_for_permission_resolution_before_new_messages() {
         assert_eq!(
             session_composer_status_message(false, "active", true),
-            "Resolve or cancel the pending permission request before sending another prompt."
+            "Resolve the request below before sending another message."
         );
+    }
+
+    #[test]
+    fn active_session_hides_idle_status_copy() {
+        assert_eq!(session_composer_status_message(false, "active", false), "");
     }
 }

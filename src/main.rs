@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
+use acp_app_support::{
+    BoxError, FrontendBundleAsset, build_http_client_for_url, frontend_bundle_exists, init_tracing,
+    wait_for_http_success,
+};
 use snafu::prelude::*;
 
 mod launcher_process;
@@ -265,8 +268,8 @@ fn frontend_dist_path() -> PathBuf {
 /// Runs `trunk build --release` in the frontend crate directory when the
 /// compiled artefacts are absent.
 async fn ensure_frontend_built(dist: &Path) -> Result<()> {
-    if frontend_bundle_exists(dist, is_frontend_javascript_asset)
-        && frontend_bundle_exists(dist, is_frontend_wasm_asset)
+    if frontend_bundle_exists(dist, FrontendBundleAsset::JavaScript)
+        && frontend_bundle_exists(dist, FrontendBundleAsset::Wasm)
     {
         return Ok(());
     }
@@ -300,22 +303,6 @@ async fn ensure_frontend_built(dist: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn frontend_bundle_exists(dist: &Path, predicate: fn(&str) -> bool) -> bool {
-    std::fs::read_dir(dist)
-        .ok()
-        .into_iter()
-        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
-        .any(|entry| entry.file_name().to_str().is_some_and(predicate))
-}
-
-fn is_frontend_javascript_asset(file_name: &str) -> bool {
-    file_name.starts_with("acp-web-frontend") && file_name.ends_with(".js")
-}
-
-fn is_frontend_wasm_asset(file_name: &str) -> bool {
-    file_name.starts_with("acp-web-frontend") && file_name.ends_with("_bg.wasm")
 }
 
 async fn run_web_launcher(stack: &mut launcher_stack::LauncherStack) -> Result<()> {

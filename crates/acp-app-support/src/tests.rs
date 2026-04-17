@@ -29,6 +29,51 @@ fn unique_temp_json_path_uses_the_expected_shape() {
     assert!(file_name.ends_with(".json"));
 }
 
+#[test]
+fn frontend_bundle_helpers_match_expected_names() {
+    let javascript = frontend_bundle_file_name("test", FrontendBundleAsset::JavaScript);
+    let wasm = frontend_bundle_file_name("test", FrontendBundleAsset::Wasm);
+
+    assert_eq!(javascript, "acp-web-frontend-test.js");
+    assert_eq!(wasm, "acp-web-frontend-test_bg.wasm");
+    assert!(is_frontend_bundle_asset(
+        &javascript,
+        FrontendBundleAsset::JavaScript
+    ));
+    assert!(is_frontend_bundle_asset(&wasm, FrontendBundleAsset::Wasm));
+}
+
+#[test]
+fn frontend_bundle_helpers_find_matching_files() {
+    let dist = unique_temp_json_path("acp-frontend-dist", "support").with_extension("");
+    std::fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+    let javascript = dist.join(frontend_bundle_file_name(
+        "abc",
+        FrontendBundleAsset::JavaScript,
+    ));
+    let wasm = dist.join(frontend_bundle_file_name("abc", FrontendBundleAsset::Wasm));
+    std::fs::write(&javascript, b"// js").expect("javascript bundle should write");
+    std::fs::write(&wasm, b"\x00asm\x01\x00\x00\x00").expect("wasm bundle should write");
+
+    assert!(frontend_bundle_exists(
+        &dist,
+        FrontendBundleAsset::JavaScript
+    ));
+    assert!(frontend_bundle_exists(&dist, FrontendBundleAsset::Wasm));
+    assert_eq!(
+        find_frontend_bundle_asset(&dist, FrontendBundleAsset::JavaScript)
+            .expect("javascript bundle should be discoverable"),
+        javascript
+    );
+    assert_eq!(
+        find_frontend_bundle_asset(&dist, FrontendBundleAsset::Wasm)
+            .expect("wasm bundle should be discoverable"),
+        wasm
+    );
+
+    std::fs::remove_dir_all(&dist).expect("temp dist directory should be removable");
+}
+
 #[tokio::test]
 async fn shutdown_signal_resolves_when_a_deadline_is_set() {
     timeout(Duration::from_millis(100), shutdown_signal(Some(5)))

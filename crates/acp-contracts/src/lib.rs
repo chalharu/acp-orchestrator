@@ -46,9 +46,11 @@ pub struct SessionListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreateSessionResponse {
+pub struct SessionResponse {
     pub session: SessionSnapshot,
 }
+
+pub type CreateSessionResponse = SessionResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptRequest {

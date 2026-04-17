@@ -21,6 +21,67 @@ async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Re
     Ok(())
 }
 
+#[tokio::test]
+async fn browser_cookie_bootstrap_can_resolve_pending_permissions() -> Result<()> {
+    let stack = spawn_browser_test_stack().await?;
+    let browser = build_browser_client()?;
+    let (csrf_token, session_id, mut events) =
+        bootstrap_browser_session(&browser, &stack.backend_url).await?;
+
+    submit_browser_prompt(
+        &browser,
+        &stack.backend_url,
+        &session_id,
+        &csrf_token,
+        "permission please",
+    )
+    .await?;
+    assert_user_message(expect_next_event(&mut events).await?, "permission please");
+
+    let request = next_permission_request(&mut events).await?;
+    let resolution = resolve_browser_permission(
+        &browser,
+        &stack.backend_url,
+        &session_id,
+        &request.request_id,
+        &csrf_token,
+        PermissionDecision::Approve,
+    )
+    .await?;
+
+    assert_eq!(resolution.request_id, request.request_id);
+    assert_snapshot_without_pending_permissions(expect_next_event(&mut events).await?);
+    assert_assistant_message(expect_next_event(&mut events).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn browser_cookie_bootstrap_can_cancel_pending_permission_turns() -> Result<()> {
+    let stack = spawn_browser_test_stack().await?;
+    let browser = build_browser_client()?;
+    let (csrf_token, session_id, mut events) =
+        bootstrap_browser_session(&browser, &stack.backend_url).await?;
+
+    submit_browser_prompt(
+        &browser,
+        &stack.backend_url,
+        &session_id,
+        &csrf_token,
+        "permission please",
+    )
+    .await?;
+    assert_user_message(expect_next_event(&mut events).await?, "permission please");
+    let _ = next_permission_request(&mut events).await?;
+
+    let cancelled =
+        cancel_browser_turn(&browser, &stack.backend_url, &session_id, &csrf_token).await?;
+    assert!(cancelled.cancelled);
+
+    assert_snapshot_without_pending_permissions(expect_next_event(&mut events).await?);
+    assert_cancelled_status(expect_next_event(&mut events).await?);
+    Ok(())
+}
+
 async fn spawn_browser_test_stack() -> Result<TestStack> {
     TestStack::spawn(ServerConfig {
         session_cap: 8,
@@ -93,4 +154,27 @@ fn assert_assistant_message(event: StreamEvent) {
         }
         payload => panic!("expected assistant message event, got {payload:?}"),
     }
+}
+
+async fn next_permission_request(
+    events: &mut SseStream,
+) -> Result<acp_contracts::PermissionRequest> {
+    match expect_next_event(events).await?.payload {
+        StreamEventPayload::PermissionRequested { request } => Ok(request),
+        payload => panic!("expected permission request event, got {payload:?}"),
+    }
+}
+
+fn assert_snapshot_without_pending_permissions(event: StreamEvent) {
+    assert!(matches!(
+        event.payload,
+        StreamEventPayload::SessionSnapshot { session } if session.pending_permissions.is_empty()
+    ));
+}
+
+fn assert_cancelled_status(event: StreamEvent) {
+    assert!(matches!(
+        event.payload,
+        StreamEventPayload::Status { message } if message == "turn cancelled"
+    ));
 }

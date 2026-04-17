@@ -5,8 +5,9 @@
 //! SSE events.
 
 use acp_contracts::{
-    ConversationMessage, CreateSessionResponse, MessageRole, PermissionRequest, PromptRequest,
-    SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    CancelTurnResponse, ConversationMessage, CreateSessionResponse, ErrorResponse, MessageRole,
+    PermissionDecision, PermissionRequest, PromptRequest, ResolvePermissionRequest,
+    SessionResponse, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
 };
 use futures_channel::mpsc;
 use futures_util::StreamExt;
@@ -21,6 +22,12 @@ pub struct SessionBootstrap {
     pub entries: Vec<TranscriptEntry>,
     pub pending_permissions: Vec<(String, String)>,
     pub session_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLoadError {
+    ResumeUnavailable(String),
+    Other(String),
 }
 
 enum StreamMessage {
@@ -61,7 +68,7 @@ pub async fn create_session_and_send(prompt: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())?;
 
     if !response.ok() {
-        return Err(format!("Create session failed: HTTP {}", response.status()));
+        return Err(response_error_message(response, "Create session failed").await);
     }
 
     let created: CreateSessionResponse =
@@ -72,30 +79,23 @@ pub async fn create_session_and_send(prompt: &str) -> Result<String, String> {
 }
 
 /// Load the current snapshot for an existing session.
-pub async fn load_session(session_id: &str) -> Result<SessionBootstrap, String> {
+pub async fn load_session(session_id: &str) -> Result<SessionBootstrap, SessionLoadError> {
     let url = format!("/api/v1/sessions/{session_id}");
     let response = Request::get(&url)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| SessionLoadError::Other(error.to_string()))?;
 
     if !response.ok() {
-        return Err(format!("Load session failed: HTTP {}", response.status()));
+        return Err(classify_session_load_failure(response).await);
     }
 
-    let session: SessionSnapshot = response.json().await.map_err(|error| error.to_string())?;
-    let SessionSnapshot {
-        status,
-        messages,
-        pending_permissions,
-        ..
-    } = session;
+    let session: SessionResponse = response
+        .json()
+        .await
+        .map_err(|error| SessionLoadError::Other(error.to_string()))?;
 
-    Ok(SessionBootstrap {
-        entries: messages.into_iter().map(message_to_entry).collect(),
-        pending_permissions: pending_permissions_to_items(pending_permissions),
-        session_status: session_status_label(status).to_string(),
-    })
+    Ok(session_bootstrap_from_snapshot(session.session))
 }
 
 /// POST a new message to an existing session.
@@ -117,9 +117,51 @@ pub async fn send_message(session_id: &str, text: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     if !response.ok() {
-        return Err(format!("Send message failed: HTTP {}", response.status()));
+        return Err(response_error_message(response, "Send message failed").await);
     }
     Ok(())
+}
+
+pub async fn resolve_permission(
+    session_id: &str,
+    request_id: &str,
+    decision: PermissionDecision,
+) -> Result<(), String> {
+    let csrf = csrf_token();
+    let url = format!("/api/v1/sessions/{session_id}/permissions/{request_id}");
+    let body = serde_json::to_string(&ResolvePermissionRequest { decision })
+        .map_err(|error| error.to_string())?;
+
+    let response = Request::post(&url)
+        .header("x-csrf-token", &csrf)
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Resolve permission failed").await);
+    }
+
+    Ok(())
+}
+
+pub async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String> {
+    let csrf = csrf_token();
+    let url = format!("/api/v1/sessions/{session_id}/cancel");
+    let response = Request::post(&url)
+        .header("x-csrf-token", &csrf)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Cancel turn failed").await);
+    }
+
+    response.json().await.map_err(|error| error.to_string())
 }
 
 /// Open the session event stream and keep driving the supplied signals until
@@ -300,15 +342,10 @@ fn handle_sse_event(
 
     match payload {
         StreamEventPayload::SessionSnapshot { session } => {
-            let SessionSnapshot {
-                status,
-                messages,
-                pending_permissions,
-                ..
-            } = session;
-            session_status.set(session_status_label(status).to_string());
-            pending_permissions_signal.set(pending_permissions_to_items(pending_permissions));
-            entries.set(messages.into_iter().map(message_to_entry).collect());
+            let bootstrap = session_bootstrap_from_snapshot(session);
+            session_status.set(bootstrap.session_status);
+            pending_permissions_signal.set(bootstrap.pending_permissions);
+            entries.set(bootstrap.entries);
         }
         StreamEventPayload::ConversationMessage { message } => {
             entries.update(|current_entries| {
@@ -335,6 +372,65 @@ fn handle_sse_event(
             push_status_entry(entries, sequence, message);
         }
     }
+}
+
+fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> SessionBootstrap {
+    let SessionSnapshot {
+        status,
+        messages,
+        pending_permissions,
+        ..
+    } = session;
+
+    SessionBootstrap {
+        entries: messages.into_iter().map(message_to_entry).collect(),
+        pending_permissions: pending_permissions_to_items(pending_permissions),
+        session_status: session_status_label(status).to_string(),
+    }
+}
+
+async fn classify_session_load_failure(response: gloo_net::http::Response) -> SessionLoadError {
+    let status = response.status();
+    let backend_message = read_backend_error_message(response).await;
+    match status {
+        401 | 403 | 404 => SessionLoadError::ResumeUnavailable(session_unavailable_message(
+            status,
+            backend_message,
+        )),
+        _ => SessionLoadError::Other(format_api_failure(
+            "Load session failed",
+            status,
+            backend_message,
+        )),
+    }
+}
+
+async fn response_error_message(response: gloo_net::http::Response, action: &str) -> String {
+    let status = response.status();
+    let backend_message = read_backend_error_message(response).await;
+    format_api_failure(action, status, backend_message)
+}
+
+async fn read_backend_error_message(response: gloo_net::http::Response) -> Option<String> {
+    let body = response.text().await.ok()?;
+    decode_backend_error_message(&body)
+}
+
+fn decode_backend_error_message(body: &str) -> Option<String> {
+    serde_json::from_str::<ErrorResponse>(body)
+        .ok()
+        .map(|response| response.error)
+}
+
+fn format_api_failure(action: &str, status: u16, backend_message: Option<String>) -> String {
+    backend_message
+        .map(|message| format!("{action}: {message}"))
+        .unwrap_or_else(|| format!("{action}: HTTP {status}"))
+}
+
+fn session_unavailable_message(status: u16, backend_message: Option<String>) -> String {
+    let detail = backend_message.unwrap_or_else(|| format!("HTTP {status}"));
+    format!("This session is unavailable ({detail}). Start a fresh chat.")
 }
 
 fn pending_permissions_to_items(
@@ -388,5 +484,78 @@ fn session_status_label(status: SessionStatus) -> &'static str {
     match status {
         SessionStatus::Active => "active",
         SessionStatus::Closed => "closed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_backend_error_message_reads_error_response() {
+        let body = serde_json::json!({
+            "error": "session not found"
+        })
+        .to_string();
+
+        assert_eq!(
+            decode_backend_error_message(&body),
+            Some("session not found".to_string())
+        );
+    }
+
+    #[test]
+    fn session_unavailable_message_includes_backend_details() {
+        assert_eq!(
+            session_unavailable_message(404, Some("session not found".to_string())),
+            "This session is unavailable (session not found). Start a fresh chat."
+        );
+    }
+
+    #[test]
+    fn session_bootstrap_from_snapshot_maps_messages_and_permissions() {
+        let body = serde_json::json!({
+            "session": {
+                "id": "s_123",
+                "status": "closed",
+                "latest_sequence": 8,
+                "messages": [
+                    {
+                        "id": "m_user",
+                        "role": "user",
+                        "text": "hello",
+                        "created_at": "2026-04-17T01:00:00Z"
+                    },
+                    {
+                        "id": "m_assistant",
+                        "role": "assistant",
+                        "text": "world",
+                        "created_at": "2026-04-17T01:00:01Z"
+                    }
+                ],
+                "pending_permissions": [{
+                    "request_id": "req_1",
+                    "summary": "read README.md"
+                }]
+            }
+        })
+        .to_string();
+
+        let bootstrap = session_bootstrap_from_snapshot(
+            serde_json::from_str::<SessionResponse>(&body)
+                .expect("wrapped session payload should decode")
+                .session,
+        );
+
+        assert_eq!(bootstrap.session_status, "closed");
+        assert_eq!(bootstrap.entries.len(), 2);
+        assert_eq!(bootstrap.entries[0].id, "m_user");
+        assert!(matches!(bootstrap.entries[0].role, EntryRole::User));
+        assert_eq!(bootstrap.entries[1].id, "m_assistant");
+        assert!(matches!(bootstrap.entries[1].role, EntryRole::Assistant));
+        assert_eq!(
+            bootstrap.pending_permissions,
+            vec![("req_1".to_string(), "read README.md".to_string())]
+        );
     }
 }

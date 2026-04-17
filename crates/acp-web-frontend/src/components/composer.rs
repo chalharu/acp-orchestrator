@@ -6,17 +6,15 @@ use leptos::prelude::*;
 pub fn Composer(
     #[prop(into)] busy: Signal<bool>,
     #[prop(into)] status_text: Signal<String>,
+    draft: RwSignal<String>,
     on_submit: Callback<String>,
 ) -> impl IntoView {
-    let input_value = RwSignal::new(String::new());
-
     let handle_submit = move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
-        let text = input_value.get_untracked().trim().to_string();
+        let text = draft.get_untracked().trim().to_string();
         if text.is_empty() || busy.get_untracked() {
             return;
         }
-        input_value.set(String::new());
         on_submit.run(text);
     };
 
@@ -32,10 +30,10 @@ pub fn Composer(
                 name="prompt"
                 rows="4"
                 placeholder="Ask ACP something…"
-                prop:value=move || input_value.get()
+                prop:value=move || draft.get()
                 on:input=move |ev| {
                     let target = event_target::<web_sys::HtmlTextAreaElement>(&ev);
-                    input_value.set(target.value());
+                    draft.set(target.value());
                 }
                 prop:disabled=move || busy.get()
             />

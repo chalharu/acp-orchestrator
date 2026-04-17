@@ -11,7 +11,8 @@ use std::{
 };
 
 use acp_app_support::{
-    build_http_client_for_url, wait_for_health, wait_for_http_success, wait_for_tcp_connect,
+    FRONTEND_JAVASCRIPT_ASSET_PATH, build_http_client_for_url, wait_for_health,
+    wait_for_http_success, wait_for_tcp_connect,
 };
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -508,7 +509,7 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "acp mock",
         "mock",
-        mock_role_args(true),
+        mock_role_args(false),
         &[],
         false,
     )
@@ -518,7 +519,7 @@ async fn spawn_persistent_bundled_backend(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(OsString::from(&mock_address), true, frontend_dist),
+        backend_role_args(OsString::from(&mock_address), false, frontend_dist),
         &[],
         false,
     )
@@ -689,8 +690,9 @@ async fn managed_stack_is_healthy(state: &LauncherState) -> bool {
         .is_ok();
         let frontend_ready = if state.frontend_dist.is_some() {
             let frontend_asset_url = format!(
-                "{}/app/assets/acp-web-frontend.js",
-                state.backend_url.trim_end_matches('/')
+                "{}{}",
+                state.backend_url.trim_end_matches('/'),
+                FRONTEND_JAVASCRIPT_ASSET_PATH
             );
             wait_for_http_success(
                 &client,

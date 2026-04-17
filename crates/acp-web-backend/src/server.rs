@@ -10,11 +10,16 @@ use std::{
     time::Duration,
 };
 
+use acp_app_support::{
+    FRONTEND_JAVASCRIPT_ASSET_PATH, FRONTEND_WASM_ASSET_PATH, FrontendBundleAsset,
+    LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH, LEGACY_FRONTEND_WASM_ASSET_PATH,
+    find_frontend_bundle_asset,
+};
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
     PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
-    SessionHistoryResponse, SessionListResponse, SessionSnapshot, SlashCompletionsResponse,
-    StreamEvent,
+    SessionHistoryResponse, SessionListResponse, SessionResponse, SessionSnapshot,
+    SlashCompletionsResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -121,10 +126,13 @@ pub fn app(state: AppState) -> Router {
         .route("/app/", get(app_entrypoint))
         .route("/app/assets/app.css", get(app_stylesheet))
         .route("/app/assets/wasm-init.js", get(wasm_init_script))
-        .route("/app/assets/acp-web-frontend.js", get(wasm_glue_javascript))
-        .route("/app/assets/acp-web-frontend_bg.wasm", get(wasm_binary))
-        .route("/app/assets/acp_web_frontend.js", get(wasm_glue_javascript))
-        .route("/app/assets/acp_web_frontend_bg.wasm", get(wasm_binary))
+        .route(FRONTEND_JAVASCRIPT_ASSET_PATH, get(wasm_glue_javascript))
+        .route(FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
+        .route(
+            LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH,
+            get(wasm_glue_javascript),
+        )
+        .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route("/api/v1/sessions/{session_id}", get(get_session))
@@ -409,14 +417,7 @@ async fn wasm_binary(State(state): State<AppState>) -> Response {
 
     match tokio::fs::read(&asset_path).await {
         Ok(bytes) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/wasm"));
-            headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            headers.insert(
-                "x-content-type-options",
-                HeaderValue::from_static("nosniff"),
-            );
-            headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+            let headers = asset_response_headers("application/wasm");
             (headers, bytes).into_response()
         }
         Err(err) => {
@@ -427,39 +428,11 @@ async fn wasm_binary(State(state): State<AppState>) -> Response {
 }
 
 fn frontend_javascript_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
-    frontend_asset_path(
-        dist,
-        is_frontend_javascript_asset,
-        "frontend javascript bundle",
-    )
+    find_frontend_bundle_asset(dist, FrontendBundleAsset::JavaScript)
 }
 
 fn frontend_wasm_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
-    frontend_asset_path(dist, is_frontend_wasm_asset, "frontend wasm bundle")
-}
-
-fn frontend_asset_path(
-    dist: &FsPath,
-    predicate: fn(&str) -> bool,
-    asset_kind: &'static str,
-) -> io::Result<PathBuf> {
-    std::fs::read_dir(dist)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(predicate)
-        })
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("missing {asset_kind}")))
-}
-
-fn is_frontend_javascript_asset(file_name: &str) -> bool {
-    file_name.starts_with("acp-web-frontend") && file_name.ends_with(".js")
-}
-
-fn is_frontend_wasm_asset(file_name: &str) -> bool {
-    file_name.starts_with("acp-web-frontend") && file_name.ends_with("_bg.wasm")
+    find_frontend_bundle_asset(dist, FrontendBundleAsset::Wasm)
 }
 
 fn frontend_unavailable_response(detail: &'static str) -> Response {
@@ -488,19 +461,16 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
 }
 
 fn app_static_text_response(content_type: &'static str, body: &'static str) -> Response {
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response_headers.insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-
+    let response_headers = asset_response_headers(content_type);
     (response_headers, body).into_response()
 }
 
 fn app_dynamic_text_response(content_type: &'static str, body: String) -> Response {
+    let response_headers = asset_response_headers(content_type);
+    (response_headers, body).into_response()
+}
+
+fn asset_response_headers(content_type: &'static str) -> HeaderMap {
     let mut response_headers = HeaderMap::new();
     response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -509,8 +479,7 @@ fn app_dynamic_text_response(content_type: &'static str, body: String) -> Respon
         HeaderValue::from_static("nosniff"),
     );
     response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-
-    (response_headers, body).into_response()
+    response_headers
 }
 
 fn app_shell_cookie(headers: &HeaderMap, name: &str) -> (Option<String>, String) {
@@ -746,11 +715,11 @@ async fn get_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<CreateSessionResponse>, AppError> {
+) -> Result<Json<SessionResponse>, AppError> {
     let principal = authorize_request(&headers, false)?;
     let session = state.store.open_session(&principal.id, &session_id).await?;
 
-    Ok(Json(CreateSessionResponse { session }))
+    Ok(Json(SessionResponse { session }))
 }
 
 async fn get_session_history(

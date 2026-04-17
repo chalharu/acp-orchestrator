@@ -171,11 +171,33 @@ code {
 
 .pending-list {
   margin: 0.75rem 0 0;
-  padding-left: 1.25rem;
+  padding-left: 0;
+  list-style: none;
 }
 
 .pending-list li + li {
   margin-top: 0.45rem;
+}
+
+.pending-list__item {
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+  background: rgba(15, 23, 42, 0.56);
+}
+
+.pending-list__summary {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pending-list__actions,
+.pending-panel__footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
 }
 
 .composer label {
@@ -215,7 +237,9 @@ code {
   margin: 0;
 }
 
-.composer button {
+.composer button,
+.pending-list__actions button,
+.pending-panel__footer button {
   padding: 0.72rem 1.1rem;
   border: 0;
   border-radius: 999px;
@@ -223,6 +247,12 @@ code {
   font-weight: 700;
   color: #08111f;
   background: linear-gradient(135deg, #60a5fa, #22c55e);
+}
+
+.pending-list__button--secondary {
+  color: #ebf1ff;
+  background: rgba(30, 41, 59, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.32);
 }
 
 @media (max-width: 720px) {

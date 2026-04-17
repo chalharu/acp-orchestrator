@@ -89,6 +89,49 @@ pub(super) async fn submit_browser_prompt(
     Ok(())
 }
 
+pub(super) async fn resolve_browser_permission(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+    request_id: &str,
+    csrf_token: &str,
+    decision: PermissionDecision,
+) -> Result<ResolvePermissionResponse> {
+    client
+        .post(format!(
+            "{backend_url}/api/v1/sessions/{session_id}/permissions/{request_id}"
+        ))
+        .header("x-csrf-token", csrf_token)
+        .json(&ResolvePermissionRequest { decision })
+        .send()
+        .await
+        .context("resolving a browser-authenticated permission")?
+        .error_for_status()
+        .context("browser-authenticated permission resolution returned an error")?
+        .json()
+        .await
+        .context("decoding the browser-authenticated permission resolution")
+}
+
+pub(super) async fn cancel_browser_turn(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+    csrf_token: &str,
+) -> Result<CancelTurnResponse> {
+    client
+        .post(format!("{backend_url}/api/v1/sessions/{session_id}/cancel"))
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .context("cancelling a browser-authenticated turn")?
+        .error_for_status()
+        .context("browser-authenticated turn cancellation returned an error")?
+        .json()
+        .await
+        .context("decoding the browser-authenticated cancel response")
+}
+
 pub(super) async fn open_cookie_events(
     client: &Client,
     backend_url: &str,

@@ -1,5 +1,5 @@
 use super::*;
-use acp_app_support::unique_temp_json_path;
+use acp_app_support::{FrontendBundleAsset, frontend_bundle_file_name, unique_temp_json_path};
 use std::{
     ffi::OsString,
     fs,
@@ -878,8 +878,14 @@ async fn spawn_sleep_child() -> tokio::process::Child {
 
 fn write_stub_frontend_bundle_assets(dist: &Path) -> Vec<PathBuf> {
     let tag = uuid::Uuid::new_v4();
-    let javascript = dist.join(format!("acp-web-frontend-{tag}.js"));
-    let wasm = dist.join(format!("acp-web-frontend-{tag}_bg.wasm"));
+    let javascript = dist.join(frontend_bundle_file_name(
+        &tag.to_string(),
+        FrontendBundleAsset::JavaScript,
+    ));
+    let wasm = dist.join(frontend_bundle_file_name(
+        &tag.to_string(),
+        FrontendBundleAsset::Wasm,
+    ));
     fs::write(&javascript, "export default async function init() {}\n")
         .expect("stub javascript bundle should write");
     fs::write(&wasm, b"\x00asm\x01\x00\x00\x00").expect("stub wasm bundle should write");

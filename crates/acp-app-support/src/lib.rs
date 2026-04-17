@@ -3,7 +3,7 @@ use std::{
     future::{Future, pending},
     io,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,6 +21,34 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 pub type BoxError = Box<dyn StdError + Send + Sync>;
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub type SupportResult<T, E> = std::result::Result<T, E>;
+
+pub const FRONTEND_BUNDLE_PREFIX: &str = "acp-web-frontend";
+pub const FRONTEND_JAVASCRIPT_ASSET_PATH: &str = "/app/assets/acp-web-frontend.js";
+pub const FRONTEND_WASM_ASSET_PATH: &str = "/app/assets/acp-web-frontend_bg.wasm";
+pub const LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH: &str = "/app/assets/acp_web_frontend.js";
+pub const LEGACY_FRONTEND_WASM_ASSET_PATH: &str = "/app/assets/acp_web_frontend_bg.wasm";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontendBundleAsset {
+    JavaScript,
+    Wasm,
+}
+
+impl FrontendBundleAsset {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::JavaScript => ".js",
+            Self::Wasm => "_bg.wasm",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::JavaScript => "frontend javascript bundle",
+            Self::Wasm => "frontend wasm bundle",
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ServiceReadinessError<E> {
@@ -239,6 +267,44 @@ pub fn unique_temp_json_path(prefix: &str, label: &str) -> PathBuf {
         .expect("system time should be after the epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{prefix}-{label}-{nanos}.json"))
+}
+
+pub fn frontend_bundle_file_name(tag: &str, asset: FrontendBundleAsset) -> String {
+    format!("{FRONTEND_BUNDLE_PREFIX}-{tag}{}", asset.suffix())
+}
+
+pub fn is_frontend_bundle_asset(file_name: &str, asset: FrontendBundleAsset) -> bool {
+    file_name.starts_with(FRONTEND_BUNDLE_PREFIX) && file_name.ends_with(asset.suffix())
+}
+
+pub fn frontend_bundle_exists(dist: &Path, asset: FrontendBundleAsset) -> bool {
+    std::fs::read_dir(dist)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|file_name| is_frontend_bundle_asset(file_name, asset))
+        })
+}
+
+pub fn find_frontend_bundle_asset(dist: &Path, asset: FrontendBundleAsset) -> io::Result<PathBuf> {
+    std::fs::read_dir(dist)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|file_name| is_frontend_bundle_asset(file_name, asset))
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("missing {}", asset.label()),
+            )
+        })
 }
 
 pub async fn wait_for_tcp_connect(

@@ -407,6 +407,20 @@ fn backend_role_args_include_frontend_dist_when_requested() {
 }
 
 #[test]
+fn backend_role_args_omit_startup_hints_when_disabled() {
+    let args = backend_role_args(OsString::from("127.0.0.1:8090"), false, None);
+
+    assert!(!args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
+fn mock_role_args_omit_startup_hints_when_disabled() {
+    let args = mock_role_args(false);
+
+    assert!(!args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
 fn launcher_state_supports_frontend_requires_matching_dist_paths() {
     let frontend_dist = Path::new("/tmp/acp-frontend-dist");
     let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));

@@ -1,6 +1,6 @@
 use super::*;
 use crate::mock_client::{ReplyFuture, ReplyResult};
-use acp_app_support::build_http_client_for_url;
+use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
 use axum::{
     body::to_bytes,
     http::{
@@ -337,12 +337,18 @@ fn write_temp_frontend_dist_with(
     let dir = std::env::temp_dir().join(format!("acp-test-frontend-dist-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("temp dist dir should be creatable");
     if include_javascript {
-        std::fs::write(dir.join("acp-web-frontend-test.js"), b"// stub js loader")
-            .expect("stub JS should be writable");
+        std::fs::write(
+            dir.join(frontend_bundle_file_name(
+                "test",
+                FrontendBundleAsset::JavaScript,
+            )),
+            b"// stub js loader",
+        )
+        .expect("stub JS should be writable");
     }
     if include_wasm {
         std::fs::write(
-            dir.join("acp-web-frontend-test_bg.wasm"),
+            dir.join(frontend_bundle_file_name("test", FrontendBundleAsset::Wasm)),
             b"\x00asm\x01\x00\x00\x00", // minimal valid WASM header
         )
         .expect("stub WASM should be writable");
@@ -352,14 +358,17 @@ fn write_temp_frontend_dist_with(
 
 fn write_temp_frontend_dist_with_unreadable_javascript() -> std::path::PathBuf {
     let dir = write_temp_frontend_dist_with(false, true);
-    std::fs::create_dir(dir.join("acp-web-frontend-test.js"))
-        .expect("stub unreadable JS directory should be creatable");
+    std::fs::create_dir(dir.join(frontend_bundle_file_name(
+        "test",
+        FrontendBundleAsset::JavaScript,
+    )))
+    .expect("stub unreadable JS directory should be creatable");
     dir
 }
 
 fn write_temp_frontend_dist_with_unreadable_wasm() -> std::path::PathBuf {
     let dir = write_temp_frontend_dist_with(true, false);
-    std::fs::create_dir(dir.join("acp-web-frontend-test_bg.wasm"))
+    std::fs::create_dir(dir.join(frontend_bundle_file_name("test", FrontendBundleAsset::Wasm)))
         .expect("stub unreadable WASM directory should be creatable");
     dir
 }

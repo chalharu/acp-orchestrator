@@ -243,6 +243,7 @@ fn render_event_covers_all_display_variants() {
         .expect("timestamp should be valid");
     let snapshot = SessionSnapshot {
         id: "s_test".to_string(),
+        title: "New chat".to_string(),
         status: acp_contracts::SessionStatus::Active,
         latest_sequence: 2,
         messages: vec![acp_contracts::ConversationMessage {
@@ -289,6 +290,7 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
     let chat_session = ChatSession {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            title: "New chat".to_string(),
             status: acp_contracts::SessionStatus::Active,
             latest_sequence: 2,
             messages: vec![acp_contracts::ConversationMessage {
@@ -325,6 +327,7 @@ fn print_chat_status_handles_pending_permissions() {
     let chat_session = ChatSession {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            title: "New chat".to_string(),
             status: acp_contracts::SessionStatus::Active,
             latest_sequence: 1,
             messages: Vec::new(),

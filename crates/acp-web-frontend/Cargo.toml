@@ -39,6 +39,7 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
+chrono = { version = "=0.4.44", features = ["serde"] }
 wasm-bindgen-test = "0.3"
 
 [profile.release]

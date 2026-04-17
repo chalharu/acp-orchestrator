@@ -15,6 +15,7 @@ name = "acp-web-frontend"
 version = "0.1.0"
 dependencies = [
  "acp-contracts",
+ "chrono",
  "console_error_panic_hook",
  "futures-channel",
  "futures-util",

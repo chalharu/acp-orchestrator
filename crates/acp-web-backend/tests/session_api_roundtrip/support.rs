@@ -2,8 +2,9 @@ use std::{future::pending, pin::Pin, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
-    CancelTurnResponse, CreateSessionResponse, PromptRequest, ResolvePermissionRequest,
-    ResolvePermissionResponse, SessionListResponse,
+    CancelTurnResponse, CreateSessionResponse, PromptRequest, RenameSessionRequest,
+    RenameSessionResponse, ResolvePermissionRequest, ResolvePermissionResponse,
+    SessionListResponse,
 };
 pub(super) use acp_contracts::{MessageRole, PermissionDecision, StreamEvent, StreamEventPayload};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
@@ -228,6 +229,39 @@ impl TestStack {
             .context("submitting test prompt")?
             .error_for_status()
             .context("prompt submission returned an error")?;
+        Ok(())
+    }
+
+    pub(super) async fn rename_session(
+        &self,
+        token: &str,
+        session_id: &str,
+        title: &str,
+    ) -> Result<RenameSessionResponse> {
+        let response = self
+            .client
+            .patch(format!("{}/api/v1/sessions/{session_id}", self.backend_url))
+            .bearer_auth(token)
+            .json(&RenameSessionRequest {
+                title: title.to_string(),
+            })
+            .send()
+            .await
+            .context("renaming test session")?
+            .error_for_status()
+            .context("rename session returned an error")?;
+        response.json().await.context("decoding rename response")
+    }
+
+    pub(super) async fn delete_session(&self, token: &str, session_id: &str) -> Result<()> {
+        self.client
+            .delete(format!("{}/api/v1/sessions/{session_id}", self.backend_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("deleting test session")?
+            .error_for_status()
+            .context("delete session returned an error")?;
         Ok(())
     }
 

@@ -249,16 +249,6 @@ impl SessionStore {
         Ok(handle.snapshot().await)
     }
 
-    pub async fn open_session(
-        &self,
-        owner: &str,
-        session_id: &str,
-    ) -> Result<SessionSnapshot, SessionStoreError> {
-        let handle = self.authorized_handle(owner, session_id).await?;
-        self.touch_recent_activity(&handle).await;
-        Ok(handle.snapshot().await)
-    }
-
     pub async fn list_owned_sessions(&self, owner: &str) -> Vec<SessionListItem> {
         let handles = {
             let sessions = self.sessions.read().await;
@@ -356,7 +346,6 @@ impl SessionStore {
         let handle = self.authorized_handle(owner, session_id).await?;
         let response = handle.resolve_permission(request_id, decision).await?;
         handle.broadcast(StreamEvent::snapshot(handle.snapshot().await));
-        self.touch_recent_activity(&handle).await;
         Ok(response)
     }
 
@@ -369,7 +358,6 @@ impl SessionStore {
         let cancelled = handle.cancel_active_turn().await?;
         if cancelled {
             handle.broadcast(StreamEvent::snapshot(handle.snapshot().await));
-            self.touch_recent_activity(&handle).await;
         }
         Ok(cancelled)
     }
@@ -382,10 +370,31 @@ impl SessionStore {
         let handle = self.authorized_handle(owner, session_id).await?;
         let close_event = handle.close("closed by user").await?;
         handle.broadcast(close_event);
-        self.touch_recent_activity(&handle).await;
         let snapshot = handle.snapshot().await;
         self.prune_closed_sessions().await;
         Ok(snapshot)
+    }
+
+    pub async fn rename_session(
+        &self,
+        owner: &str,
+        session_id: &str,
+        title: String,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        handle.rename(title).await;
+        Ok(handle.snapshot().await)
+    }
+
+    pub async fn delete_session(
+        &self,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<(), SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        handle.prepare_delete().await;
+        self.sessions.write().await.remove(session_id);
+        Ok(())
     }
 
     pub async fn append_assistant_message(

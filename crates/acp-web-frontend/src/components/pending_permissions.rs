@@ -2,13 +2,12 @@
 
 use leptos::prelude::*;
 
+use crate::PendingPermission;
+
 /// Displays pending tool-permission requests.
-///
-/// Each item is `(request_id, summary)` sourced from
-/// `acp_contracts::PermissionRequest`.
 #[component]
 pub fn PendingPermissions(
-    #[prop(into)] items: Signal<Vec<(String, String)>>,
+    #[prop(into)] items: Signal<Vec<PendingPermission>>,
     #[prop(into)] busy: Signal<bool>,
     on_approve: Callback<String>,
     on_deny: Callback<String>,
@@ -20,12 +19,12 @@ pub fn PendingPermissions(
                 <ul class="pending-list">
                     <For
                         each=move || items.get()
-                        key=|(request_id, _)| request_id.clone()
-                        children=move |(request_id, summary)| {
+                        key=|item| item.request_id.clone()
+                        children=move |item| {
                             view! {
                                 <PendingPermissionItem
-                                    request_id=request_id
-                                    summary=summary
+                                    request_id=item.request_id
+                                    summary=item.summary
                                     busy=busy
                                     on_approve=on_approve
                                     on_deny=on_deny

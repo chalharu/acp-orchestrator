@@ -1,20 +1,23 @@
 use std::{
     env,
     ffi::OsString,
-    fs,
     future::Future,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
-use acp_app_support::{
-    BoxError, FrontendBundleAsset, build_http_client_for_url, init_tracing,
-    is_frontend_bundle_asset, wait_for_http_success,
-};
+use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
 use snafu::prelude::*;
 
+mod frontend_bundle;
 mod launcher_process;
 mod launcher_stack;
+
+pub(crate) use frontend_bundle::{ensure_frontend_built, frontend_dist_path};
+#[cfg(test)]
+pub(crate) use frontend_bundle::{
+    ensure_frontend_built_at, frontend_bundle_paths, latest_frontend_input_modified,
+};
 
 use launcher_process::{ensure_success, spawn_foreground_role};
 use launcher_stack::prepare_launcher_stack;
@@ -250,185 +253,6 @@ fn should_prepare_frontend_dist(
         && needs_backend
         && !cli_server_url_explicit
         && env::var_os("ACP_SERVER_URL").is_none()
-}
-
-fn frontend_crate_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates")
-        .join("acp-web-frontend")
-}
-
-/// Returns the Trunk dist directory for the web frontend.
-/// The path is anchored to the repository root so `cargo run -- --web`
-/// keeps working even when launched outside the repo root.
-fn frontend_dist_path() -> PathBuf {
-    frontend_crate_path().join("dist")
-}
-
-/// Ensures the Leptos/WASM frontend bundle exists in `dist`.
-/// Runs `trunk build --release` in the frontend crate directory when the
-/// compiled artefacts are absent or older than the frontend sources.
-async fn ensure_frontend_built(dist: &Path) -> Result<()> {
-    ensure_frontend_built_at(&frontend_crate_path(), dist).await
-}
-
-async fn ensure_frontend_built_at(frontend_root: &Path, dist: &Path) -> Result<()> {
-    match frontend_bundle_state(frontend_root, dist)? {
-        FrontendBundleState::Current => return Ok(()),
-        FrontendBundleState::Missing => {
-            eprintln!(
-                "web frontend not built yet – running `trunk build --release` in {} …",
-                frontend_root.display()
-            );
-        }
-        FrontendBundleState::Stale => {
-            eprintln!(
-                "web frontend bundle is stale – running `trunk build --release` in {} …",
-                frontend_root.display()
-            );
-        }
-    }
-
-    eprintln!("(re-run with `trunk build --release` in that directory to rebuild manually)");
-
-    let status = tokio::process::Command::new("trunk")
-        .args(["build", "--release"])
-        .current_dir(frontend_root)
-        .status()
-        .await
-        .map_err(|source| {
-            let detail = if source.kind() == std::io::ErrorKind::NotFound {
-                "trunk not found – install it with `cargo install trunk`".to_string()
-            } else {
-                source.to_string()
-            };
-            LauncherError::FrontendBuild { message: detail }
-        })?;
-
-    if !status.success() {
-        return Err(LauncherError::FrontendBuild {
-            message: format!(
-                "`trunk build --release` failed with exit code {:?}",
-                status.code()
-            ),
-        });
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FrontendBundleState {
-    Current,
-    Missing,
-    Stale,
-}
-
-fn frontend_bundle_state(frontend_root: &Path, dist: &Path) -> Result<FrontendBundleState> {
-    let Some((javascript, wasm)) = frontend_bundle_paths(dist)? else {
-        return Ok(FrontendBundleState::Missing);
-    };
-
-    let latest_input = latest_frontend_input_modified(frontend_root)?;
-    if read_modified_time(&javascript)? < latest_input || read_modified_time(&wasm)? < latest_input
-    {
-        return Ok(FrontendBundleState::Stale);
-    }
-
-    Ok(FrontendBundleState::Current)
-}
-
-fn frontend_bundle_paths(dist: &Path) -> Result<Option<(PathBuf, PathBuf)>> {
-    let entries = match fs::read_dir(dist) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(frontend_build_error("reading", dist, source)),
-    };
-    let mut javascript = None;
-    let mut wasm = None;
-
-    for entry in entries {
-        let path = entry
-            .map_err(|source| frontend_build_error("reading", dist, source))?
-            .path();
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if is_frontend_bundle_asset(file_name, FrontendBundleAsset::JavaScript) {
-            javascript = Some(path);
-        } else if is_frontend_bundle_asset(file_name, FrontendBundleAsset::Wasm) {
-            wasm = Some(path);
-        }
-    }
-
-    Ok(match (javascript, wasm) {
-        (Some(javascript), Some(wasm)) => Some((javascript, wasm)),
-        _ => None,
-    })
-}
-
-fn latest_frontend_input_modified(frontend_root: &Path) -> Result<SystemTime> {
-    let mut latest = None;
-    for relative_path in ["Cargo.toml", "Cargo.lock", "Trunk.toml", "index.html"] {
-        let path = frontend_root.join(relative_path);
-        if path.exists() {
-            update_latest_modified(&path, &mut latest)?;
-        }
-    }
-    update_latest_modified(&frontend_root.join("src"), &mut latest)?;
-
-    latest.ok_or_else(|| LauncherError::FrontendBuild {
-        message: no_frontend_inputs_message(frontend_root),
-    })
-}
-
-fn update_latest_modified(path: &Path, latest: &mut Option<SystemTime>) -> Result<()> {
-    let metadata =
-        fs::metadata(path).map_err(|source| frontend_build_error("reading", path, source))?;
-
-    if metadata.is_dir() {
-        let entries =
-            fs::read_dir(path).map_err(|source| frontend_build_error("reading", path, source))?;
-        for entry in entries {
-            let entry = entry.map_err(|source| frontend_build_error("reading", path, source))?;
-            update_latest_modified(&entry.path(), latest)?;
-        }
-        return Ok(());
-    }
-
-    let modified = metadata
-        .modified()
-        .map_err(|source| frontend_build_error("reading modified time for", path, source))?;
-    match latest {
-        Some(current) if modified <= *current => {}
-        _ => *latest = Some(modified),
-    }
-    Ok(())
-}
-
-fn read_modified_time(path: &Path) -> Result<SystemTime> {
-    fs::metadata(path)
-        .map_err(|source| frontend_build_error("reading", path, source))?
-        .modified()
-        .map_err(|source| frontend_build_error("reading modified time for", path, source))
-}
-
-fn frontend_build_message(action: &str, path: &Path, source: std::io::Error) -> String {
-    format!("{action} {} failed: {source}", path.display())
-}
-
-fn frontend_build_error(action: &str, path: &Path, source: std::io::Error) -> LauncherError {
-    LauncherError::FrontendBuild {
-        message: frontend_build_message(action, path, source),
-    }
-}
-
-fn no_frontend_inputs_message(frontend_root: &Path) -> String {
-    format!(
-        "no frontend inputs were found under {}",
-        frontend_root.display()
-    )
 }
 
 async fn run_web_launcher(stack: &mut launcher_stack::LauncherStack) -> Result<()> {

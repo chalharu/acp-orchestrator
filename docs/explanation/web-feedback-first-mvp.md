@@ -32,215 +32,233 @@ backend contract、session route、permission 操作を先に固めるための*
 - session ID は認可や access token の代わりに使わない
 - session 一覧や recent ordering の正本は backend が owner 単位で管理する
 
-## 3. ざっくりしたタスク分割
+## 3. 現在の実装状況
 
-| スライス | 目的 | 主な作業 | この時点でユーザーが確認できること |
+このブランチの Web Feedback-First MVP は、当初の「最小 Web」から少し進み、
+**launcher + minimal chat shell + permission/cancel + session 再開の一部 + 仮想スクロール**
+まで到達しています。現時点の実装をまとめると次の通りです。
+
+| 状態 | 項目 | 現在の実装 | ユーザーが確認できること |
 | --- | --- | --- | --- |
-| 0. 起動導線固定 | とにかく試せる入口を最短で作る | `cargo run -- --web` を追加し、bundled mock / backend の loopback 起動・ヘルス確認・browser bootstrap readiness・loopback HTTPS endpoint・browser open・URL 表示と、Web auth / CSRF の足場を実装する | repo root から `cargo run -- --web` を実行すると browser が開き、Web frontend の入口へ安全に到達できること |
-| 1. 最小会話導線 | まず会話できる状態を早く出す | 単一カラムの chat page、初回 prompt 送信時の session 作成、SSE 受信、transcript 表示、basic composer を実装する | browser から 1 往復以上の会話ができること |
-| 2. permission / cancel | 実運用に近い最小制御を足す | permission card、approve / deny button、実行中 turn の cancel action、status 表示を実装する | bundled mock の `verify permission` / `verify cancel` で、permission 応答と cancel を人手で確認できること |
-| 3. session 継続 | reload や再訪時のストレスを減らす | backend-managed session list、session route、history 取得、再 attach 導線を実装する | browser を reload または再 open しても既存 session に戻れること |
-| 4. 操作性 | 日常利用の不満を減らす | slash command palette、connection badge、tool activity 表示、error banner を実装する | command 候補や接続状態を見ながら操作できること |
-| 5. pane / virtual scroll 化 | target architecture に寄せる | recent session pane、tool panel、仮想スクロール、pane layout を実装する | target architecture にある Web MVP の画面構成を確認できること |
+| 実装済み | 起動導線 | `cargo run -- --web` が frontend bundle の missing / stale を検知し、必要なら `trunk build --release` を走らせたうえで bundled backend / mock を loopback で起動または再利用し、`/app/` が ready になってから browser を開く | repo root から `cargo run -- --web` を実行すると browser が開き、Web frontend の入口へ安全に到達できること |
+| 実装済み | 会話導線 | `/app/` で session を事前作成して `/app/sessions/{id}` へ即時遷移し、startup hint を先に見せたうえで composer / SSE transcript / assistant reply を扱う | browser から startup hint を見て、そのまま 1 往復以上の会話ができること |
+| 実装済み | permission / cancel | 固定の permission panel、approve / deny、permission panel 側 cancel、返信待ち中の composer 側 cancel を実装 | bundled mock の `verify permission` / `verify cancel` を人手で確認できること |
+| 実装済み | session 再開 | `/app/sessions/{id}` の deep link / reload で既存 session を開ける。さらに同一 tab では `sessionStorage` で「まだ最初の user prompt を送っていない prepared session」を再利用する | reload や direct route でも既存 session に戻れること |
+| 実装済み | transcript | chat body は固定高の仮想スクロール viewport になっており、最新発言への追従、safe Markdown rendering、chat 領域外スクロールの抑制が入っている | 長い会話でも transcript だけをスクロールし、最新発言と Markdown 表示を確認できること |
+| 未実装 | session list UI | backend には owner-scoped session list API があるが、browser UI ではまだ一覧を出していない | `/app/` を dashboard のようには使えず、新規 chat 生成と既知 route 再訪が中心になること |
+| 未実装 | close / slash / tool panel | backend には close API や slash completions API があるが、browser UI には close button / command palette / tool activity panel をまだ出していない | 現在の Web は minimal shell のままで、操作面はかなり絞られていること |
 
 ### 3.1 フィードバックの取り方
 
-各スライスでは「動くか」だけでなく、次の観点を優先して聞きます。
+現状実装では、次の観点を優先してフィードバックを得るのがよいです。
 
-1. `cargo run -- --web` から会話開始まで迷いが少ないか
-2. browser が開いたあと、何をすればよいか直感的に分かるか
+1. `cargo run -- --web` から startup hint 表示まで迷いが少ないか
+2. `/app/` が「dashboard」ではなく「session bootstrap route」であることが直感的か
 3. permission 応答と cancel の場所が見つけやすいか
-4. reload / 再訪時の session 継続が期待通りか
-5. pane 化や仮想スクロールへ進む前に残る不満が何か
+4. reload / direct route 再訪時の session 継続が期待通りか
+5. transcript の追従・仮想スクロール・Markdown 表示に不満がないか
 
-## 4. 最初に見せる最小 Web の設計
+## 4. 現在の Web MVP の形
 
 ### 4.1 形
 
-最初に出す Web は、target architecture にある pane 分割 UI ではなく、**1 カラムの
-single-page chat** にします。ただし実装技術は最初から Leptos CSR を使い、
-後続で app shell を育てる前提にします。理由は次の通りです。
+現在の Web は、target architecture にある pane 分割 UI ではなく、**brutally minimal な
+1 カラム chat shell**です。ただし実装技術は最初から Leptos CSR で、backend が shell document
+と WASM bundle を配信します。
 
-- `cargo run -- --web` の launcher 体験を最速で end-to-end 接続できる
-- browser での session 作成、prompt 送信、SSE 受信、permission 操作を最短で確認できる
-- pane や仮想スクロールより先に、route と session 継続の意味を固定できる
-- 後続の full Web UI でも使う component / contract の語彙を先に固められる
+現状の UI は次の 3 面で構成されます。
 
-最終的な Web MVP は pane 構成と仮想スクロールへ進めますが、最初のユーザー確認では
-「repo root から迷わず browser を開き、会話を始められるか」を優先します。
+- `chat-topbar`: `New chat` link と error banner
+- `chat-body`: 仮想スクロール付き transcript
+- `chat-dock`: pending permission panel と composer
 
-### 4.2 初期の起動方法
+接続状態や session 状態は badge として常時表示するのではなく、composer の status text や
+banner に寄せています。これは current code の minimal 方針に合わせたものです。
 
-初期段階では、frontend の個別 build / serve 手順よりも、**repo を clone した直後に
-ユーザーがそのまま試せること**を優先します。そのため、root の `cargo run -- --web` を
-簡易 launcher とし、workspace 内の Web backend / mock を起動または再利用して、backend が
-配信する browser entrypoint を開きます。frontend asset の build / serve も、独立 service として
-ではなく backend entrypoint 配下にぶら下げます。
+### 4.2 起動とビルド
+
+現行コードの起動フローは次の通りです。
 
 - Web 起動: `cargo run -- --web`
 - browser open 先の例: `https://127.0.0.1:8443/app/`
-- bundled feedback flow の bind 先: `127.0.0.1` のみ
-- browser open に失敗した場合: terminal へ URL を表示し、手動 open を案内する
+- bind / reuse 対象: loopback (`127.0.0.1`) 上の bundled backend / mock のみ
+- browser open に失敗した場合: terminal に URL を出したまま失敗を隠さない
 
-#### Leptos CSR ビルドパイプライン (slice 1 以降)
+#### Leptos CSR ビルドパイプライン
 
-Slice 1 から browser 側の実装は `crates/acp-web-frontend/` の Leptos CSR crate で
-行います。この crate は Cargo workspace とは独立した **trunk プロジェクト**であり、
-通常の `cargo build` や `cargo test` は対象外です。ビルド手順は次の通りです。
+browser 側の実装は `crates/acp-web-frontend/` の Leptos CSR crate で行います。この crate は
+Cargo workspace 外の **trunk プロジェクト**です。
 
 ```sh
-# 1. wasm32 ターゲットを追加（初回のみ）
-rustup target add wasm32-unknown-unknown
-
-# 2. trunk を用意（バイナリを https://github.com/trunk-rs/trunk からインストール）
-# 例: cargo install trunk --locked
-# または prebuilt バイナリを PATH に配置
-
-# 3. frontend をビルド（repo root または crates/acp-web-frontend から実行）
+# frontend 単体の主な確認
+cargo fmt --manifest-path crates/acp-web-frontend/Cargo.toml
+cargo clippy --manifest-path crates/acp-web-frontend/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path crates/acp-web-frontend/Cargo.toml --lib
+cargo check --manifest-path crates/acp-web-frontend/Cargo.toml --target wasm32-unknown-unknown
 cd crates/acp-web-frontend && trunk build --release
-
-# 4. backend をビルド / 起動
-cargo build -p acp-web-backend
 ```
 
-`trunk build` は `crates/acp-web-frontend/dist/` に JS loader と WASM binary を出力します。
-Backend はこの dist ディレクトリを runtime で参照します。
-fingerprinted bundle は
-`/app/assets/acp-web-frontend.js` と `/app/assets/acp-web-frontend_bg.wasm`
-の stable alias から配信します。
-dist が存在しない場合、backend は 503 を返します。
-ブラウザには「frontend 未ビルド」を示すプレースホルダを表示します。
+repo root からの `cargo run -- --web` は、`crates/acp-web-frontend/dist/` を見て
+frontend bundle の missing / stale を検知し、必要なら `trunk build --release` を自動実行します。
+そのため、**通常の bundled feedback flow では事前に手で `trunk build` しなくてもよい**のが
+現状実装です。
 
-開発中は `trunk serve` を使い、Axum backend を別プロセスで起動して proxy を通すことで
-ホットリロードを実現できます（production での個別 serve は不要です）。
+この bundle 準備ロジックは launcher 本体から `src/frontend_bundle.rs` に切り出されており、
+dist path 解決、missing / stale 判定、入力ファイルの最終更新時刻比較、`trunk build --release`
+実行を 1 か所で扱います。
 
-launcher は backend の `/healthz` と asset 配信準備に加えて、Web entrypoint の
-browser-bootstrap readiness を確認してから browser を開きます。`/healthz` は process の
-liveness/readiness 用であり、それだけで auth cookie / CSRF 初期化まで完了した根拠にはしません。
-bundled service を再利用する場合も、loopback 上の起動だけを対象とし、非 local な endpoint へ
-暗黙に attach しません。
-feedback-first launcher でも browser 入口は loopback HTTPS とし、ここで same-origin
-`Secure` + `HttpOnly` cookie と CSRF token を bootstrap します。つまり、local feedback flow でも
-session ID を token 代わりにしたり、CSRF を省略したりせず、本番と同じ auth / owner-check
-前提で始めます。
-この bootstrap の責務は層ごとに分けます。Web backend の entrypoint は loopback HTTPS endpoint、
-cert material の提示、auth cookie 発行、CSRF token 初期化を担当します。launcher はその
-readiness を待って browser を開きます。local certificate を OS / browser が信頼するための
-setup や明示承認フローは host 側の責務として扱います。trust が成立していない場合は launcher が
-失敗を隠さず、URL と対処を表示します。
+backend は dist ディレクトリ内の fingerprinted asset を runtime で見つけ、
+stable alias として次の path から配信します。
+
+- `/app/assets/acp-web-frontend.js`
+- `/app/assets/acp-web-frontend_bg.wasm`
+
+外部 backend を使う direct mode では local 側で `frontend_dist` を準備できないため、
+その backend が bundle を配信していない場合、WASM asset route は `503 Service Unavailable`
+になります。
+
+launcher は `/healthz` だけでなく browser entrypoint (`/app/`) 自体の readiness を待ってから
+browser を開きます。same-origin `Secure` + `HttpOnly` cookie と CSRF token bootstrap も
+loopback HTTPS の app shell で行います。
 
 bundled mock を使う手動確認 prompt は README の bundled feedback flow と同じ
 `verify permission` / `verify cancel` を使います。
 
 ### 4.3 route と UI 面
 
-最小 Web で先に固定したい surface は次です。**具体的な API path / auth 要件の正本**は
-`docs/explanation/acp-web-cli-architecture.md` の 8.3 節とします。この文書では、最初の Web
-slice がどの API 群を使い、どの trust boundary を守るかを固定します。
+**具体的な API path / auth 要件の正本**は `docs/explanation/acp-web-cli-architecture.md`
+の 8.3 節ですが、現在の browser 実装が実際に使っている surface は次です。
 
 #### 4.3.1 route 面
 
-| route / shortcut | 役割 | 利用する backend API 群 | 認可・境界メモ |
+| route / shortcut | 現在の役割 | 現在の browser 実装 | 認可・境界メモ |
 | --- | --- | --- | --- |
-| `/app/` | browser 起動直後の入口。composer は見せるが、owner-scoped session list も表示する | owned session list API + session create API | loopback HTTPS 上で same-origin cookie principal として開始し、一覧も create も backend の owner 判定に従う |
-| `/app/sessions/{id}` | 既存 session を開く。attach 可能なら会話を継続し、closed なら read-only transcript を表示する | session snapshot / history / event stream API | URL 中の session ID 自体は access token ではなく、snapshot / history / SSE attach でも owner check を再実行する |
-| session list pane | browser から再訪しやすくする一覧 | owned session list API | session 一覧と recent ordering の正本は backend が持ち、active / closed の state も backend から受け取る |
+| `/app/` | browser 起動直後の bootstrap route | 「Preparing chat...」を一瞬表示し、session を事前作成または prepared session を再利用して `/app/sessions/{id}` へ即時遷移する | create は mutating `POST` として CSRF を掛け、owner 判定は backend が持つ |
+| `/app/sessions/{id}` | live chat route | snapshot 読み込み、SSE 購読、transcript 表示、permission 応答、cancel、composer を扱う | URL 中の session ID 自体は access token ではなく、snapshot / SSE / action ごとに owner check を再実行する |
+| direct route / reload | session 継続 | 既知の `/app/sessions/{id}` を開き直して同じ session を読む | deep link を知っていること自体は認可根拠ではない |
+
+現状の `/app/` は session list を見せる landing page ではありません。**まず session を用意して、
+startup hint を visible にしたうえで live chat route へ移す**ための bootstrap route です。
 
 #### 4.3.2 action 面
 
-| UI action | 役割 | 利用する backend API 群 | 認可・境界メモ |
+| UI action | 現在の役割 | 実際に使っている backend API | 認可・境界メモ |
 | --- | --- | --- | --- |
 | composer send | prompt を送信する | message send API | session owner に限って実行し、mutating `POST` として CSRF を掛ける |
-| fixed permission card | pending permission に応答する | permission resolution API | session owner に限って実行し、transcript には read-only event だけを流す |
-| cancel action | 実行中 turn を止める | cancel API | session owner に限って実行し、mutating `POST` として CSRF を掛ける |
-| close action | session を明示的に終了する | session close API | session owner に限って実行し、mutating `POST` として CSRF を掛ける |
+| permission panel | pending permission に応答する | permission resolution API | session owner に限って実行し、transcript とは別の固定 panel で扱う |
+| cancel action | 実行中 turn を止める | cancel API | permission panel 側と composer 側の両方に cancel affordance がある |
+| `New chat` link | 新しい会話へ移る | `/app/` route 経由で session create API | 既存 session を閉じるのではなく、新規 session bootstrap を始める |
 
-`/app/` では最初から空の chat shell を見せ、利用者が最初の prompt を送った瞬間に session を
-作成して `/app/sessions/{id}` へ遷移する想定にします。これにより、browser を開いた直後の
-迷いを減らしつつ、未使用 session の量産も避けやすくします。
+backend には次の API もありますが、現在の browser UI ではまだ使っていません。
 
-`/app/sessions/{id}` は backend の session state に従って開き方を変えます。attach 可能な
-session では composer / permission / cancel / close を伴う live view を出します。
-retained closed session では transcript と state badge だけを出す read-only view にします。
+- owned session list API
+- session history API
+- session close API
+- slash completions API
 
-slice 3 以降の bundled feedback flow では、backend が owner-scoped session list を返します。
-再訪時は `/app/` から session 一覧を選ぶか、既知の route `/app/sessions/{id}` を開いて復帰します。
-retention window 内にある closed session も state 付きで見せられます。ただし、deep link を知って
-いること自体は認可根拠にならず、backend は毎回 owner を確認します。
+### 4.4 現在の最小 UX
 
-### 4.4 最小 UX
+- browser が開くと `/app/` は新しい session を準備し、bundled startup hint を見せるために
+  `/app/sessions/{id}` へすぐ遷移する
+- transcript は `user` / `assistant` / `status` の 3 種を見た目で分けて表示する
+- `user` / `assistant` は safe Markdown で HTML 化し、raw HTML / image / unsafe URL は信頼しない
+- `status` は plain text のまま表示する
+- transcript は仮想スクロールで、ユーザーが意図的に離れていない限り最新発言へ追従する
+- page 全体ではなく transcript viewport だけがスクロールする
+- pending permission は固定 panel で approve / deny / cancel できる
+- 返信待ち中は composer footer に cancel を出す
+- stream や session load の失敗は banner と composer status text に出す
+- composer は `Enter` で送信し、`Shift+Enter` で改行する
+- closed session は snapshot / transcript の表示だけを行い、SSE を張らない read-only 扱いにする
+- action 失敗と connection 失敗は別管理にし、action error は次の action を始めるまで維持する
+- connection badge、session badge、tool activity panel、session list pane はまだ出していない
 
-- browser が開いたら、接続先 backend と session 状態がすぐ分かる
-- transcript は時系列に 1 本で表示し、conversation / tool / status の read-only event を流す
-- user / assistant / tool / status を視覚的に区別する
-- permission request は transcript に埋めず、固定の permission card で approve / deny できるようにする
-- stream 切断時は黙ってごまかさず、banner と再 attach 導線を出す
-- 初期版では follow mode 固定とし、複雑な pane 分割や仮想スクロールは持ち込まない
+### 4.4.1 内部設計の整理
 
-表示イメージは次の通りです。
+この minimal UI の内部状態も、当初の magic string / tuple 中心の形から少し整理されています。
+
+- session の lifecycle は `"active"` / `"closed"` / `"loading"` のような文字列ではなく
+  `SessionLifecycle` enum で持つ
+- pending permission は `(String, String)` ではなく `PendingPermission { request_id, summary }`
+  で扱う
+- SSE transport / parse は `api.rs`、UI state reduction は `lib.rs` に寄せて責務を分ける
+- assistant message / status update で turn state を解放する判定は共通 helper
+  `should_release_turn_state` にまとめる
+- transcript の Markdown sanitization は危険タグの block list を明示したまま、safe structural
+  tag は catch-all で通す
+
+表示イメージは次のような minimal shell です。
 
 ```text
 $ cargo run -- --web
 opening browser: https://127.0.0.1:8443/app/
 
 +--------------------------------------------------+
-| ACP Web MVP                    connected : ready |
+|                                         New chat |
 +--------------------------------------------------+
-| README の要点を教えて                                  |
-+--------------------------------------------------+
+| Bundled mock ready.                              |
+| Try `verify permission` or `verify cancel`.      |
+|                                                  |
 | [user] README の要点を教えて                           |
 | [assistant] ACP Orchestrator は ...                  |
-| [status] permission req_17 pending                  |
-|                                                    |
-| pending permission                                 |
-| [permission req_17] read_text_file README.md        |
-| [Approve] [Deny]                                    |
+| [status] Waiting for response...                  |
+|                                                  |
+| Permission required                              |
+| read_text_file README.md                         |
+| [Approve] [Deny] [Cancel]                        |
++--------------------------------------------------+
+| Resolve the request below before sending ...     |
+| [textarea]                                       |
+| [Send]                                           |
 +--------------------------------------------------+
 ```
 
-### 4.5 最初のスコープに入れるもの / 入れないもの
+### 4.5 現在のスコープに入っているもの / まだ入っていないもの
 
-### 入れるもの
+### 入っているもの
 
 - `cargo run -- --web` による bundled mock / backend 起動と browser open
+- frontend bundle の missing / stale 検知と `trunk build --release` の自動実行
 - Web auth transport、session owner check、state-mutating `POST` の CSRF 保護
-- 初回 prompt 時の session 作成
-- 既存 session route への再 attach
+- startup hint を見せるための事前 session 作成
+- 既存 session route の再 attach / reload
 - prompt 送信
 - live event の購読
 - permission request への応答
-- 明示的な cancel / close
+- 実行中 turn の cancel
+- 仮想スクロール付き transcript
+- safe Markdown rendering
 
-### 入れないもの
+### まだ入っていないもの
 
-- pane 分割の app shell
-- 仮想スクロール
-- rich markdown / HTML rendering
-- install/package 配布導線
-- backend 全件 session 一覧
+- owner-scoped session list の browser UI
+- browser UI からの close action
+- slash command palette
+- connection badge / tool activity panel
+- multi-pane app shell
 - session 共有や operator override
 - offline 対応や service worker
 
-### 4.6 この設計で避けたいこと
+### 4.6 この実装で崩していないこと
 
-- backend を飛ばして browser から ACP に直接つなぐこと
-- session ID を access token のように扱うこと
-- loopback feedback flow を `0.0.0.0` bind や非 local service の暗黙 reuse に広げること
-- `cargo run -- --web` と `/app/*` の責務を分けず、別々の暫定起動方法を増やすこと
-- pending permission を transcript の奥に埋めて見落としやすくすること
-- browser open や stream reconnect の失敗を黙って隠すこと
-- owner-scoped session 一覧を backend ではなく browser-local state だけで管理すること
+- backend を飛ばして browser から ACP に直接つながない
+- session ID を access token のように扱わない
+- loopback feedback flow を `0.0.0.0` bind や非 local service の暗黙 reuse に広げない
+- `cargo run -- --web` と `/app/*` の責務を分けず、別々の暫定起動方法を増やさない
+- pending permission を transcript の奥に埋めて見落としやすくしない
+- browser open や session / stream の失敗を黙って隠さない
+- prepared session を `sessionStorage` で再利用しても、それを認証根拠にはしない
 
 ## 5. 次に full Web UI へ進むための接続点
 
-最小 Web の実装で先に固定しておくべきものは次です。
+現在の実装で先に固定できた接続点は次です。
 
 1. `cargo run -- --web` の launcher semantics と app URL
-2. `/app/` と `/app/sessions/{id}` の route 語彙
-3. transcript に流す event の表示カテゴリ
-4. permission request / cancel / close の UI action 語彙
-5. owner-scoped session list を backend が管理する前提
-6. shortcut / deep link と認証・認可を切り離す前提
+2. `/app/` は bootstrap route、`/app/sessions/{id}` は live chat route という語彙
+3. transcript に流す `user` / `assistant` / `status` の表示カテゴリ
+4. permission request / cancel の UI action 語彙
+5. same-origin cookie + CSRF + owner-check を最初から崩さない前提
+6. session list / history / close / slash completions は backend 側にあり、browser UI がまだ追いついていないという分離
 
-これらを先に固めれば、後続の Web 実装は「pane layout と仮想スクロールの強化」に集中でき、
-会話導線や session 継続の意味を作り直さずに済みます。
+これにより、後続の Web 実装は「session list UI・close action・slash 操作・pane layout をどう育てるか」
+に集中でき、launcher / auth / route / transcript の意味を作り直さずに済みます。

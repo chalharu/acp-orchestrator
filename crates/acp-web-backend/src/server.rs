@@ -382,15 +382,13 @@ async fn wasm_init_script() -> Response {
 
 /// Serve the wasm-bindgen JS loader from the Trunk dist directory at runtime.
 async fn wasm_glue_javascript(State(state): State<AppState>) -> Response {
-    let Some(dist) = state.frontend_dist.as_deref() else {
-        return frontend_unavailable_response("wasm_glue_javascript: frontend_dist not configured");
-    };
-    let asset_path = match frontend_javascript_asset_path(dist) {
+    let asset_path = match locate_frontend_asset(
+        &state,
+        FrontendBundleAsset::JavaScript,
+        "wasm_glue_javascript",
+    ) {
         Ok(path) => path,
-        Err(err) => {
-            tracing::warn!(%err, "failed to locate frontend javascript bundle");
-            return frontend_unavailable_response("wasm_glue_javascript: file not found");
-        }
+        Err(detail) => return frontend_unavailable_response_detail(&detail),
     };
 
     match tokio::fs::read_to_string(&asset_path).await {
@@ -404,15 +402,9 @@ async fn wasm_glue_javascript(State(state): State<AppState>) -> Response {
 
 /// Serve the compiled WebAssembly binary from the Trunk dist directory at runtime.
 async fn wasm_binary(State(state): State<AppState>) -> Response {
-    let Some(dist) = state.frontend_dist.as_deref() else {
-        return frontend_unavailable_response("wasm_binary: frontend_dist not configured");
-    };
-    let asset_path = match frontend_wasm_asset_path(dist) {
+    let asset_path = match locate_frontend_asset(&state, FrontendBundleAsset::Wasm, "wasm_binary") {
         Ok(path) => path,
-        Err(err) => {
-            tracing::warn!(%err, "failed to locate frontend wasm bundle");
-            return frontend_unavailable_response("wasm_binary: file not found");
-        }
+        Err(detail) => return frontend_unavailable_response_detail(&detail),
     };
 
     match tokio::fs::read(&asset_path).await {
@@ -427,6 +419,29 @@ async fn wasm_binary(State(state): State<AppState>) -> Response {
     }
 }
 
+fn locate_frontend_asset(
+    state: &AppState,
+    asset_type: FrontendBundleAsset,
+    context_name: &'static str,
+) -> Result<PathBuf, String> {
+    let Some(dist) = state.frontend_dist.as_deref() else {
+        return Err(format!("{context_name}: frontend_dist not configured"));
+    };
+
+    let locate_result = match asset_type {
+        FrontendBundleAsset::JavaScript => frontend_javascript_asset_path(dist),
+        FrontendBundleAsset::Wasm => frontend_wasm_asset_path(dist),
+    };
+
+    match locate_result {
+        Ok(path) => Ok(path),
+        Err(err) => {
+            tracing::warn!(%err, asset = ?asset_type, context_name, "failed to locate frontend bundle asset");
+            Err(format!("{context_name}: file not found"))
+        }
+    }
+}
+
 fn frontend_javascript_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
     find_frontend_bundle_asset(dist, FrontendBundleAsset::JavaScript)
 }
@@ -436,6 +451,10 @@ fn frontend_wasm_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
 }
 
 fn frontend_unavailable_response(detail: &'static str) -> Response {
+    frontend_unavailable_response_detail(detail)
+}
+
+fn frontend_unavailable_response_detail(detail: &str) -> Response {
     tracing::debug!(detail, "frontend WASM assets not available");
     (
         StatusCode::SERVICE_UNAVAILABLE,

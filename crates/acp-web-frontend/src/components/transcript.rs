@@ -237,8 +237,7 @@ fn sanitize_markdown_events<'a>(parser: Parser<'a>) -> Vec<MarkdownEvent<'a>> {
             MarkdownEvent::Html(html) | MarkdownEvent::InlineHtml(html) => {
                 Some(MarkdownEvent::Text(html))
             }
-            MarkdownEvent::SoftBreak => Some(MarkdownEvent::HardBreak),
-            MarkdownEvent::HardBreak => Some(MarkdownEvent::HardBreak),
+            MarkdownEvent::SoftBreak | MarkdownEvent::HardBreak => Some(MarkdownEvent::HardBreak),
             MarkdownEvent::Rule => Some(MarkdownEvent::Rule),
             MarkdownEvent::TaskListMarker(checked) => Some(MarkdownEvent::TaskListMarker(checked)),
         })
@@ -250,29 +249,12 @@ fn sanitize_markdown_start<'a>(
     ignored_ends: &mut Vec<TagEnd>,
 ) -> Option<MarkdownEvent<'a>> {
     match tag {
-        Tag::Paragraph => Some(MarkdownEvent::Start(Tag::Paragraph)),
         Tag::Heading { level, .. } => Some(MarkdownEvent::Start(Tag::Heading {
             level,
             id: None,
             classes: Vec::new(),
             attrs: Vec::new(),
         })),
-        Tag::BlockQuote(kind) => Some(MarkdownEvent::Start(Tag::BlockQuote(kind))),
-        Tag::CodeBlock(kind) => Some(MarkdownEvent::Start(Tag::CodeBlock(kind))),
-        Tag::List(start) => Some(MarkdownEvent::Start(Tag::List(start))),
-        Tag::Item => Some(MarkdownEvent::Start(Tag::Item)),
-        Tag::DefinitionList => Some(MarkdownEvent::Start(Tag::DefinitionList)),
-        Tag::DefinitionListTitle => Some(MarkdownEvent::Start(Tag::DefinitionListTitle)),
-        Tag::DefinitionListDefinition => Some(MarkdownEvent::Start(Tag::DefinitionListDefinition)),
-        Tag::Table(alignments) => Some(MarkdownEvent::Start(Tag::Table(alignments))),
-        Tag::TableHead => Some(MarkdownEvent::Start(Tag::TableHead)),
-        Tag::TableRow => Some(MarkdownEvent::Start(Tag::TableRow)),
-        Tag::TableCell => Some(MarkdownEvent::Start(Tag::TableCell)),
-        Tag::Emphasis => Some(MarkdownEvent::Start(Tag::Emphasis)),
-        Tag::Strong => Some(MarkdownEvent::Start(Tag::Strong)),
-        Tag::Strikethrough => Some(MarkdownEvent::Start(Tag::Strikethrough)),
-        Tag::Superscript => Some(MarkdownEvent::Start(Tag::Superscript)),
-        Tag::Subscript => Some(MarkdownEvent::Start(Tag::Subscript)),
         Tag::Link {
             link_type,
             dest_url,
@@ -306,6 +288,7 @@ fn sanitize_markdown_start<'a>(
             ignored_ends.push(TagEnd::MetadataBlock(kind));
             None
         }
+        tag => Some(MarkdownEvent::Start(tag)),
     }
 }
 
@@ -319,29 +302,11 @@ fn sanitize_markdown_end<'a>(
     }
 
     match tag_end {
-        TagEnd::Paragraph
-        | TagEnd::Heading(_)
-        | TagEnd::BlockQuote(_)
-        | TagEnd::CodeBlock
-        | TagEnd::List(_)
-        | TagEnd::Item
-        | TagEnd::DefinitionList
-        | TagEnd::DefinitionListTitle
-        | TagEnd::DefinitionListDefinition
-        | TagEnd::Table
-        | TagEnd::TableHead
-        | TagEnd::TableRow
-        | TagEnd::TableCell
-        | TagEnd::Emphasis
-        | TagEnd::Strong
-        | TagEnd::Strikethrough
-        | TagEnd::Superscript
-        | TagEnd::Subscript
-        | TagEnd::Link => Some(MarkdownEvent::End(tag_end)),
         TagEnd::HtmlBlock
         | TagEnd::Image
         | TagEnd::FootnoteDefinition
         | TagEnd::MetadataBlock(_) => None,
+        tag_end => Some(MarkdownEvent::End(tag_end)),
     }
 }
 

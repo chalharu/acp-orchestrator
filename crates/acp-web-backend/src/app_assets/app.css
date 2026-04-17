@@ -18,17 +18,18 @@
 }
 
 html,
-body,
-#app-root {
-  min-height: 100%;
+body {
+  height: 100%;
 }
 
 body {
   margin: 0;
-  min-height: 100vh;
+  min-height: 100%;
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   color: var(--ink);
   background: var(--page-bg);
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 button,
@@ -70,8 +71,11 @@ a:hover {
 }
 
 #app-root {
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
   padding: 0 1rem;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .app-shell {
@@ -81,17 +85,19 @@ a:hover {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  min-height: 0;
+  max-height: 100%;
 }
 
 .app-shell--home {
-  min-height: 100dvh;
+  min-height: 100%;
   justify-content: center;
   padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
 
 .app-shell--session {
-  height: 100dvh;
-  min-height: 100dvh;
+  height: 100%;
+  min-height: 0;
   padding-top: 0.75rem;
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
   display: grid;

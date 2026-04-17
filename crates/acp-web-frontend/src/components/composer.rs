@@ -27,7 +27,7 @@ pub fn Composer(
             autocomplete="off"
             on:submit=handle_submit
         >
-            <ComposerInput disabled=disabled draft=draft />
+            <ComposerInput disabled=disabled draft=draft on_submit=on_submit />
             <ComposerFooter
                 status_text=status_text
                 disabled=disabled
@@ -40,7 +40,19 @@ pub fn Composer(
 }
 
 #[component]
-fn ComposerInput(#[prop(into)] disabled: Signal<bool>, draft: RwSignal<String>) -> impl IntoView {
+fn ComposerInput(
+    #[prop(into)] disabled: Signal<bool>,
+    draft: RwSignal<String>,
+    on_submit: Callback<String>,
+) -> impl IntoView {
+    let handle_submit = move || {
+        let text = draft.get_untracked().trim().to_string();
+        if text.is_empty() || disabled.get_untracked() {
+            return;
+        }
+        on_submit.run(text);
+    };
+
     view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
@@ -52,6 +64,15 @@ fn ComposerInput(#[prop(into)] disabled: Signal<bool>, draft: RwSignal<String>) 
             on:input=move |ev| {
                 let target = event_target::<web_sys::HtmlTextAreaElement>(&ev);
                 draft.set(target.value());
+            }
+            on:keydown=move |ev: web_sys::KeyboardEvent| {
+                if ev.is_composing() {
+                    return;
+                }
+                if ev.key() == "Enter" && !ev.shift_key() {
+                    ev.prevent_default();
+                    handle_submit();
+                }
             }
             prop:disabled=move || disabled.get()
         />

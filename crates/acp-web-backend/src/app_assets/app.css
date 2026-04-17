@@ -156,11 +156,85 @@ a:hover {
 }
 
 .banner__body,
-.pending-list__summary,
+.pending-list__summary {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .transcript-entry__body {
   line-height: 1.6;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.transcript-entry__body--plain {
+  white-space: pre-wrap;
+}
+
+.transcript-entry__body--markdown > :first-child {
+  margin-top: 0;
+}
+
+.transcript-entry__body--markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.transcript-entry__body--markdown p,
+.transcript-entry__body--markdown ul,
+.transcript-entry__body--markdown ol,
+.transcript-entry__body--markdown pre,
+.transcript-entry__body--markdown blockquote,
+.transcript-entry__body--markdown table {
+  margin: 0 0 0.75rem;
+}
+
+.transcript-entry__body--markdown ul,
+.transcript-entry__body--markdown ol {
+  padding-left: 1.2rem;
+}
+
+.transcript-entry__body--markdown blockquote {
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--line-strong);
+  color: var(--ink-soft);
+}
+
+.transcript-entry__body--markdown a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+
+.transcript-entry__body--markdown code {
+  padding: 0.08rem 0.32rem;
+  border-radius: 6px;
+  background: #efe7dc;
+  font-size: 0.94em;
+}
+
+.transcript-entry__body--markdown pre {
+  overflow-x: auto;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f6f0e7;
+}
+
+.transcript-entry__body--markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.transcript-entry__body--markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.transcript-entry__body--markdown th,
+.transcript-entry__body--markdown td {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  text-align: left;
 }
 
 .transcript {

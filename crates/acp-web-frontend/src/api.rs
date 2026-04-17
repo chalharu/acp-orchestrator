@@ -5,9 +5,10 @@
 //! SSE events.
 
 use acp_contracts::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse,
-    PermissionDecision, PromptRequest, ResolvePermissionRequest, SessionListItem,
-    SessionListResponse, SessionResponse, SessionSnapshot, StreamEvent,
+    CancelTurnResponse, CreateSessionResponse, DeleteSessionResponse, ErrorResponse,
+    PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
+    ResolvePermissionRequest, SessionListItem, SessionListResponse, SessionResponse,
+    SessionSnapshot, StreamEvent,
 };
 use futures_channel::mpsc;
 use gloo_net::http::Request;
@@ -168,26 +169,57 @@ pub async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String>
     response.json().await.map_err(|error| error.to_string())
 }
 
-pub async fn close_session(session_id: &str) -> Result<SessionSnapshot, String> {
+/// PATCH the session title.
+pub async fn rename_session(session_id: &str, title: &str) -> Result<SessionSnapshot, String> {
+    let url = format!("/api/v1/sessions/{session_id}");
+    let body = serde_json::to_string(&RenameSessionRequest {
+        title: title.to_string(),
+    })
+    .map_err(|error| error.to_string())?;
+
+    let response = patch_json_with_csrf(&url, body).await?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Rename session failed").await);
+    }
+
+    let renamed: RenameSessionResponse =
+        response.json().await.map_err(|error| error.to_string())?;
+    Ok(renamed.session)
+}
+
+/// DELETE a session permanently.
+pub async fn delete_session(session_id: &str) -> Result<DeleteSessionResponse, String> {
     let csrf = csrf_token();
-    let url = format!("/api/v1/sessions/{session_id}/close");
-    let response = Request::post(&url)
+    let url = format!("/api/v1/sessions/{session_id}");
+    let response = Request::delete(&url)
         .header("x-csrf-token", &csrf)
         .send()
         .await
         .map_err(|error| error.to_string())?;
 
     if !response.ok() {
-        return Err(response_error_message(response, "Close session failed").await);
+        return Err(response_error_message(response, "Delete session failed").await);
     }
 
-    let closed: CloseSessionResponse = response.json().await.map_err(|error| error.to_string())?;
-    Ok(closed.session)
+    response.json().await.map_err(|error| error.to_string())
 }
 
 async fn post_json_with_csrf(url: &str, body: String) -> Result<gloo_net::http::Response, String> {
     let csrf = csrf_token();
     Request::post(url)
+        .header("x-csrf-token", &csrf)
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn patch_json_with_csrf(url: &str, body: String) -> Result<gloo_net::http::Response, String> {
+    let csrf = csrf_token();
+    Request::patch(url)
         .header("x-csrf-token", &csrf)
         .header("content-type", "application/json")
         .body(body)

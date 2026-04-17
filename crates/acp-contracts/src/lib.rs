@@ -26,6 +26,8 @@ pub struct ConversationMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub id: String,
+    #[serde(default = "default_session_title")]
+    pub title: String,
     pub status: SessionStatus,
     pub latest_sequence: u64,
     pub messages: Vec<ConversationMessage>,
@@ -36,8 +38,14 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionListItem {
     pub id: String,
+    #[serde(default = "default_session_title")]
+    pub title: String,
     pub status: SessionStatus,
     pub last_activity_at: DateTime<Utc>,
+}
+
+fn default_session_title() -> String {
+    "New chat".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +59,21 @@ pub struct SessionResponse {
 }
 
 pub type CreateSessionResponse = SessionResponse;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenameSessionRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenameSessionResponse {
+    pub session: SessionSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteSessionResponse {
+    pub deleted: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptRequest {

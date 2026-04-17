@@ -16,8 +16,9 @@ use acp_app_support::{
     find_frontend_bundle_asset,
 };
 use acp_contracts::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
-    PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, DeleteSessionResponse,
+    ErrorResponse, HealthResponse, PromptRequest, PromptResponse, RenameSessionRequest,
+    RenameSessionResponse, ResolvePermissionRequest, ResolvePermissionResponse,
     SessionHistoryResponse, SessionListResponse, SessionResponse, SessionSnapshot,
     SlashCompletionsResponse, StreamEvent,
 };
@@ -135,7 +136,12 @@ pub fn app(state: AppState) -> Router {
         .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
-        .route("/api/v1/sessions/{session_id}", get(get_session))
+        .route(
+            "/api/v1/sessions/{session_id}",
+            get(get_session)
+                .patch(rename_session)
+                .delete(delete_session),
+        )
         .route(
             "/api/v1/sessions/{session_id}/history",
             get(get_session_history),
@@ -736,9 +742,51 @@ async fn get_session(
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, AppError> {
     let principal = authorize_request(&headers, false)?;
-    let session = state.store.open_session(&principal.id, &session_id).await?;
+    let session = state
+        .store
+        .session_snapshot(&principal.id, &session_id)
+        .await?;
 
     Ok(Json(SessionResponse { session }))
+}
+
+async fn rename_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<RenameSessionRequest>,
+) -> Result<Json<RenameSessionResponse>, AppError> {
+    let principal = authorize_request(&headers, true)?;
+    let title = request.title.trim().to_string();
+    if title.is_empty() {
+        return Err(AppError::BadRequest("title must not be empty".to_string()));
+    }
+    if title.chars().count() > 500 {
+        return Err(AppError::BadRequest(
+            "title must not exceed 500 characters".to_string(),
+        ));
+    }
+    let session = state
+        .store
+        .rename_session(&principal.id, &session_id, title)
+        .await?;
+
+    Ok(Json(RenameSessionResponse { session }))
+}
+
+async fn delete_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<DeleteSessionResponse>, AppError> {
+    let principal = authorize_request(&headers, true)?;
+    state
+        .store
+        .delete_session(&principal.id, &session_id)
+        .await?;
+    state.reply_provider.forget_session(&session_id);
+
+    Ok(Json(DeleteSessionResponse { deleted: true }))
 }
 
 async fn get_session_history(

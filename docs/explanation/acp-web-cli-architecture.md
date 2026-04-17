@@ -926,8 +926,9 @@ Application read model として、`OwnedSessionListView` と `SessionSnapshotVi
   - session owner、session metadata、ACP sessionId、negotiated protocol/capabilities を保存する
     single writer
   - TTL、recent activity 順序、worker ひも付け、attach 数などの現在値も同じ repository で管理する
-  - recent activity は create / attach / prompt accept / permission resolve / cancel / close の
-    成功時に更新し、history 読み出しや stream delta 受信だけでは更新しない
+  - current MVP では recent activity は create / prompt accept の成功時に更新し、
+    session snapshot 読み出し、permission resolve、cancel、close、history 読み出し、
+    stream delta 受信だけでは更新しない
 - `EventStore`
   - append-only canonical event と transcript snapshot を保持し、history/replay/reconnect の
     読み出しに使う single writer
@@ -999,6 +1000,8 @@ backend は ACP の raw event をそのまま流しません。`SessionUpdateNor
 | `GET` | `/api/v1/sessions` | owner-scoped session 一覧取得 | 認証済み principal |
 | `POST` | `/api/v1/sessions` | session 作成 | 認証済み principal |
 | `GET` | `/api/v1/sessions/{id}` | session snapshot 取得 | session owner |
+| `PATCH` | `/api/v1/sessions/{id}` | session title rename | session owner |
+| `DELETE` | `/api/v1/sessions/{id}` | session delete | session owner |
 | `GET` | `/api/v1/sessions/{id}/events` | SSE 購読 | session owner |
 | `GET` | `/api/v1/sessions/{id}/history` | 履歴ページ取得 | session owner |
 | `POST` | `/api/v1/sessions/{id}/messages` | prompt 送信 | session owner |
@@ -1010,9 +1013,10 @@ backend は ACP の raw event をそのまま流しません。`SessionUpdateNor
 
 `GET /api/v1/sessions` が返すのは system-wide な全件一覧ではなく、認証済み principal が
 owner である session 一覧です。retention window 内にある closed session も current state 付きで
-返し、front-end は attachable / read-only を判別できます。並び順の正本も backend が持ちます。
-recent activity は create / attach / prompt accept / permission resolve / cancel / close の
-成功時だけ更新し、history 読み出しや stream delta では並び替えません。
+返し、front-end は attachable / read-only を判別できます。session title metadata と並び順の正本も
+backend が持ちます。current MVP の recent activity は create / prompt accept の成功時だけ更新し、
+session snapshot 読み出し、permission resolve、cancel、close、history 読み出しや stream delta
+では並び替えません。
 
 `/api/v1/completions/slash` は ACP をそのまま中継する endpoint ではありません。
 ACP schema に completion 専用 RPC はありません。そのため、backend は active session を

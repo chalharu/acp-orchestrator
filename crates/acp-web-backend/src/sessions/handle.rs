@@ -53,6 +53,8 @@ impl PendingPermission {
 struct SessionData {
     id: String,
     owner: String,
+    title: String,
+    title_is_auto: bool,
     status: SessionStatus,
     closed_at: Option<DateTime<Utc>>,
     last_activity_at: DateTime<Utc>,
@@ -80,6 +82,8 @@ impl SessionHandle {
             data: Mutex::new(SessionData {
                 id,
                 owner,
+                title: "New chat".to_string(),
+                title_is_auto: true,
                 status: SessionStatus::Active,
                 closed_at: None,
                 last_activity_at,
@@ -118,6 +122,7 @@ impl SessionHandle {
         let data = self.data.lock().await;
         SessionSnapshot {
             id: data.id.clone(),
+            title: data.title.clone(),
             status: data.status.clone(),
             latest_sequence: data.latest_sequence,
             messages: data.messages.clone(),
@@ -135,6 +140,7 @@ impl SessionHandle {
         (
             SessionListItem {
                 id: data.id.clone(),
+                title: data.title.clone(),
                 status: data.status.clone(),
                 last_activity_at: data.last_activity_at,
             },
@@ -165,6 +171,12 @@ impl SessionHandle {
         data.recent_order = recent_order;
     }
 
+    pub(super) async fn rename(&self, title: String) {
+        let mut data = self.data.lock().await;
+        data.title = title;
+        data.title_is_auto = false;
+    }
+
     pub(super) async fn submit_user_prompt(
         &self,
         text: String,
@@ -172,6 +184,17 @@ impl SessionHandle {
         let mut data = self.data.lock().await;
         if data.status == SessionStatus::Closed {
             return Err(SessionStoreError::Closed);
+        }
+
+        // Auto-title from the first user prompt when the title has not been manually set.
+        if data.title_is_auto
+            && !data
+                .messages
+                .iter()
+                .any(|m| matches!(m.role, MessageRole::User))
+            && let Some(auto_title) = auto_title_from_prompt(&text)
+        {
+            data.title = auto_title;
         }
 
         let prompt_order = data.next_prompt_order;
@@ -357,6 +380,18 @@ impl SessionHandle {
         })
     }
 
+    pub(super) async fn prepare_delete(&self) {
+        let mut data = self.data.lock().await;
+        Self::cancel_all_turns_locked(&mut data);
+        data.pending_completions.clear();
+        if data.status != SessionStatus::Closed {
+            data.status = SessionStatus::Closed;
+            data.closed_at = Some(Utc::now());
+        } else if data.closed_at.is_none() {
+            data.closed_at = Some(Utc::now());
+        }
+    }
+
     pub(super) fn subscribe(&self) -> broadcast::Receiver<StreamEvent> {
         self.sender.subscribe()
     }
@@ -434,6 +469,12 @@ impl SessionHandle {
             }
         }
     }
+}
+
+fn auto_title_from_prompt(prompt: &str) -> Option<String> {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = normalized.chars().take(60).collect::<String>();
+    (!title.is_empty()).then_some(title)
 }
 
 fn collect_pending_permissions(data: &SessionData) -> Vec<PermissionRequest> {

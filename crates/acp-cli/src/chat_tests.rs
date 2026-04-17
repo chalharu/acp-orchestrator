@@ -20,6 +20,7 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
         &serde_json::to_vec(&CreateSessionResponse {
             session: SessionSnapshot {
                 id: "s_new".to_string(),
+                title: "New chat".to_string(),
                 status: SessionStatus::Active,
                 latest_sequence: 1,
                 messages: Vec::new(),
@@ -60,6 +61,7 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
             &serde_json::to_vec(&CreateSessionResponse {
                 session: SessionSnapshot {
                     id: "s_line".to_string(),
+                    title: "New chat".to_string(),
                     status: SessionStatus::Active,
                     latest_sequence: 1,
                     messages: Vec::new(),
@@ -103,6 +105,7 @@ async fn run_chat_with_handlers_does_not_start_repl_for_closed_sessions() {
             &serde_json::to_vec(&CreateSessionResponse {
                 session: SessionSnapshot {
                     id: "s_resume".to_string(),
+                    title: "New chat".to_string(),
                     status: SessionStatus::Closed,
                     latest_sequence: 2,
                     messages: Vec::new(),
@@ -169,6 +172,7 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
             &serde_json::to_vec(&CreateSessionResponse {
                 session: SessionSnapshot {
                     id: "s_resume".to_string(),
+                    title: "New chat".to_string(),
                     status: SessionStatus::Active,
                     latest_sequence: 2,
                     messages: vec![acp_contracts::ConversationMessage {
@@ -245,6 +249,7 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
             &serde_json::to_vec(&SessionListResponse {
                 sessions: vec![SessionListItem {
                     id: "s_close".to_string(),
+                    title: "New chat".to_string(),
                     status: SessionStatus::Active,
                     last_activity_at: chrono::Utc::now(),
                 }],
@@ -255,6 +260,7 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
             &serde_json::to_vec(&CloseSessionResponse {
                 session: SessionSnapshot {
                     id: "s_close".to_string(),
+                    title: "New chat".to_string(),
                     status: SessionStatus::Closed,
                     latest_sequence: 3,
                     messages: Vec::new(),
@@ -361,6 +367,7 @@ fn resumed_session_response() -> CreateSessionResponse {
     CreateSessionResponse {
         session: SessionSnapshot {
             id: "s_resume".to_string(),
+            title: "New chat".to_string(),
             status: SessionStatus::Active,
             latest_sequence: 2,
             messages: Vec::new(),

@@ -160,49 +160,96 @@ impl EntryRole {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SessionSignals {
+    entries: RwSignal<Vec<TranscriptEntry>>,
+    pending_permissions: RwSignal<Vec<(String, String)>>,
+    error: RwSignal<Option<String>>,
+    connection_status: RwSignal<String>,
+    session_status: RwSignal<String>,
+    busy: RwSignal<bool>,
+    pending_action_busy: RwSignal<bool>,
+    draft: RwSignal<String>,
+}
+
 #[component]
 fn SessionView(session_id: String) -> impl IntoView {
-    let entries: RwSignal<Vec<TranscriptEntry>> = RwSignal::new(Vec::new());
-    let pending_permissions: RwSignal<Vec<(String, String)>> = RwSignal::new(Vec::new());
-    let error = RwSignal::new(None::<String>);
-    let connection_status = RwSignal::new("connecting".to_string());
-    let session_status = RwSignal::new("loading".to_string());
-    let busy = RwSignal::new(false);
-    let pending_action_busy = RwSignal::new(false);
-    let draft = RwSignal::new(String::new());
+    let signals = session_signals();
 
     spawn_session_bootstrap(
         session_id.clone(),
-        entries,
-        pending_permissions,
-        connection_status,
-        session_status,
-        error,
+        signals.entries,
+        signals.pending_permissions,
+        signals.connection_status,
+        signals.session_status,
+        signals.error,
     );
 
-    let composer_busy = session_composer_busy_signal(busy, session_status, pending_permissions);
-    let composer_status = session_composer_status_signal(busy, session_status, pending_permissions);
-    let on_submit = session_submit_callback(session_id.clone(), busy, error, draft);
-    let on_approve = permission_resolution_callback(
-        session_id.clone(),
-        PermissionDecision::Approve,
-        pending_permissions,
-        pending_action_busy,
-        error,
+    let composer_busy = session_composer_busy_signal(
+        signals.busy,
+        signals.session_status,
+        signals.pending_permissions,
     );
-    let on_deny = permission_resolution_callback(
-        session_id.clone(),
-        PermissionDecision::Deny,
-        pending_permissions,
-        pending_action_busy,
-        error,
+    let composer_status = session_composer_status_signal(
+        signals.busy,
+        signals.session_status,
+        signals.pending_permissions,
     );
-    let on_cancel = cancel_turn_callback(
+    let on_submit = session_submit_callback(
         session_id.clone(),
-        pending_permissions,
-        pending_action_busy,
-        error,
+        signals.busy,
+        signals.error,
+        signals.draft,
     );
+    let (on_approve, on_deny, on_cancel) = session_permission_callbacks(
+        session_id.clone(),
+        signals.pending_permissions,
+        signals.pending_action_busy,
+        signals.error,
+    );
+
+    session_view_content(
+        session_id,
+        signals,
+        composer_busy,
+        composer_status,
+        on_submit,
+        on_approve,
+        on_deny,
+        on_cancel,
+    )
+}
+
+fn session_signals() -> SessionSignals {
+    SessionSignals {
+        entries: RwSignal::new(Vec::new()),
+        pending_permissions: RwSignal::new(Vec::new()),
+        error: RwSignal::new(None::<String>),
+        connection_status: RwSignal::new("connecting".to_string()),
+        session_status: RwSignal::new("loading".to_string()),
+        busy: RwSignal::new(false),
+        pending_action_busy: RwSignal::new(false),
+        draft: RwSignal::new(String::new()),
+    }
+}
+
+fn session_view_content(
+    session_id: String,
+    signals: SessionSignals,
+    composer_busy: Signal<bool>,
+    composer_status: Signal<String>,
+    on_submit: Callback<String>,
+    on_approve: Callback<String>,
+    on_deny: Callback<String>,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
+    let entries = signals.entries;
+    let pending_permissions = signals.pending_permissions;
+    let pending_action_busy = signals.pending_action_busy;
+    let error = signals.error;
+    let connection_status = signals.connection_status;
+    let session_status = signals.session_status;
+    let draft = signals.draft;
 
     view! {
         <main class="app-shell">
@@ -230,6 +277,31 @@ fn SessionView(session_id: String) -> impl IntoView {
             />
         </main>
     }
+}
+
+fn session_permission_callbacks(
+    session_id: String,
+    pending_permissions: RwSignal<Vec<(String, String)>>,
+    pending_action_busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+) -> (Callback<String>, Callback<String>, Callback<()>) {
+    (
+        permission_resolution_callback(
+            session_id.clone(),
+            PermissionDecision::Approve,
+            pending_permissions,
+            pending_action_busy,
+            error,
+        ),
+        permission_resolution_callback(
+            session_id.clone(),
+            PermissionDecision::Deny,
+            pending_permissions,
+            pending_action_busy,
+            error,
+        ),
+        cancel_turn_callback(session_id, pending_permissions, pending_action_busy, error),
+    )
 }
 
 fn spawn_session_bootstrap(

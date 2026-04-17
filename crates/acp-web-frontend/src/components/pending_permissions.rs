@@ -17,10 +17,15 @@ pub fn PendingPermissions(
     view! {
         <Show when=move || !items.get().is_empty()>
             <section class="panel pending-panel" aria-live="polite">
-                <h2>"Pending permissions"</h2>
-                <p class="muted">
-                    "Resolve the pending request to continue this turn, or cancel it."
-                </p>
+                <div class="section-heading section-heading--compact">
+                    <div>
+                        <p class="eyebrow">"Attention"</p>
+                        <h2>"Pending permissions"</h2>
+                    </div>
+                    <p class="section-heading__meta">
+                        "Resolve the request to continue this turn, or cancel it."
+                    </p>
+                </div>
                 <ul class="pending-list">
                     <For
                         each=move || items.get()
@@ -52,11 +57,10 @@ fn PendingPermissionItem(
     on_approve: Callback<String>,
     on_deny: Callback<String>,
 ) -> impl IntoView {
-    let label = format!("[{request_id}] {summary}");
-
     view! {
         <li class="pending-list__item">
-            <p class="pending-list__summary">{label}</p>
+            <p class="pending-list__request-id">{request_id.clone()}</p>
+            <p class="pending-list__summary">{summary}</p>
             <div class="pending-list__actions">
                 <PendingPermissionActionButton
                     request_id=request_id.clone()

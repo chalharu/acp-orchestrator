@@ -8,6 +8,15 @@ use crate::TranscriptEntry;
 pub fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl IntoView {
     view! {
         <section class="panel transcript-panel" aria-label="conversation transcript">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">"Conversation"</p>
+                    <h2>"Transcript"</h2>
+                </div>
+                <p class="section-heading__meta">
+                    {move || transcript_meta_copy(&entries.get())}
+                </p>
+            </div>
             <ol class="transcript">
                 <Show
                     when=move || !entries.get().is_empty()
@@ -42,5 +51,13 @@ pub fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl I
                 </Show>
             </ol>
         </section>
+    }
+}
+
+fn transcript_meta_copy(entries: &[TranscriptEntry]) -> String {
+    match entries.len() {
+        0 => "Waiting for the first note.".to_string(),
+        1 => "1 message in view.".to_string(),
+        count => format!("{count} messages in view."),
     }
 }

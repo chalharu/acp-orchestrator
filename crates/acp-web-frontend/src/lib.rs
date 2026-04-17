@@ -56,9 +56,10 @@ fn App() -> impl IntoView {
                             backend_origin=window_origin()
                             connection_status=Signal::derive(|| "ready".to_string())
                             session_status=Signal::derive(|| "unknown".to_string())
-                            route_summary="Unknown ACP Web route.".to_string()
+                            route_summary="This route is not available in the current web shell."
+                                .to_string()
                         />
-                        <p class="top-link"><a href="/app/">"Start a fresh chat"</a></p>
+                        <p class="top-link"><a href="/app/">"Start a new chat"</a></p>
                         <section class="panel">
                             <p class="muted">"Page not found."</p>
                         </section>
@@ -109,9 +110,9 @@ fn HomePage() -> impl IntoView {
                 backend_origin=window_origin()
                 connection_status=Signal::derive(|| "ready".to_string())
                 session_status=Signal::derive(|| "new".to_string())
-                route_summary="Send the first prompt to create a session and move to /app/sessions/{id}."
+                route_summary="Send the first prompt here to create a session and move into the conversation view."
             />
-            <p class="top-link"><a href="/app/">"Start a fresh chat"</a></p>
+            <p class="top-link"><a href="/app/">"Start a new chat"</a></p>
             <ErrorBanner message=error />
             <Transcript entries=Signal::derive(Vec::new) />
             <Composer
@@ -270,9 +271,9 @@ fn session_view_content(
                 backend_origin=window_origin()
                 connection_status=Signal::derive(move || connection_status.get())
                 session_status=Signal::derive(move || session_status.get())
-                route_summary=format!("Session: {}", session_id)
+                route_summary=format!("You are viewing session {session_id}.")
             />
-            <p class="top-link"><a href="/app/">"Start a fresh chat"</a></p>
+            <p class="top-link"><a href="/app/">"Start a new chat"</a></p>
             <ErrorBanner message=error />
             <Transcript entries=Signal::derive(move || entries.get()) />
             <PendingPermissions

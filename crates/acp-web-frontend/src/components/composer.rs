@@ -24,12 +24,19 @@ pub fn Composer(
             autocomplete="off"
             on:submit=handle_submit
         >
-            <label for="composer-input">"Prompt"</label>
+            <div class="section-heading section-heading--compact">
+                <div>
+                    <p class="eyebrow">"Next turn"</p>
+                    <h2>"Write the next turn"</h2>
+                </div>
+                <p class="section-heading__meta">{move || status_text.get()}</p>
+            </div>
+            <label class="sr-only" for="composer-input">"Prompt"</label>
             <textarea
                 id="composer-input"
                 name="prompt"
                 rows="4"
-                placeholder="Ask ACP something…"
+                placeholder="Write a prompt, question, or next step…"
                 prop:value=move || draft.get()
                 on:input=move |ev| {
                     let target = event_target::<web_sys::HtmlTextAreaElement>(&ev);
@@ -38,12 +45,14 @@ pub fn Composer(
                 prop:disabled=move || busy.get()
             />
             <div class="composer__footer">
-                <p class="muted">{move || status_text.get()}</p>
+                <p class="muted">
+                    "Short prompts work well, but longer notes are welcome too."
+                </p>
                 <button
                     type="submit"
                     prop:disabled=move || busy.get()
                 >
-                    "Send"
+                    "Send prompt"
                 </button>
             </div>
         </form>

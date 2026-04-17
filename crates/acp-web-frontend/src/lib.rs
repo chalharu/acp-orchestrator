@@ -326,55 +326,146 @@ fn session_view_content(
 
     view! {
         <main class="app-shell app-shell--session">
-            <div
-                class=move || {
-                    if sidebar_open.get() {
-                        "session-layout session-layout--sidebar-open"
-                    } else {
-                        "session-layout"
-                    }
-                }
-            >
-                <SessionSidebar
-                    current_session_id=current_session_id
-                    sessions=Signal::derive(move || session_list.get())
-                    session_list_loaded=Signal::derive(move || session_list_loaded.get())
-                    session_list_error=Signal::derive(move || session_list_error.get())
-                    sidebar_open=sidebar_open
-                    closing_session_id=Signal::derive(move || closing_session_id.get())
-                    close_disabled=close_disabled
-                    on_close_session=on_close_session
-                />
-                <button
-                    type="button"
-                    class="session-layout__backdrop"
-                    hidden=move || !sidebar_open.get()
-                    on:click=move |_| sidebar_open.set(false)
-                >
-                    <span class="sr-only">"Close session sidebar"</span>
-                </button>
-                <section class="session-main">
-                    <SessionTopBar message=combined_error sidebar_open=sidebar_open />
-                    <div class="chat-body">
-                        <Transcript entries=Signal::derive(move || entries.get()) />
-                    </div>
-                    <SessionDock
-                        pending_permissions=Signal::derive(move || pending_permissions.get())
-                        pending_action_busy=Signal::derive(move || pending_action_busy.get())
-                        on_approve=on_approve
-                        on_deny=on_deny
-                        on_cancel=on_cancel_for_permissions
-                        composer_disabled=composer.disabled
-                        composer_status=composer.status
-                        draft=draft
-                        on_submit=on_submit
-                        composer_cancel_visible=composer.cancel_visible
-                        composer_cancel_busy=composer.cancel_busy
-                        composer_cancel=on_cancel_for_composer
-                    />
-                </section>
-            </div>
+            <SessionShell
+                current_session_id=current_session_id
+                sidebar_open=sidebar_open
+                sessions=Signal::derive(move || session_list.get())
+                session_list_loaded=Signal::derive(move || session_list_loaded.get())
+                session_list_error=Signal::derive(move || session_list_error.get())
+                closing_session_id=Signal::derive(move || closing_session_id.get())
+                close_disabled=close_disabled
+                on_close_session=on_close_session
+                topbar_message=combined_error
+                entries=Signal::derive(move || entries.get())
+                pending_permissions=Signal::derive(move || pending_permissions.get())
+                pending_action_busy=Signal::derive(move || pending_action_busy.get())
+                on_approve=on_approve
+                on_deny=on_deny
+                on_cancel=on_cancel_for_permissions
+                composer_disabled=composer.disabled
+                composer_status=composer.status
+                draft=draft
+                on_submit=on_submit
+                composer_cancel_visible=composer.cancel_visible
+                composer_cancel_busy=composer.cancel_busy
+                composer_cancel=on_cancel_for_composer
+            />
         </main>
+    }
+}
+
+#[component]
+fn SessionShell(
+    current_session_id: String,
+    sidebar_open: RwSignal<bool>,
+    #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
+    #[prop(into)] session_list_loaded: Signal<bool>,
+    #[prop(into)] session_list_error: Signal<Option<String>>,
+    #[prop(into)] closing_session_id: Signal<Option<String>>,
+    #[prop(into)] close_disabled: Signal<bool>,
+    on_close_session: Callback<String>,
+    #[prop(into)] topbar_message: Signal<Option<String>>,
+    #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
+    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
+    #[prop(into)] pending_action_busy: Signal<bool>,
+    on_approve: Callback<String>,
+    on_deny: Callback<String>,
+    on_cancel: Callback<()>,
+    #[prop(into)] composer_disabled: Signal<bool>,
+    #[prop(into)] composer_status: Signal<String>,
+    draft: RwSignal<String>,
+    on_submit: Callback<String>,
+    #[prop(into)] composer_cancel_visible: Signal<bool>,
+    #[prop(into)] composer_cancel_busy: Signal<bool>,
+    composer_cancel: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <div class=move || session_layout_class(sidebar_open.get())>
+            <SessionSidebar
+                current_session_id=current_session_id
+                sessions=sessions
+                session_list_loaded=session_list_loaded
+                session_list_error=session_list_error
+                sidebar_open=sidebar_open
+                closing_session_id=closing_session_id
+                close_disabled=close_disabled
+                on_close_session=on_close_session
+            />
+            <SessionBackdrop sidebar_open=sidebar_open />
+            <SessionMain
+                topbar_message=topbar_message
+                sidebar_open=sidebar_open
+                entries=entries
+                pending_permissions=pending_permissions
+                pending_action_busy=pending_action_busy
+                on_approve=on_approve
+                on_deny=on_deny
+                on_cancel=on_cancel
+                composer_disabled=composer_disabled
+                composer_status=composer_status
+                draft=draft
+                on_submit=on_submit
+                composer_cancel_visible=composer_cancel_visible
+                composer_cancel_busy=composer_cancel_busy
+                composer_cancel=composer_cancel
+            />
+        </div>
+    }
+}
+
+#[component]
+fn SessionBackdrop(sidebar_open: RwSignal<bool>) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="session-layout__backdrop"
+            hidden=move || !sidebar_open.get()
+            on:click=move |_| sidebar_open.set(false)
+        >
+            <span class="sr-only">"Close session sidebar"</span>
+        </button>
+    }
+}
+
+#[component]
+fn SessionMain(
+    #[prop(into)] topbar_message: Signal<Option<String>>,
+    sidebar_open: RwSignal<bool>,
+    #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
+    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
+    #[prop(into)] pending_action_busy: Signal<bool>,
+    on_approve: Callback<String>,
+    on_deny: Callback<String>,
+    on_cancel: Callback<()>,
+    #[prop(into)] composer_disabled: Signal<bool>,
+    #[prop(into)] composer_status: Signal<String>,
+    draft: RwSignal<String>,
+    on_submit: Callback<String>,
+    #[prop(into)] composer_cancel_visible: Signal<bool>,
+    #[prop(into)] composer_cancel_busy: Signal<bool>,
+    composer_cancel: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <section class="session-main">
+            <SessionTopBar message=topbar_message sidebar_open=sidebar_open />
+            <div class="chat-body">
+                <Transcript entries=entries />
+            </div>
+            <SessionDock
+                pending_permissions=pending_permissions
+                pending_action_busy=pending_action_busy
+                on_approve=on_approve
+                on_deny=on_deny
+                on_cancel=on_cancel
+                composer_disabled=composer_disabled
+                composer_status=composer_status
+                draft=draft
+                on_submit=on_submit
+                composer_cancel_visible=composer_cancel_visible
+                composer_cancel_busy=composer_cancel_busy
+                composer_cancel=composer_cancel
+            />
+        </section>
     }
 }
 
@@ -415,75 +506,135 @@ fn SessionSidebar(
         Signal::derive(move || sidebar_sessions(&sessions.get(), &current_session_id));
 
     view! {
-        <aside
-            class=move || {
-                if sidebar_open.get() {
-                    "session-sidebar session-sidebar--open"
-                } else {
-                    "session-sidebar"
+        <aside class=move || session_sidebar_class(sidebar_open.get())>
+            <SessionSidebarHeader sidebar_open=sidebar_open />
+            <SessionSidebarStatus session_list_error=session_list_error session_items=session_items />
+            <SessionSidebarNav
+                session_items=session_items
+                session_list_loaded=session_list_loaded
+                session_list_error=session_list_error
+                closing_session_id=closing_session_id
+                close_disabled=close_disabled
+                on_close_session=on_close_session
+            />
+        </aside>
+    }
+}
+
+#[component]
+fn SessionSidebarHeader(sidebar_open: RwSignal<bool>) -> impl IntoView {
+    view! {
+        <div class="session-sidebar__header">
+            <a class="session-sidebar__new-link" href="/app/">
+                "New session"
+            </a>
+            <button
+                type="button"
+                class="session-sidebar__dismiss"
+                on:click=move |_| sidebar_open.set(false)
+            >
+                "Close"
+            </button>
+        </div>
+    }
+}
+
+#[component]
+fn SessionSidebarStatus(
+    #[prop(into)] session_list_error: Signal<Option<String>>,
+    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || session_list_error.get().is_some() && !session_items.get().is_empty()>
+            <p class="session-sidebar__status muted">
+                {move || session_list_error.get().unwrap_or_default()}
+            </p>
+        </Show>
+    }
+}
+
+#[component]
+fn SessionSidebarNav(
+    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
+    #[prop(into)] session_list_loaded: Signal<bool>,
+    #[prop(into)] session_list_error: Signal<Option<String>>,
+    #[prop(into)] closing_session_id: Signal<Option<String>>,
+    #[prop(into)] close_disabled: Signal<bool>,
+    on_close_session: Callback<String>,
+) -> impl IntoView {
+    view! {
+        <nav class="session-sidebar__nav" aria-label="Sessions">
+            <Show
+                when=move || session_list_loaded.get()
+                fallback=|| {
+                    view! { <p class="session-sidebar__empty muted">"Loading sessions..."</p> }
+                }
+            >
+                <SessionSidebarListOrEmpty
+                    session_items=session_items
+                    session_list_error=session_list_error
+                    closing_session_id=closing_session_id
+                    close_disabled=close_disabled
+                    on_close_session=on_close_session
+                />
+            </Show>
+        </nav>
+    }
+}
+
+#[component]
+fn SessionSidebarListOrEmpty(
+    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
+    #[prop(into)] session_list_error: Signal<Option<String>>,
+    #[prop(into)] closing_session_id: Signal<Option<String>>,
+    #[prop(into)] close_disabled: Signal<bool>,
+    on_close_session: Callback<String>,
+) -> impl IntoView {
+    view! {
+        <Show
+            when=move || !session_items.get().is_empty()
+            fallback=move || {
+                view! {
+                    <p class="session-sidebar__empty muted">
+                        {move || session_sidebar_empty_message(session_list_error.get().is_some())}
+                    </p>
                 }
             }
         >
-            <div class="session-sidebar__header">
-                <a class="session-sidebar__new-link" href="/app/">
-                    "New session"
-                </a>
-                <button
-                    type="button"
-                    class="session-sidebar__dismiss"
-                    on:click=move |_| sidebar_open.set(false)
-                >
-                    "Close"
-                </button>
-            </div>
-            <Show when=move || session_list_error.get().is_some() && !session_items.get().is_empty()>
-                <p class="session-sidebar__status muted">
-                    {move || session_list_error.get().unwrap_or_default()}
-                </p>
-            </Show>
-            <nav class="session-sidebar__nav" aria-label="Sessions">
-                <Show
-                    when=move || session_list_loaded.get()
-                    fallback=|| {
-                        view! { <p class="session-sidebar__empty muted">"Loading sessions..."</p> }
+            <SessionSidebarList
+                session_items=session_items
+                closing_session_id=closing_session_id
+                close_disabled=close_disabled
+                on_close_session=on_close_session
+            />
+        </Show>
+    }
+}
+
+#[component]
+fn SessionSidebarList(
+    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
+    #[prop(into)] closing_session_id: Signal<Option<String>>,
+    #[prop(into)] close_disabled: Signal<bool>,
+    on_close_session: Callback<String>,
+) -> impl IntoView {
+    view! {
+        <ul class="session-sidebar__list">
+            <For
+                each=move || session_items.get()
+                key=|item| (item.id.clone(), item.is_closed, item.is_current)
+                children=move |item| {
+                    view! {
+                        <SessionSidebarItem
+                            item=item
+                            closing_session_id=closing_session_id
+                            close_disabled=close_disabled
+                            on_close_session=on_close_session
+                        />
                     }
-                >
-                    <Show
-                        when=move || !session_items.get().is_empty()
-                        fallback=move || {
-                            view! {
-                                <p class="session-sidebar__empty muted">
-                                    {move || {
-                                        if session_list_error.get().is_some() {
-                                            "Unable to load sessions right now."
-                                        } else {
-                                            "No sessions yet. Start a new one."
-                                        }
-                                    }}
-                                </p>
-                            }
-                        }
-                    >
-                        <ul class="session-sidebar__list">
-                            <For
-                                each=move || session_items.get()
-                                key=|item| (item.id.clone(), item.is_closed, item.is_current)
-                                children=move |item| {
-                                    view! {
-                                        <SessionSidebarItem
-                                            item=item
-                                            closing_session_id=closing_session_id
-                                            close_disabled=close_disabled
-                                            on_close_session=on_close_session
-                                        />
-                                    }
-                                }
-                            />
-                        </ul>
-                    </Show>
-                </Show>
-            </nav>
-        </aside>
+                }
+            />
+        </ul>
     }
 }
 
@@ -513,47 +664,81 @@ fn SessionSidebarItem(
     let closed_badge = is_closed;
 
     view! {
-        <li
-            class=move || {
-                if is_current {
-                    "session-sidebar__item session-sidebar__item--current"
-                } else {
-                    "session-sidebar__item"
-                }
+        <li class=move || session_sidebar_item_class(is_current)>
+            <SessionSidebarLink
+                href=href
+                is_current=is_current
+                title=title
+                session_id=session_id
+                show_current=current_badge
+                show_closed=closed_badge
+            />
+            <SessionSidebarCloseButton
+                can_close=can_close
+                is_current=is_current
+                session_id=session_id_for_click
+                closing_label=closing_label
+                closing_session_id=closing_session_id
+                close_disabled=close_disabled
+                on_close_session=on_close_session
+            />
+        </li>
+    }
+}
+
+#[component]
+fn SessionSidebarLink(
+    href: String,
+    is_current: bool,
+    title: String,
+    session_id: String,
+    show_current: bool,
+    show_closed: bool,
+) -> impl IntoView {
+    view! {
+        <a
+            class="session-sidebar__session-link"
+            href=href
+            aria-current=if is_current { Some("page") } else { None }
+        >
+            <span class="session-sidebar__session-title">{title}</span>
+            <code class="session-sidebar__session-id">{session_id}</code>
+            <span class="session-sidebar__session-meta">
+                <Show when=move || show_current>
+                    <span class="session-sidebar__badge session-sidebar__badge--current">
+                        "Current"
+                    </span>
+                </Show>
+                <Show when=move || show_closed>
+                    <span class="session-sidebar__badge">"Closed"</span>
+                </Show>
+            </span>
+        </a>
+    }
+}
+
+#[component]
+fn SessionSidebarCloseButton(
+    can_close: bool,
+    is_current: bool,
+    session_id: String,
+    #[prop(into)] closing_label: Signal<&'static str>,
+    #[prop(into)] closing_session_id: Signal<Option<String>>,
+    #[prop(into)] close_disabled: Signal<bool>,
+    on_close_session: Callback<String>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="session-sidebar__close"
+            hidden=!can_close
+            on:click=move |_| on_close_session.run(session_id.clone())
+            prop:disabled=move || {
+                !can_close || closing_session_id.get().is_some() || (is_current && close_disabled.get())
             }
         >
-            <a
-                class="session-sidebar__session-link"
-                href=href
-                aria-current=if is_current { Some("page") } else { None }
-            >
-                <span class="session-sidebar__session-title">{title}</span>
-                <code class="session-sidebar__session-id">{session_id}</code>
-                <span class="session-sidebar__session-meta">
-                    <Show when=move || current_badge>
-                        <span class="session-sidebar__badge session-sidebar__badge--current">
-                            "Current"
-                        </span>
-                    </Show>
-                    <Show when=move || closed_badge>
-                        <span class="session-sidebar__badge">"Closed"</span>
-                    </Show>
-                </span>
-            </a>
-            <button
-                type="button"
-                class="session-sidebar__close"
-                hidden=!can_close
-                on:click=move |_| on_close_session.run(session_id_for_click.clone())
-                prop:disabled=move || {
-                    !can_close
-                        || closing_session_id.get().is_some()
-                        || (is_current && close_disabled.get())
-                }
-            >
-                {move || closing_label.get()}
-            </button>
-        </li>
+            {move || closing_label.get()}
+        </button>
     }
 }
 
@@ -873,51 +1058,71 @@ fn cancel_turn_callback(session_id: String, signals: SessionSignals) -> Callback
     })
 }
 
-fn close_session_callback(current_session_id: String, signals: SessionSignals) -> Callback<String> {
-    Callback::new(move |session_id: String| {
-        let current_session_id = current_session_id.clone();
-        let closing_current_session = session_id == current_session_id;
-        if signals.closing_session_id.get_untracked().is_some() {
-            return;
-        }
-        if closing_current_session
+fn should_block_close_request(
+    session_id: &str,
+    current_session_id: &str,
+    signals: SessionSignals,
+) -> bool {
+    signals.closing_session_id.get_untracked().is_some()
+        || (session_id == current_session_id
             && session_close_disabled(
                 signals.turn_state.get_untracked(),
                 signals.pending_action_busy.get_untracked(),
                 false,
-            )
-        {
+            ))
+}
+
+fn clear_close_feedback(signals: SessionSignals, closing_current_session: bool) {
+    if closing_current_session {
+        signals.action_error.set(None);
+    } else {
+        signals.session_list_error.set(None);
+    }
+}
+
+fn record_close_failure(signals: SessionSignals, closing_current_session: bool, message: String) {
+    if closing_current_session {
+        signals.action_error.set(Some(message));
+    } else {
+        signals.session_list_error.set(Some(message));
+    }
+}
+
+async fn handle_close_success(
+    session_id: &str,
+    current_session_id: &str,
+    session: SessionSnapshot,
+    signals: SessionSignals,
+) {
+    signals
+        .session_list
+        .update(|sessions| mark_session_closed(sessions, session_id));
+    if session_id == current_session_id {
+        signals.connection_error.set(None);
+        push_local_status_entry(signals.entries, USER_CLOSED_STATUS);
+        stop_live_stream(signals);
+        apply_closed_session_response(session, signals);
+    }
+    refresh_session_list(signals).await;
+}
+
+fn close_session_callback(current_session_id: String, signals: SessionSignals) -> Callback<String> {
+    Callback::new(move |session_id: String| {
+        let current_session_id = current_session_id.clone();
+        let closing_current_session = session_id == current_session_id;
+        if should_block_close_request(&session_id, &current_session_id, signals) {
             return;
         }
 
         signals.closing_session_id.set(Some(session_id.clone()));
-        if closing_current_session {
-            signals.action_error.set(None);
-        } else {
-            signals.session_list_error.set(None);
-        }
+        clear_close_feedback(signals, closing_current_session);
 
         leptos::task::spawn_local(async move {
             match api::close_session(&session_id).await {
                 Ok(session) => {
-                    signals
-                        .session_list
-                        .update(|sessions| mark_session_closed(sessions, &session_id));
-                    if session_id == current_session_id {
-                        signals.connection_error.set(None);
-                        push_local_status_entry(signals.entries, USER_CLOSED_STATUS);
-                        stop_live_stream(signals);
-                        apply_closed_session_response(session, signals);
-                    }
-                    refresh_session_list(signals).await;
+                    handle_close_success(&session_id, &current_session_id, session, signals).await
                 }
-                Err(message) => {
-                    if closing_current_session {
-                        signals.action_error.set(Some(message));
-                    } else {
-                        signals.session_list_error.set(Some(message));
-                    }
-                }
+                Err(message) => record_close_failure(signals, closing_current_session, message),
             }
 
             signals.closing_session_id.set(None);
@@ -1191,6 +1396,38 @@ fn default_sidebar_open() -> bool {
         .and_then(|width| width.as_f64())
         .map(|width| width >= 960.0)
         .unwrap_or(true)
+}
+
+fn session_layout_class(sidebar_open: bool) -> &'static str {
+    if sidebar_open {
+        "session-layout session-layout--sidebar-open"
+    } else {
+        "session-layout"
+    }
+}
+
+fn session_sidebar_class(sidebar_open: bool) -> &'static str {
+    if sidebar_open {
+        "session-sidebar session-sidebar--open"
+    } else {
+        "session-sidebar"
+    }
+}
+
+fn session_sidebar_item_class(is_current: bool) -> &'static str {
+    if is_current {
+        "session-sidebar__item session-sidebar__item--current"
+    } else {
+        "session-sidebar__item"
+    }
+}
+
+fn session_sidebar_empty_message(has_error: bool) -> &'static str {
+    if has_error {
+        "Unable to load sessions right now."
+    } else {
+        "No sessions yet. Start a new one."
+    }
 }
 
 fn navigate_to(path: &str) -> Result<(), String> {

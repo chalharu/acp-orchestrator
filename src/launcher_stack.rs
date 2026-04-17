@@ -509,39 +509,77 @@ async fn spawn_persistent_bundled_backend(
     )
     .await?;
 
-    let backend = spawn_background_role(
+    let SpawnedService {
+        child: backend,
+        endpoint,
+    } = match spawn_persistent_bundled_backend_service(
+        current_executable,
+        &mock_address,
+        frontend_dist,
+    )
+    .await
+    {
+        Ok(service) => service,
+        Err(error) => {
+            let _ = terminate_child(&mut mock, "acp mock").await;
+            return Err(error);
+        }
+    };
+
+    Ok((
+        mock,
+        backend,
+        persistent_launcher_state(
+            endpoint,
+            mock_address,
+            frontend_dist,
+            auth_token,
+            launcher_identity,
+        ),
+    ))
+}
+
+async fn spawn_persistent_bundled_backend_service(
+    current_executable: &Path,
+    mock_address: &str,
+    frontend_dist: Option<&Path>,
+) -> Result<SpawnedService> {
+    spawn_background_role(
         current_executable,
         "web backend",
         "backend",
-        backend_role_args(
-            OsString::from(&mock_address),
-            BUNDLED_STARTUP_HINTS,
-            frontend_dist,
-        ),
+        persistent_bundled_backend_role_args(mock_address, frontend_dist),
         &[],
         false,
     )
-    .await;
-    match backend {
-        Ok(SpawnedService {
-            child: backend,
-            endpoint,
-        }) => Ok((
-            mock,
-            backend,
-            LauncherState {
-                backend_url: endpoint,
-                mock_address: Some(mock_address),
-                frontend_dist: frontend_dist.map(path_to_string),
-                startup_hints: BUNDLED_STARTUP_HINTS,
-                auth_token,
-                launcher_identity: launcher_identity.clone(),
-            },
-        )),
-        Err(error) => {
-            let _ = terminate_child(&mut mock, "acp mock").await;
-            Err(error)
-        }
+    .await
+}
+
+fn persistent_bundled_backend_role_args(
+    mock_address: &str,
+    frontend_dist: Option<&Path>,
+) -> Vec<OsString> {
+    backend_role_args(
+        OsString::from(mock_address),
+        BUNDLED_STARTUP_HINTS,
+        frontend_dist,
+    )
+}
+
+fn persistent_launcher_state(
+    endpoint: String,
+    mock_address: String,
+    frontend_dist: Option<&Path>,
+    auth_token: String,
+    launcher_identity: &LauncherIdentity,
+) -> LauncherState {
+    LauncherState {
+        backend_url: endpoint,
+        mock_address: Some(mock_address),
+        frontend_dist: frontend_dist.map(path_to_string),
+        startup_hints: BUNDLED_STARTUP_HINTS,
+        auth_token,
+        launcher_identity: launcher_identity.clone(),
     }
 }
 

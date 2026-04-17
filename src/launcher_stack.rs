@@ -280,10 +280,7 @@ async fn prepare_persistent_bundled_stack_with_retry(
         if let Some(state) =
             reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
         {
-            return Ok(LauncherStack::persistent(
-                state.backend_url,
-                state.auth_token,
-            ));
+            return Ok(persistent_stack_from_state(state));
         }
 
         if let Some(lock) = try_acquire_launcher_lock(&lock_path)? {
@@ -305,10 +302,7 @@ async fn prepare_persistent_bundled_stack_with_retry(
     if let Some(state) =
         reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
     {
-        return Ok(LauncherStack::persistent(
-            state.backend_url,
-            state.auth_token,
-        ));
+        return Ok(persistent_stack_from_state(state));
     }
 
     crate::WaitForLauncherLockSnafu { path: lock_path }.fail()
@@ -324,10 +318,7 @@ async fn spawn_or_reuse_locked_stack(
     if let Some(state) =
         reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
     {
-        return Ok(LauncherStack::persistent(
-            state.backend_url,
-            state.auth_token,
-        ));
+        return Ok(persistent_stack_from_state(state));
     }
 
     let (mut mock, mut backend, state) =
@@ -581,6 +572,10 @@ fn backend_role_args(
     }
     append_stack_exit_after_ms(&mut args);
     args
+}
+
+fn persistent_stack_from_state(state: LauncherState) -> LauncherStack {
+    LauncherStack::persistent(state.backend_url, state.auth_token)
 }
 
 fn launcher_state_supports_frontend(

@@ -5,8 +5,9 @@
 //! SSE events.
 
 use acp_contracts::{
-    CancelTurnResponse, CreateSessionResponse, ErrorResponse, PermissionDecision, PromptRequest,
-    ResolvePermissionRequest, SessionResponse, SessionSnapshot, StreamEvent,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse,
+    PermissionDecision, PromptRequest, ResolvePermissionRequest, SessionListItem,
+    SessionListResponse, SessionResponse, SessionSnapshot, StreamEvent,
 };
 use futures_channel::mpsc;
 use gloo_net::http::Request;
@@ -86,6 +87,21 @@ pub async fn load_session(session_id: &str) -> Result<SessionSnapshot, SessionLo
     Ok(session.session)
 }
 
+/// Load the current user's sessions in backend-provided order.
+pub async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
+    let response = Request::get("/api/v1/sessions")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "List sessions failed").await);
+    }
+
+    let listed: SessionListResponse = response.json().await.map_err(|error| error.to_string())?;
+    Ok(listed.sessions)
+}
+
 /// Open the session event stream and return the raw `EventSource` plus a parsed
 /// event receiver.
 pub fn open_session_event_stream(
@@ -150,6 +166,23 @@ pub async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String>
     }
 
     response.json().await.map_err(|error| error.to_string())
+}
+
+pub async fn close_session(session_id: &str) -> Result<SessionSnapshot, String> {
+    let csrf = csrf_token();
+    let url = format!("/api/v1/sessions/{session_id}/close");
+    let response = Request::post(&url)
+        .header("x-csrf-token", &csrf)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Close session failed").await);
+    }
+
+    let closed: CloseSessionResponse = response.json().await.map_err(|error| error.to_string())?;
+    Ok(closed.session)
 }
 
 async fn post_json_with_csrf(url: &str, body: String) -> Result<gloo_net::http::Response, String> {

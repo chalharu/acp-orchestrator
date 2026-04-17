@@ -1,13 +1,25 @@
 use std::{
-    convert::Infallible, fmt::Display, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc,
+    convert::Infallible,
+    fmt::Display,
+    future::Future,
+    io,
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
+use acp_app_support::{
+    FRONTEND_JAVASCRIPT_ASSET_PATH, FRONTEND_WASM_ASSET_PATH, FrontendBundleAsset,
+    LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH, LEGACY_FRONTEND_WASM_ASSET_PATH,
+    find_frontend_bundle_asset,
+};
 use acp_contracts::{
     CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, ErrorResponse, HealthResponse,
     PromptRequest, PromptResponse, ResolvePermissionRequest, ResolvePermissionResponse,
-    SessionHistoryResponse, SessionListResponse, SessionSnapshot, SlashCompletionsResponse,
-    StreamEvent,
+    SessionHistoryResponse, SessionListResponse, SessionResponse, SessionSnapshot,
+    SlashCompletionsResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -58,6 +70,10 @@ pub struct ServerConfig {
     pub session_cap: usize,
     pub acp_server: String,
     pub startup_hints: bool,
+    /// Directory containing the Trunk-compiled Leptos CSR bundle.
+    /// The backend serves the fingerprinted files through stable alias routes.
+    /// When `None`, the WASM asset routes return `503 Service Unavailable`.
+    pub frontend_dist: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +82,7 @@ impl Default for ServerConfig {
             session_cap: 8,
             acp_server: "127.0.0.1:8090".to_string(),
             startup_hints: false,
+            frontend_dist: None,
         }
     }
 }
@@ -75,6 +92,8 @@ pub struct AppState {
     store: Arc<SessionStore>,
     reply_provider: Arc<dyn ReplyProvider>,
     startup_hints: bool,
+    /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
+    frontend_dist: Option<Arc<PathBuf>>,
 }
 
 impl AppState {
@@ -83,6 +102,7 @@ impl AppState {
             store: Arc::new(SessionStore::new(config.session_cap)),
             reply_provider: Arc::new(MockClient::new(config.acp_server)?),
             startup_hints: config.startup_hints,
+            frontend_dist: config.frontend_dist.map(Arc::new),
         })
     }
 
@@ -94,6 +114,7 @@ impl AppState {
             store,
             reply_provider,
             startup_hints: false,
+            frontend_dist: None,
         }
     }
 }
@@ -103,6 +124,15 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/app", get(redirect_to_app))
         .route("/app/", get(app_entrypoint))
+        .route("/app/assets/app.css", get(app_stylesheet))
+        .route("/app/assets/wasm-init.js", get(wasm_init_script))
+        .route(FRONTEND_JAVASCRIPT_ASSET_PATH, get(wasm_glue_javascript))
+        .route(FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
+        .route(
+            LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH,
+            get(wasm_glue_javascript),
+        )
+        .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
         .route("/api/v1/sessions/{session_id}", get(get_session))
@@ -342,6 +372,97 @@ async fn app_session_entrypoint(Path(_session_id): Path<String>, headers: Header
     app_shell_response(&headers)
 }
 
+async fn app_stylesheet() -> Response {
+    app_static_text_response("text/css; charset=utf-8", APP_STYLESHEET)
+}
+
+async fn wasm_init_script() -> Response {
+    app_static_text_response("application/javascript; charset=utf-8", WASM_INIT_JS)
+}
+
+/// Serve the wasm-bindgen JS loader from the Trunk dist directory at runtime.
+async fn wasm_glue_javascript(State(state): State<AppState>) -> Response {
+    let asset_path = match locate_frontend_asset(
+        &state,
+        FrontendBundleAsset::JavaScript,
+        "wasm_glue_javascript",
+    ) {
+        Ok(path) => path,
+        Err(detail) => return frontend_unavailable_response_detail(&detail),
+    };
+
+    match tokio::fs::read_to_string(&asset_path).await {
+        Ok(content) => app_dynamic_text_response("application/javascript; charset=utf-8", content),
+        Err(err) => {
+            tracing::warn!(%err, path = %asset_path.display(), "failed to read frontend javascript bundle");
+            frontend_unavailable_response("wasm_glue_javascript: file not found")
+        }
+    }
+}
+
+/// Serve the compiled WebAssembly binary from the Trunk dist directory at runtime.
+async fn wasm_binary(State(state): State<AppState>) -> Response {
+    let asset_path = match locate_frontend_asset(&state, FrontendBundleAsset::Wasm, "wasm_binary") {
+        Ok(path) => path,
+        Err(detail) => return frontend_unavailable_response_detail(&detail),
+    };
+
+    match tokio::fs::read(&asset_path).await {
+        Ok(bytes) => {
+            let headers = asset_response_headers("application/wasm");
+            (headers, bytes).into_response()
+        }
+        Err(err) => {
+            tracing::warn!(%err, path = %asset_path.display(), "failed to read frontend wasm bundle");
+            frontend_unavailable_response("wasm_binary: file not found")
+        }
+    }
+}
+
+fn locate_frontend_asset(
+    state: &AppState,
+    asset_type: FrontendBundleAsset,
+    context_name: &'static str,
+) -> Result<PathBuf, String> {
+    let Some(dist) = state.frontend_dist.as_deref() else {
+        return Err(format!("{context_name}: frontend_dist not configured"));
+    };
+
+    let locate_result = match asset_type {
+        FrontendBundleAsset::JavaScript => frontend_javascript_asset_path(dist),
+        FrontendBundleAsset::Wasm => frontend_wasm_asset_path(dist),
+    };
+
+    match locate_result {
+        Ok(path) => Ok(path),
+        Err(err) => {
+            tracing::warn!(%err, asset = ?asset_type, context_name, "failed to locate frontend bundle asset");
+            Err(format!("{context_name}: file not found"))
+        }
+    }
+}
+
+fn frontend_javascript_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
+    find_frontend_bundle_asset(dist, FrontendBundleAsset::JavaScript)
+}
+
+fn frontend_wasm_asset_path(dist: &FsPath) -> io::Result<PathBuf> {
+    find_frontend_bundle_asset(dist, FrontendBundleAsset::Wasm)
+}
+
+fn frontend_unavailable_response(detail: &'static str) -> Response {
+    frontend_unavailable_response_detail(detail)
+}
+
+fn frontend_unavailable_response_detail(detail: &str) -> Response {
+    tracing::debug!(detail, "frontend WASM assets not available");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Web frontend assets not available. Run `cargo run -- --web` to build and serve them.",
+    )
+        .into_response()
+}
+
 fn app_shell_response(headers: &HeaderMap) -> Response {
     let (existing_session_id, session_id) = app_shell_cookie(headers, SESSION_COOKIE_NAME);
     let (existing_csrf_token, csrf_token) = app_shell_cookie(headers, CSRF_COOKIE_NAME);
@@ -356,6 +477,28 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
         app_shell_document(&csrf_token),
     )
         .into_response()
+}
+
+fn app_static_text_response(content_type: &'static str, body: &'static str) -> Response {
+    let response_headers = asset_response_headers(content_type);
+    (response_headers, body).into_response()
+}
+
+fn app_dynamic_text_response(content_type: &'static str, body: String) -> Response {
+    let response_headers = asset_response_headers(content_type);
+    (response_headers, body).into_response()
+}
+
+fn asset_response_headers(content_type: &'static str) -> HeaderMap {
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    response_headers
 }
 
 fn app_shell_cookie(headers: &HeaderMap, name: &str) -> (Option<String>, String) {
@@ -380,7 +523,7 @@ fn build_app_shell_headers(
     response_headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'",
         ),
     );
     response_headers.insert(
@@ -418,28 +561,16 @@ fn append_cookie_if_missing(
     }
 }
 
+const APP_SHELL_DOCUMENT_TEMPLATE: &str = include_str!("app_assets/app.html");
+const APP_STYLESHEET: &str = include_str!("app_assets/app.css");
+const WASM_INIT_JS: &str = "import init from \"./acp-web-frontend.js\";\n\nawait init();\n";
+
 fn app_shell_document(csrf_token: &str) -> Html<String> {
-    Html(format!(
-        r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="acp-api-base" content="/api/v1">
-    <meta name="acp-csrf-token" content="{csrf_token}">
-    <title>ACP Web MVP slice 0</title>
-  </head>
-  <body>
-    <main>
-      <h1>ACP Web MVP slice 0</h1>
-      <p>Loopback HTTPS browser entrypoint is ready.</p>
-      <p>This slice fixes the launcher, auth cookie bootstrap, and CSRF bootstrap before the chat UI arrives.</p>
-      <p>Route vocabulary is fixed at <code>/app/</code> and <code>/app/sessions/{{id}}</code>.</p>
-    </main>
-  </body>
-</html>
-"#
-    ))
+    assert!(
+        APP_SHELL_DOCUMENT_TEMPLATE.contains("__ACP_CSRF_TOKEN__"),
+        "app.html must contain the __ACP_CSRF_TOKEN__ sentinel",
+    );
+    Html(APP_SHELL_DOCUMENT_TEMPLATE.replace("__ACP_CSRF_TOKEN__", csrf_token))
 }
 
 fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue {
@@ -447,18 +578,18 @@ fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue 
     assert!(
         name.bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
-        "slice 0 cookie names must stay header-safe",
+        "web app cookie names must stay header-safe",
     );
     assert!(
         value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-        "slice 0 cookie values must stay UUID-safe",
+        "web app cookie values must stay UUID-safe",
     );
     HeaderValue::from_str(&format!(
         "{name}={value}; Path=/; SameSite=Strict; Secure{http_only}"
     ))
-    .expect("slice 0 cookies should serialize into response headers")
+    .expect("web app cookies should serialize into response headers")
 }
 
 fn cookie_uuid_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -603,11 +734,11 @@ async fn get_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<CreateSessionResponse>, AppError> {
+) -> Result<Json<SessionResponse>, AppError> {
     let principal = authorize_request(&headers, false)?;
     let session = state.store.open_session(&principal.id, &session_id).await?;
 
-    Ok(Json(CreateSessionResponse { session }))
+    Ok(Json(SessionResponse { session }))
 }
 
 async fn get_session_history(

@@ -1,5 +1,14 @@
 use super::*;
-use std::{process::Stdio, sync::OnceLock, time::Duration};
+use acp_app_support::{FrontendBundleAsset, frontend_bundle_file_name, unique_temp_json_path};
+use std::{
+    ffi::OsString,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::OnceLock,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -43,6 +52,38 @@ pub(crate) fn test_acp_server_url_guard(value: Option<&str>) -> TestAcpServerUrl
         }
     }
     TestAcpServerUrlGuard { previous }
+}
+
+struct TestPathGuard {
+    previous: Option<OsString>,
+}
+
+impl Drop for TestPathGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            unsafe {
+                std::env::set_var("PATH", previous);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+}
+
+fn test_path_guard(value: Option<OsString>) -> TestPathGuard {
+    let previous = std::env::var_os("PATH");
+    if let Some(value) = value {
+        unsafe {
+            std::env::set_var("PATH", value);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("PATH");
+        }
+    }
+    TestPathGuard { previous }
 }
 
 #[test]
@@ -436,6 +477,181 @@ async fn run_launcher_routes_web_mode_through_the_web_launcher() {
     result.expect("web launcher routing should succeed");
 }
 
+#[tokio::test]
+async fn prepare_frontend_dist_skips_external_backend_launches() {
+    let _guard = test_env_lock().lock().await;
+    let _url_guard = test_acp_server_url_guard(Some("https://127.0.0.1:9443"));
+
+    let frontend_dist = prepare_managed_web_frontend_dist()
+        .await
+        .expect("external backend launches should skip the managed frontend build");
+
+    assert_eq!(frontend_dist, None);
+}
+
+#[tokio::test]
+async fn prepare_frontend_dist_returns_workspace_dist_for_managed_web_launches() {
+    let _guard = test_env_lock().lock().await;
+    let _url_guard = test_acp_server_url_guard(None);
+    let dist = frontend_dist_path();
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+    let created_assets = write_stub_frontend_bundle_assets(&dist);
+
+    let frontend_dist = prepare_managed_web_frontend_dist()
+        .await
+        .expect("managed web launches should prepare the frontend dist");
+
+    assert_eq!(frontend_dist.as_deref(), Some(dist.as_path()));
+
+    for asset in created_assets {
+        let _ = fs::remove_file(asset);
+    }
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_reports_missing_trunk() {
+    let _guard = test_env_lock().lock().await;
+    let _path_guard = test_path_guard(Some(path_without_trunk()));
+    let dist = unique_temp_json_path("acp-frontend-dist", "missing-trunk").with_extension("");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+
+    let error = ensure_frontend_built(&dist)
+        .await
+        .expect_err("missing trunk executables should be surfaced");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message }
+            if message == "trunk not found – install it with `cargo install trunk`"
+    ));
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_surfaces_failed_trunk_exit_codes() {
+    let _guard = test_env_lock().lock().await;
+    let fake_trunk_dir = write_fake_trunk_bin("exit 9");
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+    let dist = unique_temp_json_path("acp-frontend-dist", "failed-trunk").with_extension("");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+
+    let error = ensure_frontend_built(&dist)
+        .await
+        .expect_err("failed trunk builds should be surfaced");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message }
+            if message == "`trunk build --release` failed with exit code Some(9)"
+    ));
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_surfaces_other_trunk_spawn_errors() {
+    let _guard = test_env_lock().lock().await;
+    let fake_trunk_dir = write_fake_trunk_bin_with_permissions("exit 0", 0o644);
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+    let dist = unique_temp_json_path("acp-frontend-dist", "unexecutable-trunk").with_extension("");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+
+    let error = ensure_frontend_built(&dist)
+        .await
+        .expect_err("other trunk spawn failures should be surfaced");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message } if !message.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_accepts_successful_trunk_runs() {
+    let _guard = test_env_lock().lock().await;
+    let fake_trunk_dir = write_fake_trunk_bin("exit 0");
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+    let dist = unique_temp_json_path("acp-frontend-dist", "successful-trunk").with_extension("");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+
+    ensure_frontend_built(&dist)
+        .await
+        .expect("successful trunk builds should be accepted");
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_skips_trunk_when_dist_is_current() {
+    let _guard = test_env_lock().lock().await;
+    let fake_trunk_dir = write_fake_trunk_bin("exit 9");
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+    let frontend_root = write_temp_frontend_root("fresh-dist");
+    let dist = frontend_root.join("dist");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+    std::thread::sleep(Duration::from_millis(20));
+    write_stub_frontend_bundle_assets(&dist);
+
+    ensure_frontend_built_at(&frontend_root, &dist)
+        .await
+        .expect("fresh frontend dist should skip rebuilding");
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_rebuilds_stale_dist() {
+    let _guard = test_env_lock().lock().await;
+    let frontend_root = write_temp_frontend_root("stale-dist");
+    let dist = frontend_root.join("dist");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+    write_stub_frontend_bundle_assets(&dist);
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(
+        frontend_root.join("src").join("lib.rs"),
+        "pub fn app() { let _ = 1; }\n",
+    )
+    .expect("frontend source should be writable");
+    let marker = unique_temp_json_path("acp-trunk-marker", "stale-dist");
+    let fake_trunk_dir = write_fake_trunk_bin(&format!("printf rebuilt > '{}'", marker.display()));
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+
+    ensure_frontend_built_at(&frontend_root, &dist)
+        .await
+        .expect("stale frontend dist should trigger a rebuild");
+
+    assert_eq!(
+        fs::read_to_string(&marker).expect("the fake trunk marker should be written"),
+        "rebuilt"
+    );
+}
+
+#[test]
+fn frontend_bundle_paths_reports_non_directory_dist_errors() {
+    let frontend_root = write_temp_frontend_root("dist-read-error");
+    let dist = frontend_root.join("dist-file");
+    fs::write(&dist, "not a directory").expect("dist file should be writable");
+
+    let error = frontend_bundle_paths(&dist).expect_err("non-directory dist should fail");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message }
+            if message.contains("reading") && message.contains("dist-file")
+    ));
+}
+
+#[test]
+fn latest_frontend_input_modified_reports_missing_frontend_inputs() {
+    let frontend_root =
+        unique_temp_json_path("acp-web-frontend-root", "empty-root").with_extension("");
+    fs::create_dir_all(frontend_root.join("src"))
+        .expect("empty frontend src directory should be creatable");
+
+    let error = latest_frontend_input_modified(&frontend_root)
+        .expect_err("empty frontend roots should fail");
+
+    assert!(matches!(
+        error,
+        LauncherError::FrontendBuild { message }
+            if message
+                == format!("no frontend inputs were found under {}", frontend_root.display())
+    ));
+}
+
 #[test]
 fn finish_cli_launch_preserves_cli_errors_when_cleanup_also_fails() {
     let error = finish_cli_launch(
@@ -718,4 +934,80 @@ async fn spawn_sleep_child() -> tokio::process::Child {
         .arg("sleep 30")
         .spawn()
         .expect("sleep child should spawn")
+}
+
+fn write_stub_frontend_bundle_assets(dist: &Path) -> Vec<PathBuf> {
+    let tag = uuid::Uuid::new_v4();
+    let javascript = dist.join(frontend_bundle_file_name(
+        &tag.to_string(),
+        FrontendBundleAsset::JavaScript,
+    ));
+    let wasm = dist.join(frontend_bundle_file_name(
+        &tag.to_string(),
+        FrontendBundleAsset::Wasm,
+    ));
+    fs::write(&javascript, "export default async function init() {}\n")
+        .expect("stub javascript bundle should write");
+    fs::write(&wasm, b"\x00asm\x01\x00\x00\x00").expect("stub wasm bundle should write");
+    vec![javascript, wasm]
+}
+
+fn write_temp_frontend_root(label: &str) -> PathBuf {
+    let root = unique_temp_json_path("acp-web-frontend-root", label).with_extension("");
+    fs::create_dir_all(root.join("src")).expect("temp frontend src directory should be creatable");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"temp-frontend\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("temp frontend Cargo.toml should write");
+    fs::write(root.join("Trunk.toml"), "dist = \"dist\"\n")
+        .expect("temp frontend Trunk.toml should write");
+    fs::write(
+        root.join("index.html"),
+        "<!doctype html>\n<div id=\"app-root\"></div>\n",
+    )
+    .expect("temp frontend index.html should write");
+    fs::write(root.join("src").join("lib.rs"), "pub fn app() {}\n")
+        .expect("temp frontend source should write");
+    root
+}
+
+async fn prepare_managed_web_frontend_dist() -> Result<Option<PathBuf>> {
+    prepare_frontend_dist(
+        &LauncherArgs {
+            acp_server: None,
+            web: true,
+            cli_args: Vec::new(),
+        },
+        true,
+        false,
+    )
+    .await
+}
+
+fn write_fake_trunk_bin(command: &str) -> PathBuf {
+    write_fake_trunk_bin_with_permissions(command, 0o755)
+}
+
+fn write_fake_trunk_bin_with_permissions(command: &str, mode: u32) -> PathBuf {
+    let dir = unique_temp_json_path("acp-trunk-bin", "frontend-build").with_extension("");
+    fs::create_dir_all(&dir).expect("fake trunk bin dir should be creatable");
+    let trunk = dir.join("trunk");
+    fs::write(&trunk, format!("#!/bin/sh\n{command}\n")).expect("fake trunk should write");
+    let mut permissions = fs::metadata(&trunk)
+        .expect("fake trunk metadata should load")
+        .permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(&trunk, permissions).expect("fake trunk should become executable");
+    dir
+}
+
+fn path_with_fake_trunk(front: &Path) -> OsString {
+    std::env::join_paths([front, Path::new("/bin"), Path::new("/usr/bin")])
+        .expect("PATH entries should be joinable")
+}
+
+fn path_without_trunk() -> OsString {
+    std::env::join_paths([Path::new("/bin"), Path::new("/usr/bin")])
+        .expect("PATH entries should be joinable")
 }

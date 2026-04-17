@@ -7,6 +7,7 @@ async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        frontend_dist: None,
     })
     .await?;
     let session = stack.create_session("alice").await?;

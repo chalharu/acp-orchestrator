@@ -296,6 +296,16 @@ fn manual_permission_trigger_still_uses_the_permission_flow() {
 }
 
 #[test]
+fn manual_permission_trigger_is_case_and_spacing_insensitive() {
+    assert!(prompt_requires_permission("  Verify   Permission "));
+}
+
+#[test]
+fn bare_permission_words_do_not_trigger_the_permission_flow() {
+    assert!(!prompt_requires_permission("permission"));
+}
+
+#[test]
 fn manual_cancel_trigger_uses_an_extended_delay() {
     assert_eq!(
         response_delay_for(MANUAL_CANCEL_TRIGGER, Duration::from_millis(120)),

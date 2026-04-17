@@ -1,0 +1,9 @@
+[build]
+# Trunk outputs to this directory, which the backend serves at runtime.
+dist = "dist"
+# The public base path under which Axum serves the bundle.
+public_url = "/app/assets/"
+
+[watch]
+# Don't watch the dist directory – we write to it.
+ignore = ["dist"]

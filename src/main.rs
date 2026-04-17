@@ -9,8 +9,15 @@ use std::{
 use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
 use snafu::prelude::*;
 
+mod frontend_bundle;
 mod launcher_process;
 mod launcher_stack;
+
+pub(crate) use frontend_bundle::{ensure_frontend_built, frontend_dist_path};
+#[cfg(test)]
+pub(crate) use frontend_bundle::{
+    ensure_frontend_built_at, frontend_bundle_paths, latest_frontend_input_modified,
+};
 
 use launcher_process::{ensure_success, spawn_foreground_role};
 use launcher_stack::prepare_launcher_stack;
@@ -175,6 +182,9 @@ enum LauncherError {
         source: std::io::Error,
         path: PathBuf,
     },
+
+    #[snafu(display("building the web frontend failed: {message}"))]
+    FrontendBuild { message: String },
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -197,17 +207,52 @@ async fn run_with_args(args: Vec<OsString>) -> Result<()> {
 }
 
 async fn run_launcher(current_executable: &Path, launcher_args: LauncherArgs) -> Result<()> {
+    let needs_backend = launcher_args.web || command_needs_backend(&launcher_args.cli_args);
+    let cli_server_url_explicit = cli_server_url_is_explicit(&launcher_args.cli_args);
+    let frontend_dist =
+        prepare_frontend_dist(&launcher_args, needs_backend, cli_server_url_explicit).await?;
+
     let mut stack = prepare_launcher_stack(
         current_executable,
         &launcher_args,
-        launcher_args.web || command_needs_backend(&launcher_args.cli_args),
-        cli_server_url_is_explicit(&launcher_args.cli_args),
+        needs_backend,
+        cli_server_url_explicit,
+        frontend_dist.as_deref(),
     )
     .await?;
     if launcher_args.web {
         return run_web_launcher(&mut stack).await;
     }
     run_cli_launcher(current_executable, launcher_args.cli_args, &mut stack).await
+}
+
+async fn prepare_frontend_dist(
+    launcher_args: &LauncherArgs,
+    needs_backend: bool,
+    cli_server_url_explicit: bool,
+) -> Result<Option<PathBuf>> {
+    // For web mode, build the Leptos/WASM frontend before spawning the backend
+    // so the backend can be given a valid --frontend-dist path.
+    // Skip the build when an external backend is already provided via
+    // ACP_SERVER_URL (direct stack) – in that case we can't configure its dist.
+    if !should_prepare_frontend_dist(launcher_args, needs_backend, cli_server_url_explicit) {
+        return Ok(None);
+    }
+
+    let dist = frontend_dist_path();
+    ensure_frontend_built(&dist).await?;
+    Ok(Some(dist))
+}
+
+fn should_prepare_frontend_dist(
+    launcher_args: &LauncherArgs,
+    needs_backend: bool,
+    cli_server_url_explicit: bool,
+) -> bool {
+    launcher_args.web
+        && needs_backend
+        && !cli_server_url_explicit
+        && env::var_os("ACP_SERVER_URL").is_none()
 }
 
 async fn run_web_launcher(stack: &mut launcher_stack::LauncherStack) -> Result<()> {

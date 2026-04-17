@@ -25,6 +25,153 @@ pub(super) async fn expect_next_event(stream: &mut SseStream) -> Result<StreamEv
     next.context("SSE stream ended unexpectedly")?
 }
 
+pub(super) fn build_browser_client() -> Result<Client> {
+    Client::builder()
+        .cookie_store(true)
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .context("building cookie-authenticated browser client")
+}
+
+pub(super) async fn load_browser_app_shell(client: &Client, backend_url: &str) -> Result<String> {
+    client
+        .get(format!("{backend_url}/app/"))
+        .send()
+        .await
+        .context("loading the browser app shell")?
+        .error_for_status()
+        .context("browser app shell returned an error")?
+        .text()
+        .await
+        .context("reading the browser app shell")
+}
+
+pub(super) async fn create_browser_session(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+) -> Result<CreateSessionResponse> {
+    client
+        .post(format!("{backend_url}/api/v1/sessions"))
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .context("creating a cookie-authenticated browser session")?
+        .error_for_status()
+        .context("cookie-authenticated browser session creation returned an error")?
+        .json()
+        .await
+        .context("decoding the created browser session")
+}
+
+pub(super) async fn submit_browser_prompt(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+    csrf_token: &str,
+    prompt: &str,
+) -> Result<()> {
+    client
+        .post(format!(
+            "{backend_url}/api/v1/sessions/{session_id}/messages"
+        ))
+        .header("x-csrf-token", csrf_token)
+        .json(&PromptRequest {
+            text: prompt.to_string(),
+        })
+        .send()
+        .await
+        .context("submitting a browser-authenticated prompt")?
+        .error_for_status()
+        .context("browser-authenticated prompt submission returned an error")?;
+    Ok(())
+}
+
+pub(super) async fn resolve_browser_permission(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+    request_id: &str,
+    csrf_token: &str,
+    decision: PermissionDecision,
+) -> Result<ResolvePermissionResponse> {
+    client
+        .post(format!(
+            "{backend_url}/api/v1/sessions/{session_id}/permissions/{request_id}"
+        ))
+        .header("x-csrf-token", csrf_token)
+        .json(&ResolvePermissionRequest { decision })
+        .send()
+        .await
+        .context("resolving a browser-authenticated permission")?
+        .error_for_status()
+        .context("browser-authenticated permission resolution returned an error")?
+        .json()
+        .await
+        .context("decoding the browser-authenticated permission resolution")
+}
+
+pub(super) async fn cancel_browser_turn(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+    csrf_token: &str,
+) -> Result<CancelTurnResponse> {
+    client
+        .post(format!("{backend_url}/api/v1/sessions/{session_id}/cancel"))
+        .header("x-csrf-token", csrf_token)
+        .send()
+        .await
+        .context("cancelling a browser-authenticated turn")?
+        .error_for_status()
+        .context("browser-authenticated turn cancellation returned an error")?
+        .json()
+        .await
+        .context("decoding the browser-authenticated cancel response")
+}
+
+pub(super) async fn open_cookie_events(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+) -> Result<SseStream> {
+    let response = client
+        .get(format!("{backend_url}/api/v1/sessions/{session_id}/events"))
+        .send()
+        .await
+        .context("opening cookie-authenticated event stream")?
+        .error_for_status()
+        .context("cookie-authenticated event stream returned an error")?;
+
+    let stream = response.bytes_stream().eventsource().map(|event| {
+        let event = event.context("reading cookie-authenticated event")?;
+        serde_json::from_str(&event.data).context("decoding cookie-authenticated event payload")
+    });
+
+    Ok(Box::pin(stream))
+}
+
+pub(super) fn extract_meta_content(document: &str, name: &str) -> Result<String> {
+    let name_needle = format!(r#"name="{name}""#);
+    let tag = document
+        .lines()
+        .find(|line| line.contains("<meta ") && line.contains(&name_needle))
+        .context("meta tag was not present in the app shell")?
+        .trim();
+    let content_start = tag
+        .find(r#"content=""#)
+        .context("meta tag did not contain a content attribute")?
+        + r#"content=""#.len();
+    let content_end = tag[content_start..]
+        .find('"')
+        .context("meta tag content did not terminate")?
+        + content_start;
+
+    Ok(tag[content_start..content_end].to_string())
+}
+
 pub(super) struct TestStack {
     pub(super) backend_url: String,
     pub(super) client: Client,
@@ -314,6 +461,7 @@ pub(super) async fn spawn_direct_backend_server(
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        frontend_dist: None,
     })
     .context("building direct backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -351,6 +499,7 @@ pub(super) async fn spawn_graceful_backend_server(
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        frontend_dist: None,
     })
     .context("building graceful backend state")?;
     let listener = TcpListener::bind("127.0.0.1:0")

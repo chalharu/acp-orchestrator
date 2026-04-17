@@ -355,6 +355,7 @@ impl SessionStore {
     ) -> Result<ResolvePermissionResponse, SessionStoreError> {
         let handle = self.authorized_handle(owner, session_id).await?;
         let response = handle.resolve_permission(request_id, decision).await?;
+        handle.broadcast(StreamEvent::snapshot(handle.snapshot().await));
         self.touch_recent_activity(&handle).await;
         Ok(response)
     }
@@ -367,6 +368,7 @@ impl SessionStore {
         let handle = self.authorized_handle(owner, session_id).await?;
         let cancelled = handle.cancel_active_turn().await?;
         if cancelled {
+            handle.broadcast(StreamEvent::snapshot(handle.snapshot().await));
             self.touch_recent_activity(&handle).await;
         }
         Ok(cancelled)

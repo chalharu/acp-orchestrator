@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="acp-api-base" content="/api/v1">
+    <meta name="acp-csrf-token" content="__ACP_CSRF_TOKEN__">
+    <title>ACP Web chat</title>
+    <link rel="stylesheet" href="/app/assets/app.css">
+    <!--
+      The Leptos CSR bundle is initialized by wasm-init.js, which imports
+      the stable backend-served loader alias (acp-web-frontend.js) and calls
+      init() to load the compiled WebAssembly module.
+    -->
+    <script type="module" src="/app/assets/wasm-init.js"></script>
+  </head>
+  <body>
+    <!-- Leptos mounts the entire UI into this element. -->
+    <div id="app-root">
+      <noscript>
+        <p>ACP Web requires JavaScript and WebAssembly to run.</p>
+      </noscript>
+    </div>
+  </body>
+</html>

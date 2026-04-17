@@ -1,5 +1,7 @@
 use super::*;
-use acp_contracts::{SessionHistoryResponse, SessionListResponse, SlashCompletionsResponse};
+use acp_contracts::{
+    SessionHistoryResponse, SessionListResponse, SessionResponse, SlashCompletionsResponse,
+};
 
 pub(super) async fn list_sessions(
     client: &Client,
@@ -55,7 +57,7 @@ pub(super) async fn get_session(
             action: "load session",
         })?;
     let response = ensure_success(response, "load session").await?;
-    let payload: CreateSessionResponse = response.json().await.context(DecodeResponseSnafu {
+    let payload: SessionResponse = response.json().await.context(DecodeResponseSnafu {
         action: "load session",
     })?;
     Ok(payload.session)

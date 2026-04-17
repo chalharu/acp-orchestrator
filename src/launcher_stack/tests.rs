@@ -13,6 +13,12 @@ use tokio::{
     process::Command,
 };
 
+struct HealthyLauncherStateFixture {
+    backend_url: String,
+    health_task: tokio::task::JoinHandle<()>,
+    _mock_listener: TcpListener,
+}
+
 #[test]
 fn launcher_state_path_uses_home_dir_without_data_dir() {
     let path = launcher_state_path_from(None, None, Some(PathBuf::from("/tmp/home")))
@@ -73,7 +79,7 @@ async fn prepare_launcher_stack_uses_direct_mode_with_acp_server_url_env() {
         cli_args: vec![OsString::from("chat"), OsString::from("--new")],
     };
 
-    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args, true, false)
+    let stack = prepare_launcher_stack(Path::new("/bin/true"), &args, true, false, None)
         .await
         .expect("explicit ACP_SERVER_URL should skip launcher-managed services");
 
@@ -148,6 +154,7 @@ async fn prepare_persistent_stack_times_out_when_the_lock_stays_busy() {
         1,
         Duration::ZERO,
         Duration::from_secs(3600),
+        None,
     )
     .await
     .expect_err("busy launcher locks should eventually time out");
@@ -172,6 +179,7 @@ async fn prepare_persistent_stack_clears_stale_locks_before_timing_out() {
         1,
         Duration::ZERO,
         Duration::ZERO,
+        None,
     )
     .await
     .expect_err("without reusable state the launcher should still time out");
@@ -186,23 +194,7 @@ async fn prepare_persistent_stack_clears_stale_locks_before_timing_out() {
 #[tokio::test]
 async fn prepare_persistent_stack_uses_the_final_reuse_check() {
     let state_path = unique_temp_json_path("acp-launcher-state", "final-reuse");
-    let (backend_url, health_task) = spawn_health_server().await;
-    let mock_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock listener should bind");
-    save_launcher_state(
-        &state_path,
-        &test_launcher_state(
-            &backend_url,
-            Some(
-                &mock_listener
-                    .local_addr()
-                    .expect("mock listener address should be readable")
-                    .to_string(),
-            ),
-        ),
-    )
-    .expect("launcher state should save");
+    let fixture = save_healthy_launcher_state(&state_path).await;
 
     let stack = prepare_persistent_bundled_stack_with_retry(
         Path::new("/bin/true"),
@@ -211,12 +203,13 @@ async fn prepare_persistent_stack_uses_the_final_reuse_check() {
         0,
         Duration::ZERO,
         Duration::ZERO,
+        None,
     )
     .await
     .expect("the final reuse check should return the healthy stack");
 
-    health_task.abort();
-    assert_eq!(stack.backend_url(), Some(backend_url.as_str()));
+    fixture.health_task.abort();
+    assert_eq!(stack.backend_url(), Some(fixture.backend_url.as_str()));
     assert_eq!(stack.auth_token(), Some("launcher-auth-token"));
 }
 
@@ -227,35 +220,20 @@ async fn spawn_or_reuse_locked_stack_reuses_existing_state() {
     let lock = try_acquire_launcher_lock(&lock_path)
         .expect("creating the launcher lock should succeed")
         .expect("the lock should be acquired");
-    let (backend_url, health_task) = spawn_health_server().await;
-    let mock_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock listener should bind");
-    save_launcher_state(
-        &state_path,
-        &test_launcher_state(
-            &backend_url,
-            Some(
-                &mock_listener
-                    .local_addr()
-                    .expect("mock listener address should be readable")
-                    .to_string(),
-            ),
-        ),
-    )
-    .expect("launcher state should save");
+    let fixture = save_healthy_launcher_state(&state_path).await;
 
     let stack = spawn_or_reuse_locked_stack(
         Path::new("/bin/true"),
         &state_path,
         &test_launcher_identity("current"),
         lock,
+        None,
     )
     .await
     .expect("the existing healthy stack should be reused");
 
-    health_task.abort();
-    assert_eq!(stack.backend_url(), Some(backend_url.as_str()));
+    fixture.health_task.abort();
+    assert_eq!(stack.backend_url(), Some(fixture.backend_url.as_str()));
     assert_eq!(stack.auth_token(), Some("launcher-auth-token"));
 }
 
@@ -265,7 +243,7 @@ async fn reusable_launcher_state_clears_invalid_json_without_a_lock() {
     fs::write(&state_path, "{invalid").expect("invalid launcher state should write");
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
             .await
             .expect("invalid json should be ignored"),
         None
@@ -281,7 +259,7 @@ async fn reusable_launcher_state_keeps_invalid_json_while_the_lock_exists() {
     fs::write(&lock_path, []).expect("launcher lock should write");
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
             .await
             .expect("invalid json should be ignored while locked"),
         None
@@ -294,7 +272,7 @@ async fn reusable_launcher_state_propagates_non_parse_read_errors() {
     let state_path = unique_temp_json_path("acp-launcher-state", "read-error");
     fs::create_dir_all(&state_path).expect("state path directory should be creatable");
 
-    let error = reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+    let error = reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
         .await
         .expect_err("non-parse read failures should still be surfaced");
 
@@ -307,25 +285,14 @@ async fn reusable_launcher_state_propagates_non_parse_read_errors() {
 #[tokio::test]
 async fn reusable_launcher_state_treats_invalid_backend_urls_as_unhealthy() {
     let state_path = unique_temp_json_path("acp-launcher-state", "invalid-backend-url");
-    let mock_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock listener should bind");
-    save_launcher_state(
+    let mock_listener = bind_mock_listener().await;
+    write_launcher_state_fixture(
         &state_path,
-        &test_launcher_state(
-            "://invalid",
-            Some(
-                &mock_listener
-                    .local_addr()
-                    .expect("mock listener address should be readable")
-                    .to_string(),
-            ),
-        ),
-    )
-    .expect("launcher state should save");
+        test_launcher_state("://invalid", Some(&listener_address(&mock_listener))),
+    );
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("current"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
             .await
             .expect("invalid backend urls should be ignored"),
         None
@@ -336,33 +303,128 @@ async fn reusable_launcher_state_treats_invalid_backend_urls_as_unhealthy() {
 #[tokio::test]
 async fn reusable_launcher_state_rejects_identity_mismatches() {
     let state_path = unique_temp_json_path("acp-launcher-state", "identity-mismatch");
-    let (backend_url, health_task) = spawn_health_server().await;
-    let mock_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock listener should bind");
-    save_launcher_state(
+    let fixture = save_healthy_launcher_state_with_identity(
         &state_path,
-        &test_launcher_state_with_identity(
-            &backend_url,
-            Some(
-                &mock_listener
-                    .local_addr()
-                    .expect("mock listener address should be readable")
-                    .to_string(),
-            ),
-            test_launcher_identity("old-binary"),
-        ),
+        test_launcher_identity("old-binary"),
     )
-    .expect("launcher state should save");
+    .await;
 
     assert_eq!(
-        reusable_launcher_state(&state_path, &test_launcher_identity("new-binary"))
+        reusable_launcher_state(&state_path, &test_launcher_identity("new-binary"), None)
             .await
             .expect("identity mismatches should be ignored"),
         None
     );
 
+    fixture.health_task.abort();
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_rejects_frontend_dist_mismatches() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "frontend-mismatch");
+    let requested_frontend_dist =
+        unique_temp_json_path("acp-launcher-frontend", "requested").with_extension("");
+    let stored_frontend_dist =
+        unique_temp_json_path("acp-launcher-frontend", "stored").with_extension("");
+    let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
+    state.frontend_dist = Some(path_to_string(&stored_frontend_dist));
+    save_launcher_state(&state_path, &state).expect("launcher state should save");
+
+    assert_eq!(
+        reusable_launcher_state(
+            &state_path,
+            &test_launcher_identity("current"),
+            Some(&requested_frontend_dist),
+        )
+        .await
+        .expect("frontend mismatches should be ignored"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn reusable_launcher_state_rejects_startup_hint_mismatches() {
+    let state_path = unique_temp_json_path("acp-launcher-state", "startup-hints");
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = bind_mock_listener().await;
+    let mut state = test_launcher_state(&backend_url, Some(&listener_address(&mock_listener)));
+    state.startup_hints = false;
+    write_launcher_state_fixture(&state_path, state);
+
+    assert_eq!(
+        reusable_launcher_state(&state_path, &test_launcher_identity("current"), None)
+            .await
+            .expect("startup hint mismatches should be ignored"),
+        None
+    );
+
     health_task.abort();
+}
+
+#[test]
+fn backend_role_args_include_frontend_dist_when_requested() {
+    let frontend_dist = Path::new("/tmp/acp-frontend-dist");
+    let args = backend_role_args(OsString::from("127.0.0.1:8090"), true, Some(frontend_dist));
+
+    assert!(args.windows(2).any(|window| {
+        window
+            == [
+                OsString::from("--frontend-dist"),
+                frontend_dist.as_os_str().to_owned(),
+            ]
+    }));
+}
+
+#[test]
+fn backend_role_args_include_startup_hints_when_enabled() {
+    let args = backend_role_args(OsString::from("127.0.0.1:8090"), true, None);
+
+    assert!(args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
+fn backend_role_args_omit_startup_hints_when_disabled() {
+    let args = backend_role_args(OsString::from("127.0.0.1:8090"), false, None);
+
+    assert!(!args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
+fn mock_role_args_include_startup_hints_when_enabled() {
+    let args = mock_role_args(true);
+
+    assert!(args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
+fn mock_role_args_omit_startup_hints_when_disabled() {
+    let args = mock_role_args(false);
+
+    assert!(!args.iter().any(|arg| arg == "--startup-hints"));
+}
+
+#[test]
+fn launcher_state_supports_requested_stack_requires_matching_dist_paths() {
+    let frontend_dist = Path::new("/tmp/acp-frontend-dist");
+    let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
+    state.frontend_dist = Some(path_to_string(frontend_dist));
+
+    assert!(launcher_state_supports_requested_stack(
+        &state,
+        Some(frontend_dist)
+    ));
+    assert!(!launcher_state_supports_requested_stack(
+        &state,
+        Some(Path::new("/tmp/other-frontend-dist")),
+    ));
+}
+
+#[test]
+fn launcher_state_supports_requested_stack_requires_startup_hints() {
+    let mut state = test_launcher_state("http://127.0.0.1:1", Some("127.0.0.1:1"));
+    state.startup_hints = false;
+
+    assert!(!launcher_state_supports_requested_stack(&state, None));
 }
 
 #[test]
@@ -465,9 +527,10 @@ fi
 "#,
     );
 
-    let error = spawn_persistent_bundled_backend(&script, &test_launcher_identity("spawn-failure"))
-        .await
-        .expect_err("backend startup failures should be returned");
+    let error =
+        spawn_persistent_bundled_backend(&script, &test_launcher_identity("spawn-failure"), None)
+            .await
+            .expect_err("backend startup failures should be returned");
 
     assert!(matches!(
         error,
@@ -621,6 +684,18 @@ async fn managed_stack_is_healthy_rejects_non_loopback_backend_urls() {
     );
 }
 
+#[tokio::test]
+async fn managed_stack_is_healthy_checks_frontend_assets_for_web_stacks() {
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = bind_mock_listener().await;
+    let mut state = test_launcher_state(&backend_url, Some(&listener_address(&mock_listener)));
+    state.frontend_dist = Some("/tmp/acp-frontend-dist".to_string());
+
+    assert!(managed_stack_is_healthy(&state).await);
+
+    health_task.abort();
+}
+
 #[test]
 fn socket_address_uses_loopback_accepts_bracketed_ipv6_loopback() {
     assert!(socket_address_uses_loopback("[::1]:8080"));
@@ -653,9 +728,55 @@ fn test_launcher_state_with_identity(
     LauncherState {
         backend_url: backend_url.to_string(),
         mock_address: mock_address.map(str::to_string),
+        frontend_dist: None,
+        startup_hints: BUNDLED_STARTUP_HINTS,
         auth_token: "launcher-auth-token".to_string(),
         launcher_identity,
     }
+}
+
+fn write_launcher_state_fixture(path: &Path, state: LauncherState) {
+    save_launcher_state(path, &state).expect("launcher state should save");
+}
+
+async fn save_healthy_launcher_state(path: &Path) -> HealthyLauncherStateFixture {
+    save_healthy_launcher_state_with_identity(path, test_launcher_identity("current")).await
+}
+
+async fn save_healthy_launcher_state_with_identity(
+    path: &Path,
+    launcher_identity: LauncherIdentity,
+) -> HealthyLauncherStateFixture {
+    let (backend_url, health_task) = spawn_health_server().await;
+    let mock_listener = bind_mock_listener().await;
+
+    write_launcher_state_fixture(
+        path,
+        test_launcher_state_with_identity(
+            &backend_url,
+            Some(&listener_address(&mock_listener)),
+            launcher_identity,
+        ),
+    );
+
+    HealthyLauncherStateFixture {
+        backend_url,
+        health_task,
+        _mock_listener: mock_listener,
+    }
+}
+
+async fn bind_mock_listener() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock listener should bind")
+}
+
+fn listener_address(listener: &TcpListener) -> String {
+    listener
+        .local_addr()
+        .expect("mock listener address should be readable")
+        .to_string()
 }
 
 fn path_under_file_parent(label: &str, child: &str) -> PathBuf {

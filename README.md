@@ -54,7 +54,7 @@ composer, and tool/status pane. Use `PageUp` / `PageDown` to switch the
 transcript into manual scroll mode. Use `End` to jump back to the live tail,
 then leave chat with `/quit`.
 
-Open the browser-facing slice-0 Web launcher from the same repo root:
+Open the browser-facing Web launcher from the same repo root:
 
 ```bash
 cargo run -- --web
@@ -64,6 +64,13 @@ This starts or reuses the bundled mock/backend. It prints the loopback HTTPS
 app URL and attempts to open `/app/` in your browser. The backend uses a local
 development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
+
+The current Web slice serves a minimal single-column chat page.
+The first prompt creates a browser-owned session and moves the URL to
+`/app/sessions/<id>`. Direct session routes load saved transcript state and keep
+receiving live events over SSE. Pending permission requests now surface browser
+buttons for **Approve**, **Deny**, and **Cancel turn** so permission-gated flows
+do not dead-end.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
@@ -78,9 +85,12 @@ When running against the bundled mock stack, prompts containing the word
 verification, use the built-in mock prompts below:
 
 - `verify permission`: emits `[permission <request-id>] read_text_file README.md`.
-  Respond with `/approve <request-id>` or `/deny <request-id>`.
+  In the browser, use the pending permission panel buttons. In the CLI, respond
+  with `/approve <request-id>` or `/deny <request-id>`.
 - `verify cancel`: starts a delayed mock reply. Run `/cancel` before the
-  assistant reply arrives and confirm `[status] turn cancelled`.
+  assistant reply arrives and confirm `[status] turn cancelled`. In the browser,
+  the pending permission panel also exposes **Cancel turn** when a permission
+  request is blocking the current turn.
 
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.

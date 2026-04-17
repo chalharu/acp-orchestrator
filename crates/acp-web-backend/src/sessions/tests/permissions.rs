@@ -33,6 +33,16 @@ async fn expect_permission_event(receiver: &mut broadcast::Receiver<StreamEvent>
     ));
 }
 
+async fn expect_snapshot_without_pending_permissions(
+    receiver: &mut broadcast::Receiver<StreamEvent>,
+) {
+    let snapshot_event = receiver.recv().await.expect("snapshot event should arrive");
+    assert!(matches!(
+        snapshot_event.payload,
+        StreamEventPayload::SessionSnapshot { session } if session.pending_permissions.is_empty()
+    ));
+}
+
 #[tokio::test]
 async fn permission_requests_can_be_resolved_for_the_active_turn() {
     let store = SessionStore::new(4);
@@ -67,6 +77,7 @@ async fn permission_requests_can_be_resolved_for_the_active_turn() {
         .expect("permission resolution should succeed");
     assert_eq!(resolved.request_id, "req_1");
     assert_eq!(resolved.decision, PermissionDecision::Approve);
+    expect_snapshot_without_pending_permissions(&mut receiver).await;
     assert_eq!(
         resolution.wait().await,
         PermissionResolutionOutcome::Selected("allow_once".to_string())
@@ -133,10 +144,15 @@ async fn cancelling_the_active_turn_cancels_pending_permissions() {
         .create_session("alice")
         .await
         .expect("session creation should succeed");
+    let (_snapshot, mut receiver) = store
+        .session_events("alice", &session.id)
+        .await
+        .expect("subscribing should succeed");
     let pending = store
         .submit_prompt("alice", &session.id, "permission please".to_string())
         .await
         .expect("prompt submission should succeed");
+    let _ = receiver.recv().await.expect("user event should arrive");
 
     let _cancel_rx = pending
         .turn_handle()
@@ -146,6 +162,7 @@ async fn cancelling_the_active_turn_cancels_pending_permissions() {
     let resolution = register_readme_permission(&pending)
         .await
         .expect("permission registration should succeed");
+    expect_permission_event(&mut receiver).await;
 
     assert!(
         store
@@ -153,6 +170,7 @@ async fn cancelling_the_active_turn_cancels_pending_permissions() {
             .await
             .expect("cancelling should succeed")
     );
+    expect_snapshot_without_pending_permissions(&mut receiver).await;
     assert_eq!(
         resolution.wait().await,
         PermissionResolutionOutcome::Cancelled

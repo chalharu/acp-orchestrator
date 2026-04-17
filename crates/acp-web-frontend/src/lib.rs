@@ -735,28 +735,19 @@ fn session_sidebar_item_signals(
     saving_rename_session_id: Signal<Option<String>>,
     rename_draft: RwSignal<String>,
 ) -> SessionSidebarItemSignals {
-    let renaming_session_id_value = session_id.clone();
-    let deleting_session_id_value = session_id.clone();
-    let saving_session_id_value = session_id;
-    let is_renaming = Signal::derive(move || {
-        renaming_session_id.get().as_deref() == Some(renaming_session_id_value.as_str())
-    });
-    let is_deleting = Signal::derive(move || {
-        deleting_session_id.get().as_deref() == Some(deleting_session_id_value.as_str())
-    });
-    let is_saving_rename = Signal::derive(move || {
-        saving_rename_session_id.get().as_deref() == Some(saving_session_id_value.as_str())
-    });
+    let is_renaming = sidebar_rw_session_match_signal(session_id.clone(), renaming_session_id);
+    let is_deleting = sidebar_session_match_signal(session_id.clone(), deleting_session_id);
+    let is_saving_rename = sidebar_session_match_signal(session_id, saving_rename_session_id);
     let rename_action_disabled =
-        Signal::derive(move || is_deleting.get() || saving_rename_session_id.get().is_some());
-    let delete_action_disabled = Signal::derive(move || {
-        is_deleting.get()
-            || deleting_session_id.get().is_some()
-            || saving_rename_session_id.get().is_some()
-            || (is_current && delete_disabled.get())
-    });
-    let save_rename_disabled =
-        Signal::derive(move || is_saving_rename.get() || rename_draft.get().trim().is_empty());
+        sidebar_rename_action_disabled_signal(is_deleting, saving_rename_session_id);
+    let delete_action_disabled = sidebar_delete_action_disabled_signal(
+        is_deleting,
+        deleting_session_id,
+        saving_rename_session_id,
+        is_current,
+        delete_disabled,
+    );
+    let save_rename_disabled = sidebar_save_rename_disabled_signal(is_saving_rename, rename_draft);
 
     SessionSidebarItemSignals {
         is_renaming,
@@ -766,6 +757,49 @@ fn session_sidebar_item_signals(
         delete_action_disabled,
         save_rename_disabled,
     }
+}
+
+fn sidebar_rw_session_match_signal(
+    session_id: String,
+    active_session_id: RwSignal<Option<String>>,
+) -> Signal<bool> {
+    Signal::derive(move || active_session_id.get().as_deref() == Some(session_id.as_str()))
+}
+
+fn sidebar_session_match_signal(
+    session_id: String,
+    active_session_id: Signal<Option<String>>,
+) -> Signal<bool> {
+    Signal::derive(move || active_session_id.get().as_deref() == Some(session_id.as_str()))
+}
+
+fn sidebar_rename_action_disabled_signal(
+    is_deleting: Signal<bool>,
+    saving_rename_session_id: Signal<Option<String>>,
+) -> Signal<bool> {
+    Signal::derive(move || is_deleting.get() || saving_rename_session_id.get().is_some())
+}
+
+fn sidebar_delete_action_disabled_signal(
+    is_deleting: Signal<bool>,
+    deleting_session_id: Signal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
+    is_current: bool,
+    delete_disabled: Signal<bool>,
+) -> Signal<bool> {
+    Signal::derive(move || {
+        is_deleting.get()
+            || deleting_session_id.get().is_some()
+            || saving_rename_session_id.get().is_some()
+            || (is_current && delete_disabled.get())
+    })
+}
+
+fn sidebar_save_rename_disabled_signal(
+    is_saving_rename: Signal<bool>,
+    rename_draft: RwSignal<String>,
+) -> Signal<bool> {
+    Signal::derive(move || is_saving_rename.get() || rename_draft.get().trim().is_empty())
 }
 
 fn session_sidebar_item_callbacks(
@@ -812,40 +846,15 @@ fn session_sidebar_item_callbacks(
     }
 }
 
-#[component]
-fn SessionSidebarItem(
-    item: SidebarSession,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
+fn session_sidebar_item_view(
+    href: String,
+    title: String,
+    is_current: bool,
+    is_closed: bool,
     rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
+    item_signals: SessionSidebarItemSignals,
+    callbacks: SessionSidebarItemCallbacks,
 ) -> impl IntoView {
-    let is_current = item.is_current;
-    let is_closed = item.is_closed;
-    let href = item.href.clone();
-    let title = item.title.clone();
-    let item_signals = session_sidebar_item_signals(
-        item.id.clone(),
-        is_current,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-    );
-    let callbacks = session_sidebar_item_callbacks(
-        item.id,
-        item.title,
-        rename_draft,
-        renaming_session_id,
-        item_signals.is_saving_rename,
-        on_rename_session,
-        on_delete_session,
-    );
-
     view! {
         <li class=move || session_sidebar_item_class(is_current, is_closed)>
             <Show
@@ -879,6 +888,47 @@ fn SessionSidebarItem(
             </Show>
         </li>
     }
+}
+
+#[component]
+fn SessionSidebarItem(
+    item: SidebarSession,
+    #[prop(into)] deleting_session_id: Signal<Option<String>>,
+    #[prop(into)] delete_disabled: Signal<bool>,
+    renaming_session_id: RwSignal<Option<String>>,
+    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
+    rename_draft: RwSignal<String>,
+    on_rename_session: Callback<(String, String)>,
+    on_delete_session: Callback<String>,
+) -> impl IntoView {
+    let item_signals = session_sidebar_item_signals(
+        item.id.clone(),
+        item.is_current,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+    );
+    let callbacks = session_sidebar_item_callbacks(
+        item.id,
+        item.title.clone(),
+        rename_draft,
+        renaming_session_id,
+        item_signals.is_saving_rename,
+        on_rename_session,
+        on_delete_session,
+    );
+
+    session_sidebar_item_view(
+        item.href,
+        item.title,
+        item.is_current,
+        item.is_closed,
+        rename_draft,
+        item_signals,
+        callbacks,
+    )
 }
 
 #[component]
@@ -939,6 +989,29 @@ fn SessionSidebarRenameForm(
     on_cancel_rename: Callback<()>,
 ) -> impl IntoView {
     view! {
+        <SessionSidebarRenameInput
+            rename_draft=rename_draft
+            is_saving_rename=is_saving_rename
+            on_commit_rename=on_commit_rename
+            on_cancel_rename=on_cancel_rename
+        />
+        <SessionSidebarRenameButtons
+            is_saving_rename=is_saving_rename
+            save_disabled=save_disabled
+            on_commit_rename=on_commit_rename
+            on_cancel_rename=on_cancel_rename
+        />
+    }
+}
+
+#[component]
+fn SessionSidebarRenameInput(
+    rename_draft: RwSignal<String>,
+    #[prop(into)] is_saving_rename: Signal<bool>,
+    on_commit_rename: Callback<()>,
+    on_cancel_rename: Callback<()>,
+) -> impl IntoView {
+    view! {
         <input
             class="session-sidebar__rename-input"
             type="text"
@@ -961,6 +1034,17 @@ fn SessionSidebarRenameForm(
                 _ => {}
             }
         />
+    }
+}
+
+#[component]
+fn SessionSidebarRenameButtons(
+    #[prop(into)] is_saving_rename: Signal<bool>,
+    #[prop(into)] save_disabled: Signal<bool>,
+    on_commit_rename: Callback<()>,
+    on_cancel_rename: Callback<()>,
+) -> impl IntoView {
+    view! {
         <button
             type="button"
             class="session-sidebar__action-btn"

@@ -28,17 +28,14 @@ async fn browser_cookie_bootstrap_can_resolve_pending_permissions() -> Result<()
     let (csrf_token, session_id, mut events) =
         bootstrap_browser_session(&browser, &stack.backend_url).await?;
 
-    submit_browser_prompt(
+    let request = submit_permission_prompt_and_wait(
         &browser,
         &stack.backend_url,
         &session_id,
         &csrf_token,
-        "permission please",
+        &mut events,
     )
     .await?;
-    assert_user_message(expect_next_event(&mut events).await?, "permission please");
-
-    let request = next_permission_request(&mut events).await?;
     let resolution = resolve_browser_permission(
         &browser,
         &stack.backend_url,
@@ -62,16 +59,14 @@ async fn browser_cookie_bootstrap_can_cancel_pending_permission_turns() -> Resul
     let (csrf_token, session_id, mut events) =
         bootstrap_browser_session(&browser, &stack.backend_url).await?;
 
-    submit_browser_prompt(
+    let _ = submit_permission_prompt_and_wait(
         &browser,
         &stack.backend_url,
         &session_id,
         &csrf_token,
-        "permission please",
+        &mut events,
     )
     .await?;
-    assert_user_message(expect_next_event(&mut events).await?, "permission please");
-    let _ = next_permission_request(&mut events).await?;
 
     let cancelled =
         cancel_browser_turn(&browser, &stack.backend_url, &session_id, &csrf_token).await?;
@@ -125,6 +120,25 @@ async fn submit_and_assert_browser_prompt(
     assert_user_message(expect_next_event(events).await?, prompt);
     assert_assistant_message(expect_next_event(events).await?);
     Ok(())
+}
+
+async fn submit_permission_prompt_and_wait(
+    browser: &Client,
+    backend_url: &str,
+    session_id: &str,
+    csrf_token: &str,
+    events: &mut SseStream,
+) -> Result<acp_contracts::PermissionRequest> {
+    submit_browser_prompt(
+        browser,
+        backend_url,
+        session_id,
+        csrf_token,
+        "permission please",
+    )
+    .await?;
+    assert_user_message(expect_next_event(events).await?, "permission please");
+    next_permission_request(events).await
 }
 
 fn assert_snapshot_for_session(event: StreamEvent, session_id: &str) {

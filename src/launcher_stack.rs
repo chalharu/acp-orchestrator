@@ -277,10 +277,10 @@ async fn prepare_persistent_bundled_stack_with_retry(
     let lock_path = launcher_lock_path_from(state_path);
 
     for _ in 0..lock_wait_attempts {
-        if let Some(state) =
-            reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
+        if let Some(stack) =
+            reusable_persistent_stack(state_path, launcher_identity, frontend_dist).await?
         {
-            return Ok(persistent_stack_from_state(state));
+            return Ok(stack);
         }
 
         if let Some(lock) = try_acquire_launcher_lock(&lock_path)? {
@@ -299,10 +299,10 @@ async fn prepare_persistent_bundled_stack_with_retry(
         tokio::time::sleep(lock_wait_delay).await;
     }
 
-    if let Some(state) =
-        reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
+    if let Some(stack) =
+        reusable_persistent_stack(state_path, launcher_identity, frontend_dist).await?
     {
-        return Ok(persistent_stack_from_state(state));
+        return Ok(stack);
     }
 
     crate::WaitForLauncherLockSnafu { path: lock_path }.fail()
@@ -315,10 +315,10 @@ async fn spawn_or_reuse_locked_stack(
     _lock: LauncherLock,
     frontend_dist: Option<&Path>,
 ) -> Result<LauncherStack> {
-    if let Some(state) =
-        reusable_launcher_state(state_path, launcher_identity, frontend_dist).await?
+    if let Some(stack) =
+        reusable_persistent_stack(state_path, launcher_identity, frontend_dist).await?
     {
-        return Ok(persistent_stack_from_state(state));
+        return Ok(stack);
     }
 
     let (mut mock, mut backend, state) =
@@ -576,6 +576,16 @@ fn backend_role_args(
 
 fn persistent_stack_from_state(state: LauncherState) -> LauncherStack {
     LauncherStack::persistent(state.backend_url, state.auth_token)
+}
+
+async fn reusable_persistent_stack(
+    state_path: &Path,
+    launcher_identity: &LauncherIdentity,
+    frontend_dist: Option<&Path>,
+) -> Result<Option<LauncherStack>> {
+    reusable_launcher_state(state_path, launcher_identity, frontend_dist)
+        .await
+        .map(|state| state.map(persistent_stack_from_state))
 }
 
 fn launcher_state_supports_frontend(

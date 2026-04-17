@@ -100,21 +100,13 @@ pub async fn load_session(session_id: &str) -> Result<SessionBootstrap, SessionL
 
 /// POST a new message to an existing session.
 pub async fn send_message(session_id: &str, text: &str) -> Result<(), String> {
-    let csrf = csrf_token();
     let url = format!("/api/v1/sessions/{session_id}/messages");
     let body = serde_json::to_string(&PromptRequest {
         text: text.to_string(),
     })
     .map_err(|error| error.to_string())?;
 
-    let response = Request::post(&url)
-        .header("x-csrf-token", &csrf)
-        .header("content-type", "application/json")
-        .body(body)
-        .map_err(|error| error.to_string())?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = post_json_with_csrf(&url, body).await?;
 
     if !response.ok() {
         return Err(response_error_message(response, "Send message failed").await);
@@ -127,19 +119,11 @@ pub async fn resolve_permission(
     request_id: &str,
     decision: PermissionDecision,
 ) -> Result<(), String> {
-    let csrf = csrf_token();
     let url = format!("/api/v1/sessions/{session_id}/permissions/{request_id}");
     let body = serde_json::to_string(&ResolvePermissionRequest { decision })
         .map_err(|error| error.to_string())?;
 
-    let response = Request::post(&url)
-        .header("x-csrf-token", &csrf)
-        .header("content-type", "application/json")
-        .body(body)
-        .map_err(|error| error.to_string())?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = post_json_with_csrf(&url, body).await?;
 
     if !response.ok() {
         return Err(response_error_message(response, "Resolve permission failed").await);
@@ -162,6 +146,18 @@ pub async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String>
     }
 
     response.json().await.map_err(|error| error.to_string())
+}
+
+async fn post_json_with_csrf(url: &str, body: String) -> Result<gloo_net::http::Response, String> {
+    let csrf = csrf_token();
+    Request::post(url)
+        .header("x-csrf-token", &csrf)
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Open the session event stream and keep driving the supplied signals until

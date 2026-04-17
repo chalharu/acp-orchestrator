@@ -482,17 +482,9 @@ async fn prepare_frontend_dist_skips_external_backend_launches() {
     let _guard = test_env_lock().lock().await;
     let _url_guard = test_acp_server_url_guard(Some("https://127.0.0.1:9443"));
 
-    let frontend_dist = prepare_frontend_dist(
-        &LauncherArgs {
-            acp_server: None,
-            web: true,
-            cli_args: Vec::new(),
-        },
-        true,
-        false,
-    )
-    .await
-    .expect("external backend launches should skip the managed frontend build");
+    let frontend_dist = prepare_managed_web_frontend_dist()
+        .await
+        .expect("external backend launches should skip the managed frontend build");
 
     assert_eq!(frontend_dist, None);
 }
@@ -505,17 +497,9 @@ async fn prepare_frontend_dist_returns_workspace_dist_for_managed_web_launches()
     fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
     let created_assets = write_stub_frontend_bundle_assets(&dist);
 
-    let frontend_dist = prepare_frontend_dist(
-        &LauncherArgs {
-            acp_server: None,
-            web: true,
-            cli_args: Vec::new(),
-        },
-        true,
-        false,
-    )
-    .await
-    .expect("managed web launches should prepare the frontend dist");
+    let frontend_dist = prepare_managed_web_frontend_dist()
+        .await
+        .expect("managed web launches should prepare the frontend dist");
 
     assert_eq!(frontend_dist.as_deref(), Some(dist.as_path()));
 
@@ -890,6 +874,19 @@ fn write_stub_frontend_bundle_assets(dist: &Path) -> Vec<PathBuf> {
         .expect("stub javascript bundle should write");
     fs::write(&wasm, b"\x00asm\x01\x00\x00\x00").expect("stub wasm bundle should write");
     vec![javascript, wasm]
+}
+
+async fn prepare_managed_web_frontend_dist() -> Result<Option<PathBuf>> {
+    prepare_frontend_dist(
+        &LauncherArgs {
+            acp_server: None,
+            web: true,
+            cli_args: Vec::new(),
+        },
+        true,
+        false,
+    )
+    .await
 }
 
 fn write_fake_trunk_bin(command: &str) -> PathBuf {

@@ -172,6 +172,13 @@ struct SessionSignals {
     draft: RwSignal<String>,
 }
 
+struct SessionViewCallbacks {
+    submit: Callback<String>,
+    approve: Callback<String>,
+    deny: Callback<String>,
+    cancel: Callback<()>,
+}
+
 #[component]
 fn SessionView(session_id: String) -> impl IntoView {
     let signals = session_signals();
@@ -207,16 +214,19 @@ fn SessionView(session_id: String) -> impl IntoView {
         signals.pending_action_busy,
         signals.error,
     );
+    let callbacks = SessionViewCallbacks {
+        submit: on_submit,
+        approve: on_approve,
+        deny: on_deny,
+        cancel: on_cancel,
+    };
 
     session_view_content(
         session_id,
         signals,
         composer_busy,
         composer_status,
-        on_submit,
-        on_approve,
-        on_deny,
-        on_cancel,
+        callbacks,
     )
 }
 
@@ -238,10 +248,7 @@ fn session_view_content(
     signals: SessionSignals,
     composer_busy: Signal<bool>,
     composer_status: Signal<String>,
-    on_submit: Callback<String>,
-    on_approve: Callback<String>,
-    on_deny: Callback<String>,
-    on_cancel: Callback<()>,
+    callbacks: SessionViewCallbacks,
 ) -> impl IntoView {
     let entries = signals.entries;
     let pending_permissions = signals.pending_permissions;
@@ -250,6 +257,12 @@ fn session_view_content(
     let connection_status = signals.connection_status;
     let session_status = signals.session_status;
     let draft = signals.draft;
+    let SessionViewCallbacks {
+        submit: on_submit,
+        approve: on_approve,
+        deny: on_deny,
+        cancel: on_cancel,
+    } = callbacks;
 
     view! {
         <main class="app-shell">

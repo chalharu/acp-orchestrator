@@ -576,6 +576,49 @@ async fn ensure_frontend_built_accepts_successful_trunk_runs() {
         .expect("successful trunk builds should be accepted");
 }
 
+#[tokio::test]
+async fn ensure_frontend_built_skips_trunk_when_dist_is_current() {
+    let _guard = test_env_lock().lock().await;
+    let fake_trunk_dir = write_fake_trunk_bin("exit 9");
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+    let frontend_root = write_temp_frontend_root("fresh-dist");
+    let dist = frontend_root.join("dist");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+    std::thread::sleep(Duration::from_millis(20));
+    write_stub_frontend_bundle_assets(&dist);
+
+    ensure_frontend_built_at(&frontend_root, &dist)
+        .await
+        .expect("fresh frontend dist should skip rebuilding");
+}
+
+#[tokio::test]
+async fn ensure_frontend_built_rebuilds_stale_dist() {
+    let _guard = test_env_lock().lock().await;
+    let frontend_root = write_temp_frontend_root("stale-dist");
+    let dist = frontend_root.join("dist");
+    fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+    write_stub_frontend_bundle_assets(&dist);
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(
+        frontend_root.join("src").join("lib.rs"),
+        "pub fn app() { let _ = 1; }\n",
+    )
+    .expect("frontend source should be writable");
+    let marker = unique_temp_json_path("acp-trunk-marker", "stale-dist");
+    let fake_trunk_dir = write_fake_trunk_bin(&format!("printf rebuilt > '{}'", marker.display()));
+    let _path_guard = test_path_guard(Some(path_with_fake_trunk(&fake_trunk_dir)));
+
+    ensure_frontend_built_at(&frontend_root, &dist)
+        .await
+        .expect("stale frontend dist should trigger a rebuild");
+
+    assert_eq!(
+        fs::read_to_string(&marker).expect("the fake trunk marker should be written"),
+        "rebuilt"
+    );
+}
+
 #[test]
 fn finish_cli_launch_preserves_cli_errors_when_cleanup_also_fails() {
     let error = finish_cli_launch(
@@ -874,6 +917,26 @@ fn write_stub_frontend_bundle_assets(dist: &Path) -> Vec<PathBuf> {
         .expect("stub javascript bundle should write");
     fs::write(&wasm, b"\x00asm\x01\x00\x00\x00").expect("stub wasm bundle should write");
     vec![javascript, wasm]
+}
+
+fn write_temp_frontend_root(label: &str) -> PathBuf {
+    let root = unique_temp_json_path("acp-web-frontend-root", label).with_extension("");
+    fs::create_dir_all(root.join("src")).expect("temp frontend src directory should be creatable");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"temp-frontend\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("temp frontend Cargo.toml should write");
+    fs::write(root.join("Trunk.toml"), "dist = \"dist\"\n")
+        .expect("temp frontend Trunk.toml should write");
+    fs::write(
+        root.join("index.html"),
+        "<!doctype html>\n<div id=\"app-root\"></div>\n",
+    )
+    .expect("temp frontend index.html should write");
+    fs::write(root.join("src").join("lib.rs"), "pub fn app() {}\n")
+        .expect("temp frontend source should write");
+    root
 }
 
 async fn prepare_managed_web_frontend_dist() -> Result<Option<PathBuf>> {

@@ -199,6 +199,7 @@ struct SessionSignals {
     draft: RwSignal<String>,
 }
 
+#[derive(Clone, Copy)]
 struct SessionViewCallbacks {
     submit: Callback<String>,
     approve: Callback<String>,
@@ -213,6 +214,23 @@ struct SessionComposerSignals {
     status: Signal<String>,
     cancel_visible: Signal<bool>,
     cancel_busy: Signal<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct SessionShellSignals {
+    sessions: Signal<Vec<SessionListItem>>,
+    session_list_loaded: Signal<bool>,
+    session_list_error: Signal<Option<String>>,
+    closing_session_id: Signal<Option<String>>,
+    close_disabled: Signal<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct SessionMainSignals {
+    topbar_message: Signal<Option<String>>,
+    entries: Signal<Vec<TranscriptEntry>>,
+    pending_permissions: Signal<Vec<PendingPermission>>,
+    pending_action_busy: Signal<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,41 +332,30 @@ fn session_view_content(
         session_close_disabled(signals.turn_state.get(), pending_action_busy.get(), false)
     });
     let draft = signals.draft;
-    let SessionViewCallbacks {
-        submit: on_submit,
-        approve: on_approve,
-        deny: on_deny,
-        cancel: on_cancel,
-        close_session: on_close_session,
-    } = callbacks;
-    let on_cancel_for_permissions = on_cancel;
-    let on_cancel_for_composer = on_cancel;
+    let shell_signals = SessionShellSignals {
+        sessions: Signal::derive(move || session_list.get()),
+        session_list_loaded: Signal::derive(move || session_list_loaded.get()),
+        session_list_error: Signal::derive(move || session_list_error.get()),
+        closing_session_id: Signal::derive(move || closing_session_id.get()),
+        close_disabled,
+    };
+    let main_signals = SessionMainSignals {
+        topbar_message: combined_error,
+        entries: Signal::derive(move || entries.get()),
+        pending_permissions: Signal::derive(move || pending_permissions.get()),
+        pending_action_busy: Signal::derive(move || pending_action_busy.get()),
+    };
 
     view! {
         <main class="app-shell app-shell--session">
             <SessionShell
                 current_session_id=current_session_id
                 sidebar_open=sidebar_open
-                sessions=Signal::derive(move || session_list.get())
-                session_list_loaded=Signal::derive(move || session_list_loaded.get())
-                session_list_error=Signal::derive(move || session_list_error.get())
-                closing_session_id=Signal::derive(move || closing_session_id.get())
-                close_disabled=close_disabled
-                on_close_session=on_close_session
-                topbar_message=combined_error
-                entries=Signal::derive(move || entries.get())
-                pending_permissions=Signal::derive(move || pending_permissions.get())
-                pending_action_busy=Signal::derive(move || pending_action_busy.get())
-                on_approve=on_approve
-                on_deny=on_deny
-                on_cancel=on_cancel_for_permissions
-                composer_disabled=composer.disabled
-                composer_status=composer.status
+                shell_signals=shell_signals
+                main_signals=main_signals
+                composer=composer
+                callbacks=callbacks
                 draft=draft
-                on_submit=on_submit
-                composer_cancel_visible=composer.cancel_visible
-                composer_cancel_busy=composer.cancel_busy
-                composer_cancel=on_cancel_for_composer
             />
         </main>
     }
@@ -358,56 +365,36 @@ fn session_view_content(
 fn SessionShell(
     current_session_id: String,
     sidebar_open: RwSignal<bool>,
-    #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
-    #[prop(into)] session_list_loaded: Signal<bool>,
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] closing_session_id: Signal<Option<String>>,
-    #[prop(into)] close_disabled: Signal<bool>,
-    on_close_session: Callback<String>,
-    #[prop(into)] topbar_message: Signal<Option<String>>,
-    #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
-    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
-    #[prop(into)] pending_action_busy: Signal<bool>,
-    on_approve: Callback<String>,
-    on_deny: Callback<String>,
-    on_cancel: Callback<()>,
-    #[prop(into)] composer_disabled: Signal<bool>,
-    #[prop(into)] composer_status: Signal<String>,
+    shell_signals: SessionShellSignals,
+    main_signals: SessionMainSignals,
+    composer: SessionComposerSignals,
+    callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
-    on_submit: Callback<String>,
-    #[prop(into)] composer_cancel_visible: Signal<bool>,
-    #[prop(into)] composer_cancel_busy: Signal<bool>,
-    composer_cancel: Callback<()>,
 ) -> impl IntoView {
+    let SessionViewCallbacks {
+        close_session: on_close_session,
+        ..
+    } = callbacks;
+
     view! {
         <div class=move || session_layout_class(sidebar_open.get())>
             <SessionSidebar
                 current_session_id=current_session_id
-                sessions=sessions
-                session_list_loaded=session_list_loaded
-                session_list_error=session_list_error
+                sessions=shell_signals.sessions
+                session_list_loaded=shell_signals.session_list_loaded
+                session_list_error=shell_signals.session_list_error
                 sidebar_open=sidebar_open
-                closing_session_id=closing_session_id
-                close_disabled=close_disabled
+                closing_session_id=shell_signals.closing_session_id
+                close_disabled=shell_signals.close_disabled
                 on_close_session=on_close_session
             />
             <SessionBackdrop sidebar_open=sidebar_open />
             <SessionMain
-                topbar_message=topbar_message
+                main_signals=main_signals
                 sidebar_open=sidebar_open
-                entries=entries
-                pending_permissions=pending_permissions
-                pending_action_busy=pending_action_busy
-                on_approve=on_approve
-                on_deny=on_deny
-                on_cancel=on_cancel
-                composer_disabled=composer_disabled
-                composer_status=composer_status
+                composer=composer
+                callbacks=callbacks
                 draft=draft
-                on_submit=on_submit
-                composer_cancel_visible=composer_cancel_visible
-                composer_cancel_busy=composer_cancel_busy
-                composer_cancel=composer_cancel
             />
         </div>
     }
@@ -429,41 +416,39 @@ fn SessionBackdrop(sidebar_open: RwSignal<bool>) -> impl IntoView {
 
 #[component]
 fn SessionMain(
-    #[prop(into)] topbar_message: Signal<Option<String>>,
+    main_signals: SessionMainSignals,
     sidebar_open: RwSignal<bool>,
-    #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
-    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
-    #[prop(into)] pending_action_busy: Signal<bool>,
-    on_approve: Callback<String>,
-    on_deny: Callback<String>,
-    on_cancel: Callback<()>,
-    #[prop(into)] composer_disabled: Signal<bool>,
-    #[prop(into)] composer_status: Signal<String>,
+    composer: SessionComposerSignals,
+    callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
-    on_submit: Callback<String>,
-    #[prop(into)] composer_cancel_visible: Signal<bool>,
-    #[prop(into)] composer_cancel_busy: Signal<bool>,
-    composer_cancel: Callback<()>,
 ) -> impl IntoView {
+    let SessionViewCallbacks {
+        submit: on_submit,
+        approve: on_approve,
+        deny: on_deny,
+        cancel: on_cancel,
+        ..
+    } = callbacks;
+
     view! {
         <section class="session-main">
-            <SessionTopBar message=topbar_message sidebar_open=sidebar_open />
+            <SessionTopBar message=main_signals.topbar_message sidebar_open=sidebar_open />
             <div class="chat-body">
-                <Transcript entries=entries />
+                <Transcript entries=main_signals.entries />
             </div>
             <SessionDock
-                pending_permissions=pending_permissions
-                pending_action_busy=pending_action_busy
+                pending_permissions=main_signals.pending_permissions
+                pending_action_busy=main_signals.pending_action_busy
                 on_approve=on_approve
                 on_deny=on_deny
                 on_cancel=on_cancel
-                composer_disabled=composer_disabled
-                composer_status=composer_status
+                composer_disabled=composer.disabled
+                composer_status=composer.status
                 draft=draft
                 on_submit=on_submit
-                composer_cancel_visible=composer_cancel_visible
-                composer_cancel_busy=composer_cancel_busy
-                composer_cancel=composer_cancel
+                composer_cancel_visible=composer.cancel_visible
+                composer_cancel_busy=composer.cancel_busy
+                composer_cancel=on_cancel
             />
         </section>
     }

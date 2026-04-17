@@ -324,75 +324,82 @@ fn handle_stream_data(
 
     signals.connection_status.set("connected".to_string());
     signals.error.set(None);
-    handle_sse_event(
-        event,
-        signals.entries,
-        signals.pending_permissions,
-        signals.session_status,
-        signals.turn_state,
-    );
+    handle_sse_event(event, signals);
     true
 }
 
-fn handle_sse_event(
-    event: StreamEvent,
-    entries: leptos::prelude::RwSignal<Vec<TranscriptEntry>>,
-    pending_permissions_signal: leptos::prelude::RwSignal<Vec<(String, String)>>,
-    session_status: leptos::prelude::RwSignal<String>,
-    turn_state: leptos::prelude::RwSignal<TurnState>,
-) {
+fn handle_sse_event(event: StreamEvent, signals: StreamSignals) {
     let StreamEvent { sequence, payload } = event;
 
     match payload {
-        StreamEventPayload::SessionSnapshot { session } => {
-            let bootstrap = session_bootstrap_from_snapshot(session);
-            session_status.set(bootstrap.session_status);
-            let current_turn_state = turn_state.get_untracked();
-            if should_apply_snapshot_turn_state(current_turn_state) {
-                turn_state.set(turn_state_for_snapshot(&bootstrap.pending_permissions));
-            }
-            pending_permissions_signal.set(bootstrap.pending_permissions);
-            entries.set(bootstrap.entries);
-        }
+        StreamEventPayload::SessionSnapshot { session } => apply_session_snapshot(session, signals),
         StreamEventPayload::ConversationMessage { message } => {
-            let is_assistant_message = matches!(message.role, MessageRole::Assistant);
-            let mut appended = false;
-            entries.update(|current_entries| {
-                if !current_entries.iter().any(|entry| entry.id == message.id) {
-                    appended = true;
-                    current_entries.push(message_to_entry(message));
-                }
-            });
-            if appended
-                && is_assistant_message
-                && should_release_turn_state_for_assistant_message(turn_state.get_untracked())
-            {
-                turn_state.set(TurnState::Idle);
-            }
+            apply_conversation_message(message, signals)
         }
         StreamEventPayload::PermissionRequested { request } => {
-            pending_permissions_signal.update(|current_permissions| {
-                if !current_permissions
-                    .iter()
-                    .any(|(request_id, _)| request_id == &request.request_id)
-                {
-                    current_permissions.push((request.request_id, request.summary));
-                }
-            });
-            turn_state.set(TurnState::AwaitingPermission);
+            apply_permission_request(request, signals)
         }
         StreamEventPayload::SessionClosed { reason, .. } => {
-            session_status.set("closed".to_string());
-            turn_state.set(TurnState::Idle);
-            push_status_entry(entries, sequence, reason);
+            apply_session_closed(sequence, reason, signals)
         }
-        StreamEventPayload::Status { message } => {
-            if should_release_turn_state_for_status(turn_state.get_untracked()) {
-                turn_state.set(TurnState::Idle);
-            }
-            push_status_entry(entries, sequence, message);
-        }
+        StreamEventPayload::Status { message } => apply_status_update(sequence, message, signals),
     }
+}
+
+fn apply_session_snapshot(session: SessionSnapshot, signals: StreamSignals) {
+    let bootstrap = session_bootstrap_from_snapshot(session);
+    signals.session_status.set(bootstrap.session_status);
+    if should_apply_snapshot_turn_state(signals.turn_state.get_untracked()) {
+        signals
+            .turn_state
+            .set(turn_state_for_snapshot(&bootstrap.pending_permissions));
+    }
+    signals
+        .pending_permissions
+        .set(bootstrap.pending_permissions);
+    signals.entries.set(bootstrap.entries);
+}
+
+fn apply_conversation_message(message: ConversationMessage, signals: StreamSignals) {
+    let is_assistant_message = matches!(message.role, MessageRole::Assistant);
+    let mut appended = false;
+    signals.entries.update(|current_entries| {
+        if !current_entries.iter().any(|entry| entry.id == message.id) {
+            appended = true;
+            current_entries.push(message_to_entry(message));
+        }
+    });
+    if appended
+        && is_assistant_message
+        && should_release_turn_state_for_assistant_message(signals.turn_state.get_untracked())
+    {
+        signals.turn_state.set(TurnState::Idle);
+    }
+}
+
+fn apply_permission_request(request: PermissionRequest, signals: StreamSignals) {
+    signals.pending_permissions.update(|current_permissions| {
+        if !current_permissions
+            .iter()
+            .any(|(request_id, _)| request_id == &request.request_id)
+        {
+            current_permissions.push((request.request_id, request.summary));
+        }
+    });
+    signals.turn_state.set(TurnState::AwaitingPermission);
+}
+
+fn apply_session_closed(sequence: u64, reason: String, signals: StreamSignals) {
+    signals.session_status.set("closed".to_string());
+    signals.turn_state.set(TurnState::Idle);
+    push_status_entry(signals.entries, sequence, reason);
+}
+
+fn apply_status_update(sequence: u64, message: String, signals: StreamSignals) {
+    if should_release_turn_state_for_status(signals.turn_state.get_untracked()) {
+        signals.turn_state.set(TurnState::Idle);
+    }
+    push_status_entry(signals.entries, sequence, message);
 }
 
 fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> SessionBootstrap {

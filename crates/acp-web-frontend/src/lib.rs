@@ -87,31 +87,7 @@ fn HomePage() -> impl IntoView {
 
         started.set(true);
         error.set(None);
-        leptos::task::spawn_local(async move {
-            if let Some(session_id) = prepared_session_id() {
-                if let Err(message) = navigate_to(&format!("/app/sessions/{session_id}")) {
-                    clear_prepared_session_id();
-                    error.set(Some(message));
-                    preparing.set(false);
-                }
-                return;
-            }
-
-            match api::create_session().await {
-                Ok(session_id) => {
-                    store_prepared_session_id(&session_id);
-                    if let Err(message) = navigate_to(&format!("/app/sessions/{session_id}")) {
-                        clear_prepared_session_id();
-                        error.set(Some(message));
-                        preparing.set(false);
-                    }
-                }
-                Err(message) => {
-                    error.set(Some(message));
-                    preparing.set(false);
-                }
-            }
-        });
+        spawn_home_redirect(error, preparing);
     });
 
     view! {
@@ -194,28 +170,32 @@ struct SessionViewCallbacks {
     cancel: Callback<()>,
 }
 
+#[derive(Clone, Copy)]
+struct SessionComposerSignals {
+    disabled: Signal<bool>,
+    status: Signal<String>,
+    cancel_visible: Signal<bool>,
+    cancel_busy: Signal<bool>,
+}
+
 #[component]
 fn SessionView(session_id: String) -> impl IntoView {
     let signals = session_signals();
 
-    spawn_session_bootstrap(
-        session_id.clone(),
-        signals.entries,
-        signals.pending_permissions,
-        signals.connection_status,
-        signals.session_status,
-        signals.turn_state,
-        signals.error,
-    );
+    spawn_session_bootstrap(session_id.clone(), signals);
 
-    let composer_disabled =
-        session_composer_disabled_signal(signals.turn_state, signals.session_status);
-    let composer_status =
-        session_composer_status_signal(signals.turn_state, signals.session_status);
-    let composer_cancel_visible =
-        session_composer_cancel_visible_signal(signals.turn_state, signals.pending_permissions);
-    let composer_cancel_busy =
-        session_composer_cancel_busy_signal(signals.turn_state, signals.pending_action_busy);
+    let composer = SessionComposerSignals {
+        disabled: session_composer_disabled_signal(signals.turn_state, signals.session_status),
+        status: session_composer_status_signal(signals.turn_state, signals.session_status),
+        cancel_visible: session_composer_cancel_visible_signal(
+            signals.turn_state,
+            signals.pending_permissions,
+        ),
+        cancel_busy: session_composer_cancel_busy_signal(
+            signals.turn_state,
+            signals.pending_action_busy,
+        ),
+    };
     let on_submit = session_submit_callback(
         session_id.clone(),
         signals.turn_state,
@@ -236,14 +216,7 @@ fn SessionView(session_id: String) -> impl IntoView {
         cancel: on_cancel,
     };
 
-    session_view_content(
-        signals,
-        composer_disabled,
-        composer_status,
-        composer_cancel_visible,
-        composer_cancel_busy,
-        callbacks,
-    )
+    session_view_content(signals, composer, callbacks)
 }
 
 fn session_signals() -> SessionSignals {
@@ -261,10 +234,7 @@ fn session_signals() -> SessionSignals {
 
 fn session_view_content(
     signals: SessionSignals,
-    composer_disabled: Signal<bool>,
-    composer_status: Signal<String>,
-    composer_cancel_visible: Signal<bool>,
-    composer_cancel_busy: Signal<bool>,
+    composer: SessionComposerSignals,
     callbacks: SessionViewCallbacks,
 ) -> impl IntoView {
     let entries = signals.entries;
@@ -283,34 +253,74 @@ fn session_view_content(
 
     view! {
         <main class="app-shell app-shell--session">
-            <div class="chat-topbar">
-                <nav class="shell-nav">
-                    <a href="/app/">"New chat"</a>
-                </nav>
-                <ErrorBanner message=error />
-            </div>
+            <SessionTopBar message=error />
             <div class="chat-body">
                 <Transcript entries=Signal::derive(move || entries.get()) />
             </div>
-            <div class="chat-dock">
-                <PendingPermissions
-                    items=Signal::derive(move || pending_permissions.get())
-                    busy=Signal::derive(move || pending_action_busy.get())
-                    on_approve=on_approve
-                    on_deny=on_deny
-                    on_cancel=on_cancel_for_permissions
-                />
-                <Composer
-                    disabled=composer_disabled
-                    status_text=composer_status
-                    draft=draft
-                    on_submit=on_submit
-                    show_cancel=composer_cancel_visible
-                    cancel_disabled=composer_cancel_busy
-                    on_cancel=on_cancel_for_composer
-                />
-            </div>
+            <SessionDock
+                pending_permissions=Signal::derive(move || pending_permissions.get())
+                pending_action_busy=Signal::derive(move || pending_action_busy.get())
+                on_approve=on_approve
+                on_deny=on_deny
+                on_cancel=on_cancel_for_permissions
+                composer_disabled=composer.disabled
+                composer_status=composer.status
+                draft=draft
+                on_submit=on_submit
+                composer_cancel_visible=composer.cancel_visible
+                composer_cancel_busy=composer.cancel_busy
+                composer_cancel=on_cancel_for_composer
+            />
         </main>
+    }
+}
+
+#[component]
+fn SessionTopBar(message: RwSignal<Option<String>>) -> impl IntoView {
+    view! {
+        <div class="chat-topbar">
+            <nav class="shell-nav">
+                <a href="/app/">"New chat"</a>
+            </nav>
+            <ErrorBanner message=message />
+        </div>
+    }
+}
+
+#[component]
+fn SessionDock(
+    #[prop(into)] pending_permissions: Signal<Vec<(String, String)>>,
+    #[prop(into)] pending_action_busy: Signal<bool>,
+    on_approve: Callback<String>,
+    on_deny: Callback<String>,
+    on_cancel: Callback<()>,
+    #[prop(into)] composer_disabled: Signal<bool>,
+    #[prop(into)] composer_status: Signal<String>,
+    draft: RwSignal<String>,
+    on_submit: Callback<String>,
+    #[prop(into)] composer_cancel_visible: Signal<bool>,
+    #[prop(into)] composer_cancel_busy: Signal<bool>,
+    composer_cancel: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <div class="chat-dock">
+            <PendingPermissions
+                items=pending_permissions
+                busy=pending_action_busy
+                on_approve=on_approve
+                on_deny=on_deny
+                on_cancel=on_cancel
+            />
+            <Composer
+                disabled=composer_disabled
+                status_text=composer_status
+                draft=draft
+                on_submit=on_submit
+                show_cancel=composer_cancel_visible
+                cancel_disabled=composer_cancel_busy
+                on_cancel=composer_cancel
+            />
+        </div>
     }
 }
 
@@ -348,58 +358,28 @@ fn session_permission_callbacks(
     )
 }
 
-fn spawn_session_bootstrap(
-    session_id: String,
-    entries: RwSignal<Vec<TranscriptEntry>>,
-    pending_permissions: RwSignal<Vec<(String, String)>>,
-    connection_status: RwSignal<String>,
-    session_status: RwSignal<String>,
-    turn_state: RwSignal<TurnState>,
-    error: RwSignal<Option<String>>,
-) {
+fn spawn_session_bootstrap(session_id: String, signals: SessionSignals) {
     leptos::task::spawn_local(async move {
         match api::load_session(&session_id).await {
-            Ok(session) => {
-                let turn_state_for_session = turn_state_for_snapshot(&session.pending_permissions);
-                let should_clear_prepared_session = session.session_status == "closed"
-                    || session
-                        .entries
-                        .iter()
-                        .any(|entry| matches!(entry.role, EntryRole::User));
-                entries.set(session.entries);
-                pending_permissions.set(session.pending_permissions);
-                session_status.set(session.session_status);
-                turn_state.set(turn_state_for_session);
-                if should_clear_prepared_session {
-                    clear_prepared_session_id();
-                }
-            }
+            Ok(session) => apply_loaded_session(session, signals),
             Err(api::SessionLoadError::ResumeUnavailable(message)) => {
-                clear_prepared_session_id();
-                error.set(Some(message));
-                connection_status.set("unavailable".to_string());
-                session_status.set("unavailable".to_string());
-                turn_state.set(TurnState::Idle);
+                record_session_bootstrap_failure(message, "unavailable", signals);
                 return;
             }
             Err(api::SessionLoadError::Other(message)) => {
-                clear_prepared_session_id();
-                error.set(Some(message));
-                connection_status.set("error".to_string());
-                session_status.set("error".to_string());
-                turn_state.set(TurnState::Idle);
+                record_session_bootstrap_failure(message, "error", signals);
                 return;
             }
         }
 
         api::subscribe_sse(
             &session_id,
-            entries,
-            pending_permissions,
-            connection_status,
-            session_status,
-            turn_state,
-            error,
+            signals.entries,
+            signals.pending_permissions,
+            signals.connection_status,
+            signals.session_status,
+            signals.turn_state,
+            signals.error,
         )
         .await;
     });
@@ -429,6 +409,63 @@ fn session_submit_callback(
             }
         });
     })
+}
+
+fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: RwSignal<bool>) {
+    leptos::task::spawn_local(async move {
+        match resolve_home_session_id().await {
+            Ok(session_id) => {
+                if let Err(message) = navigate_to(&format!("/app/sessions/{session_id}")) {
+                    clear_prepared_session_id();
+                    error.set(Some(message));
+                    preparing.set(false);
+                }
+            }
+            Err(message) => {
+                error.set(Some(message));
+                preparing.set(false);
+            }
+        }
+    });
+}
+
+async fn resolve_home_session_id() -> Result<String, String> {
+    if let Some(session_id) = prepared_session_id() {
+        Ok(session_id)
+    } else {
+        let session_id = api::create_session().await?;
+        store_prepared_session_id(&session_id);
+        Ok(session_id)
+    }
+}
+
+fn apply_loaded_session(session: api::SessionBootstrap, signals: SessionSignals) {
+    let turn_state_for_session = turn_state_for_snapshot(&session.pending_permissions);
+    let should_clear_prepared_session = session.session_status == "closed"
+        || session
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.role, EntryRole::User));
+
+    signals.entries.set(session.entries);
+    signals.pending_permissions.set(session.pending_permissions);
+    signals.session_status.set(session.session_status);
+    signals.turn_state.set(turn_state_for_session);
+    if should_clear_prepared_session {
+        clear_prepared_session_id();
+    }
+}
+
+fn record_session_bootstrap_failure(
+    message: String,
+    connection_label: &str,
+    signals: SessionSignals,
+) {
+    clear_prepared_session_id();
+    signals.error.set(Some(message));
+    signals.connection_status.set(connection_label.to_string());
+    signals.session_status.set(connection_label.to_string());
+    signals.turn_state.set(TurnState::Idle);
 }
 
 fn permission_resolution_callback(

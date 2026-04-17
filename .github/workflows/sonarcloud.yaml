@@ -70,7 +70,7 @@ jobs:
           workspace_root="${PWD%/}/"
           sed -i "s#^SF:${workspace_root}#SF:#" coverage/lcov.info
       - name: Run SonarCloud scan
-        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        uses: SonarSource/sonarqube-scan-action@299e4b793aaa83bf2aba7c9c14bedbb485688ec4 # v7.1.0
         env:
           SONAR_HOST_URL: https://sonarcloud.io
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

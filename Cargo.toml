@@ -25,7 +25,7 @@ acp-app-support = { path = "crates/acp-app-support" }
 acp-contracts = { path = "crates/acp-contracts" }
 agent-client-protocol = "=0.10.4"
 async-trait = "=0.1.89"
-axum = { version = "=0.8.8", features = ["macros"] }
+axum = { version = "=0.8.9", features = ["macros"] }
 chrono = { version = "=0.4.44", features = ["serde"] }
 clap = { version = "=4.6.0", features = ["derive", "env"] }
 crossterm = "=0.29.0"

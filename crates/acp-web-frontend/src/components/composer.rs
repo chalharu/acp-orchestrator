@@ -1,7 +1,7 @@
 //! Composer (message input + submit) component.
 
 use acp_contracts::CompletionCandidate;
-use leptos::prelude::*;
+use leptos::{html as leptos_html, prelude::*};
 
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
 
@@ -43,9 +43,10 @@ pub fn Composer(
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
+    let textarea = NodeRef::<leptos_html::Textarea>::new();
     let handle_submit = move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
-        submit_draft(draft, disabled, on_submit);
+        submit_draft(draft, textarea, disabled, on_submit);
     };
 
     view! {
@@ -57,6 +58,7 @@ pub fn Composer(
             <ComposerEditor
                 disabled=disabled
                 draft=draft
+                textarea=textarea
                 on_submit=on_submit
                 slash_signals=slash_signals
                 slash_callbacks=slash_callbacks
@@ -76,6 +78,7 @@ pub fn Composer(
 fn ComposerEditor(
     #[prop(into)] disabled: Signal<bool>,
     draft: RwSignal<String>,
+    textarea: NodeRef<leptos_html::Textarea>,
     on_submit: Callback<String>,
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
@@ -85,6 +88,7 @@ fn ComposerEditor(
             <ComposerInput
                 disabled=disabled
                 draft=draft
+                textarea=textarea
                 on_submit=on_submit
                 slash_signals=slash_signals
                 slash_callbacks=slash_callbacks
@@ -101,6 +105,7 @@ fn ComposerEditor(
 fn ComposerInput(
     #[prop(into)] disabled: Signal<bool>,
     draft: RwSignal<String>,
+    textarea: NodeRef<leptos_html::Textarea>,
     on_submit: Callback<String>,
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
@@ -111,12 +116,14 @@ fn ComposerInput(
             id="composer-input"
             name="prompt"
             rows="4"
+            node_ref=textarea
             placeholder="Write a prompt or type / for commands."
             bind:value=draft
             on:keydown=move |ev| {
                 handle_composer_keydown(
                     ev,
                     draft,
+                    textarea,
                     disabled,
                     on_submit,
                     slash_signals,
@@ -131,6 +138,7 @@ fn ComposerInput(
 fn handle_composer_keydown(
     ev: web_sys::KeyboardEvent,
     draft: RwSignal<String>,
+    textarea: NodeRef<leptos_html::Textarea>,
     disabled: Signal<bool>,
     on_submit: Callback<String>,
     slash_signals: ComposerSlashSignals,
@@ -139,6 +147,7 @@ fn handle_composer_keydown(
     if handle_slash_palette_keydown(
         &ev,
         draft,
+        textarea,
         disabled,
         on_submit,
         slash_signals,
@@ -150,13 +159,14 @@ fn handle_composer_keydown(
 
     if ev.key() == "Enter" && !ev.shift_key() {
         ev.prevent_default();
-        submit_draft(draft, disabled, on_submit);
+        submit_draft(draft, textarea, disabled, on_submit);
     }
 }
 
 fn handle_slash_palette_keydown(
     ev: &web_sys::KeyboardEvent,
     draft: RwSignal<String>,
+    textarea: NodeRef<leptos_html::Textarea>,
     disabled: Signal<bool>,
     on_submit: Callback<String>,
     slash_signals: ComposerSlashSignals,
@@ -174,7 +184,7 @@ fn handle_slash_palette_keydown(
             if slash_signals.apply_on_enter.get_untracked() {
                 slash_callbacks.apply_selected.run(());
             } else {
-                submit_draft(draft, disabled, on_submit);
+                submit_draft(draft, textarea, disabled, on_submit);
             }
         }
         "Escape" => slash_callbacks.dismiss.run(()),
@@ -185,12 +195,35 @@ fn handle_slash_palette_keydown(
     true
 }
 
-fn submit_draft(draft: RwSignal<String>, disabled: Signal<bool>, on_submit: Callback<String>) {
-    let text = draft.get_untracked().trim().to_string();
-    if text.is_empty() || disabled.get_untracked() {
-        return;
+fn submit_draft(
+    draft: RwSignal<String>,
+    textarea: NodeRef<leptos_html::Textarea>,
+    disabled: Signal<bool>,
+    on_submit: Callback<String>,
+) {
+    let signal_value = draft.get_untracked();
+    let current_value = current_submit_value(
+        textarea.get().map(|textarea| textarea.value()),
+        signal_value.clone(),
+    );
+
+    if current_value != signal_value {
+        draft.set(current_value.clone());
     }
+
+    let Some(text) = submit_text(current_value, disabled.get_untracked()) else {
+        return;
+    };
     on_submit.run(text);
+}
+
+fn current_submit_value(live_value: Option<String>, draft_value: String) -> String {
+    live_value.unwrap_or(draft_value)
+}
+
+fn submit_text(current_value: String, disabled: bool) -> Option<String> {
+    let text = current_value.trim().to_string();
+    (!disabled && !text.is_empty()).then_some(text)
 }
 
 #[component]
@@ -371,5 +404,28 @@ fn ComposerActions(
                 "Send"
             </button>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{current_submit_value, submit_text};
+
+    #[test]
+    fn current_submit_value_prefers_the_live_textarea_value() {
+        assert_eq!(
+            current_submit_value(Some("test".to_string()), "/help".to_string()),
+            "test"
+        );
+    }
+
+    #[test]
+    fn submit_text_trims_and_blocks_disabled_or_empty_submissions() {
+        assert_eq!(
+            submit_text("  test  ".to_string(), false),
+            Some("test".to_string())
+        );
+        assert_eq!(submit_text("   ".to_string(), false), None);
+        assert_eq!(submit_text("test".to_string(), true), None);
     }
 }

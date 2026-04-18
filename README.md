@@ -71,7 +71,8 @@ creates a browser-owned session and moves the URL to `/app/sessions/<id>`.
 Direct session routes load saved transcript state and keep receiving live
 events over SSE. Pending permission requests surface browser **Approve**,
 **Deny**, and **Cancel** controls in the chat area. Slash commands such as
-`/help`, `/cancel`, `/approve`, and `/deny` complete directly in the composer.
+`/help`, `/cancel`, `/approve`, and `/deny` complete directly in the composer,
+with a small floating suggestion overlay while typing.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.

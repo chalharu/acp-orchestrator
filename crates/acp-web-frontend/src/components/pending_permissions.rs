@@ -20,6 +20,7 @@ pub fn ChatActivity(
             fallback=move || view! { <></> }
         >
             <section class="chat-activity" aria-live="polite">
+                <RecentActivityFeed activity=activity />
                 <PendingPermissionsSection
                     items=items
                     busy=busy
@@ -27,7 +28,6 @@ pub fn ChatActivity(
                     on_deny=on_deny
                     on_cancel=on_cancel
                 />
-                <RecentActivitySection activity=activity />
             </section>
         </Show>
     }
@@ -69,19 +69,16 @@ fn PendingPermissionsSection(
 }
 
 #[component]
-fn RecentActivitySection(#[prop(into)] activity: Signal<Vec<ToolActivityEntry>>) -> impl IntoView {
+fn RecentActivityFeed(#[prop(into)] activity: Signal<Vec<ToolActivityEntry>>) -> impl IntoView {
     view! {
         <Show when=move || !activity.get().is_empty() fallback=move || view! { <></> }>
-            <section class="chat-activity__section">
-                <p class="chat-activity__section-label">"Recent activity"</p>
-                <ul class="tool-activity-list chat-activity__list">
-                    <For
-                        each=move || activity.get()
-                        key=|item| item.id.clone()
-                        children=move |item| view! { <ToolActivityItem item=item /> }
-                    />
-                </ul>
-            </section>
+            <ul class="tool-activity-list chat-activity__feed">
+                <For
+                    each=move || activity.get()
+                    key=|item| item.id.clone()
+                    children=move |item| view! { <ToolActivityItem item=item /> }
+                />
+            </ul>
         </Show>
     }
 }

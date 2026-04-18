@@ -635,7 +635,7 @@ a:hover {
 
 .chat-activity {
   display: grid;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
 
 .chat-activity__section {
@@ -647,8 +647,27 @@ a:hover {
   gap: 0.6rem;
 }
 
-.chat-activity__list {
-  max-height: min(24vh, 180px);
+.chat-activity__feed {
+  display: grid;
+  gap: 0.45rem;
+  max-height: none;
+  overflow: visible;
+}
+
+.chat-activity__feed .tool-activity-list__item {
+  width: min(100%, 40rem);
+  padding: 0.55rem 0.7rem;
+  border-style: dashed;
+  background: transparent;
+}
+
+.chat-activity__feed .tool-activity-list__title {
+  font-size: 0.92rem;
+}
+
+.chat-activity__feed .tool-activity-list__detail,
+.chat-activity__feed .tool-activity-list__command {
+  font-size: 0.84rem;
 }
 
 .pending-list__actions,
@@ -669,6 +688,15 @@ a:hover {
   justify-content: flex-end;
 }
 
+.composer {
+  position: relative;
+  overflow: visible;
+}
+
+.composer__editor {
+  position: relative;
+}
+
 .composer textarea {
   width: 100%;
   min-height: 104px;
@@ -686,19 +714,24 @@ a:hover {
 }
 
 .composer__slash-palette {
-  margin-top: 0.5rem;
+  position: absolute;
+  left: 0.25rem;
+  bottom: calc(100% + 0.45rem);
+  width: min(20rem, calc(100% - 0.5rem));
   border: 1px solid var(--line);
-  border-radius: 12px;
-  background: #fffaf4;
-  max-height: min(26vh, 160px);
+  border-radius: 10px;
+  background: rgba(255, 250, 244, 0.98);
+  box-shadow: 0 12px 28px rgba(93, 68, 44, 0.12);
+  max-height: min(22vh, 140px);
   overflow-y: auto;
+  z-index: 2;
 }
 
 .composer__slash-empty {
   margin: 0;
-  padding: 0.65rem 0.8rem;
+  padding: 0.5rem 0.65rem;
   color: var(--ink-soft);
-  font-size: 0.9rem;
+  font-size: 0.82rem;
 }
 
 .composer__slash-empty--error {
@@ -714,10 +747,10 @@ a:hover {
   border: 0;
   border-radius: 0;
   border-bottom: 1px solid var(--line);
-  padding: 0.55rem 0.75rem;
+  padding: 0.45rem 0.6rem;
   background: transparent;
   display: grid;
-  gap: 0.12rem;
+  gap: 0.08rem;
   text-align: left;
 }
 
@@ -733,12 +766,16 @@ a:hover {
 
 .composer__slash-label {
   color: var(--ink);
+  font-size: 0.88rem;
 }
 
 .composer__slash-detail {
   color: var(--ink-soft);
-  font-size: 0.82rem;
-  line-height: 1.4;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .composer__status {

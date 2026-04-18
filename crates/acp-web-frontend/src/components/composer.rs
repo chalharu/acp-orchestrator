@@ -1,7 +1,9 @@
 //! Composer (message input + submit) component.
 
 use acp_contracts::CompletionCandidate;
-use leptos::prelude::*;
+use leptos::{html as leptos_html, prelude::*};
+
+const MAX_SLASH_PALETTE_ITEMS: usize = 5;
 
 #[derive(Clone, Copy)]
 pub struct ComposerSlashSignals {
@@ -25,7 +27,6 @@ pub struct ComposerSlashCallbacks {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SlashPaletteState {
     Error(String),
-    Loading,
     Empty,
     Ready(Vec<(usize, CompletionCandidate)>),
 }
@@ -53,16 +54,12 @@ pub fn Composer(
             autocomplete="off"
             on:submit=handle_submit
         >
-            <ComposerInput
+            <ComposerEditor
                 disabled=disabled
                 draft=draft
                 on_submit=on_submit
                 slash_signals=slash_signals
                 slash_callbacks=slash_callbacks
-            />
-            <SlashPalette
-                slash_signals=slash_signals
-                on_apply_index=slash_callbacks.apply_index
             />
             <ComposerFooter
                 status_text=status_text
@@ -76,7 +73,7 @@ pub fn Composer(
 }
 
 #[component]
-fn ComposerInput(
+fn ComposerEditor(
     #[prop(into)] disabled: Signal<bool>,
     draft: RwSignal<String>,
     on_submit: Callback<String>,
@@ -84,11 +81,40 @@ fn ComposerInput(
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
     view! {
+        <div class="composer__editor">
+            <ComposerInput
+                disabled=disabled
+                draft=draft
+                on_submit=on_submit
+                slash_signals=slash_signals
+                slash_callbacks=slash_callbacks
+            />
+            <SlashPalette
+                slash_signals=slash_signals
+                on_apply_index=slash_callbacks.apply_index
+            />
+        </div>
+    }
+}
+
+#[component]
+fn ComposerInput(
+    #[prop(into)] disabled: Signal<bool>,
+    draft: RwSignal<String>,
+    on_submit: Callback<String>,
+    slash_signals: ComposerSlashSignals,
+    slash_callbacks: ComposerSlashCallbacks,
+) -> impl IntoView {
+    let textarea = NodeRef::<leptos_html::Textarea>::new();
+    bind_slash_focus(textarea, slash_signals);
+
+    view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
             id="composer-input"
             name="prompt"
             rows="4"
+            node_ref=textarea
             placeholder="Write a prompt or type / for commands."
             prop:value=move || draft.get()
             on:input=move |ev| update_draft(draft, &ev)
@@ -105,6 +131,27 @@ fn ComposerInput(
             prop:disabled=move || disabled.get()
         />
     }
+}
+
+fn bind_slash_focus(textarea: NodeRef<leptos_html::Textarea>, slash_signals: ComposerSlashSignals) {
+    let previous_state = RwSignal::new((false, false, false));
+
+    Effect::new(move |_| {
+        let current_state = (
+            slash_signals.visible.get(),
+            slash_signals.loading.get(),
+            should_render_slash_palette(slash_signals),
+        );
+
+        if current_state != previous_state.get_untracked()
+            && current_state.0
+            && let Some(input) = textarea.get()
+        {
+            let _ = input.focus();
+        }
+
+        previous_state.set(current_state);
+    });
 }
 
 fn update_draft(draft: RwSignal<String>, ev: &web_sys::Event) {
@@ -186,7 +233,7 @@ fn SlashPalette(
     let state = Signal::derive(move || slash_palette_state(slash_signals));
 
     view! {
-        <Show when=move || slash_signals.visible.get()>
+        <Show when=move || should_render_slash_palette(slash_signals)>
             <section class="composer__slash-palette" aria-label="Slash command suggestions">
                 {move || render_slash_palette_state(state.get(), selected_index, on_apply_index)}
             </section>
@@ -194,13 +241,19 @@ fn SlashPalette(
     }
 }
 
+fn should_render_slash_palette(slash_signals: ComposerSlashSignals) -> bool {
+    if !slash_signals.visible.get() {
+        return false;
+    }
+
+    slash_signals.error.get().is_some()
+        || !slash_signals.candidates.get().is_empty()
+        || !slash_signals.loading.get()
+}
+
 fn slash_palette_state(slash_signals: ComposerSlashSignals) -> SlashPaletteState {
     if let Some(message) = slash_signals.error.get() {
         return SlashPaletteState::Error(message);
-    }
-
-    if slash_signals.loading.get() {
-        return SlashPaletteState::Loading;
     }
 
     let items = slash_signals
@@ -208,6 +261,7 @@ fn slash_palette_state(slash_signals: ComposerSlashSignals) -> SlashPaletteState
         .get()
         .into_iter()
         .enumerate()
+        .take(MAX_SLASH_PALETTE_ITEMS)
         .collect::<Vec<_>>();
     if items.is_empty() {
         SlashPaletteState::Empty
@@ -228,9 +282,6 @@ fn render_slash_palette_state(
             </p>
         }
         .into_any(),
-        SlashPaletteState::Loading => {
-            view! { <p class="composer__slash-empty">"Looking up slash commands…"</p> }.into_any()
-        }
         SlashPaletteState::Empty => {
             view! { <p class="composer__slash-empty">"No matching slash commands."</p> }.into_any()
         }
@@ -291,6 +342,7 @@ fn SlashPaletteItem(
                         "composer__slash-item"
                     }
                 }
+                on:mousedown=move |ev| ev.prevent_default()
                 on:click=move |_| on_apply_index.run(index)
             >
                 <span class="composer__slash-label">{label}</span>

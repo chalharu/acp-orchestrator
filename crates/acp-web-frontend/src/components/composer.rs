@@ -1,7 +1,7 @@
 //! Composer (message input + submit) component.
 
 use acp_contracts::CompletionCandidate;
-use leptos::{html as leptos_html, prelude::*};
+use leptos::prelude::*;
 
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
 
@@ -105,19 +105,14 @@ fn ComposerInput(
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
-    let textarea = NodeRef::<leptos_html::Textarea>::new();
-    bind_slash_focus(textarea, slash_signals);
-
     view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
             id="composer-input"
             name="prompt"
             rows="4"
-            node_ref=textarea
             placeholder="Write a prompt or type / for commands."
-            prop:value=move || draft.get()
-            on:input=move |ev| update_draft(draft, &ev)
+            bind:value=draft
             on:keydown=move |ev| {
                 handle_composer_keydown(
                     ev,
@@ -131,32 +126,6 @@ fn ComposerInput(
             prop:disabled=move || disabled.get()
         />
     }
-}
-
-fn bind_slash_focus(textarea: NodeRef<leptos_html::Textarea>, slash_signals: ComposerSlashSignals) {
-    let previous_state = RwSignal::new((false, false, false));
-
-    Effect::new(move |_| {
-        let current_state = (
-            slash_signals.visible.get(),
-            slash_signals.loading.get(),
-            should_render_slash_palette(slash_signals),
-        );
-
-        if current_state != previous_state.get_untracked()
-            && current_state.0
-            && let Some(input) = textarea.get()
-        {
-            let _ = input.focus();
-        }
-
-        previous_state.set(current_state);
-    });
-}
-
-fn update_draft(draft: RwSignal<String>, ev: &web_sys::Event) {
-    let target = event_target::<web_sys::HtmlTextAreaElement>(ev);
-    draft.set(target.value());
 }
 
 fn handle_composer_keydown(

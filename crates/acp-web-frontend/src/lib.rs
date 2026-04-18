@@ -31,7 +31,6 @@ use components::{
 const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
 const DRAFT_STORAGE_KEY_PREFIX: &str = "acp-draft-";
 const CLOSED_SESSION_MESSAGE: &str = "Conversation ended.";
-const MAX_TOOL_ACTIVITY_ITEMS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -162,32 +161,12 @@ pub struct PendingPermission {
     pub summary: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolActivityEntry {
-    pub id: String,
-    pub title: String,
-    pub detail: String,
-    pub kind: ToolActivityKind,
-    pub commands: Vec<CompletionCandidate>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolActivityKind {
     Status,
     Warning,
     Error,
     Help,
-}
-
-impl ToolActivityKind {
-    fn css_class(self) -> &'static str {
-        match self {
-            Self::Status => "tool-activity-list__item--status",
-            Self::Warning => "tool-activity-list__item--warning",
-            Self::Error => "tool-activity-list__item--error",
-            Self::Help => "tool-activity-list__item--help",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,7 +212,6 @@ struct SessionBootstrap {
 struct SessionSignals {
     entries: RwSignal<Vec<TranscriptEntry>>,
     pending_permissions: RwSignal<Vec<PendingPermission>>,
-    tool_activity: RwSignal<Vec<ToolActivityEntry>>,
     action_error: RwSignal<Option<String>>,
     connection_error: RwSignal<Option<String>>,
     event_source: RwSignal<Option<EventSource>>,
@@ -308,7 +286,6 @@ struct SessionMainSignals {
     entries: Signal<Vec<TranscriptEntry>>,
     pending_permissions: Signal<Vec<PendingPermission>>,
     pending_action_busy: Signal<bool>,
-    tool_activity: Signal<Vec<ToolActivityEntry>>,
 }
 
 #[derive(Clone, Copy)]
@@ -456,7 +433,6 @@ fn session_signals() -> SessionSignals {
     SessionSignals {
         entries: RwSignal::new(Vec::new()),
         pending_permissions: RwSignal::new(Vec::new()),
-        tool_activity: RwSignal::new(Vec::new()),
         action_error: RwSignal::new(None::<String>),
         connection_error: RwSignal::new(None::<String>),
         event_source: RwSignal::new(None::<EventSource>),
@@ -535,7 +511,6 @@ fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
     let action_error = signals.action_error;
     let connection_error = signals.connection_error;
     let pending_permissions = signals.pending_permissions;
-    let tool_activity = signals.tool_activity;
     let session_status = signals.session_status;
     let turn_state = signals.turn_state;
 
@@ -555,7 +530,6 @@ fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
         entries: Signal::derive(move || entries.get()),
         pending_permissions: Signal::derive(move || pending_permissions.get()),
         pending_action_busy: Signal::derive(move || pending_action_busy.get()),
-        tool_activity: Signal::derive(move || reverse_tool_activity(tool_activity.get())),
     }
 }
 
@@ -638,7 +612,6 @@ fn SessionMain(
                 session_status=main_signals.session_status
                 pending_permissions=main_signals.pending_permissions
                 pending_action_busy=main_signals.pending_action_busy
-                tool_activity=main_signals.tool_activity
                 on_approve=callbacks.approve
                 on_deny=callbacks.deny
                 on_cancel=callbacks.cancel
@@ -654,7 +627,6 @@ fn SessionTranscriptPanel(
     #[prop(into)] session_status: Signal<SessionLifecycle>,
     #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
     #[prop(into)] pending_action_busy: Signal<bool>,
-    #[prop(into)] tool_activity: Signal<Vec<ToolActivityEntry>>,
     on_approve: Callback<String>,
     on_deny: Callback<String>,
     on_cancel: Callback<()>,
@@ -664,7 +636,6 @@ fn SessionTranscriptPanel(
             <Transcript entries=entries />
             <ChatActivity
                 items=pending_permissions
-                activity=tool_activity
                 busy=pending_action_busy
                 on_approve=on_approve
                 on_deny=on_deny
@@ -1945,29 +1916,13 @@ fn apply_session_closed(
         sequence,
         session_end_message(Some(&reason)),
     );
-    push_tool_activity_entry(
-        signals,
-        format!("session-closed-{sequence}"),
-        "Session ended",
-        session_end_message(Some(&reason)),
-        ToolActivityKind::Warning,
-        Vec::new(),
-    );
 }
 
 fn apply_status_update(sequence: u64, message: String, signals: SessionSignals) {
     if should_release_turn_state(signals.turn_state.get_untracked()) {
         signals.turn_state.set(TurnState::Idle);
     }
-    push_status_entry(signals.entries, sequence, message.clone());
-    push_tool_activity_entry(
-        signals,
-        format!("status-{sequence}"),
-        "Status update",
-        message,
-        ToolActivityKind::Status,
-        Vec::new(),
-    );
+    push_status_entry(signals.entries, sequence, message);
 }
 
 fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> SessionBootstrap {
@@ -2020,6 +1975,24 @@ fn push_status_entry(entries: RwSignal<Vec<TranscriptEntry>>, sequence: u64, tex
             id: entry_id.clone(),
             role: EntryRole::Status,
             text: text.clone(),
+        });
+    });
+}
+
+fn push_activity_entry(entries: RwSignal<Vec<TranscriptEntry>>, id: String, text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    entries.update(|current_entries| {
+        if current_entries.iter().any(|entry| entry.id == id) {
+            return;
+        }
+
+        current_entries.push(TranscriptEntry {
+            id,
+            role: EntryRole::Status,
+            text,
         });
     });
 }
@@ -2241,29 +2214,46 @@ fn push_tool_activity_entry(
     id: String,
     title: impl Into<String>,
     detail: impl Into<String>,
-    kind: ToolActivityKind,
+    _kind: ToolActivityKind,
     commands: Vec<CompletionCandidate>,
 ) {
     let title = title.into();
     let detail = detail.into();
-    signals.tool_activity.update(|current_activity| {
-        current_activity.push(ToolActivityEntry {
-            id,
-            title: title.clone(),
-            detail: detail.clone(),
-            kind,
-            commands: commands.clone(),
-        });
-        if current_activity.len() > MAX_TOOL_ACTIVITY_ITEMS {
-            let overflow = current_activity.len() - MAX_TOOL_ACTIVITY_ITEMS;
-            current_activity.drain(0..overflow);
-        }
-    });
+    push_activity_entry(
+        signals.entries,
+        format!("activity-{id}"),
+        tool_activity_text(&title, &detail, &commands),
+    );
 }
 
-fn reverse_tool_activity(mut activity: Vec<ToolActivityEntry>) -> Vec<ToolActivityEntry> {
-    activity.reverse();
-    activity
+fn tool_activity_text(title: &str, detail: &str, commands: &[CompletionCandidate]) -> String {
+    let mut lines = Vec::new();
+
+    let title = title.trim();
+    if !title.is_empty() {
+        lines.push(title.to_string());
+    }
+
+    let detail = detail.trim();
+    if !detail.is_empty() {
+        lines.push(detail.to_string());
+    }
+
+    if !commands.is_empty() {
+        lines.push("Commands:".to_string());
+        lines.extend(commands.iter().map(format_tool_activity_command));
+    }
+
+    lines.join("\n")
+}
+
+fn format_tool_activity_command(command: &CompletionCandidate) -> String {
+    let detail = command.detail.trim();
+    if detail.is_empty() {
+        format!("- {}", command.label)
+    } else {
+        format!("- {} — {}", command.label, detail)
+    }
 }
 
 fn connection_badge_state(

@@ -1,40 +1,11 @@
-//! Chat-side activity and pending permission panels.
+//! Pending permission panel rendered below the transcript.
 
-use acp_contracts::CompletionCandidate;
 use leptos::prelude::*;
 
-use crate::{PendingPermission, ToolActivityEntry};
+use crate::PendingPermission;
 
 #[component]
 pub fn ChatActivity(
-    #[prop(into)] items: Signal<Vec<PendingPermission>>,
-    #[prop(into)] activity: Signal<Vec<ToolActivityEntry>>,
-    #[prop(into)] busy: Signal<bool>,
-    on_approve: Callback<String>,
-    on_deny: Callback<String>,
-    on_cancel: Callback<()>,
-) -> impl IntoView {
-    view! {
-        <Show
-            when=move || !items.get().is_empty() || !activity.get().is_empty()
-            fallback=move || view! { <></> }
-        >
-            <section class="chat-activity" aria-live="polite">
-                <RecentActivityFeed activity=activity />
-                <PendingPermissionsSection
-                    items=items
-                    busy=busy
-                    on_approve=on_approve
-                    on_deny=on_deny
-                    on_cancel=on_cancel
-                />
-            </section>
-        </Show>
-    }
-}
-
-#[component]
-fn PendingPermissionsSection(
     #[prop(into)] items: Signal<Vec<PendingPermission>>,
     #[prop(into)] busy: Signal<bool>,
     on_approve: Callback<String>,
@@ -43,7 +14,7 @@ fn PendingPermissionsSection(
 ) -> impl IntoView {
     view! {
         <Show when=move || !items.get().is_empty() fallback=move || view! { <></> }>
-            <section class="chat-activity__section">
+            <section class="chat-activity" aria-live="polite">
                 <p class="chat-activity__section-label">"Pending permissions"</p>
                 <ul class="pending-list chat-activity__pending-list">
                     <For
@@ -64,21 +35,6 @@ fn PendingPermissionsSection(
                 </ul>
                 <PendingPermissionFooter busy=busy on_cancel=on_cancel />
             </section>
-        </Show>
-    }
-}
-
-#[component]
-fn RecentActivityFeed(#[prop(into)] activity: Signal<Vec<ToolActivityEntry>>) -> impl IntoView {
-    view! {
-        <Show when=move || !activity.get().is_empty() fallback=move || view! { <></> }>
-            <ul class="tool-activity-list chat-activity__feed">
-                <For
-                    each=move || activity.get()
-                    key=|item| item.id.clone()
-                    children=move |item| view! { <ToolActivityItem item=item /> }
-                />
-            </ul>
         </Show>
     }
 }
@@ -151,58 +107,5 @@ fn PendingPermissionFooter(
                 "Cancel"
             </button>
         </div>
-    }
-}
-
-#[component]
-fn ToolActivityItem(item: ToolActivityEntry) -> impl IntoView {
-    let item_class = format!("tool-activity-list__item {}", item.kind.css_class());
-    let ToolActivityEntry {
-        title,
-        detail,
-        commands,
-        ..
-    } = item;
-    let has_detail = !detail.is_empty();
-    let has_commands = !commands.is_empty();
-    let commands_for_rows = commands;
-
-    view! {
-        <li class=item_class>
-            <div class="tool-activity-list__body">
-                <p class="tool-activity-list__title">{title}</p>
-                {move || {
-                    if has_detail {
-                        view! { <p class="tool-activity-list__detail">{detail.clone()}</p> }.into_any()
-                    } else {
-                        ().into_any()
-                    }
-                }}
-                {move || {
-                    if has_commands {
-                        let command_rows = commands_for_rows
-                            .clone()
-                            .into_iter()
-                            .map(|command| view! { <ToolActivityCommandRow command=command /> })
-                            .collect_view();
-                        view! { <ul class="tool-activity-list__commands">{command_rows}</ul> }.into_any()
-                    } else {
-                        ().into_any()
-                    }
-                }}
-            </div>
-        </li>
-    }
-}
-
-#[component]
-fn ToolActivityCommandRow(command: CompletionCandidate) -> impl IntoView {
-    let CompletionCandidate { label, detail, .. } = command;
-
-    view! {
-        <li class="tool-activity-list__command">
-            <code>{label}</code>
-            <span>{detail}</span>
-        </li>
     }
 }

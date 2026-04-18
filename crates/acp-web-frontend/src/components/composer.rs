@@ -110,6 +110,8 @@ fn ComposerInput(
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
+    bind_textarea_value(textarea, draft);
+
     view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
@@ -118,7 +120,7 @@ fn ComposerInput(
             rows="4"
             node_ref=textarea
             placeholder="Write a prompt or type / for commands."
-            bind:value=draft
+            on:input=move |ev| update_draft(draft, ev)
             on:keydown=move |ev| {
                 handle_composer_keydown(
                     ev,
@@ -133,6 +135,22 @@ fn ComposerInput(
             prop:disabled=move || disabled.get()
         />
     }
+}
+
+fn bind_textarea_value(textarea: NodeRef<leptos_html::Textarea>, draft: RwSignal<String>) {
+    Effect::new(move |_| {
+        let next_value = draft.get();
+        if let Some(input) = textarea.get()
+            && input.value() != next_value
+        {
+            input.set_value(&next_value);
+        }
+    });
+}
+
+fn update_draft(draft: RwSignal<String>, ev: web_sys::Event) {
+    let textarea = event_target::<web_sys::HtmlTextAreaElement>(&ev);
+    draft.set(textarea.value());
 }
 
 fn handle_composer_keydown(
@@ -344,8 +362,16 @@ fn SlashPaletteItem(
                         "composer__slash-item"
                     }
                 }
-                on:mousedown=move |ev| ev.prevent_default()
-                on:click=move |_| on_apply_index.run(index)
+                on:mousedown=move |ev| {
+                    ev.prevent_default();
+                    on_apply_index.run(index);
+                }
+                on:keydown=move |ev| {
+                    if matches!(ev.key().as_str(), "Enter" | " ") {
+                        ev.prevent_default();
+                        on_apply_index.run(index);
+                    }
+                }
             >
                 <span class="composer__slash-label">{label}</span>
                 <span class="composer__slash-detail">{detail}</span>

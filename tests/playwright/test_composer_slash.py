@@ -24,7 +24,9 @@ TEXTAREA_SELECTOR = "#composer-input"
 PALETTE_SELECTOR = ".composer__slash-palette"
 PALETTE_ITEM_SELECTOR = ".composer__slash-item"
 SUBMIT_SELECTOR = ".composer__submit"
+SIDEBAR_SELECTOR = ".session-sidebar"
 MOCK_REPLY_TEXT = "mock assistant: I received test."
+MOBILE_VIEWPORT = {"width": 390, "height": 844}
 
 
 def chromium_env() -> dict[str, str]:
@@ -70,8 +72,11 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
         if self.playwright is not None:
             self.playwright.stop()
 
-    def open_app(self) -> Page:
-        page = self.browser.new_page(ignore_https_errors=True)
+    def open_app(self, viewport: dict[str, int] | None = None) -> Page:
+        page = self.browser.new_page(
+            ignore_https_errors=True,
+            viewport=viewport,
+        )
         page.goto(APP_URL, wait_until="domcontentloaded", timeout=30_000)
         page.locator(TEXTAREA_SELECTOR).wait_for(state="visible", timeout=30_000)
         page.wait_for_url(re.compile(r".*/app/sessions/[^/]+$"), timeout=30_000)
@@ -161,6 +166,48 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
             page.get_by_text("Session unavailable. Start a fresh chat.").is_visible()
         )
         self.assertFalse(composer.is_disabled())
+
+    def test_mobile_sidebar_keeps_actions_visible_and_dismisses_from_corner_taps(
+        self,
+    ) -> None:
+        page = self.open_app(viewport=MOBILE_VIEWPORT)
+        sidebar = page.locator(SIDEBAR_SELECTOR)
+        toggle = page.locator(".session-sidebar__toggle")
+
+        toggle.click()
+        sidebar.wait_for(state="visible", timeout=10_000)
+
+        new_chat = page.locator(".session-sidebar__new-link")
+        new_chat_label = page.locator(".session-sidebar__new-link-label")
+        dismiss = page.get_by_role("button", name="Close sidebar")
+        title = page.locator(".session-sidebar__session-title").first
+        delete_button = page.get_by_role("button", name="Delete session").first
+
+        new_chat_box = new_chat.bounding_box()
+        dismiss_box = dismiss.bounding_box()
+        title_box = title.bounding_box()
+
+        self.assertEqual(
+            new_chat_label.evaluate("node => getComputedStyle(node).display"),
+            "none",
+        )
+        self.assertIsNotNone(new_chat_box)
+        self.assertIsNotNone(dismiss_box)
+        self.assertIsNotNone(title_box)
+        self.assertLess(abs(new_chat_box["width"] - dismiss_box["width"]), 8)
+        self.assertGreater(title_box["width"], 48)
+        self.assertTrue(delete_button.is_visible())
+        self.assertEqual(
+            sidebar.evaluate("node => getComputedStyle(node).boxShadow"),
+            "none",
+        )
+
+        page.mouse.click(MOBILE_VIEWPORT["width"] - 12, 12)
+        page.wait_for_function(
+            "() => getComputedStyle(document.querySelector('.session-sidebar')).display === 'none'",
+            timeout=10_000,
+        )
+        self.assertEqual(toggle.get_attribute("aria-expanded"), "false")
 
 
 if __name__ == "__main__":

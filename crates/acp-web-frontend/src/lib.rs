@@ -20,7 +20,7 @@ use futures_util::{
     StreamExt,
     future::{AbortHandle, Abortable},
 };
-use leptos::prelude::*;
+use leptos::{portal::Portal, prelude::*};
 use wasm_bindgen::JsCast;
 use web_sys::EventSource;
 
@@ -470,6 +470,7 @@ fn session_view_content(
     let main_signals = session_main_signals(signals);
 
     view! {
+        <SessionBackdrop sidebar_open=sidebar_open />
         <main class="app-shell app-shell--session">
             <SessionShell
                 current_session_id=current_session_id
@@ -565,7 +566,6 @@ fn SessionShell(
                 on_rename_session=on_rename_session
                 on_delete_session=on_delete_session
             />
-            <SessionBackdrop sidebar_open=sidebar_open />
             <SessionMain
                 main_signals=main_signals
                 sidebar_open=sidebar_open
@@ -580,14 +580,22 @@ fn SessionShell(
 #[component]
 fn SessionBackdrop(sidebar_open: RwSignal<bool>) -> impl IntoView {
     view! {
-        <button
-            type="button"
-            class="session-layout__backdrop"
-            hidden=move || !sidebar_open.get()
-            on:click=move |_| sidebar_open.set(false)
-        >
-            <span class="sr-only">"Close session sidebar"</span>
-        </button>
+        <Portal>
+            <div
+                class="session-layout__backdrop"
+                role="button"
+                aria-label="Close session sidebar"
+                tabindex="0"
+                hidden=move || !sidebar_open.get()
+                on:click=move |_| sidebar_open.set(false)
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if matches!(ev.key().as_str(), "Enter" | " " | "Spacebar") {
+                        ev.prevent_default();
+                        sidebar_open.set(false);
+                    }
+                }
+            ></div>
+        </Portal>
     }
 }
 
@@ -745,8 +753,11 @@ fn SessionSidebar(
 fn SessionSidebarHeader(sidebar_open: RwSignal<bool>) -> impl IntoView {
     view! {
         <div class="session-sidebar__header">
-            <a class="session-sidebar__new-link" href="/app/">
-                "New chat"
+            <a class="session-sidebar__new-link" href="/app/" aria-label="New chat">
+                <span class="session-sidebar__new-link-icon" aria-hidden="true">
+                    "+"
+                </span>
+                <span class="session-sidebar__new-link-label">"New chat"</span>
             </a>
             <button
                 type="button"

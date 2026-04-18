@@ -25,8 +25,7 @@ use wasm_bindgen::JsCast;
 use web_sys::EventSource;
 
 use components::{
-    Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, ToolActivityPanel,
-    Transcript,
+    ChatActivity, Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, Transcript,
 };
 
 const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
@@ -310,7 +309,6 @@ struct SessionMainSignals {
     pending_permissions: Signal<Vec<PendingPermission>>,
     pending_action_busy: Signal<bool>,
     tool_activity: Signal<Vec<ToolActivityEntry>>,
-    slash_help_hint: Signal<Option<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -412,7 +410,9 @@ fn session_composer_signals(
             signals.pending_action_busy,
             current_session_deleting,
         ),
-        slash_palette_visible: Signal::derive(move || signals.slash_query.get().is_some()),
+        slash_palette_visible: Signal::derive(move || {
+            slash_palette_is_visible(&signals.draft.get(), signals.slash_query.get().as_deref())
+        }),
         slash_candidates: Signal::derive(move || signals.slash_candidates.get()),
         slash_selected_index: Signal::derive(move || signals.slash_selected_index.get()),
         slash_loading: Signal::derive(move || signals.slash_loading.get()),
@@ -556,7 +556,6 @@ fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
         pending_permissions: Signal::derive(move || pending_permissions.get()),
         pending_action_busy: Signal::derive(move || pending_action_busy.get()),
         tool_activity: Signal::derive(move || reverse_tool_activity(tool_activity.get())),
-        slash_help_hint: Signal::derive(move || slash_help_hint(turn_state.get())),
     }
 }
 
@@ -637,8 +636,14 @@ fn SessionMain(
             <SessionTranscriptPanel
                 entries=main_signals.entries
                 session_status=main_signals.session_status
+                pending_permissions=main_signals.pending_permissions
+                pending_action_busy=main_signals.pending_action_busy
+                tool_activity=main_signals.tool_activity
+                on_approve=callbacks.approve
+                on_deny=callbacks.deny
+                on_cancel=callbacks.cancel
             />
-            <SessionDock main_signals=main_signals composer=composer callbacks=callbacks draft=draft />
+            <SessionDock composer=composer callbacks=callbacks draft=draft />
         </section>
     }
 }
@@ -647,10 +652,24 @@ fn SessionMain(
 fn SessionTranscriptPanel(
     #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
     #[prop(into)] session_status: Signal<SessionLifecycle>,
+    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
+    #[prop(into)] pending_action_busy: Signal<bool>,
+    #[prop(into)] tool_activity: Signal<Vec<ToolActivityEntry>>,
+    on_approve: Callback<String>,
+    on_deny: Callback<String>,
+    on_cancel: Callback<()>,
 ) -> impl IntoView {
     view! {
         <div class="chat-body">
             <Transcript entries=entries />
+            <ChatActivity
+                items=pending_permissions
+                activity=tool_activity
+                busy=pending_action_busy
+                on_approve=on_approve
+                on_deny=on_deny
+                on_cancel=on_cancel
+            />
         </div>
         <SessionClosedNotice session_status=session_status />
     }
@@ -1220,7 +1239,6 @@ fn SessionSidebarRenameButtons(
 
 #[component]
 fn SessionDock(
-    main_signals: SessionMainSignals,
     composer: SessionComposerSignals,
     callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
@@ -1230,15 +1248,6 @@ fn SessionDock(
 
     view! {
         <div class="chat-dock">
-            <ToolActivityPanel
-                items=main_signals.pending_permissions
-                activity=main_signals.tool_activity
-                busy=main_signals.pending_action_busy
-                slash_help_hint=main_signals.slash_help_hint
-                on_approve=callbacks.approve
-                on_deny=callbacks.deny
-                on_cancel=callbacks.cancel
-            />
             <Composer
                 disabled=composer.disabled
                 status_text=composer.status
@@ -1355,14 +1364,14 @@ fn bind_slash_completion(session_id: String, signals: SessionSignals) {
         leptos::task::spawn_local(async move {
             match api::get_slash_completions(&session_id_for_task, &prefix).await {
                 Ok(candidates) => {
-                    if signals_for_task.slash_request_serial.get_untracked() != request_serial {
+                    if !slash_request_is_current(signals_for_task, request_serial, &prefix) {
                         return;
                     }
                     signals_for_task.slash_candidates.set(candidates);
                     signals_for_task.slash_loading.set(false);
                 }
                 Err(message) => {
-                    if signals_for_task.slash_request_serial.get_untracked() != request_serial {
+                    if !slash_request_is_current(signals_for_task, request_serial, &prefix) {
                         return;
                     }
                     signals_for_task.slash_candidates.set(Vec::new());
@@ -1416,6 +1425,7 @@ fn apply_slash_candidate_at(signals: SessionSignals, index: usize) {
 }
 
 fn dismiss_slash_palette(signals: SessionSignals) {
+    invalidate_slash_requests(signals);
     signals.slash_candidates.set(Vec::new());
     signals.slash_selected_index.set(0);
     signals.slash_loading.set(false);
@@ -2115,6 +2125,20 @@ fn session_composer_cancel_busy_signal(
     })
 }
 
+fn slash_palette_is_visible(draft: &str, query: Option<&str>) -> bool {
+    slash_completion_prefix(draft).is_some_and(|prefix| Some(prefix) == query)
+}
+
+fn invalidate_slash_requests(signals: SessionSignals) {
+    let next_request_serial = signals.slash_request_serial.get_untracked() + 1;
+    signals.slash_request_serial.set(next_request_serial);
+}
+
+fn slash_request_is_current(signals: SessionSignals, request_serial: u64, prefix: &str) -> bool {
+    signals.slash_request_serial.get_untracked() == request_serial
+        && signals.slash_query.get_untracked().as_deref() == Some(prefix)
+}
+
 fn slash_completion_prefix(draft: &str) -> Option<&str> {
     classify_slash_completion_prefix(draft).map(|_| draft)
 }
@@ -2240,15 +2264,6 @@ fn push_tool_activity_entry(
 fn reverse_tool_activity(mut activity: Vec<ToolActivityEntry>) -> Vec<ToolActivityEntry> {
     activity.reverse();
     activity
-}
-
-fn slash_help_hint(turn_state: TurnState) -> Option<String> {
-    match turn_state {
-        TurnState::AwaitingPermission => {
-            Some("Use /approve <request-id> or /deny <request-id> from the composer.".to_string())
-        }
-        _ => Some("Type / to open the slash command palette.".to_string()),
-    }
 }
 
 fn connection_badge_state(
@@ -2565,7 +2580,7 @@ fn session_composer_status_message(
     match turn_state {
         TurnState::Submitting | TurnState::AwaitingReply => "Waiting for response...".to_string(),
         TurnState::AwaitingPermission => {
-            "Resolve the request below before sending another message.".to_string()
+            "Resolve the pending request before sending another message.".to_string()
         }
         TurnState::Cancelling => "Cancelling...".to_string(),
         TurnState::Idle => match session_status {
@@ -2614,14 +2629,15 @@ mod tests {
         parse_browser_slash_action, remove_session_from_list, rename_session_in_list,
         session_action_busy, session_bootstrap_from_snapshot, session_composer_cancel_visible,
         session_composer_disabled, session_composer_status_message, should_release_turn_state,
-        sidebar_sessions, slash_palette_should_apply_on_enter, turn_state_for_snapshot,
-        worker_badge_state,
+        sidebar_sessions, slash_palette_is_visible, slash_palette_should_apply_on_enter,
+        slash_request_is_current, turn_state_for_snapshot, worker_badge_state,
     };
     use acp_contracts::{
         CompletionCandidate, CompletionKind, ConversationMessage, MessageRole, PermissionRequest,
         SessionListItem, SessionResponse, SessionSnapshot, SessionStatus,
     };
     use chrono::{TimeZone, Utc};
+    use leptos::prelude::Set;
 
     fn sample_session_bootstrap_response() -> SessionResponse {
         SessionResponse {
@@ -2669,7 +2685,7 @@ mod tests {
                 TurnState::AwaitingPermission,
                 false,
             ),
-            "Resolve the request below before sending another message."
+            "Resolve the pending request before sending another message."
         );
     }
 
@@ -3003,6 +3019,25 @@ mod tests {
             &[partial_candidate],
             0
         ));
+    }
+
+    #[test]
+    fn slash_palette_visibility_requires_a_matching_active_query() {
+        assert!(slash_palette_is_visible("/", Some("/")));
+        assert!(!slash_palette_is_visible("", Some("/")));
+        assert!(!slash_palette_is_visible("/", None));
+    }
+
+    #[test]
+    fn slash_request_must_match_the_active_query() {
+        let signals = super::session_signals();
+        signals.slash_request_serial.set(3);
+        signals.slash_query.set(Some("/".to_string()));
+
+        assert!(slash_request_is_current(signals, 3, "/"));
+
+        signals.slash_query.set(None);
+        assert!(!slash_request_is_current(signals, 3, "/"));
     }
 
     #[test]

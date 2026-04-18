@@ -89,7 +89,7 @@ fn ComposerInput(
             id="composer-input"
             name="prompt"
             rows="4"
-            placeholder="Write a prompt or next step."
+            placeholder="Write a prompt or type / for commands."
             prop:value=move || draft.get()
             on:input=move |ev| update_draft(draft, &ev)
             on:keydown=move |ev| {

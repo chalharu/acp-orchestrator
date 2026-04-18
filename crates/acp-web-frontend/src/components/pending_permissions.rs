@@ -1,4 +1,4 @@
-//! Tool activity panel.
+//! Chat-side activity and pending permission panels.
 
 use acp_contracts::CompletionCandidate;
 use leptos::prelude::*;
@@ -6,44 +6,30 @@ use leptos::prelude::*;
 use crate::{PendingPermission, ToolActivityEntry};
 
 #[component]
-pub fn ToolActivityPanel(
+pub fn ChatActivity(
     #[prop(into)] items: Signal<Vec<PendingPermission>>,
     #[prop(into)] activity: Signal<Vec<ToolActivityEntry>>,
     #[prop(into)] busy: Signal<bool>,
-    #[prop(into)] slash_help_hint: Signal<Option<String>>,
     on_approve: Callback<String>,
     on_deny: Callback<String>,
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <section class="panel tool-activity-panel" aria-live="polite">
-            <ToolActivityHeader slash_help_hint=slash_help_hint />
-            <PendingPermissionsSection
-                items=items
-                busy=busy
-                on_approve=on_approve
-                on_deny=on_deny
-                on_cancel=on_cancel
-            />
-            <RecentActivitySection activity=activity />
-        </section>
-    }
-}
-
-#[component]
-fn ToolActivityHeader(#[prop(into)] slash_help_hint: Signal<Option<String>>) -> impl IntoView {
-    view! {
-        <div class="tool-activity-panel__header">
-            <div>
-                <p class="tool-activity-panel__eyebrow">"Tool activity"</p>
-                <h2 class="tool-activity-panel__title">"Status, permissions, and slash help"</h2>
-            </div>
-            <Show when=move || slash_help_hint.get().is_some()>
-                <p class="tool-activity-panel__hint">
-                    {move || slash_help_hint.get().unwrap_or_default()}
-                </p>
-            </Show>
-        </div>
+        <Show
+            when=move || !items.get().is_empty() || !activity.get().is_empty()
+            fallback=move || view! { <></> }
+        >
+            <section class="chat-activity" aria-live="polite">
+                <PendingPermissionsSection
+                    items=items
+                    busy=busy
+                    on_approve=on_approve
+                    on_deny=on_deny
+                    on_cancel=on_cancel
+                />
+                <RecentActivitySection activity=activity />
+            </section>
+        </Show>
     }
 }
 
@@ -57,9 +43,9 @@ fn PendingPermissionsSection(
 ) -> impl IntoView {
     view! {
         <Show when=move || !items.get().is_empty() fallback=move || view! { <></> }>
-            <section class="tool-activity-panel__section">
-                <p class="tool-activity-panel__section-label">"Pending permissions"</p>
-                <ul class="pending-list">
+            <section class="chat-activity__section">
+                <p class="chat-activity__section-label">"Pending permissions"</p>
+                <ul class="pending-list chat-activity__pending-list">
                     <For
                         each=move || items.get()
                         key=|item| item.request_id.clone()
@@ -85,29 +71,18 @@ fn PendingPermissionsSection(
 #[component]
 fn RecentActivitySection(#[prop(into)] activity: Signal<Vec<ToolActivityEntry>>) -> impl IntoView {
     view! {
-        <section class="tool-activity-panel__section">
-            <p class="tool-activity-panel__section-label">"Recent activity"</p>
-            <Show
-                when=move || !activity.get().is_empty()
-                fallback=move || {
-                    view! {
-                        <p class="tool-activity-panel__empty muted">
-                            "No tool activity yet. Type "
-                            <code>/</code>
-                            " to browse commands."
-                        </p>
-                    }
-                }
-            >
-                <ul class="tool-activity-list">
+        <Show when=move || !activity.get().is_empty() fallback=move || view! { <></> }>
+            <section class="chat-activity__section">
+                <p class="chat-activity__section-label">"Recent activity"</p>
+                <ul class="tool-activity-list chat-activity__list">
                     <For
                         each=move || activity.get()
                         key=|item| item.id.clone()
                         children=move |item| view! { <ToolActivityItem item=item /> }
                     />
                 </ul>
-            </Show>
-        </section>
+            </section>
+        </Show>
     }
 }
 

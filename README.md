@@ -66,13 +66,12 @@ development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
 
 The current Web slice serves a minimal chat shell. It includes a session
-sidebar, transcript, tool activity panel, and composer. The first prompt
+sidebar, transcript, inline activity history, and composer. The first prompt
 creates a browser-owned session and moves the URL to `/app/sessions/<id>`.
 Direct session routes load saved transcript state and keep receiving live
 events over SSE. Pending permission requests surface browser **Approve**,
-**Deny**, and **Cancel** controls in the tool activity panel. Slash commands
-such as `/help`, `/cancel`, `/approve`, and `/deny` complete directly in the
-composer.
+**Deny**, and **Cancel** controls in the chat area. Slash commands such as
+`/help`, `/cancel`, `/approve`, and `/deny` complete directly in the composer.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
@@ -87,12 +86,12 @@ When running against the bundled mock stack, prompts containing the word
 verification, use the built-in mock prompts below:
 
 - `verify permission`: emits `[permission <request-id>] read_text_file README.md`.
-  In the browser, use the tool activity panel buttons or slash commands. In the
-  CLI, respond with `/approve <request-id>` or `/deny <request-id>`.
+  In the browser, use the chat-area controls or slash commands. In the CLI,
+  respond with `/approve <request-id>` or `/deny <request-id>`.
 - `verify cancel`: starts a delayed mock reply. Run `/cancel` before the
   assistant reply arrives and confirm `[status] turn cancelled`. In the browser,
-  the tool activity panel also exposes **Cancel** when a permission
-  request is blocking the current turn.
+  the chat area also exposes **Cancel** when a permission request is blocking
+  the current turn.
 
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.

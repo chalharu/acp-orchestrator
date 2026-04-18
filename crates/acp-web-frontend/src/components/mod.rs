@@ -7,5 +7,5 @@ mod transcript;
 
 pub use composer::{Composer, ComposerSlashCallbacks, ComposerSlashSignals};
 pub use error_banner::ErrorBanner;
-pub use pending_permissions::ToolActivityPanel;
+pub use pending_permissions::ChatActivity;
 pub use transcript::Transcript;

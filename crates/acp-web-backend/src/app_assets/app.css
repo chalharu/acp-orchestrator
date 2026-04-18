@@ -112,6 +112,9 @@ a:hover {
 .chat-body {
   min-height: 0;
   overflow: hidden;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0.75rem;
 }
 
 .chat-topbar__controls {
@@ -541,7 +544,8 @@ a:hover {
 }
 
 .tool-activity-panel__eyebrow,
-.tool-activity-panel__section-label {
+.tool-activity-panel__section-label,
+.chat-activity__section-label {
   margin: 0;
   font-size: 0.78rem;
   letter-spacing: 0.08em;
@@ -581,14 +585,14 @@ a:hover {
 
 .tool-activity-list {
   display: grid;
-  gap: 0.65rem;
-  max-height: 220px;
+  gap: 0.55rem;
+  max-height: 180px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .tool-activity-list__item {
-  padding: 0.75rem 0.85rem;
+  padding: 0.65rem 0.75rem;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fffaf4;
@@ -629,6 +633,24 @@ a:hover {
   flex-wrap: wrap;
 }
 
+.chat-activity {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.chat-activity__section {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.chat-activity__pending-list {
+  gap: 0.6rem;
+}
+
+.chat-activity__list {
+  max-height: min(24vh, 180px);
+}
+
 .pending-list__actions,
 .pending-panel__footer,
 .composer__footer {
@@ -664,16 +686,19 @@ a:hover {
 }
 
 .composer__slash-palette {
-  margin-top: 0.75rem;
+  margin-top: 0.5rem;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fffaf4;
+  max-height: min(26vh, 160px);
+  overflow-y: auto;
 }
 
 .composer__slash-empty {
   margin: 0;
-  padding: 0.8rem 0.95rem;
+  padding: 0.65rem 0.8rem;
   color: var(--ink-soft);
+  font-size: 0.9rem;
 }
 
 .composer__slash-empty--error {
@@ -689,10 +714,10 @@ a:hover {
   border: 0;
   border-radius: 0;
   border-bottom: 1px solid var(--line);
-  padding: 0.75rem 0.95rem;
+  padding: 0.55rem 0.75rem;
   background: transparent;
   display: grid;
-  gap: 0.18rem;
+  gap: 0.12rem;
   text-align: left;
 }
 
@@ -712,7 +737,8 @@ a:hover {
 
 .composer__slash-detail {
   color: var(--ink-soft);
-  font-size: 0.92rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .composer__status {

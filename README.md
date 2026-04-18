@@ -66,13 +66,14 @@ development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
 
 The current Web slice serves a minimal chat shell. It includes a session
-sidebar, transcript, inline activity history, and composer. The first prompt
+sidebar, transcript, composer, and inline activity history. The first prompt
 creates a browser-owned session and moves the URL to `/app/sessions/<id>`.
 Direct session routes load saved transcript state and keep receiving live
-events over SSE. Pending permission requests surface browser **Approve**,
-**Deny**, and **Cancel** controls in the chat area. Slash commands such as
-`/help`, `/cancel`, `/approve`, and `/deny` complete directly in the composer,
-with a small floating suggestion overlay while typing.
+events over SSE. Pending permission requests surface browser controls in the
+chat area. Use **Approve**, **Deny**, or **Cancel** there. The composer
+supports slash commands such as `/help` and `/cancel`. Permission actions can
+also use `/approve` or `/deny`. A small floating suggestion overlay appears
+while typing.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.

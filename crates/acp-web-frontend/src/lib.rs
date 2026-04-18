@@ -13,8 +13,8 @@ mod components;
 
 use acp_contracts::{
     CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    SessionListItem, SessionSnapshot, SessionStatus, SlashCommand, StreamEvent, StreamEventPayload,
-    classify_slash_completion_prefix, parse_slash_command,
+    SessionListItem, SessionSnapshot, SessionStatus, SlashCommand, SlashCompletionQuery,
+    StreamEvent, StreamEventPayload, classify_slash_completion_prefix, parse_slash_command,
 };
 use futures_util::{
     StreamExt,
@@ -1338,7 +1338,9 @@ fn bind_slash_completion(session_id: String, signals: SessionSignals) {
                     if !slash_request_is_current(signals_for_task, request_serial, &prefix) {
                         return;
                     }
-                    signals_for_task.slash_candidates.set(candidates);
+                    signals_for_task
+                        .slash_candidates
+                        .set(browser_slash_candidates(candidates));
                     signals_for_task.slash_loading.set(false);
                 }
                 Err(message) => {
@@ -1457,10 +1459,6 @@ async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BrowserSlashAction {
     Help,
-    Quit,
-    Cancel,
-    Approve { request_id: String },
-    Deny { request_id: String },
 }
 
 fn handle_slash_submit(session_id: &str, prompt: String, signals: SessionSignals) {
@@ -1495,34 +1493,23 @@ async fn run_browser_slash_action(
 ) {
     match action {
         BrowserSlashAction::Help => match api::get_slash_completions(&session_id, "/").await {
-            Ok(commands) => push_tool_activity_entry(
-                signals,
-                next_tool_activity_id(signals, "help"),
-                "Available slash commands",
-                if commands.is_empty() {
-                    "No slash commands are available for this session.".to_string()
-                } else {
-                    "Choose a command below or keep typing in the composer.".to_string()
-                },
-                ToolActivityKind::Help,
-                commands,
-            ),
+            Ok(commands) => {
+                let commands = browser_slash_candidates(commands);
+                push_tool_activity_entry(
+                    signals,
+                    next_tool_activity_id(signals, "help"),
+                    "Available slash commands",
+                    if commands.is_empty() {
+                        "No browser slash commands are available.".to_string()
+                    } else {
+                        "Use the composer for `/help` and the on-screen controls for cancel or permission actions.".to_string()
+                    },
+                    ToolActivityKind::Help,
+                    commands,
+                )
+            }
             Err(message) => signals.action_error.set(Some(message)),
         },
-        BrowserSlashAction::Quit => {
-            if let Err(message) = navigate_to("/app/") {
-                signals.action_error.set(Some(message));
-            }
-        }
-        BrowserSlashAction::Cancel => cancel_turn_callback(session_id, signals).run(()),
-        BrowserSlashAction::Approve { request_id } => {
-            permission_resolution_callback(session_id, PermissionDecision::Approve, signals)
-                .run(request_id);
-        }
-        BrowserSlashAction::Deny { request_id } => {
-            permission_resolution_callback(session_id, PermissionDecision::Deny, signals)
-                .run(request_id);
-        }
     }
 }
 
@@ -1766,6 +1753,7 @@ fn delete_session_callback(
         leptos::task::spawn_local(async move {
             match api::delete_session(&session_id).await {
                 Ok(_) => {
+                    clear_prepared_session_id_if_matches(&session_id);
                     clear_draft(&session_id);
                     signals
                         .session_list
@@ -2113,7 +2101,7 @@ fn slash_request_is_current(signals: SessionSignals, request_serial: u64, prefix
 }
 
 fn slash_completion_prefix(draft: &str) -> Option<&str> {
-    classify_slash_completion_prefix(draft).map(|_| draft)
+    browser_supports_slash_prefix(draft).then_some(draft)
 }
 
 fn apply_slash_completion(draft: &str, candidate: &CompletionCandidate) -> Option<String> {
@@ -2161,36 +2149,60 @@ fn cycle_slash_selection(candidate_count: usize, current_index: usize, forward: 
     }
 }
 
+fn browser_slash_candidates(candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
+    candidates
+        .into_iter()
+        .filter(browser_slash_candidate_supported)
+        .collect()
+}
+
+fn browser_slash_candidate_supported(candidate: &CompletionCandidate) -> bool {
+    parse_slash_command(candidate.insert_text.trim()).is_some_and(browser_supports_slash_command)
+}
+
+fn browser_supports_slash_prefix(draft: &str) -> bool {
+    match classify_slash_completion_prefix(draft) {
+        Some(SlashCompletionQuery::Commands { prefix }) => [SlashCommand::Help]
+            .into_iter()
+            .any(|command| command.spec().name.starts_with(prefix)),
+        Some(SlashCompletionQuery::RequestId { command, .. }) => {
+            browser_supports_slash_command(command)
+        }
+        None => false,
+    }
+}
+
+fn browser_supports_slash_command(command: SlashCommand) -> bool {
+    matches!(command, SlashCommand::Help)
+}
+
+fn unsupported_browser_slash_message(command: SlashCommand) -> String {
+    match command {
+        SlashCommand::Help => "Unknown slash command. Use `/help`.".to_string(),
+        SlashCommand::Quit => {
+            "Use the session list to leave or delete chats in the web UI.".to_string()
+        }
+        SlashCommand::Cancel | SlashCommand::Approve | SlashCommand::Deny => {
+            "Use the on-screen action buttons in the web UI.".to_string()
+        }
+    }
+}
+
 fn parse_browser_slash_action(input: &str) -> Result<BrowserSlashAction, String> {
     let mut parts = input.split_whitespace();
     let name = parts.next().unwrap_or_default();
     let Some(command) = parse_slash_command(name) else {
         return Err("Unknown slash command. Use `/help`.".to_string());
     };
+    if !browser_supports_slash_command(command) {
+        return Err(unsupported_browser_slash_message(command));
+    }
 
     match command {
         SlashCommand::Help => ensure_no_extra_slash_args(command, parts.next().is_some())
             .map(|()| BrowserSlashAction::Help),
-        SlashCommand::Quit => ensure_no_extra_slash_args(command, parts.next().is_some())
-            .map(|()| BrowserSlashAction::Quit),
-        SlashCommand::Cancel => ensure_no_extra_slash_args(command, parts.next().is_some())
-            .map(|()| BrowserSlashAction::Cancel),
-        SlashCommand::Approve | SlashCommand::Deny => {
-            let Some(request_id) = parts.next() else {
-                return Err(format!("Usage: {}", command.spec().label));
-            };
-            if parts.next().is_some() {
-                return Err(format!("Usage: {}", command.spec().label));
-            }
-            Ok(if command == SlashCommand::Approve {
-                BrowserSlashAction::Approve {
-                    request_id: request_id.to_string(),
-                }
-            } else {
-                BrowserSlashAction::Deny {
-                    request_id: request_id.to_string(),
-                }
-            })
+        SlashCommand::Quit | SlashCommand::Cancel | SlashCommand::Approve | SlashCommand::Deny => {
+            Err(unsupported_browser_slash_message(command))
         }
     }
 }
@@ -2445,6 +2457,12 @@ fn store_prepared_session_id(session_id: &str) {
     }
 }
 
+fn clear_prepared_session_id_if_matches(session_id: &str) {
+    if prepared_session_id().as_deref() == Some(session_id) {
+        clear_prepared_session_id();
+    }
+}
+
 fn clear_prepared_session_id() {
     if let Some(storage) = session_storage() {
         let _ = storage.remove_item(PREPARED_SESSION_STORAGE_KEY);
@@ -2614,13 +2632,14 @@ pub(crate) fn turn_state_for_snapshot(pending_permissions: &[PendingPermission])
 mod tests {
     use super::{
         BadgeTone, BrowserSlashAction, EntryRole, PendingPermission, SessionLifecycle,
-        SidebarSession, TurnState, apply_slash_completion, connection_badge_state,
-        cycle_slash_selection, mark_session_closed, next_session_destination,
-        parse_browser_slash_action, remove_session_from_list, rename_session_in_list,
-        session_action_busy, session_bootstrap_from_snapshot, session_composer_cancel_visible,
-        session_composer_disabled, session_composer_status_message, should_release_turn_state,
-        sidebar_sessions, slash_palette_is_visible, slash_palette_should_apply_on_enter,
-        slash_request_is_current, turn_state_for_snapshot, worker_badge_state,
+        SidebarSession, TurnState, apply_slash_completion, browser_slash_candidates,
+        connection_badge_state, cycle_slash_selection, mark_session_closed,
+        next_session_destination, parse_browser_slash_action, remove_session_from_list,
+        rename_session_in_list, session_action_busy, session_bootstrap_from_snapshot,
+        session_composer_cancel_visible, session_composer_disabled,
+        session_composer_status_message, should_release_turn_state, sidebar_sessions,
+        slash_palette_is_visible, slash_palette_should_apply_on_enter, slash_request_is_current,
+        turn_state_for_snapshot, worker_badge_state,
     };
     use acp_contracts::{
         CompletionCandidate, CompletionKind, ConversationMessage, MessageRole, PermissionRequest,
@@ -2922,32 +2941,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_browser_slash_action_handles_help_and_permission_commands() {
+    fn parse_browser_slash_action_handles_help() {
         assert_eq!(
             parse_browser_slash_action("/help").unwrap(),
             BrowserSlashAction::Help
         );
-        assert_eq!(
-            parse_browser_slash_action("/approve req_1").unwrap(),
-            BrowserSlashAction::Approve {
-                request_id: "req_1".to_string()
-            }
-        );
     }
 
     #[test]
-    fn parse_browser_slash_action_rejects_unknown_and_invalid_usage() {
+    fn parse_browser_slash_action_rejects_unknown_and_non_web_usage() {
         assert_eq!(
             parse_browser_slash_action("/unknown").unwrap_err(),
             "Unknown slash command. Use `/help`."
         );
         assert_eq!(
-            parse_browser_slash_action("/cancel now").unwrap_err(),
-            "Usage: /cancel"
+            parse_browser_slash_action("/cancel").unwrap_err(),
+            "Use the on-screen action buttons in the web UI."
         );
         assert_eq!(
-            parse_browser_slash_action("/deny").unwrap_err(),
-            "Usage: /deny <request-id>"
+            parse_browser_slash_action("/deny req_1").unwrap_err(),
+            "Use the on-screen action buttons in the web UI."
+        );
+        assert_eq!(
+            parse_browser_slash_action("/quit").unwrap_err(),
+            "Use the session list to leave or delete chats in the web UI."
         );
     }
 
@@ -3016,6 +3033,34 @@ mod tests {
         assert!(slash_palette_is_visible("/", Some("/")));
         assert!(!slash_palette_is_visible("", Some("/")));
         assert!(!slash_palette_is_visible("/", None));
+        assert!(!slash_palette_is_visible("/cancel", Some("/cancel")));
+    }
+
+    #[test]
+    fn browser_slash_candidates_only_keep_web_supported_commands() {
+        let help = CompletionCandidate {
+            label: "/help".to_string(),
+            insert_text: "/help".to_string(),
+            detail: "Show available slash commands".to_string(),
+            kind: CompletionKind::Command,
+        };
+        let cancel = CompletionCandidate {
+            label: "/cancel".to_string(),
+            insert_text: "/cancel".to_string(),
+            detail: "Cancel the running turn".to_string(),
+            kind: CompletionKind::Command,
+        };
+        let request_id = CompletionCandidate {
+            label: "req_1".to_string(),
+            insert_text: "req_1".to_string(),
+            detail: "Pending permission".to_string(),
+            kind: CompletionKind::Parameter,
+        };
+
+        assert_eq!(
+            browser_slash_candidates(vec![help.clone(), cancel, request_id]),
+            vec![help]
+        );
     }
 
     #[test]

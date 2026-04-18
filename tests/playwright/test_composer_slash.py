@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import unittest
 
-from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 
 APP_URL = os.environ.get("ACP_WEB_APP_URL", "https://127.0.0.1:18080/app/")
@@ -49,21 +50,31 @@ def chromium_env() -> dict[str, str]:
 
 class ComposerSlashPlaywrightTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.playwright = sync_playwright().start()
-        self.browser: Browser = self.playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-gpu"],
-            env=chromium_env(),
-        )
+        self.playwright = None
+        self.browser = None
+        try:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-gpu"],
+                env=chromium_env(),
+            )
+        except Exception:
+            if self.playwright is not None:
+                self.playwright.stop()
+            raise
 
     def tearDown(self) -> None:
-        self.browser.close()
-        self.playwright.stop()
+        if self.browser is not None:
+            self.browser.close()
+        if self.playwright is not None:
+            self.playwright.stop()
 
     def open_app(self) -> Page:
         page = self.browser.new_page(ignore_https_errors=True)
         page.goto(APP_URL, wait_until="domcontentloaded", timeout=30_000)
         page.locator(TEXTAREA_SELECTOR).wait_for(state="visible", timeout=30_000)
+        page.wait_for_url(re.compile(r".*/app/sessions/[^/]+$"), timeout=30_000)
         page.wait_for_timeout(1_500)
         return page
 
@@ -78,6 +89,13 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
         palette.wait_for(state="visible", timeout=10_000)
         items = page.locator(PALETTE_ITEM_SELECTOR)
         self.assertGreater(items.count(), 0)
+        item_texts = [text.strip() for text in items.all_inner_texts()]
+
+        self.assertTrue(any("/help" in text for text in item_texts))
+        self.assertFalse(any("/cancel" in text for text in item_texts))
+        self.assertFalse(any("/approve" in text for text in item_texts))
+        self.assertFalse(any("/deny" in text for text in item_texts))
+        self.assertFalse(any("/quit" in text for text in item_texts))
 
         items.first.click()
         page.wait_for_timeout(500)
@@ -106,6 +124,43 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
         page.get_by_text(MOCK_REPLY_TEXT).wait_for(timeout=30_000)
 
         self.assertEqual(composer.input_value(), "")
+
+    def test_sending_restores_focus_to_the_composer(self) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+        submit = page.locator(SUBMIT_SELECTOR)
+
+        composer.click()
+        page.keyboard.type("test", delay=100)
+        submit.click()
+
+        page.get_by_text(MOCK_REPLY_TEXT).wait_for(timeout=30_000)
+        page.wait_for_function(
+            "() => document.activeElement?.id === 'composer-input'",
+            timeout=10_000,
+        )
+
+        self.assertEqual(composer.input_value(), "")
+
+    def test_deleting_only_session_opens_a_fresh_chat(self) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+        initial_url = page.url
+
+        page.get_by_role("button", name="Delete session").first.click()
+        page.wait_for_function(
+            "(previousUrl) => window.location.href !== previousUrl",
+            arg=initial_url,
+            timeout=30_000,
+        )
+        page.wait_for_url(re.compile(r".*/app/sessions/[^/]+$"), timeout=30_000)
+        composer.wait_for(state="visible", timeout=30_000)
+
+        self.assertNotEqual(page.url, initial_url)
+        self.assertFalse(
+            page.get_by_text("Session unavailable. Start a fresh chat.").is_visible()
+        )
+        self.assertFalse(composer.is_disabled())
 
 
 if __name__ == "__main__":

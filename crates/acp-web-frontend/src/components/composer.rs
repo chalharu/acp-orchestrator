@@ -31,6 +31,14 @@ enum SlashPaletteState {
     Ready(Vec<(usize, CompletionCandidate)>),
 }
 
+#[derive(Clone)]
+struct SubmitDraftContext {
+    textarea: NodeRef<leptos_html::Textarea>,
+    disabled: Signal<bool>,
+    on_submit: Callback<String>,
+    restore_focus_after_submit: RwSignal<bool>,
+}
+
 #[component]
 pub fn Composer(
     #[prop(into)] disabled: Signal<bool>,
@@ -44,9 +52,17 @@ pub fn Composer(
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
     let textarea = NodeRef::<leptos_html::Textarea>::new();
+    let restore_focus_after_submit = RwSignal::new(false);
+    let submit_context = SubmitDraftContext {
+        textarea,
+        disabled,
+        on_submit,
+        restore_focus_after_submit,
+    };
+    let handle_submit_context = submit_context.clone();
     let handle_submit = move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
-        submit_draft(draft, textarea, disabled, on_submit);
+        submit_draft(draft, handle_submit_context.clone());
     };
 
     view! {
@@ -56,12 +72,10 @@ pub fn Composer(
             on:submit=handle_submit
         >
             <ComposerEditor
-                disabled=disabled
                 draft=draft
-                textarea=textarea
-                on_submit=on_submit
                 slash_signals=slash_signals
                 slash_callbacks=slash_callbacks
+                submit_context=submit_context
             />
             <ComposerFooter
                 status_text=status_text
@@ -76,22 +90,18 @@ pub fn Composer(
 
 #[component]
 fn ComposerEditor(
-    #[prop(into)] disabled: Signal<bool>,
     draft: RwSignal<String>,
-    textarea: NodeRef<leptos_html::Textarea>,
-    on_submit: Callback<String>,
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
+    submit_context: SubmitDraftContext,
 ) -> impl IntoView {
     view! {
         <div class="composer__editor">
             <ComposerInput
-                disabled=disabled
                 draft=draft
-                textarea=textarea
-                on_submit=on_submit
                 slash_signals=slash_signals
                 slash_callbacks=slash_callbacks
+                submit_context=submit_context
             />
             <SlashPalette
                 slash_signals=slash_signals
@@ -103,13 +113,16 @@ fn ComposerEditor(
 
 #[component]
 fn ComposerInput(
-    #[prop(into)] disabled: Signal<bool>,
     draft: RwSignal<String>,
-    textarea: NodeRef<leptos_html::Textarea>,
-    on_submit: Callback<String>,
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
+    submit_context: SubmitDraftContext,
 ) -> impl IntoView {
+    bind_submit_focus(submit_context.clone());
+    let keydown_submit_context = submit_context.clone();
+    let textarea = submit_context.textarea;
+    let disabled = submit_context.disabled;
+
     view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
@@ -124,9 +137,7 @@ fn ComposerInput(
                 handle_composer_keydown(
                     ev,
                     draft,
-                    textarea,
-                    disabled,
-                    on_submit,
+                    keydown_submit_context.clone(),
                     slash_signals,
                     slash_callbacks,
                 );
@@ -140,21 +151,30 @@ fn update_draft(draft: RwSignal<String>, ev: web_sys::Event) {
     draft.set(event_target_value(&ev));
 }
 
+fn bind_submit_focus(submit_context: SubmitDraftContext) {
+    Effect::new(move |_| {
+        if !submit_context.restore_focus_after_submit.get() || submit_context.disabled.get() {
+            return;
+        }
+
+        if let Some(textarea) = submit_context.textarea.get() {
+            let _ = textarea.focus();
+            submit_context.restore_focus_after_submit.set(false);
+        }
+    });
+}
+
 fn handle_composer_keydown(
     ev: web_sys::KeyboardEvent,
     draft: RwSignal<String>,
-    textarea: NodeRef<leptos_html::Textarea>,
-    disabled: Signal<bool>,
-    on_submit: Callback<String>,
+    submit_context: SubmitDraftContext,
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) {
     if handle_slash_palette_keydown(
         &ev,
         draft,
-        textarea,
-        disabled,
-        on_submit,
+        submit_context.clone(),
         slash_signals,
         slash_callbacks,
     ) || ev.is_composing()
@@ -164,16 +184,14 @@ fn handle_composer_keydown(
 
     if ev.key() == "Enter" && !ev.shift_key() {
         ev.prevent_default();
-        submit_draft(draft, textarea, disabled, on_submit);
+        submit_draft(draft, submit_context);
     }
 }
 
 fn handle_slash_palette_keydown(
     ev: &web_sys::KeyboardEvent,
     draft: RwSignal<String>,
-    textarea: NodeRef<leptos_html::Textarea>,
-    disabled: Signal<bool>,
-    on_submit: Callback<String>,
+    submit_context: SubmitDraftContext,
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) -> bool {
@@ -189,7 +207,7 @@ fn handle_slash_palette_keydown(
             if slash_signals.apply_on_enter.get_untracked() {
                 slash_callbacks.apply_selected.run(());
             } else {
-                submit_draft(draft, textarea, disabled, on_submit);
+                submit_draft(draft, submit_context);
             }
         }
         "Escape" => slash_callbacks.dismiss.run(()),
@@ -200,15 +218,13 @@ fn handle_slash_palette_keydown(
     true
 }
 
-fn submit_draft(
-    draft: RwSignal<String>,
-    textarea: NodeRef<leptos_html::Textarea>,
-    disabled: Signal<bool>,
-    on_submit: Callback<String>,
-) {
+fn submit_draft(draft: RwSignal<String>, submit_context: SubmitDraftContext) {
     let signal_value = draft.get_untracked();
     let current_value = current_submit_value(
-        textarea.get().map(|textarea| textarea.value()),
+        submit_context
+            .textarea
+            .get()
+            .map(|textarea| textarea.value()),
         signal_value.clone(),
     );
 
@@ -216,10 +232,11 @@ fn submit_draft(
         draft.set(current_value.clone());
     }
 
-    let Some(text) = submit_text(current_value, disabled.get_untracked()) else {
+    let Some(text) = submit_text(current_value, submit_context.disabled.get_untracked()) else {
         return;
     };
-    on_submit.run(text);
+    submit_context.on_submit.run(text);
+    submit_context.restore_focus_after_submit.set(true);
 }
 
 fn current_submit_value(live_value: Option<String>, draft_value: String) -> String {

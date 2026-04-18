@@ -71,10 +71,9 @@ creates a browser-owned session and moves the URL to `/app/sessions/<id>`.
 Direct session routes load saved transcript state and keep receiving live
 events over SSE. Pending permission requests surface browser controls in the
 chat area. Use **Approve**, **Deny**, or **Cancel** there. The composer
-supports slash commands such as `/help` and `/cancel`. Permission actions can
-also use `/approve` or `/deny`. A small floating suggestion overlay appears
-while typing, and recent slash or connection activity is recorded inside the
-transcript stream.
+supports `/help` only in the browser, with a small floating suggestion overlay.
+Recent slash or connection activity is recorded inside the transcript stream.
+Deleting the last remaining session returns to a fresh new-chat view.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
@@ -89,12 +88,11 @@ When running against the bundled mock stack, prompts containing the word
 verification, use the built-in mock prompts below:
 
 - `verify permission`: emits `[permission <request-id>] read_text_file README.md`.
-  In the browser, use the chat-area controls or slash commands. In the CLI,
-  respond with `/approve <request-id>` or `/deny <request-id>`.
+  In the browser, use the chat-area controls. In the CLI, respond with
+  `/approve <request-id>` or `/deny <request-id>`.
 - `verify cancel`: starts a delayed mock reply. Run `/cancel` before the
   assistant reply arrives and confirm `[status] turn cancelled`. In the browser,
-  the chat area also exposes **Cancel** when a permission request is blocking
-  the current turn.
+  use the visible **Cancel** button while the turn is pending.
 
 For browser regression coverage, run
 `python3 -m unittest discover -s tests/playwright -p 'test_*.py'` against a

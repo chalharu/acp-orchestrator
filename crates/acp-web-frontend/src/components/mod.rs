@@ -5,7 +5,7 @@ mod error_banner;
 mod pending_permissions;
 mod transcript;
 
-pub use composer::Composer;
+pub use composer::{Composer, ComposerSlashCallbacks, ComposerSlashSignals};
 pub use error_banner::ErrorBanner;
 pub use pending_permissions::ToolActivityPanel;
 pub use transcript::Transcript;

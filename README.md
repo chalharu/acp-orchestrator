@@ -65,13 +65,14 @@ app URL and attempts to open `/app/` in your browser. The backend uses a local
 development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
 
-The current Web slice serves a minimal chat shell with a session sidebar,
-transcript, tool activity panel, and composer. The first prompt creates a
-browser-owned session and moves the URL to `/app/sessions/<id>`. Direct session
-routes load saved transcript state and keep receiving live events over SSE.
-Pending permission requests surface browser **Approve**, **Deny**, and
-**Cancel** controls in the tool activity panel, while slash commands such as
-`/help`, `/cancel`, `/approve`, and `/deny` complete directly in the composer.
+The current Web slice serves a minimal chat shell. It includes a session
+sidebar, transcript, tool activity panel, and composer. The first prompt
+creates a browser-owned session and moves the URL to `/app/sessions/<id>`.
+Direct session routes load saved transcript state and keep receiving live
+events over SSE. Pending permission requests surface browser **Approve**,
+**Deny**, and **Cancel** controls in the tool activity panel. Slash commands
+such as `/help`, `/cancel`, `/approve`, and `/deny` complete directly in the
+composer.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.

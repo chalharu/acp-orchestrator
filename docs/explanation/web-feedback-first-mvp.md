@@ -34,7 +34,8 @@ backend contract、session route、permission 操作を先に固めるための*
 
 ## 3. 現在の実装状況
 
-このブランチの Web Feedback-First MVP は、当初の「最小 Web」から少し進み、
+このブランチの Web Feedback-First MVP は、当初の「最小 Web」から少し進みました。
+現在は
 **launcher + minimal chat shell + slash/tool panel + permission/cancel + session 再開の一部 + 仮想スクロール**
 まで到達しています。現時点の実装をまとめると次の通りです。
 

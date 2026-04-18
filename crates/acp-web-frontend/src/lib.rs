@@ -24,7 +24,10 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::EventSource;
 
-use components::{Composer, ErrorBanner, ToolActivityPanel, Transcript};
+use components::{
+    Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, ToolActivityPanel,
+    Transcript,
+};
 
 const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
 const DRAFT_STORAGE_KEY_PREFIX: &str = "acp-draft-";
@@ -623,20 +626,6 @@ fn SessionMain(
     callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
 ) -> impl IntoView {
-    let SessionViewCallbacks {
-        submit: on_submit,
-        approve: on_approve,
-        deny: on_deny,
-        cancel: on_cancel,
-        slash_select_next: on_slash_select_next,
-        slash_select_previous: on_slash_select_previous,
-        slash_apply_selected: on_slash_apply_selected,
-        slash_apply_index: on_slash_apply_index,
-        slash_dismiss: on_slash_dismiss,
-        ..
-    } = callbacks;
-    let session_status = main_signals.session_status;
-
     view! {
         <section class="session-main">
             <SessionTopBar
@@ -645,45 +634,39 @@ fn SessionMain(
                 worker_badge=main_signals.worker_badge
                 sidebar_open=sidebar_open
             />
-            <div class="chat-body">
-                <Transcript entries=main_signals.entries />
-            </div>
-            <Show when=move || matches!(session_status.get(), SessionLifecycle::Closed)>
-                <div class="session-ended-notice" role="status">
-                    <p class="session-ended-notice__text">
-                        "This conversation has ended. "
-                        <a href="/app/">"Start a new chat."</a>
-                    </p>
-                </div>
-            </Show>
-            <SessionDock
-                pending_permissions=main_signals.pending_permissions
-                pending_action_busy=main_signals.pending_action_busy
-                tool_activity=main_signals.tool_activity
-                slash_help_hint=main_signals.slash_help_hint
-                on_approve=on_approve
-                on_deny=on_deny
-                on_cancel=on_cancel
-                composer_disabled=composer.disabled
-                composer_status=composer.status
-                draft=draft
-                on_submit=on_submit
-                composer_cancel_visible=composer.cancel_visible
-                composer_cancel_busy=composer.cancel_busy
-                composer_cancel=on_cancel
-                slash_palette_visible=composer.slash_palette_visible
-                slash_candidates=composer.slash_candidates
-                slash_selected_index=composer.slash_selected_index
-                slash_loading=composer.slash_loading
-                slash_error=composer.slash_error
-                slash_apply_on_enter=composer.slash_apply_on_enter
-                on_slash_select_next=on_slash_select_next
-                on_slash_select_previous=on_slash_select_previous
-                on_slash_apply_selected=on_slash_apply_selected
-                on_slash_apply_index=on_slash_apply_index
-                on_slash_dismiss=on_slash_dismiss
+            <SessionTranscriptPanel
+                entries=main_signals.entries
+                session_status=main_signals.session_status
             />
+            <SessionDock main_signals=main_signals composer=composer callbacks=callbacks draft=draft />
         </section>
+    }
+}
+
+#[component]
+fn SessionTranscriptPanel(
+    #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
+    #[prop(into)] session_status: Signal<SessionLifecycle>,
+) -> impl IntoView {
+    view! {
+        <div class="chat-body">
+            <Transcript entries=entries />
+        </div>
+        <SessionClosedNotice session_status=session_status />
+    }
+}
+
+#[component]
+fn SessionClosedNotice(#[prop(into)] session_status: Signal<SessionLifecycle>) -> impl IntoView {
+    view! {
+        <Show when=move || matches!(session_status.get(), SessionLifecycle::Closed)>
+            <div class="session-ended-notice" role="status">
+                <p class="session-ended-notice__text">
+                    "This conversation has ended. "
+                    <a href="/app/">"Start a new chat."</a>
+                </p>
+            </div>
+        </Show>
     }
 }
 
@@ -1237,64 +1220,58 @@ fn SessionSidebarRenameButtons(
 
 #[component]
 fn SessionDock(
-    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
-    #[prop(into)] pending_action_busy: Signal<bool>,
-    #[prop(into)] tool_activity: Signal<Vec<ToolActivityEntry>>,
-    #[prop(into)] slash_help_hint: Signal<Option<String>>,
-    on_approve: Callback<String>,
-    on_deny: Callback<String>,
-    on_cancel: Callback<()>,
-    #[prop(into)] composer_disabled: Signal<bool>,
-    #[prop(into)] composer_status: Signal<String>,
+    main_signals: SessionMainSignals,
+    composer: SessionComposerSignals,
+    callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
-    on_submit: Callback<String>,
-    #[prop(into)] composer_cancel_visible: Signal<bool>,
-    #[prop(into)] composer_cancel_busy: Signal<bool>,
-    composer_cancel: Callback<()>,
-    #[prop(into)] slash_palette_visible: Signal<bool>,
-    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
-    #[prop(into)] slash_selected_index: Signal<usize>,
-    #[prop(into)] slash_loading: Signal<bool>,
-    #[prop(into)] slash_error: Signal<Option<String>>,
-    #[prop(into)] slash_apply_on_enter: Signal<bool>,
-    on_slash_select_next: Callback<()>,
-    on_slash_select_previous: Callback<()>,
-    on_slash_apply_selected: Callback<()>,
-    on_slash_apply_index: Callback<usize>,
-    on_slash_dismiss: Callback<()>,
 ) -> impl IntoView {
+    let slash_signals = composer_slash_signals(composer);
+    let slash_callbacks = composer_slash_callbacks(callbacks);
+
     view! {
         <div class="chat-dock">
             <ToolActivityPanel
-                items=pending_permissions
-                activity=tool_activity
-                busy=pending_action_busy
-                slash_help_hint=slash_help_hint
-                on_approve=on_approve
-                on_deny=on_deny
-                on_cancel=on_cancel
+                items=main_signals.pending_permissions
+                activity=main_signals.tool_activity
+                busy=main_signals.pending_action_busy
+                slash_help_hint=main_signals.slash_help_hint
+                on_approve=callbacks.approve
+                on_deny=callbacks.deny
+                on_cancel=callbacks.cancel
             />
             <Composer
-                disabled=composer_disabled
-                status_text=composer_status
+                disabled=composer.disabled
+                status_text=composer.status
                 draft=draft
-                on_submit=on_submit
-                show_cancel=composer_cancel_visible
-                cancel_disabled=composer_cancel_busy
-                on_cancel=composer_cancel
-                slash_palette_visible=slash_palette_visible
-                slash_candidates=slash_candidates
-                slash_selected_index=slash_selected_index
-                slash_loading=slash_loading
-                slash_error=slash_error
-                slash_apply_on_enter=slash_apply_on_enter
-                on_slash_select_next=on_slash_select_next
-                on_slash_select_previous=on_slash_select_previous
-                on_slash_apply_selected=on_slash_apply_selected
-                on_slash_apply_index=on_slash_apply_index
-                on_slash_dismiss=on_slash_dismiss
+                on_submit=callbacks.submit
+                show_cancel=composer.cancel_visible
+                cancel_disabled=composer.cancel_busy
+                on_cancel=callbacks.cancel
+                slash_signals=slash_signals
+                slash_callbacks=slash_callbacks
             />
         </div>
+    }
+}
+
+fn composer_slash_signals(composer: SessionComposerSignals) -> ComposerSlashSignals {
+    ComposerSlashSignals {
+        visible: composer.slash_palette_visible,
+        candidates: composer.slash_candidates,
+        selected_index: composer.slash_selected_index,
+        loading: composer.slash_loading,
+        error: composer.slash_error,
+        apply_on_enter: composer.slash_apply_on_enter,
+    }
+}
+
+fn composer_slash_callbacks(callbacks: SessionViewCallbacks) -> ComposerSlashCallbacks {
+    ComposerSlashCallbacks {
+        select_next: callbacks.slash_select_next,
+        select_previous: callbacks.slash_select_previous,
+        apply_selected: callbacks.slash_apply_selected,
+        apply_index: callbacks.slash_apply_index,
+        dismiss: callbacks.slash_dismiss,
     }
 }
 
@@ -1556,95 +1533,14 @@ async fn run_browser_slash_action(
                 signals.action_error.set(Some(message));
             }
         }
-        BrowserSlashAction::Cancel => {
-            let previous_turn_state = signals.turn_state.get_untracked();
-            signals.pending_action_busy.set(true);
-            signals.turn_state.set(TurnState::Cancelling);
-            match api::cancel_turn(&session_id).await {
-                Ok(cancelled) if cancelled.cancelled => {
-                    signals.pending_permissions.set(Vec::new());
-                    signals.turn_state.set(TurnState::Idle);
-                    push_tool_activity_entry(
-                        signals,
-                        next_tool_activity_id(signals, "cancel"),
-                        "Slash command",
-                        "Cancel requested for the running turn.".to_string(),
-                        ToolActivityKind::Status,
-                        Vec::new(),
-                    );
-                    refresh_session_list(signals).await;
-                }
-                Ok(_) => {
-                    push_tool_activity_entry(
-                        signals,
-                        next_tool_activity_id(signals, "cancel"),
-                        "Slash command",
-                        "No running turn is active.".to_string(),
-                        ToolActivityKind::Warning,
-                        Vec::new(),
-                    );
-                    if signals.turn_state.get_untracked() == TurnState::Cancelling {
-                        signals.turn_state.set(previous_turn_state);
-                    }
-                }
-                Err(message) => {
-                    signals.action_error.set(Some(message));
-                    if signals.turn_state.get_untracked() == TurnState::Cancelling {
-                        signals.turn_state.set(previous_turn_state);
-                    }
-                }
-            }
-            signals.pending_action_busy.set(false);
-        }
+        BrowserSlashAction::Cancel => cancel_turn_callback(session_id, signals).run(()),
         BrowserSlashAction::Approve { request_id } => {
-            let decision = PermissionDecision::Approve;
-            signals.pending_action_busy.set(true);
-            match api::resolve_permission(&session_id, &request_id, decision.clone()).await {
-                Ok(_) => {
-                    signals.pending_permissions.update(|current_permissions| {
-                        current_permissions.retain(|current_permission| {
-                            current_permission.request_id != request_id
-                        });
-                    });
-                    signals.turn_state.set(TurnState::AwaitingReply);
-                    push_tool_activity_entry(
-                        signals,
-                        next_tool_activity_id(signals, "permission"),
-                        "Slash command",
-                        format!("Permission {request_id} approved."),
-                        ToolActivityKind::Status,
-                        Vec::new(),
-                    );
-                    refresh_session_list(signals).await;
-                }
-                Err(message) => signals.action_error.set(Some(message)),
-            }
-            signals.pending_action_busy.set(false);
+            permission_resolution_callback(session_id, PermissionDecision::Approve, signals)
+                .run(request_id);
         }
         BrowserSlashAction::Deny { request_id } => {
-            let decision = PermissionDecision::Deny;
-            signals.pending_action_busy.set(true);
-            match api::resolve_permission(&session_id, &request_id, decision.clone()).await {
-                Ok(_) => {
-                    signals.pending_permissions.update(|current_permissions| {
-                        current_permissions.retain(|current_permission| {
-                            current_permission.request_id != request_id
-                        });
-                    });
-                    signals.turn_state.set(TurnState::Idle);
-                    push_tool_activity_entry(
-                        signals,
-                        next_tool_activity_id(signals, "permission"),
-                        "Slash command",
-                        format!("Permission {request_id} denied."),
-                        ToolActivityKind::Status,
-                        Vec::new(),
-                    );
-                    refresh_session_list(signals).await;
-                }
-                Err(message) => signals.action_error.set(Some(message)),
-            }
-            signals.pending_action_busy.set(false);
+            permission_resolution_callback(session_id, PermissionDecision::Deny, signals)
+                .run(request_id);
         }
     }
 }

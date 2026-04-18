@@ -5,10 +5,10 @@
 //! SSE events.
 
 use acp_contracts::{
-    CancelTurnResponse, CreateSessionResponse, DeleteSessionResponse, ErrorResponse,
-    PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
+    CancelTurnResponse, CompletionCandidate, CreateSessionResponse, DeleteSessionResponse,
+    ErrorResponse, PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
     ResolvePermissionRequest, SessionListItem, SessionListResponse, SessionResponse,
-    SessionSnapshot, StreamEvent,
+    SessionSnapshot, SlashCompletionsResponse, StreamEvent,
 };
 use futures_channel::mpsc;
 use gloo_net::http::Request;
@@ -103,6 +103,29 @@ pub async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
     Ok(listed.sessions)
 }
 
+/// Query backend-backed slash completions for the current session.
+pub async fn get_slash_completions(
+    session_id: &str,
+    prefix: &str,
+) -> Result<Vec<CompletionCandidate>, String> {
+    let response = Request::get(&format!(
+        "/api/v1/completions/slash?sessionId={}&prefix={}",
+        encode_component(session_id),
+        encode_component(prefix),
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Slash completion failed").await);
+    }
+
+    let completions: SlashCompletionsResponse =
+        response.json().await.map_err(|error| error.to_string())?;
+    Ok(completions.candidates)
+}
+
 /// Open the session event stream and return the raw `EventSource` plus a parsed
 /// event receiver.
 pub fn open_session_event_stream(
@@ -140,7 +163,7 @@ pub async fn resolve_permission(
     request_id: &str,
     decision: PermissionDecision,
 ) -> Result<(), String> {
-    let url = format!("/api/v1/sessions/{session_id}/permissions/{request_id}");
+    let url = permission_url(session_id, request_id);
     let body = serde_json::to_string(&ResolvePermissionRequest { decision })
         .map_err(|error| error.to_string())?;
 
@@ -318,6 +341,27 @@ fn format_api_failure(action: &str, status: u16, backend_message: Option<String>
         .unwrap_or_else(|| format!("{action}: HTTP {status}"))
 }
 
+fn permission_url(session_id: &str, request_id: &str) -> String {
+    format!(
+        "/api/v1/sessions/{}/permissions/{}",
+        encode_component(session_id),
+        encode_component(request_id),
+    )
+}
+
+fn encode_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn session_unavailable_message(status: u16, backend_message: Option<String>) -> String {
     let detail = backend_message.unwrap_or_else(|| format!("HTTP {status}"));
     format!("This session is unavailable ({detail}). Start a fresh chat.")
@@ -345,6 +389,14 @@ mod tests {
         assert_eq!(
             session_unavailable_message(404, Some("session not found".to_string())),
             "This session is unavailable (session not found). Start a fresh chat."
+        );
+    }
+
+    #[test]
+    fn permission_url_encodes_session_and_request_ids() {
+        assert_eq!(
+            permission_url("s/1", "../../close"),
+            "/api/v1/sessions/s%2F1/permissions/..%2F..%2Fclose"
         );
     }
 }

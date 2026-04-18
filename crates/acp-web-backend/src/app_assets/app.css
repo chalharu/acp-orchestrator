@@ -116,7 +116,16 @@ a:hover {
 
 .chat-topbar__controls {
   display: flex;
-  justify-content: flex-start;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.chat-topbar__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .session-layout {
@@ -515,6 +524,111 @@ a:hover {
   text-transform: uppercase;
 }
 
+.tool-activity-panel {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.tool-activity-panel__header,
+.tool-activity-panel__section {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.tool-activity-panel__header {
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tool-activity-panel__eyebrow,
+.tool-activity-panel__section-label {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.tool-activity-panel__title,
+.tool-activity-list__title {
+  margin: 0;
+}
+
+.tool-activity-panel__title {
+  font-size: 1rem;
+}
+
+.tool-activity-panel__hint,
+.tool-activity-panel__empty,
+.tool-activity-list__detail,
+.tool-activity-list__command {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+
+.tool-activity-panel__hint {
+  font-size: 0.9rem;
+}
+
+.tool-activity-list,
+.tool-activity-list__commands,
+.composer__slash-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tool-activity-list {
+  display: grid;
+  gap: 0.65rem;
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.tool-activity-list__item {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fffaf4;
+}
+
+.tool-activity-list__item--warning {
+  border-color: #d7b075;
+  background: #fff7ea;
+}
+
+.tool-activity-list__item--error {
+  border-color: #e0ada5;
+  background: #fff1ee;
+}
+
+.tool-activity-list__item--help {
+  border-color: #d7c2a9;
+}
+
+.tool-activity-list__body {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.tool-activity-list__detail {
+  white-space: pre-wrap;
+}
+
+.tool-activity-list__commands {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.tool-activity-list__command {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
 .pending-list__actions,
 .pending-panel__footer,
 .composer__footer {
@@ -547,6 +661,58 @@ a:hover {
 
 .composer textarea::placeholder {
   color: #887a6d;
+}
+
+.composer__slash-palette {
+  margin-top: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fffaf4;
+}
+
+.composer__slash-empty {
+  margin: 0;
+  padding: 0.8rem 0.95rem;
+  color: var(--ink-soft);
+}
+
+.composer__slash-empty--error {
+  color: var(--danger);
+}
+
+.composer__slash-list {
+  display: grid;
+}
+
+.composer__slash-item {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0.75rem 0.95rem;
+  background: transparent;
+  display: grid;
+  gap: 0.18rem;
+  text-align: left;
+}
+
+.composer__slash-list li:last-child .composer__slash-item {
+  border-bottom: 0;
+}
+
+.composer__slash-item--selected,
+.composer__slash-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--line);
+}
+
+.composer__slash-label {
+  color: var(--ink);
+}
+
+.composer__slash-detail {
+  color: var(--ink-soft);
+  font-size: 0.92rem;
 }
 
 .composer__status {
@@ -599,6 +765,37 @@ textarea:disabled,
 button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.status-badge {
+  margin: 0;
+  padding: 0.42rem 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 0.85rem;
+}
+
+.status-badge__label {
+  color: var(--ink-soft);
+}
+
+.status-badge--success {
+  border-color: #7aa67b;
+  background: #eef8ee;
+}
+
+.status-badge--warning {
+  border-color: #d7b075;
+  background: #fff7ea;
+}
+
+.status-badge--danger {
+  border-color: #e0ada5;
+  background: #fff1ee;
 }
 
 a:focus-visible,
@@ -695,7 +892,15 @@ textarea:focus-visible {
     align-items: stretch;
   }
 
+  .tool-activity-list__command {
+    align-items: flex-start;
+  }
+
   button {
+    width: 100%;
+  }
+
+  .composer__slash-item {
     width: 100%;
   }
 }

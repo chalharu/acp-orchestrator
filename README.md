@@ -96,6 +96,11 @@ verification, use the built-in mock prompts below:
   the chat area also exposes **Cancel** when a permission request is blocking
   the current turn.
 
+For browser regression coverage, run
+`python3 -m unittest discover -s tests/playwright -p 'test_*.py'` against a
+running web stack. If Chromium needs a user-space sysroot for shared libraries
+or fonts, set `ACP_PLAYWRIGHT_SYSROOT=/path/to/sysroot` first.
+
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.
 

@@ -110,8 +110,6 @@ fn ComposerInput(
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
-    bind_textarea_value(textarea, draft);
-
     view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
@@ -120,6 +118,7 @@ fn ComposerInput(
             rows="4"
             node_ref=textarea
             placeholder="Write a prompt or type / for commands."
+            prop:value=move || draft.get()
             on:input=move |ev| update_draft(draft, ev)
             on:keydown=move |ev| {
                 handle_composer_keydown(
@@ -137,20 +136,8 @@ fn ComposerInput(
     }
 }
 
-fn bind_textarea_value(textarea: NodeRef<leptos_html::Textarea>, draft: RwSignal<String>) {
-    Effect::new(move |_| {
-        let next_value = draft.get();
-        if let Some(input) = textarea.get()
-            && input.value() != next_value
-        {
-            input.set_value(&next_value);
-        }
-    });
-}
-
 fn update_draft(draft: RwSignal<String>, ev: web_sys::Event) {
-    let textarea = event_target::<web_sys::HtmlTextAreaElement>(&ev);
-    draft.set(textarea.value());
+    draft.set(event_target_value(&ev));
 }
 
 fn handle_composer_keydown(
@@ -249,13 +236,16 @@ fn SlashPalette(
     slash_signals: ComposerSlashSignals,
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
-    let selected_index = slash_signals.selected_index;
-    let state = Signal::derive(move || slash_palette_state(slash_signals));
-
     view! {
         <Show when=move || should_render_slash_palette(slash_signals)>
             <section class="composer__slash-palette" aria-label="Slash command suggestions">
-                {move || render_slash_palette_state(state.get(), selected_index, on_apply_index)}
+                {move || {
+                    render_slash_palette_state(
+                        slash_palette_state(slash_signals),
+                        slash_signals.selected_index.get(),
+                        on_apply_index,
+                    )
+                }}
             </section>
         </Show>
     }
@@ -292,7 +282,7 @@ fn slash_palette_state(slash_signals: ComposerSlashSignals) -> SlashPaletteState
 
 fn render_slash_palette_state(
     state: SlashPaletteState,
-    selected_index: Signal<usize>,
+    selected_index: usize,
     on_apply_index: Callback<usize>,
 ) -> AnyView {
     match state {
@@ -319,7 +309,7 @@ fn render_slash_palette_state(
 #[component]
 fn SlashPaletteList(
     items: Vec<(usize, CompletionCandidate)>,
-    #[prop(into)] selected_index: Signal<usize>,
+    selected_index: usize,
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
     view! {
@@ -332,7 +322,7 @@ fn SlashPaletteList(
                         <SlashPaletteItem
                             index=index
                             candidate=candidate
-                            is_selected=Signal::derive(move || selected_index.get() == index)
+                            is_selected=index == selected_index
                             on_apply_index=on_apply_index
                         />
                     }
@@ -346,7 +336,7 @@ fn SlashPaletteList(
 fn SlashPaletteItem(
     index: usize,
     candidate: CompletionCandidate,
-    #[prop(into)] is_selected: Signal<bool>,
+    is_selected: bool,
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
     let CompletionCandidate { label, detail, .. } = candidate;
@@ -355,12 +345,10 @@ fn SlashPaletteItem(
         <li>
             <button
                 type="button"
-                class=move || {
-                    if is_selected.get() {
-                        "composer__slash-item composer__slash-item--selected"
-                    } else {
-                        "composer__slash-item"
-                    }
+                class=if is_selected {
+                    "composer__slash-item composer__slash-item--selected"
+                } else {
+                    "composer__slash-item"
                 }
                 on:mousedown=move |ev| {
                     ev.prevent_default();

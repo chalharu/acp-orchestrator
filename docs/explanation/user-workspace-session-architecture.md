@@ -571,8 +571,10 @@ restart fallback は親 workspace がまだ `active` の時にだけ `restartabl
 compatibility `POST /api/v1/sessions`、workspace delete blocker、immutable field の正本は
 parent architecture の 8.3 です。
 default workspace binding と race 制御の正本も同じく 8.3 です。
-compatibility create の default binding 解決は、`PUT /api/v1/users/me/default-workspace`、
-workspace delete step 1、session row 作成と同じ owner transaction で直列化します。
+compatibility create の default binding 解決は、
+`PUT /api/v1/users/me/default-workspace` と workspace delete step 1 と同じ
+owner transaction で直列化します。
+session row 作成も同じ owner transaction に含めます。
 この文書で追加する API 契約は次の 4 点です。
 
 1. `PATCH /api/v1/workspaces/{workspace_id}` に `upstream_url` または `credential_reference_id` を含めた場合は

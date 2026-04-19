@@ -1,12 +1,11 @@
-//! Pending permission panel.
+//! Pending permission panel rendered below the transcript.
 
 use leptos::prelude::*;
 
 use crate::PendingPermission;
 
-/// Displays pending tool-permission requests.
 #[component]
-pub fn PendingPermissions(
+pub fn ChatActivity(
     #[prop(into)] items: Signal<Vec<PendingPermission>>,
     #[prop(into)] busy: Signal<bool>,
     on_approve: Callback<String>,
@@ -14,9 +13,10 @@ pub fn PendingPermissions(
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <Show when=move || !items.get().is_empty()>
-            <section class="panel pending-panel" aria-live="polite">
-                <ul class="pending-list">
+        <Show when=move || !items.get().is_empty() fallback=move || view! { <></> }>
+            <section class="chat-activity" aria-live="polite">
+                <p class="chat-activity__section-label">"Pending permissions"</p>
+                <ul class="pending-list chat-activity__pending-list">
                     <For
                         each=move || items.get()
                         key=|item| item.request_id.clone()

@@ -65,12 +65,15 @@ app URL and attempts to open `/app/` in your browser. The backend uses a local
 development certificate for loopback HTTPS. Your browser or OS may require a
 one-time trust or confirmation step before the page loads cleanly.
 
-The current Web slice serves a minimal single-column chat page.
-The first prompt creates a browser-owned session and moves the URL to
-`/app/sessions/<id>`. Direct session routes load saved transcript state and keep
-receiving live events over SSE. Pending permission requests now surface browser
-buttons for **Approve**, **Deny**, and **Cancel turn** so permission-gated flows
-do not dead-end.
+The current Web slice serves a minimal chat shell. It includes a session
+sidebar, transcript, composer, and inline status activity. The first prompt
+creates a browser-owned session and moves the URL to `/app/sessions/<id>`.
+Direct session routes load saved transcript state and keep receiving live
+events over SSE. Pending permission requests surface browser controls in the
+chat area. Use **Approve**, **Deny**, or **Cancel** there. The composer
+supports `/help` only in the browser, with a small floating suggestion overlay.
+Recent slash or connection activity is recorded inside the transcript stream.
+Deleting the last remaining session returns to a fresh new-chat view.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
@@ -85,12 +88,16 @@ When running against the bundled mock stack, prompts containing the word
 verification, use the built-in mock prompts below:
 
 - `verify permission`: emits `[permission <request-id>] read_text_file README.md`.
-  In the browser, use the pending permission panel buttons. In the CLI, respond
-  with `/approve <request-id>` or `/deny <request-id>`.
+  In the browser, use the chat-area controls. In the CLI, respond with
+  `/approve <request-id>` or `/deny <request-id>`.
 - `verify cancel`: starts a delayed mock reply. Run `/cancel` before the
   assistant reply arrives and confirm `[status] turn cancelled`. In the browser,
-  the pending permission panel also exposes **Cancel turn** when a permission
-  request is blocking the current turn.
+  use the visible **Cancel** button while the turn is pending.
+
+For browser regression coverage, run
+`python3 -m unittest discover -s tests/playwright -p 'test_*.py'` against a
+running web stack. If Chromium needs a user-space sysroot for shared libraries
+or fonts, set `ACP_PLAYWRIGHT_SYSROOT=/path/to/sysroot` first.
 
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.

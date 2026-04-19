@@ -10,20 +10,28 @@
 
 mod api;
 mod components;
+mod slash;
 
 use acp_contracts::{
-    ConversationMessage, MessageRole, PermissionDecision, PermissionRequest, SessionListItem,
-    SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
+    SessionListItem, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
 };
 use futures_util::{
     StreamExt,
     future::{AbortHandle, Abortable},
 };
-use leptos::prelude::*;
+use leptos::{portal::Portal, prelude::*};
 use wasm_bindgen::JsCast;
 use web_sys::EventSource;
 
-use components::{Composer, ErrorBanner, PendingPermissions, Transcript};
+use components::{
+    ChatActivity, Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, Transcript,
+};
+use slash::{
+    BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
+    local_slash_candidates, parse_browser_slash_action, slash_palette_is_visible,
+    slash_palette_should_apply_selected,
+};
 
 const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
 const DRAFT_STORAGE_KEY_PREFIX: &str = "acp-draft-";
@@ -159,6 +167,21 @@ pub struct PendingPermission {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadgeTone {
+    Neutral,
+    Success,
+    Warning,
+    Danger,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusBadge {
+    pub label: &'static str,
+    pub value: &'static str,
+    pub tone: BadgeTone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionLifecycle {
     Loading,
     Active,
@@ -183,6 +206,23 @@ struct SessionBootstrap {
 }
 
 #[derive(Clone, Copy)]
+struct SlashSignals {
+    candidates: RwSignal<Vec<CompletionCandidate>>,
+    selected_index: RwSignal<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct SessionListSignals {
+    items: RwSignal<Vec<SessionListItem>>,
+    loaded: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    deleting_id: RwSignal<Option<String>>,
+    renaming_id: RwSignal<Option<String>>,
+    saving_rename_id: RwSignal<Option<String>>,
+    rename_draft: RwSignal<String>,
+}
+
+#[derive(Clone, Copy)]
 struct SessionSignals {
     entries: RwSignal<Vec<TranscriptEntry>>,
     pending_permissions: RwSignal<Vec<PendingPermission>>,
@@ -190,17 +230,13 @@ struct SessionSignals {
     connection_error: RwSignal<Option<String>>,
     event_source: RwSignal<Option<EventSource>>,
     stream_abort: RwSignal<Option<AbortHandle>>,
-    session_list: RwSignal<Vec<SessionListItem>>,
-    session_list_loaded: RwSignal<bool>,
-    session_list_error: RwSignal<Option<String>>,
     session_status: RwSignal<SessionLifecycle>,
     turn_state: RwSignal<TurnState>,
     pending_action_busy: RwSignal<bool>,
-    deleting_session_id: RwSignal<Option<String>>,
-    renaming_session_id: RwSignal<Option<String>>,
-    saving_rename_session_id: RwSignal<Option<String>>,
-    rename_draft: RwSignal<String>,
     draft: RwSignal<String>,
+    slash: SlashSignals,
+    list: SessionListSignals,
+    tool_activity_serial: RwSignal<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -209,6 +245,7 @@ struct SessionViewCallbacks {
     approve: Callback<String>,
     deny: Callback<String>,
     cancel: Callback<()>,
+    slash: ComposerSlashCallbacks,
     rename_session: Callback<(String, String)>,
     delete_session: Callback<String>,
 }
@@ -219,24 +256,25 @@ struct SessionComposerSignals {
     status: Signal<String>,
     cancel_visible: Signal<bool>,
     cancel_busy: Signal<bool>,
+    slash_palette_visible: Signal<bool>,
+    slash_candidates: Signal<Vec<CompletionCandidate>>,
+    slash_selected_index: Signal<usize>,
+    slash_apply_selected: Signal<bool>,
 }
 
 #[derive(Clone, Copy)]
 struct SessionShellSignals {
     sessions: Signal<Vec<SessionListItem>>,
-    session_list_loaded: Signal<bool>,
-    session_list_error: Signal<Option<String>>,
-    deleting_session_id: Signal<Option<String>>,
+    list: SessionListSignals,
     delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
 }
 
 #[derive(Clone, Copy)]
 struct SessionMainSignals {
     session_status: Signal<SessionLifecycle>,
     topbar_message: Signal<Option<String>>,
+    connection_badge: Signal<StatusBadge>,
+    worker_badge: Signal<StatusBadge>,
     entries: Signal<Vec<TranscriptEntry>>,
     pending_permissions: Signal<Vec<PendingPermission>>,
     pending_action_busy: Signal<bool>,
@@ -276,6 +314,7 @@ fn SessionView(session_id: String) -> impl IntoView {
     let current_session_deleting = current_session_deleting_signal(session_id.clone(), signals);
     restore_session_draft(&session_id, signals);
     persist_session_draft(session_id.clone(), signals.draft);
+    bind_slash_completion(signals);
     spawn_session_bootstrap(session_id.clone(), signals);
 
     session_view_content(
@@ -288,9 +327,7 @@ fn SessionView(session_id: String) -> impl IntoView {
 }
 
 fn current_session_deleting_signal(session_id: String, signals: SessionSignals) -> Signal<bool> {
-    Signal::derive(move || {
-        signals.deleting_session_id.get().as_deref() == Some(session_id.as_str())
-    })
+    Signal::derive(move || signals.list.deleting_id.get().as_deref() == Some(session_id.as_str()))
 }
 
 fn restore_session_draft(session_id: &str, signals: SessionSignals) {
@@ -331,6 +368,18 @@ fn session_composer_signals(
             signals.pending_action_busy,
             current_session_deleting,
         ),
+        slash_palette_visible: Signal::derive(move || {
+            slash_palette_is_visible(&signals.draft.get())
+        }),
+        slash_candidates: Signal::derive(move || signals.slash.candidates.get()),
+        slash_selected_index: Signal::derive(move || signals.slash.selected_index.get()),
+        slash_apply_selected: Signal::derive(move || {
+            slash_palette_should_apply_selected(
+                &signals.draft.get(),
+                &signals.slash.candidates.get(),
+                signals.slash.selected_index.get(),
+            )
+        }),
     }
 }
 
@@ -342,6 +391,7 @@ fn session_view_callbacks(session_id: String, signals: SessionSignals) -> Sessio
         approve,
         deny,
         cancel,
+        slash: slash_palette_callbacks(signals),
         rename_session: rename_session_callback(signals),
         delete_session: delete_session_callback(session_id, signals),
     }
@@ -355,17 +405,24 @@ fn session_signals() -> SessionSignals {
         connection_error: RwSignal::new(None::<String>),
         event_source: RwSignal::new(None::<EventSource>),
         stream_abort: RwSignal::new(None::<AbortHandle>),
-        session_list: RwSignal::new(Vec::new()),
-        session_list_loaded: RwSignal::new(false),
-        session_list_error: RwSignal::new(None::<String>),
         session_status: RwSignal::new(SessionLifecycle::Loading),
         turn_state: RwSignal::new(TurnState::Idle),
         pending_action_busy: RwSignal::new(false),
-        deleting_session_id: RwSignal::new(None::<String>),
-        renaming_session_id: RwSignal::new(None::<String>),
-        saving_rename_session_id: RwSignal::new(None::<String>),
-        rename_draft: RwSignal::new(String::new()),
         draft: RwSignal::new(String::new()),
+        slash: SlashSignals {
+            candidates: RwSignal::new(Vec::new()),
+            selected_index: RwSignal::new(0),
+        },
+        list: SessionListSignals {
+            items: RwSignal::new(Vec::new()),
+            loaded: RwSignal::new(false),
+            error: RwSignal::new(None::<String>),
+            deleting_id: RwSignal::new(None::<String>),
+            renaming_id: RwSignal::new(None::<String>),
+            saving_rename_id: RwSignal::new(None::<String>),
+            rename_draft: RwSignal::new(String::new()),
+        },
+        tool_activity_serial: RwSignal::new(0),
     }
 }
 
@@ -381,6 +438,7 @@ fn session_view_content(
     let main_signals = session_main_signals(signals);
 
     view! {
+        <SessionBackdrop sidebar_open=sidebar_open />
         <main class="app-shell app-shell--session">
             <SessionShell
                 current_session_id=current_session_id
@@ -396,36 +454,40 @@ fn session_view_content(
 }
 
 fn session_shell_signals(signals: SessionSignals) -> SessionShellSignals {
-    let session_list = signals.session_list;
-    let session_list_loaded = signals.session_list_loaded;
-    let session_list_error = signals.session_list_error;
-    let deleting_session_id = signals.deleting_session_id;
+    let session_list = signals.list.items;
     let pending_action_busy = signals.pending_action_busy;
 
     SessionShellSignals {
         sessions: Signal::derive(move || session_list.get()),
-        session_list_loaded: Signal::derive(move || session_list_loaded.get()),
-        session_list_error: Signal::derive(move || session_list_error.get()),
-        deleting_session_id: Signal::derive(move || deleting_session_id.get()),
+        list: signals.list,
         delete_disabled: Signal::derive(move || {
             session_action_busy(signals.turn_state.get(), pending_action_busy.get(), false)
         }),
-        renaming_session_id: signals.renaming_session_id,
-        saving_rename_session_id: Signal::derive(move || signals.saving_rename_session_id.get()),
-        rename_draft: signals.rename_draft,
     }
 }
 
 fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
     let entries = signals.entries;
-    let pending_permissions = signals.pending_permissions;
     let pending_action_busy = signals.pending_action_busy;
     let action_error = signals.action_error;
     let connection_error = signals.connection_error;
+    let pending_permissions = signals.pending_permissions;
+    let session_status = signals.session_status;
+    let turn_state = signals.turn_state;
 
     SessionMainSignals {
-        session_status: Signal::derive(move || signals.session_status.get()),
+        session_status: Signal::derive(move || session_status.get()),
         topbar_message: Signal::derive(move || action_error.get().or(connection_error.get())),
+        connection_badge: Signal::derive(move || {
+            connection_badge_state(session_status.get(), connection_error.get().is_some())
+        }),
+        worker_badge: Signal::derive(move || {
+            worker_badge_state(
+                session_status.get(),
+                turn_state.get(),
+                !pending_permissions.get().is_empty(),
+            )
+        }),
         entries: Signal::derive(move || entries.get()),
         pending_permissions: Signal::derive(move || pending_permissions.get()),
         pending_action_busy: Signal::derive(move || pending_action_busy.get()),
@@ -453,18 +515,17 @@ fn SessionShell(
             <SessionSidebar
                 current_session_id=current_session_id
                 sessions=shell_signals.sessions
-                session_list_loaded=shell_signals.session_list_loaded
-                session_list_error=shell_signals.session_list_error
+                session_list_loaded=shell_signals.list.loaded
+                session_list_error=shell_signals.list.error
                 sidebar_open=sidebar_open
-                deleting_session_id=shell_signals.deleting_session_id
+                deleting_session_id=shell_signals.list.deleting_id
                 delete_disabled=shell_signals.delete_disabled
-                renaming_session_id=shell_signals.renaming_session_id
-                saving_rename_session_id=shell_signals.saving_rename_session_id
-                rename_draft=shell_signals.rename_draft
+                renaming_session_id=shell_signals.list.renaming_id
+                saving_rename_session_id=shell_signals.list.saving_rename_id
+                rename_draft=shell_signals.list.rename_draft
                 on_rename_session=on_rename_session
                 on_delete_session=on_delete_session
             />
-            <SessionBackdrop sidebar_open=sidebar_open />
             <SessionMain
                 main_signals=main_signals
                 sidebar_open=sidebar_open
@@ -479,14 +540,22 @@ fn SessionShell(
 #[component]
 fn SessionBackdrop(sidebar_open: RwSignal<bool>) -> impl IntoView {
     view! {
-        <button
-            type="button"
-            class="session-layout__backdrop"
-            hidden=move || !sidebar_open.get()
-            on:click=move |_| sidebar_open.set(false)
-        >
-            <span class="sr-only">"Close session sidebar"</span>
-        </button>
+        <Portal>
+            <div
+                class="session-layout__backdrop"
+                role="button"
+                aria-label="Close session sidebar"
+                tabindex="0"
+                hidden=move || !sidebar_open.get()
+                on:click=move |_| sidebar_open.set(false)
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if matches!(ev.key().as_str(), "Enter" | " " | "Spacebar") {
+                        ev.prevent_default();
+                        sidebar_open.set(false);
+                    }
+                }
+            ></div>
+        </Portal>
     }
 }
 
@@ -498,50 +567,72 @@ fn SessionMain(
     callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
 ) -> impl IntoView {
-    let SessionViewCallbacks {
-        submit: on_submit,
-        approve: on_approve,
-        deny: on_deny,
-        cancel: on_cancel,
-        ..
-    } = callbacks;
-    let session_status = main_signals.session_status;
-
     view! {
         <section class="session-main">
-            <SessionTopBar message=main_signals.topbar_message sidebar_open=sidebar_open />
-            <div class="chat-body">
-                <Transcript entries=main_signals.entries />
-            </div>
-            <Show when=move || matches!(session_status.get(), SessionLifecycle::Closed)>
-                <div class="session-ended-notice" role="status">
-                    <p class="session-ended-notice__text">
-                        "This conversation has ended. "
-                        <a href="/app/">"Start a new chat."</a>
-                    </p>
-                </div>
-            </Show>
-            <SessionDock
+            <SessionTopBar
+                message=main_signals.topbar_message
+                connection_badge=main_signals.connection_badge
+                worker_badge=main_signals.worker_badge
+                sidebar_open=sidebar_open
+            />
+            <SessionTranscriptPanel
+                entries=main_signals.entries
+                session_status=main_signals.session_status
                 pending_permissions=main_signals.pending_permissions
                 pending_action_busy=main_signals.pending_action_busy
+                on_approve=callbacks.approve
+                on_deny=callbacks.deny
+                on_cancel=callbacks.cancel
+            />
+            <SessionDock composer=composer callbacks=callbacks draft=draft />
+        </section>
+    }
+}
+
+#[component]
+fn SessionTranscriptPanel(
+    #[prop(into)] entries: Signal<Vec<TranscriptEntry>>,
+    #[prop(into)] session_status: Signal<SessionLifecycle>,
+    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
+    #[prop(into)] pending_action_busy: Signal<bool>,
+    on_approve: Callback<String>,
+    on_deny: Callback<String>,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <div class="chat-body">
+            <Transcript entries=entries />
+            <ChatActivity
+                items=pending_permissions
+                busy=pending_action_busy
                 on_approve=on_approve
                 on_deny=on_deny
                 on_cancel=on_cancel
-                composer_disabled=composer.disabled
-                composer_status=composer.status
-                draft=draft
-                on_submit=on_submit
-                composer_cancel_visible=composer.cancel_visible
-                composer_cancel_busy=composer.cancel_busy
-                composer_cancel=on_cancel
             />
-        </section>
+        </div>
+        <SessionClosedNotice session_status=session_status />
+    }
+}
+
+#[component]
+fn SessionClosedNotice(#[prop(into)] session_status: Signal<SessionLifecycle>) -> impl IntoView {
+    view! {
+        <Show when=move || matches!(session_status.get(), SessionLifecycle::Closed)>
+            <div class="session-ended-notice" role="status">
+                <p class="session-ended-notice__text">
+                    "This conversation has ended. "
+                    <a href="/app/">"Start a new chat."</a>
+                </p>
+            </div>
+        </Show>
     }
 }
 
 #[component]
 fn SessionTopBar(
     #[prop(into)] message: Signal<Option<String>>,
+    #[prop(into)] connection_badge: Signal<StatusBadge>,
+    #[prop(into)] worker_badge: Signal<StatusBadge>,
     sidebar_open: RwSignal<bool>,
 ) -> impl IntoView {
     view! {
@@ -560,9 +651,23 @@ fn SessionTopBar(
                         {move || if sidebar_open.get() { "Hide sessions" } else { "Show sessions" }}
                     </span>
                 </button>
+                <div class="chat-topbar__badges" aria-label="Connection and worker state">
+                    <StatusBadgeView badge=connection_badge />
+                    <StatusBadgeView badge=worker_badge />
+                </div>
             </div>
             <ErrorBanner message=message />
         </div>
+    }
+}
+
+#[component]
+fn StatusBadgeView(#[prop(into)] badge: Signal<StatusBadge>) -> impl IntoView {
+    view! {
+        <p class=move || status_badge_class(badge.get())>
+            <span class="status-badge__label">{move || badge.get().label}</span>
+            <span class="status-badge__value">{move || badge.get().value}</span>
+        </p>
     }
 }
 
@@ -608,8 +713,11 @@ fn SessionSidebar(
 fn SessionSidebarHeader(sidebar_open: RwSignal<bool>) -> impl IntoView {
     view! {
         <div class="session-sidebar__header">
-            <a class="session-sidebar__new-link" href="/app/">
-                "New chat"
+            <a class="session-sidebar__new-link" href="/app/" aria-label="New chat">
+                <span class="session-sidebar__new-link-icon" aria-hidden="true">
+                    "+"
+                </span>
+                <span class="session-sidebar__new-link-label">"New chat"</span>
             </a>
             <button
                 type="button"
@@ -988,20 +1096,47 @@ fn SessionSidebarRenameForm(
     on_commit_rename: Callback<()>,
     on_cancel_rename: Callback<()>,
 ) -> impl IntoView {
+    let rename_form = NodeRef::<leptos::html::Div>::new();
+    let rename_form_for_focusout = rename_form;
+
     view! {
-        <SessionSidebarRenameInput
-            rename_draft=rename_draft
-            is_saving_rename=is_saving_rename
-            on_commit_rename=on_commit_rename
-            on_cancel_rename=on_cancel_rename
-        />
-        <SessionSidebarRenameButtons
-            is_saving_rename=is_saving_rename
-            save_disabled=save_disabled
-            on_commit_rename=on_commit_rename
-            on_cancel_rename=on_cancel_rename
-        />
+        <div
+            class="session-sidebar__rename-form"
+            node_ref=rename_form
+            on:focusout=move |ev: web_sys::FocusEvent| {
+                let Some(container) = rename_form_for_focusout.get() else {
+                    return;
+                };
+                let container = container.unchecked_into::<web_sys::Node>();
+                if focus_event_leaves_node(&ev, &container) {
+                    on_commit_rename.run(());
+                }
+            }
+        >
+            <SessionSidebarRenameInput
+                rename_draft=rename_draft
+                is_saving_rename=is_saving_rename
+                on_commit_rename=on_commit_rename
+                on_cancel_rename=on_cancel_rename
+            />
+            <SessionSidebarRenameButtons
+                is_saving_rename=is_saving_rename
+                save_disabled=save_disabled
+                on_commit_rename=on_commit_rename
+                on_cancel_rename=on_cancel_rename
+            />
+        </div>
     }
+}
+
+fn focus_event_leaves_node(ev: &web_sys::FocusEvent, container: &web_sys::Node) -> bool {
+    let Some(related_target) = ev.related_target() else {
+        return true;
+    };
+    let Ok(related_node) = related_target.dyn_into::<web_sys::Node>() else {
+        return true;
+    };
+    !container.contains(Some(&related_node))
 }
 
 #[component]
@@ -1073,38 +1208,35 @@ fn SessionSidebarRenameButtons(
 
 #[component]
 fn SessionDock(
-    #[prop(into)] pending_permissions: Signal<Vec<PendingPermission>>,
-    #[prop(into)] pending_action_busy: Signal<bool>,
-    on_approve: Callback<String>,
-    on_deny: Callback<String>,
-    on_cancel: Callback<()>,
-    #[prop(into)] composer_disabled: Signal<bool>,
-    #[prop(into)] composer_status: Signal<String>,
+    composer: SessionComposerSignals,
+    callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
-    on_submit: Callback<String>,
-    #[prop(into)] composer_cancel_visible: Signal<bool>,
-    #[prop(into)] composer_cancel_busy: Signal<bool>,
-    composer_cancel: Callback<()>,
 ) -> impl IntoView {
+    let slash_signals = composer_slash_signals(composer);
+
     view! {
         <div class="chat-dock">
-            <PendingPermissions
-                items=pending_permissions
-                busy=pending_action_busy
-                on_approve=on_approve
-                on_deny=on_deny
-                on_cancel=on_cancel
-            />
             <Composer
-                disabled=composer_disabled
-                status_text=composer_status
+                disabled=composer.disabled
+                status_text=composer.status
                 draft=draft
-                on_submit=on_submit
-                show_cancel=composer_cancel_visible
-                cancel_disabled=composer_cancel_busy
-                on_cancel=composer_cancel
+                on_submit=callbacks.submit
+                show_cancel=composer.cancel_visible
+                cancel_disabled=composer.cancel_busy
+                on_cancel=callbacks.cancel
+                slash_signals=slash_signals
+                slash_callbacks=callbacks.slash
             />
         </div>
+    }
+}
+
+fn composer_slash_signals(composer: SessionComposerSignals) -> ComposerSlashSignals {
+    ComposerSlashSignals {
+        visible: composer.slash_palette_visible,
+        candidates: composer.slash_candidates,
+        selected_index: composer.slash_selected_index,
+        apply_selected: composer.slash_apply_selected,
     }
 }
 
@@ -1154,18 +1286,77 @@ fn spawn_session_stream(session_id: String, signals: SessionSignals) {
 }
 
 async fn refresh_session_list(signals: SessionSignals) {
-    signals.session_list_error.set(None);
+    signals.list.error.set(None);
 
     match api::list_sessions().await {
         Ok(sessions) => {
-            signals.session_list.set(sessions);
-            signals.session_list_loaded.set(true);
+            signals.list.items.set(sessions);
+            signals.list.loaded.set(true);
         }
         Err(message) => {
-            signals.session_list_loaded.set(true);
-            signals.session_list_error.set(Some(message));
+            signals.list.loaded.set(true);
+            signals.list.error.set(Some(message));
         }
     }
+}
+
+fn bind_slash_completion(signals: SessionSignals) {
+    Effect::new(move |_| {
+        let draft = signals.draft.get();
+        let candidates = local_slash_candidates(&draft);
+        if candidates.is_empty() {
+            dismiss_slash_palette(signals);
+        } else {
+            signals.slash.candidates.set(candidates);
+            signals.slash.selected_index.set(0);
+        }
+    });
+}
+
+fn slash_palette_callbacks(signals: SessionSignals) -> ComposerSlashCallbacks {
+    ComposerSlashCallbacks {
+        select_next: Callback::new(move |()| {
+            let next_index = cycle_slash_selection(
+                signals.slash.candidates.get_untracked().len(),
+                signals.slash.selected_index.get_untracked(),
+                true,
+            );
+            signals.slash.selected_index.set(next_index);
+        }),
+        select_previous: Callback::new(move |()| {
+            let next_index = cycle_slash_selection(
+                signals.slash.candidates.get_untracked().len(),
+                signals.slash.selected_index.get_untracked(),
+                false,
+            );
+            signals.slash.selected_index.set(next_index);
+        }),
+        apply_selected: Callback::new(move |()| apply_selected_slash_candidate(signals)),
+        apply_index: Callback::new(move |index: usize| apply_slash_candidate_at(signals, index)),
+        dismiss: Callback::new(move |()| dismiss_slash_palette(signals)),
+    }
+}
+
+fn apply_selected_slash_candidate(signals: SessionSignals) {
+    let index = signals.slash.selected_index.get_untracked();
+    apply_slash_candidate_at(signals, index);
+}
+
+fn apply_slash_candidate_at(signals: SessionSignals, index: usize) {
+    let Some(candidate) = signals.slash.candidates.get_untracked().get(index).cloned() else {
+        return;
+    };
+    let Some(next_draft) = apply_slash_completion(&signals.draft.get_untracked(), &candidate)
+    else {
+        return;
+    };
+    signals.draft.set(next_draft);
+    signals.slash.selected_index.set(index);
+}
+
+fn dismiss_slash_palette(signals: SessionSignals) {
+    signals.slash.candidates.set(Vec::new());
+    signals.slash.selected_index.set(0);
 }
 
 async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
@@ -1218,11 +1409,56 @@ async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
     signals.event_source.set(None);
 }
 
+fn handle_slash_submit(prompt: &str, signals: SessionSignals) {
+    match parse_browser_slash_action(prompt) {
+        Ok(action) => {
+            signals.action_error.set(None);
+            signals.draft.set(String::new());
+            dismiss_slash_palette(signals);
+            run_browser_slash_action(action, signals);
+        }
+        Err(message) => {
+            push_tool_activity_entry(
+                signals,
+                next_tool_activity_id(signals, "slash"),
+                "Slash command",
+                message,
+                Vec::new(),
+            );
+        }
+    }
+}
+
+fn run_browser_slash_action(action: BrowserSlashAction, signals: SessionSignals) {
+    match action {
+        BrowserSlashAction::Help => {
+            let commands = local_browser_commands();
+            push_tool_activity_entry(
+                signals,
+                next_tool_activity_id(signals, "help"),
+                "Available slash commands",
+                if commands.is_empty() {
+                    "No browser slash commands are available.".to_string()
+                } else {
+                    "Use the composer for `/help` and the on-screen controls for cancel or permission actions.".to_string()
+                },
+                commands,
+            );
+        }
+    }
+}
+
 fn session_submit_callback(session_id: String, signals: SessionSignals) -> Callback<String> {
     Callback::new(move |prompt: String| {
         let session_id = session_id.clone();
+        if prompt.starts_with('/') {
+            handle_slash_submit(&prompt, signals);
+            return;
+        }
+
         signals.turn_state.set(TurnState::Submitting);
         signals.action_error.set(None);
+        dismiss_slash_palette(signals);
         leptos::task::spawn_local(async move {
             match api::send_message(&session_id, &prompt).await {
                 Ok(()) => {
@@ -1245,7 +1481,7 @@ fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: RwSignal<bool
     leptos::task::spawn_local(async move {
         match resolve_home_session_id().await {
             Ok(session_id) => {
-                if let Err(message) = navigate_to(&format!("/app/sessions/{session_id}")) {
+                if let Err(message) = navigate_to(&app_session_path(&session_id)) {
                     clear_prepared_session_id();
                     error.set(Some(message));
                     preparing.set(false);
@@ -1297,6 +1533,13 @@ fn record_session_bootstrap_failure(
 ) {
     clear_prepared_session_id();
     signals.connection_error.set(Some(message));
+    push_tool_activity_entry(
+        signals,
+        next_tool_activity_id(signals, "connection"),
+        "Connection",
+        signals.connection_error.get_untracked().unwrap_or_default(),
+        Vec::new(),
+    );
     signals.session_status.set(session_lifecycle);
     signals.turn_state.set(TurnState::Idle);
 }
@@ -1327,6 +1570,21 @@ fn permission_resolution_callback(
                         PermissionDecision::Approve => TurnState::AwaitingReply,
                         PermissionDecision::Deny => TurnState::Idle,
                     });
+                    push_tool_activity_entry(
+                        signals,
+                        next_tool_activity_id(signals, "permission"),
+                        "Permission resolved",
+                        format!(
+                            "{} {}.",
+                            request_id_for_state,
+                            if decision == PermissionDecision::Approve {
+                                "approved"
+                            } else {
+                                "denied"
+                            }
+                        ),
+                        Vec::new(),
+                    );
                     refresh_session_list(signals).await;
                 }
                 Err(message) => {
@@ -1350,6 +1608,13 @@ fn cancel_turn_callback(session_id: String, signals: SessionSignals) -> Callback
                 Ok(cancelled) if cancelled.cancelled => {
                     signals.pending_permissions.set(Vec::new());
                     signals.turn_state.set(TurnState::Idle);
+                    push_tool_activity_entry(
+                        signals,
+                        next_tool_activity_id(signals, "cancel"),
+                        "Cancel turn",
+                        "Cancel requested for the running turn.".to_string(),
+                        Vec::new(),
+                    );
                     refresh_session_list(signals).await;
                 }
                 Ok(_) => {
@@ -1376,30 +1641,28 @@ fn rename_session_callback(signals: SessionSignals) -> Callback<(String, String)
     Callback::new(move |(session_id, new_title): (String, String)| {
         let new_title = new_title.trim().to_string();
         if new_title.is_empty() {
-            signals.rename_draft.set(String::new());
-            signals.renaming_session_id.set(None);
+            signals.list.rename_draft.set(String::new());
+            signals.list.renaming_id.set(None);
             return;
         }
-        signals.session_list_error.set(None);
-        signals
-            .saving_rename_session_id
-            .set(Some(session_id.clone()));
+        signals.list.error.set(None);
+        signals.list.saving_rename_id.set(Some(session_id.clone()));
         leptos::task::spawn_local(async move {
             match api::rename_session(&session_id, &new_title).await {
                 Ok(session) => {
-                    signals.session_list.update(|list| {
+                    signals.list.items.update(|list| {
                         rename_session_in_list(list, &session_id, session.title);
                     });
-                    signals.rename_draft.set(String::new());
-                    signals.renaming_session_id.set(None);
+                    signals.list.rename_draft.set(String::new());
+                    signals.list.renaming_id.set(None);
                 }
                 Err(message) => {
-                    signals.session_list_error.set(Some(message));
-                    signals.rename_draft.set(new_title.clone());
-                    signals.renaming_session_id.set(Some(session_id.clone()));
+                    signals.list.error.set(Some(message));
+                    signals.list.rename_draft.set(new_title.clone());
+                    signals.list.renaming_id.set(Some(session_id.clone()));
                 }
             }
-            signals.saving_rename_session_id.set(None);
+            signals.list.saving_rename_id.set(None);
         });
     })
 }
@@ -1413,16 +1676,18 @@ fn delete_session_callback(
             return;
         }
 
-        signals.deleting_session_id.set(Some(session_id.clone()));
-        signals.session_list_error.set(None);
+        signals.list.deleting_id.set(Some(session_id.clone()));
+        signals.list.error.set(None);
         let is_deleting_current = session_id == current_session_id;
 
         leptos::task::spawn_local(async move {
             match api::delete_session(&session_id).await {
                 Ok(_) => {
+                    clear_prepared_session_id_if_matches(&session_id);
                     clear_draft(&session_id);
                     signals
-                        .session_list
+                        .list
+                        .items
                         .update(|list| remove_session_from_list(list, &session_id));
                     if is_deleting_current {
                         finish_current_session_delete(signals);
@@ -1441,7 +1706,7 @@ fn delete_session_is_blocked(
     current_session_id: &str,
     signals: SessionSignals,
 ) -> bool {
-    signals.deleting_session_id.get_untracked().is_some()
+    signals.list.deleting_id.get_untracked().is_some()
         || (session_id == current_session_id
             && session_action_busy(
                 signals.turn_state.get_untracked(),
@@ -1451,7 +1716,7 @@ fn delete_session_is_blocked(
 }
 
 fn finish_current_session_delete(signals: SessionSignals) {
-    let next_dest = next_session_destination(&signals.session_list.get_untracked());
+    let next_dest = next_session_destination(&signals.list.items.get_untracked());
 
     match navigate_to(&next_dest) {
         Ok(()) => stop_live_stream(signals),
@@ -1461,7 +1726,7 @@ fn finish_current_session_delete(signals: SessionSignals) {
 
 async fn finish_other_session_delete(signals: SessionSignals) {
     refresh_session_list(signals).await;
-    signals.deleting_session_id.set(None);
+    signals.list.deleting_id.set(None);
 }
 
 fn handle_current_session_delete_navigation_error(message: String, signals: SessionSignals) {
@@ -1469,13 +1734,13 @@ fn handle_current_session_delete_navigation_error(message: String, signals: Sess
     signals.pending_permissions.set(Vec::new());
     signals.turn_state.set(TurnState::Idle);
     signals.session_status.set(SessionLifecycle::Unavailable);
-    signals.session_list_error.set(Some(message));
-    signals.deleting_session_id.set(None);
+    signals.list.error.set(Some(message));
+    signals.list.deleting_id.set(None);
 }
 
 fn handle_delete_session_error(message: String, signals: SessionSignals) {
-    signals.session_list_error.set(Some(message));
-    signals.deleting_session_id.set(None);
+    signals.list.error.set(Some(message));
+    signals.list.deleting_id.set(None);
 }
 
 fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
@@ -1542,6 +1807,13 @@ fn apply_permission_request(request: PermissionRequest, signals: SessionSignals)
         }
     });
     signals.turn_state.set(TurnState::AwaitingPermission);
+    push_tool_activity_entry(
+        signals,
+        format!("permission-{request_id}"),
+        "Permission required",
+        summary,
+        Vec::new(),
+    );
 }
 
 fn apply_session_closed(
@@ -1555,7 +1827,8 @@ fn apply_session_closed(
     signals.pending_permissions.set(Vec::new());
     signals.pending_action_busy.set(false);
     signals
-        .session_list
+        .list
+        .items
         .update(|sessions| mark_session_closed(sessions, &session_id));
     push_status_entry(
         signals.entries,
@@ -1621,6 +1894,24 @@ fn push_status_entry(entries: RwSignal<Vec<TranscriptEntry>>, sequence: u64, tex
             id: entry_id.clone(),
             role: EntryRole::Status,
             text: text.clone(),
+        });
+    });
+}
+
+fn push_activity_entry(entries: RwSignal<Vec<TranscriptEntry>>, id: String, text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    entries.update(|current_entries| {
+        if current_entries.iter().any(|entry| entry.id == id) {
+            return;
+        }
+
+        current_entries.push(TranscriptEntry {
+            id,
+            role: EntryRole::Status,
+            text,
         });
     });
 }
@@ -1726,6 +2017,151 @@ fn session_composer_cancel_busy_signal(
     })
 }
 
+fn next_tool_activity_id(signals: SessionSignals, prefix: &str) -> String {
+    let next = signals.tool_activity_serial.get_untracked() + 1;
+    signals.tool_activity_serial.set(next);
+    format!("{prefix}-{next}")
+}
+
+fn push_tool_activity_entry(
+    signals: SessionSignals,
+    id: String,
+    title: impl Into<String>,
+    detail: impl Into<String>,
+    commands: Vec<CompletionCandidate>,
+) {
+    let title = title.into();
+    let detail = detail.into();
+    push_activity_entry(
+        signals.entries,
+        format!("activity-{id}"),
+        tool_activity_text(&title, &detail, &commands),
+    );
+}
+
+fn tool_activity_text(title: &str, detail: &str, commands: &[CompletionCandidate]) -> String {
+    let mut lines = Vec::new();
+
+    let title = title.trim();
+    if !title.is_empty() {
+        lines.push(title.to_string());
+    }
+
+    let detail = detail.trim();
+    if !detail.is_empty() {
+        lines.push(detail.to_string());
+    }
+
+    if !commands.is_empty() {
+        lines.push("Commands:".to_string());
+        lines.extend(commands.iter().map(format_tool_activity_command));
+    }
+
+    lines.join("\n")
+}
+
+fn format_tool_activity_command(command: &CompletionCandidate) -> String {
+    let detail = command.detail.trim();
+    if detail.is_empty() {
+        format!("- {}", command.label)
+    } else {
+        format!("- {} — {}", command.label, detail)
+    }
+}
+
+fn connection_badge_state(
+    session_status: SessionLifecycle,
+    has_connection_error: bool,
+) -> StatusBadge {
+    match session_status {
+        SessionLifecycle::Loading => StatusBadge {
+            label: "Connection",
+            value: "connecting",
+            tone: BadgeTone::Neutral,
+        },
+        SessionLifecycle::Active if has_connection_error => StatusBadge {
+            label: "Connection",
+            value: "reconnecting",
+            tone: BadgeTone::Warning,
+        },
+        SessionLifecycle::Active => StatusBadge {
+            label: "Connection",
+            value: "live",
+            tone: BadgeTone::Success,
+        },
+        SessionLifecycle::Closed => StatusBadge {
+            label: "Connection",
+            value: "ended",
+            tone: BadgeTone::Neutral,
+        },
+        SessionLifecycle::Unavailable | SessionLifecycle::Error => StatusBadge {
+            label: "Connection",
+            value: "unavailable",
+            tone: BadgeTone::Danger,
+        },
+    }
+}
+
+fn worker_badge_state(
+    session_status: SessionLifecycle,
+    turn_state: TurnState,
+    has_pending_permissions: bool,
+) -> StatusBadge {
+    match session_status {
+        SessionLifecycle::Loading => StatusBadge {
+            label: "Worker",
+            value: "starting",
+            tone: BadgeTone::Neutral,
+        },
+        SessionLifecycle::Unavailable | SessionLifecycle::Error => StatusBadge {
+            label: "Worker",
+            value: "unavailable",
+            tone: BadgeTone::Danger,
+        },
+        SessionLifecycle::Closed => StatusBadge {
+            label: "Worker",
+            value: "stopped",
+            tone: BadgeTone::Neutral,
+        },
+        SessionLifecycle::Active if has_pending_permissions => StatusBadge {
+            label: "Worker",
+            value: "permission",
+            tone: BadgeTone::Warning,
+        },
+        SessionLifecycle::Active => match turn_state {
+            TurnState::Submitting | TurnState::AwaitingReply => StatusBadge {
+                label: "Worker",
+                value: "running",
+                tone: BadgeTone::Success,
+            },
+            TurnState::Cancelling => StatusBadge {
+                label: "Worker",
+                value: "cancelling",
+                tone: BadgeTone::Warning,
+            },
+            TurnState::AwaitingPermission => StatusBadge {
+                label: "Worker",
+                value: "permission",
+                tone: BadgeTone::Warning,
+            },
+            TurnState::Idle => StatusBadge {
+                label: "Worker",
+                value: "idle",
+                tone: BadgeTone::Neutral,
+            },
+        },
+    }
+}
+
+fn status_badge_class(badge: StatusBadge) -> &'static str {
+    match badge.tone {
+        BadgeTone::Neutral => "status-badge status-badge--neutral",
+        BadgeTone::Success => "status-badge status-badge--success",
+        BadgeTone::Warning => "status-badge status-badge--warning",
+        BadgeTone::Danger => "status-badge status-badge--danger",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1743,6 +2179,10 @@ fn current_route() -> AppRoute {
         return AppRoute::NotFound;
     };
 
+    route_from_pathname(&pathname)
+}
+
+fn route_from_pathname(pathname: &str) -> AppRoute {
     if pathname == "/app" || pathname == "/app/" {
         return AppRoute::Home;
     }
@@ -1750,8 +2190,13 @@ fn current_route() -> AppRoute {
     pathname
         .strip_prefix("/app/sessions/")
         .filter(|session_id| !session_id.is_empty())
-        .map(|session_id| AppRoute::Session(session_id.to_string()))
+        .and_then(api::decode_component)
+        .map(AppRoute::Session)
         .unwrap_or(AppRoute::NotFound)
+}
+
+fn app_session_path(session_id: &str) -> String {
+    format!("/app/sessions/{}", api::encode_component(session_id))
 }
 
 fn default_sidebar_open() -> bool {
@@ -1822,6 +2267,12 @@ fn store_prepared_session_id(session_id: &str) {
     }
 }
 
+fn clear_prepared_session_id_if_matches(session_id: &str) {
+    if prepared_session_id().as_deref() == Some(session_id) {
+        clear_prepared_session_id();
+    }
+}
+
 fn clear_prepared_session_id() {
     if let Some(storage) = session_storage() {
         let _ = storage.remove_item(PREPARED_SESSION_STORAGE_KEY);
@@ -1867,7 +2318,7 @@ fn sidebar_sessions(sessions: &[SessionListItem], current_session_id: &str) -> V
     sessions
         .iter()
         .map(|session| SidebarSession {
-            href: format!("/app/sessions/{}", session.id),
+            href: app_session_path(&session.id),
             title: if session.title.is_empty() {
                 "New chat".to_string()
             } else {
@@ -1893,7 +2344,7 @@ fn remove_session_from_list(sessions: &mut Vec<SessionListItem>, session_id: &st
 fn next_session_destination(sessions: &[SessionListItem]) -> String {
     sessions
         .first()
-        .map(|session| format!("/app/sessions/{}", session.id))
+        .map(|session| app_session_path(&session.id))
         .unwrap_or_else(|| "/app/".to_string())
 }
 
@@ -1947,7 +2398,7 @@ fn session_composer_status_message(
     match turn_state {
         TurnState::Submitting | TurnState::AwaitingReply => "Waiting for response...".to_string(),
         TurnState::AwaitingPermission => {
-            "Resolve the request below before sending another message.".to_string()
+            "Resolve the pending request before sending another message.".to_string()
         }
         TurnState::Cancelling => "Cancelling...".to_string(),
         TurnState::Idle => match session_status {
@@ -1990,12 +2441,13 @@ pub(crate) fn turn_state_for_snapshot(pending_permissions: &[PendingPermission])
 #[cfg(test)]
 mod tests {
     use super::{
-        EntryRole, PendingPermission, SessionLifecycle, SidebarSession, TurnState,
-        mark_session_closed, next_session_destination, remove_session_from_list,
-        rename_session_in_list, session_action_busy, session_bootstrap_from_snapshot,
+        AppRoute, BadgeTone, EntryRole, PendingPermission, SessionLifecycle, SidebarSession,
+        TurnState, app_session_path, connection_badge_state, mark_session_closed,
+        next_session_destination, remove_session_from_list, rename_session_in_list,
+        route_from_pathname, session_action_busy, session_bootstrap_from_snapshot,
         session_composer_cancel_visible, session_composer_disabled,
         session_composer_status_message, should_release_turn_state, sidebar_sessions,
-        turn_state_for_snapshot,
+        turn_state_for_snapshot, worker_badge_state,
     };
     use acp_contracts::{
         ConversationMessage, MessageRole, PermissionRequest, SessionListItem, SessionResponse,
@@ -2049,7 +2501,7 @@ mod tests {
                 TurnState::AwaitingPermission,
                 false,
             ),
-            "Resolve the request below before sending another message."
+            "Resolve the pending request before sending another message."
         );
     }
 
@@ -2193,6 +2645,20 @@ mod tests {
     }
 
     #[test]
+    fn app_session_path_encodes_reserved_session_id_characters() {
+        assert_eq!(app_session_path("s/1"), "/app/sessions/s%2F1");
+    }
+
+    #[test]
+    fn route_from_pathname_decodes_session_id_segments() {
+        assert_eq!(
+            route_from_pathname("/app/sessions/s%2F1"),
+            AppRoute::Session("s/1".to_string())
+        );
+        assert_eq!(route_from_pathname("/app/sessions/%ZZ"), AppRoute::NotFound);
+    }
+
+    #[test]
     fn sidebar_sessions_uses_new_chat_fallback_for_empty_title() {
         let sessions = vec![SessionListItem {
             id: "s_abc".to_string(),
@@ -2293,5 +2759,16 @@ mod tests {
         assert!(session_action_busy(TurnState::Submitting, false, false));
         assert!(session_action_busy(TurnState::Idle, true, false));
         assert!(session_action_busy(TurnState::Idle, false, true));
+    }
+
+    #[test]
+    fn connection_and_worker_badges_reflect_live_and_reconnecting_states() {
+        let connection = connection_badge_state(SessionLifecycle::Active, true);
+        let worker = worker_badge_state(SessionLifecycle::Active, TurnState::AwaitingReply, false);
+
+        assert_eq!(connection.value, "reconnecting");
+        assert_eq!(connection.tone, BadgeTone::Warning);
+        assert_eq!(worker.value, "running");
+        assert_eq!(worker.tone, BadgeTone::Success);
     }
 }

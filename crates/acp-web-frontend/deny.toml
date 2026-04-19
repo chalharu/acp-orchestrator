@@ -1,8 +1,10 @@
+[graph]
+targets = ["wasm32-unknown-unknown"]
+
 [advisories]
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "transitive through Leptos until upstream replaces paste" },
 ]
-unused-ignored-advisory = "allow"
 
 [bans]
 multiple-versions = "allow"
@@ -20,10 +22,6 @@ allow = [
   "Zlib",
 ]
 
-[licenses.private]
-ignore = true
-ignore-sources = ["https://github.com/chalharu/acp-orchestrator"]
-
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
 crate = "acp-contracts"
@@ -31,7 +29,3 @@ crate = "acp-contracts"
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
 crate = "acp-web-frontend"
-
-[[licenses.exceptions]]
-allow = ["LGPL-2.1-or-later"]
-crate = "r-efi"

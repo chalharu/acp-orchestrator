@@ -1,3 +1,6 @@
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
@@ -9,7 +12,6 @@ allow = [
   "BSD-3-Clause",
   "BSL-1.0",
   "CC0-1.0",
-  "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
   "MPL-2.0",
@@ -17,10 +19,6 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
-
-[licenses.private]
-ignore = true
-ignore-sources = ["https://github.com/chalharu/acp-orchestrator"]
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
@@ -45,7 +43,3 @@ crate = "acp-orchestrator"
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
 crate = "acp-web-backend"
-
-[[licenses.exceptions]]
-allow = ["LGPL-2.1-or-later"]
-crate = "r-efi"

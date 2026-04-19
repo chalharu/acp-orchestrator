@@ -130,7 +130,7 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
 
         self.assertEqual(composer.input_value(), "")
 
-    def test_tab_keeps_slash_text_and_moves_focus(self) -> None:
+    def test_tab_applies_partial_slash_candidate(self) -> None:
         page = self.open_app()
         composer = page.locator(TEXTAREA_SELECTOR)
 
@@ -140,11 +140,31 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
 
         composer.press("Tab")
         page.wait_for_function(
+            "() => document.querySelector('#composer-input')?.value === '/help'",
+            timeout=10_000,
+        )
+        page.wait_for_function(
+            "() => document.activeElement?.id === 'composer-input'",
+            timeout=10_000,
+        )
+
+        self.assertEqual(composer.input_value(), "/help")
+
+    def test_tab_moves_focus_when_slash_candidate_is_already_applied(self) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+
+        composer.click()
+        page.keyboard.type("/help", delay=100)
+        page.locator(PALETTE_SELECTOR).wait_for(state="visible", timeout=10_000)
+
+        composer.press("Tab")
+        page.wait_for_function(
             "() => document.activeElement?.classList.contains('composer__submit')",
             timeout=10_000,
         )
 
-        self.assertEqual(composer.input_value(), "/")
+        self.assertEqual(composer.input_value(), "/help")
 
     def test_sending_restores_focus_to_the_composer(self) -> None:
         page = self.open_app()

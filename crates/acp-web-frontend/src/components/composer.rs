@@ -11,7 +11,7 @@ pub struct ComposerSlashSignals {
     pub visible: Signal<bool>,
     pub candidates: Signal<Vec<CompletionCandidate>>,
     pub selected_index: Signal<usize>,
-    pub apply_on_enter: Signal<bool>,
+    pub apply_selected: Signal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -294,8 +294,11 @@ fn handle_slash_palette_keydown(
     match ev.key().as_str() {
         "ArrowDown" => slash_callbacks.select_next.run(()),
         "ArrowUp" => slash_callbacks.select_previous.run(()),
+        "Tab" if !ev.shift_key() && slash_signals.apply_selected.get_untracked() => {
+            slash_callbacks.apply_selected.run(());
+        }
         "Enter" if !ev.shift_key() => {
-            if slash_signals.apply_on_enter.get_untracked() {
+            if slash_signals.apply_selected.get_untracked() {
                 slash_callbacks.apply_selected.run(());
             } else {
                 submit_draft(draft, submit_context);

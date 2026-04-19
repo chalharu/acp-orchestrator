@@ -30,7 +30,7 @@ use components::{
 use slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
     local_slash_candidates, parse_browser_slash_action, slash_palette_is_visible,
-    slash_palette_should_apply_on_enter,
+    slash_palette_should_apply_selected,
 };
 
 const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
@@ -259,7 +259,7 @@ struct SessionComposerSignals {
     slash_palette_visible: Signal<bool>,
     slash_candidates: Signal<Vec<CompletionCandidate>>,
     slash_selected_index: Signal<usize>,
-    slash_apply_on_enter: Signal<bool>,
+    slash_apply_selected: Signal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -373,8 +373,8 @@ fn session_composer_signals(
         }),
         slash_candidates: Signal::derive(move || signals.slash.candidates.get()),
         slash_selected_index: Signal::derive(move || signals.slash.selected_index.get()),
-        slash_apply_on_enter: Signal::derive(move || {
-            slash_palette_should_apply_on_enter(
+        slash_apply_selected: Signal::derive(move || {
+            slash_palette_should_apply_selected(
                 &signals.draft.get(),
                 &signals.slash.candidates.get(),
                 signals.slash.selected_index.get(),
@@ -1236,7 +1236,7 @@ fn composer_slash_signals(composer: SessionComposerSignals) -> ComposerSlashSign
         visible: composer.slash_palette_visible,
         candidates: composer.slash_candidates,
         selected_index: composer.slash_selected_index,
-        apply_on_enter: composer.slash_apply_on_enter,
+        apply_selected: composer.slash_apply_selected,
     }
 }
 

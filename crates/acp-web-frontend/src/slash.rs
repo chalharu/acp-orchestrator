@@ -73,7 +73,7 @@ pub(crate) fn apply_slash_completion(
     }
 }
 
-pub(crate) fn slash_palette_should_apply_on_enter(
+pub(crate) fn slash_palette_should_apply_selected(
     draft: &str,
     candidates: &[CompletionCandidate],
     selected_index: usize,
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_palette_only_applies_on_enter_when_it_changes_the_draft() {
+    fn slash_palette_only_applies_selected_completion_when_it_changes_the_draft() {
         let help_candidate = CompletionCandidate {
             label: "/help".to_string(),
             insert_text: "/help".to_string(),
@@ -257,12 +257,12 @@ mod tests {
             kind: CompletionKind::Command,
         };
 
-        assert!(!slash_palette_should_apply_on_enter(
+        assert!(!slash_palette_should_apply_selected(
             "/help",
             &[help_candidate],
             0
         ));
-        assert!(slash_palette_should_apply_on_enter(
+        assert!(slash_palette_should_apply_selected(
             "/ap",
             &[partial_candidate],
             0

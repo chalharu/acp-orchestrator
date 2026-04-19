@@ -243,15 +243,17 @@ flowchart LR
     subgraph presentation["Presentation Layer"]
         direction TB
         router["Axum Router<br/>auth / csrf / route split"]
-        httpHandlers["HTTP Handlers<br/>session index / sessions / messages / history / completions"]
+        httpHandlers["HTTP Handlers<br/>workspace index / session index / sessions / messages / history / completions"]
         sseHandlers["SSE Handlers<br/>snapshot / stream / heartbeat / resume"]
     end
 
     subgraph application["Application Layer"]
         direction TB
-        sessionCommands["Session Command Use Cases<br/>CreateSession / CloseSession"]
+        workspaceCommands["Workspace Command Use Cases<br/>CreateWorkspace / UpdateWorkspace / DeleteWorkspace"]
+        sessionCommands["Session Command Use Cases<br/>CreateSession / CloseSession / DeleteSession"]
         conversationCommands["Conversation Command Use Cases<br/>SendPrompt / CancelTurn"]
-        queryUseCases["Query / Stream Use Cases<br/>ListOwnedSessions / GetSessionSnapshot / GetHistoryWindow / AttachEventStream"]
+        workspaceQueries["Workspace Query Use Cases<br/>ListOwnedWorkspaces / GetWorkspace / ListWorkspaceSessions"]
+        queryUseCases["Session Query / Stream Use Cases<br/>ListOwnedSessions / GetSessionSnapshot / GetHistoryWindow / AttachEventStream"]
         permissionUseCases["Permission Use Cases<br/>ResolvePermissionRequest"]
         completionUseCases["Completion Use Cases<br/>ResolveSlashCompletions"]
     end
@@ -261,6 +263,8 @@ flowchart LR
         workerPort["WorkerLifecyclePort"]
         acpPort["AcpSessionPort"]
         sessionStorePort["SessionStateStorePort"]
+        workspaceStorePort["WorkspaceStorePort"]
+        checkoutPort["WorkspaceCheckoutPort"]
         eventLogPort["EventLogPort"]
         permissionPort["PermissionGatewayPort"]
         completionPort["CompletionMetadataPort"]
@@ -268,6 +272,7 @@ flowchart LR
 
     subgraph domain["Domain Layer"]
         direction TB
+        workspaceModel["Workspace Model<br/>Workspace / WorkspaceOwnerBinding / WorkspacePolicy"]
         sessionModel["Session Model<br/>Session / SessionOwner / SessionPolicy"]
         conversationModel["Conversation Model<br/>ConversationItem / SessionEvent / ToolInvocation"]
         permissionModel["Permission Model<br/>PermissionRequest / PermissionScope"]
@@ -286,6 +291,8 @@ flowchart LR
         permissionGateway["PermissionGateway<br/>policy / request store / audit"]
         workspaceFs["WorkspaceFileAdapter<br/>canonicalized workspace read / write"]
         terminalBroker["TerminalBroker<br/>sandboxed terminal execution"]
+        checkoutManager["GitWorkspaceCheckoutManager<br/>materialize / fetch / cleanup checkout"]
+        workspaceStore["WorkspaceRepository<br/>owner / upstream / default workspace"]
         sessionStore["SessionStateRepository<br/>owner / TTL / worker binding"]
         eventLog["EventStore<br/>canonical event log / transcript snapshot"]
         staticCatalog["StaticSlashCommandCatalog<br/>static slash definitions"]
@@ -300,32 +307,44 @@ flowchart LR
     router --> sseHandlers
     router --> wasmAssets
 
+    httpHandlers --> workspaceCommands
     httpHandlers --> sessionCommands
     httpHandlers --> conversationCommands
+    httpHandlers --> workspaceQueries
     httpHandlers --> queryUseCases
     httpHandlers --> permissionUseCases
     httpHandlers --> completionUseCases
     sseHandlers --> queryUseCases
 
+    workspaceCommands --> workspaceStorePort
+    workspaceCommands --> sessionStorePort
+
     sessionCommands --> workerPort
     sessionCommands --> acpPort
     sessionCommands --> sessionStorePort
+    sessionCommands --> workspaceStorePort
+    sessionCommands --> checkoutPort
     sessionCommands --> eventLogPort
 
     conversationCommands --> acpPort
     conversationCommands --> sessionStorePort
     conversationCommands --> eventLogPort
 
+    workspaceQueries --> workspaceStorePort
+    queryUseCases --> workspaceStorePort
     queryUseCases --> sessionStorePort
     queryUseCases --> eventLogPort
     permissionUseCases --> permissionPort
     permissionUseCases --> eventLogPort
     completionUseCases --> completionPort
 
+    workspaceCommands --> workspaceModel
     sessionCommands --> sessionModel
     conversationCommands --> conversationModel
+    workspaceQueries --> workspaceModel
     queryUseCases --> conversationModel
     permissionUseCases --> permissionModel
+    workspaceCommands --> errorModel
     sessionCommands --> errorModel
     conversationCommands --> errorModel
     permissionUseCases --> errorModel
@@ -333,6 +352,8 @@ flowchart LR
     workerPort --> supervisor
     acpPort --> acpGateway
     sessionStorePort --> sessionStore
+    workspaceStorePort --> workspaceStore
+    checkoutPort --> checkoutManager
     eventLogPort --> eventLog
     permissionPort --> permissionGateway
     completionPort --> sessionStore
@@ -349,6 +370,7 @@ flowchart LR
 
     supervisor --> worker
     acpTransport --> worker
+    workspaceStore --> stateDb
     sessionStore --> stateDb
     eventLog --> stateDb
 
@@ -358,9 +380,9 @@ flowchart LR
     classDef store fill:#dcfce7,stroke:#15803d,color:#111;
 
     class clients,worker external;
-    class workerPort,acpPort,sessionStorePort,eventLogPort,permissionPort,completionPort port;
-    class router,httpHandlers,sseHandlers,sessionCommands,conversationCommands,queryUseCases,permissionUseCases,completionUseCases,sessionModel,conversationModel,permissionModel,errorModel,supervisor,acpGateway,acpTransport,metadataProjector,updateNormalizer,incomingDispatcher,capabilityRegistry,permissionGateway,workspaceFs,terminalBroker,staticCatalog,wasmAssets layer;
-    class sessionStore,eventLog,stateDb store;
+    class workerPort,acpPort,sessionStorePort,workspaceStorePort,checkoutPort,eventLogPort,permissionPort,completionPort port;
+    class router,httpHandlers,sseHandlers,workspaceCommands,sessionCommands,conversationCommands,workspaceQueries,queryUseCases,permissionUseCases,completionUseCases,workspaceModel,sessionModel,conversationModel,permissionModel,errorModel,supervisor,acpGateway,acpTransport,metadataProjector,updateNormalizer,incomingDispatcher,capabilityRegistry,permissionGateway,workspaceFs,terminalBroker,checkoutManager,staticCatalog,wasmAssets layer;
+    class workspaceStore,sessionStore,eventLog,stateDb store;
 ```
 
 ### 4.6 図の読み方
@@ -396,14 +418,21 @@ sequenceDiagram
     actor User as Web / CLI User
     participant Frontend as Web Frontend or CLI Frontend
     participant Backend as Axum Backend
+    participant WorkspaceRepo as WorkspaceRepository
     participant SessionRepo as SessionRepository
+    participant Checkout as GitWorkspaceCheckoutManager
     participant Supervisor as AcpProcessSupervisor
     participant Worker as Copilot CLI ACP Worker
 
     User->>Frontend: 新規セッションを開始
-    Frontend->>Backend: POST /api/v1/sessions (authenticated)
-    Backend->>SessionRepo: owner=principal を含む仮 session metadata を作成
-    Backend->>Supervisor: AcpWorker を起動
+    Frontend->>Backend: POST /api/v1/workspaces/{workspace_id}/sessions (owner authz)
+    Backend->>WorkspaceRepo: principal を User / Workspace へ解決 + owner check
+    Backend->>SessionRepo: owner_user_id を含む仮 session metadata を作成(state=provisioning)
+    Backend->>SessionRepo: state=cloning を記録
+    Backend->>Checkout: workspace upstream から checkout を materialize
+    Checkout-->>Backend: checkout root, resolved ref / commit
+    Backend->>SessionRepo: checkout metadata を保存(state=starting)
+    Backend->>Supervisor: AcpWorker を起動(cwd=checkout root)
     Supervisor->>Worker: copilot --acp --port PORT
     Worker-->>Supervisor: TCP ready
     Supervisor-->>Backend: worker ready
@@ -418,11 +447,19 @@ sequenceDiagram
     Backend->>Worker: session/new(cwd, mcpServers)
     Worker-->>Backend: acpSessionId, modes, configOptions
     Backend->>SessionRepo: FrontendSession と ACP session の対応を保存
+    Backend->>SessionRepo: state=active を記録
     Backend-->>Frontend: 201 Created {session_id}
-    Frontend->>Backend: GET /api/v1/sessions/{id}/events (owner authz)
+    Frontend->>Backend: GET /api/v1/sessions/{session_id}/events (owner authz)
     Backend-->>Frontend: SSE session.snapshot
     Backend-->>Frontend: SSE session.state.changed(streaming)
 ```
+
+互換目的の `POST /api/v1/sessions` は、default workspace を解決できる場合にだけこの flow へ
+委譲します。default workspace が未準備なら `409 workspace_required` を返し、
+workspace bootstrap を先に通します。
+現在の create endpoint は success path では同期的に `201` を返すため、`Creating` は
+backend-internal な pre-201 state として扱います。将来 async create を採る場合にだけ、
+この状態を client へ投影します。
 
 #### 4.7.2 1 turn の実行と SSE 配信
 
@@ -446,7 +483,7 @@ sequenceDiagram
     participant EventStore as EventStore
 
     User->>Frontend: prompt を送信
-    Frontend->>Backend: POST /api/v1/sessions/{id}/messages (owner authz)
+    Frontend->>Backend: POST /api/v1/sessions/{session_id}/messages (owner authz)
     Backend->>EventStore: message.accepted を保存
     Backend-->>Frontend: 202 Accepted
     Backend->>Worker: session/prompt(sessionId, prompt)
@@ -455,7 +492,7 @@ sequenceDiagram
         Worker->>Backend: session/request_permission(toolCall, options)
         Backend->>EventStore: pending permission を保存
         Backend-->>Frontend: SSE tool.permission.requested
-        Frontend->>Backend: POST /api/v1/sessions/{id}/permissions/{requestId} (owner authz, one-time request)
+        Frontend->>Backend: POST /api/v1/sessions/{session_id}/permissions/{requestId} (owner authz, one-time request)
         Backend-->>Worker: permission outcome
     end
 
@@ -493,10 +530,10 @@ sequenceDiagram
     participant Worker as Copilot CLI ACP Worker
 
     User->>Frontend: ネットワーク復旧後に画面へ戻る
-    Frontend->>Backend: GET /api/v1/sessions/{id} (owner authz)
+    Frontend->>Backend: GET /api/v1/sessions/{session_id} (owner authz)
     Backend->>EventStore: 最新 snapshot を取得
     Backend-->>Frontend: session snapshot
-    Frontend->>Backend: GET /api/v1/sessions/{id}/events?after=last_sequence (owner authz)
+    Frontend->>Backend: GET /api/v1/sessions/{session_id}/events?after=last_sequence (owner authz)
 
     alt worker が生存しており TTL 内
         Backend->>EventStore: last_sequence 以降の event を取得
@@ -548,11 +585,12 @@ sequenceDiagram
     participant Backend as Axum Backend
     participant SessionRepo as SessionRepository
     participant EventStore as EventStore
+    participant Checkout as GitWorkspaceCheckoutManager
     participant Supervisor as AcpProcessSupervisor
     participant Worker as Copilot CLI ACP Worker
 
     alt ユーザーが明示 close
-        Frontend->>Backend: POST /api/v1/sessions/{id}/close (owner authz)
+        Frontend->>Backend: POST /api/v1/sessions/{session_id}/close (owner authz)
         Backend-->>Frontend: close accepted
     else 最終切断後に TTL 超過
         Backend->>Backend: TTL timer fired
@@ -564,6 +602,8 @@ sequenceDiagram
     Worker-->>Supervisor: stopped
     Supervisor-->>Backend: stop completed
     Backend->>EventStore: final snapshot / close reason を保存
+    Backend->>Checkout: checkout cleanup を指示
+    Checkout-->>Backend: cleanup completed
     Backend->>SessionRepo: state=closed を記録
 
     opt 明示 close 中で frontend が接続中
@@ -611,14 +651,24 @@ sequenceDiagram
 この図は、session と worker を 1:1 で持つ前提のもとで、通常系と異常系の大きな状態遷移を
 示します。**どこで resources が増え、どこで確実に掃除されるか**を見る図です。
 
-state 名は **FrontendSession を主語**にしたものです。AcpWorker の状態は、各遷移に付随する
+state 名は **FrontendSession を主語**にしたものですが、この図は owner-facing 状態に
+backend-internal cleanup state を重ねた図です。AcpWorker の状態は、各遷移に付随する
 副作用として折りたたんで表現します。
+`Creating` は pre-201 の backend-internal phase、`Deleting` は delete 受理後に backend 内部で
+purge を進める cleanup state であり、どちらも通常の client state としては投影しません。
+owner-facing API は `Deleting` 中に `404` を返します。
+永続 store 側では `provisioning / cloning / starting / active / detached / closing / closed / deleting / failed / deleted`
+のような durable state を持てますが、この図ではそれを `Creating / Ready / Streaming / Busy /
+Canceling / Detached / Closing / Closed` と内部 cleanup state へ投影して表しています。
+つまり `Creating` は `provisioning / cloning / starting` を束ね、`Ready / Streaming / Busy /
+Canceling` は durable な `active` の投影です。
 
 ```mermaid
 stateDiagram-v2
     [*] --> Creating: create session
     Creating --> Ready: worker spawn succeeded
     Creating --> Failed: worker spawn failed
+    Creating --> Deleting: explicit delete during provisioning
 
     Ready --> Streaming: first SSE attach
     Streaming --> Busy: prompt accepted
@@ -631,13 +681,23 @@ stateDiagram-v2
     Busy --> Detached: disconnect during active turn
     Detached --> Streaming: client reattaches before TTL
 
+    Ready --> Deleting: explicit delete before first stream
     Streaming --> Closing: explicit close
     Busy --> Closing: close after turn / cancel
+    Detached --> Closing: explicit close while detached
     Detached --> Closing: TTL expired
     Failed --> Closing: cleanup required
+    Closing --> Deleting: explicit delete during close
+    Streaming --> Deleting: explicit delete
+    Busy --> Deleting: delete after cancel / drain + snapshot
+    Canceling --> Deleting: explicit delete after cancel ack + snapshot
+    Detached --> Deleting: explicit delete while detached
+    Closed --> Deleting: explicit delete or retention expiry
+    Failed --> Deleting: explicit delete after failure
 
     Closing --> Closed: snapshot persisted and worker stopped
-    Closed --> [*]
+    Deleting --> Deleted: purge completed
+    Deleted --> [*]
 ```
 
 ## 5. なぜ Web と CLI を backend 経由で統一するのか
@@ -807,6 +867,8 @@ Clean Architecture を**構成として強制**するため、Application layer 
 | `WorkerLifecyclePort` | worker の起動・停止・health 確認 | `AcpProcessSupervisor` |
 | `AcpSessionPort` | `initialize` / `authenticate` / `session/*` 呼び出しと inbound ACP stream の受け渡し | `AcpSessionGateway` |
 | `SessionStateStorePort` | session owner、lifecycle state、worker binding、TTL、negotiated metadata の保存/読出し | `SessionStateRepository` |
+| `WorkspaceStorePort` | workspace owner、upstream、default workspace 解決、workspace CRUD の保存/読出し | `WorkspaceRepository` |
+| `WorkspaceCheckoutPort` | session checkout の materialize / fetch / cleanup、clone-time policy enforcement、timeout / disk budget 制御 | `GitWorkspaceCheckoutManager` |
 | `EventLogPort` | canonical event の append、replay、transcript snapshot の取得 | `EventStore` |
 | `PermissionGatewayPort` | permission request の作成・解決・期限切れ・監査 | `PermissionGateway` |
 | `CompletionMetadataPort` | static command 定義と session metadata の読出し | `SessionStateRepository` + `StaticSlashCommandCatalog` |
@@ -820,6 +882,8 @@ Clean Architecture を**構成として強制**するため、Application layer 
     実装都合を持ち込まない
   - event sequence の単調増加、session state transition、permission scope の整合性、
     conversation item の整列ルールなど、backend 内で崩してはいけない条件を表す
+- `Workspace`
+  - owner に紐づく upstream 設定、default ref、workspace 単位の policy entry を表す
 - `Session`
   - FrontendSession の identity、owner、状態、寿命、attach 数、close 条件を表す集約
 - `SessionOwner`
@@ -851,11 +915,25 @@ ACP 固有型に依存しません。
     外へ漏らさない
   - request validation のうち「入力形式」ではなく「業務的に許容できるか」を判定する
   - Infrastructure error を `DomainError` へ写像し、外部へ漏らす error 形を制御する
+- `CreateWorkspace`
+  - owner に紐づく workspace metadata を作り、upstream policy と default workspace ルールを検証する
+- `UpdateWorkspace`
+  - workspace rename と `default_ref` 更新を扱い、owner check と ref validation を同じ境界で行う
+- `ListOwnedWorkspaces`
+  - owner に見せてよい workspace 一覧と default workspace metadata を返す
+- `ListWorkspaceSessions`
+  - 1 つの workspace に属する session 一覧を owner check 付きで返す
 - `CreateSession`
-  - session ID 発行、owner / policy の束縛、AcpWorker 起動、`initialize` / 必要なら
-    `authenticate` / `session/new` 実行、初回 snapshot を準備する
+  - workspace 解決、checkout materialization、session ID 発行、owner / policy の束縛、
+    AcpWorker 起動、`initialize` / 必要なら `authenticate` / `session/new` 実行、
+    初回 snapshot を準備する
 - `CloseSession`
   - session close を確定し、worker 停止、最終 snapshot 保存、後始末を指示する
+- `DeleteSession`
+  - session を owner-facing API から不可視化し、active turn 中なら cancel / drain と final snapshot capture を
+    行ったうえで、purge queue と runtime cleanup を idempotent に進める
+- `DeleteWorkspace`
+  - 非 terminal な session が残る間は `409` を返し、空になった workspace だけを削除対象にする
 - `SendPrompt`
   - session が送信可能か判定し、prompt 受付イベントを作成して worker 送信を指示する
   - inbound ACP update を canonical event へ落とし込み、どの event を保存・配信するかを決める
@@ -997,24 +1075,54 @@ backend は ACP の raw event をそのまま流しません。`SessionUpdateNor
 
 | Method | Path | 用途 | 認可 |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/sessions` | owner-scoped session 一覧取得 | 認証済み principal |
-| `POST` | `/api/v1/sessions` | session 作成 | 認証済み principal |
-| `GET` | `/api/v1/sessions/{id}` | session snapshot 取得 | session owner |
-| `PATCH` | `/api/v1/sessions/{id}` | session title rename | session owner |
-| `DELETE` | `/api/v1/sessions/{id}` | session delete | session owner |
-| `GET` | `/api/v1/sessions/{id}/events` | SSE 購読 | session owner |
-| `GET` | `/api/v1/sessions/{id}/history` | 履歴ページ取得 | session owner |
-| `POST` | `/api/v1/sessions/{id}/messages` | prompt 送信 | session owner |
-| `POST` | `/api/v1/sessions/{id}/cancel` | 実行中 turn の cancel | session owner |
-| `POST` | `/api/v1/sessions/{id}/permissions/{requestId}` | permission 要求への応答 | session owner |
-| `POST` | `/api/v1/sessions/{id}/close` | session 終了 | session owner |
+| `GET` | `/api/v1/workspaces` | owner-scoped workspace 一覧取得 | 認証済み principal |
+| `POST` | `/api/v1/workspaces` | workspace 作成 | 認証済み principal |
+| `GET` | `/api/v1/workspaces/{workspace_id}` | workspace 詳細取得 | workspace owner |
+| `PATCH` | `/api/v1/workspaces/{workspace_id}` | workspace rename / default ref 更新 | workspace owner |
+| `DELETE` | `/api/v1/workspaces/{workspace_id}` | workspace 削除 | workspace owner |
+| `GET` | `/api/v1/workspaces/{workspace_id}/sessions` | workspace 配下 session 一覧取得 | workspace owner |
+| `POST` | `/api/v1/workspaces/{workspace_id}/sessions` | session 作成 | workspace owner |
+| `GET` | `/api/v1/sessions` | owner-scoped recent session 一覧取得 | 認証済み principal |
+| `POST` | `/api/v1/sessions` | compatibility な session 作成（default workspace へ委譲） | 認証済み principal |
+| `GET` | `/api/v1/sessions/{session_id}` | session snapshot 取得 | session owner |
+| `PATCH` | `/api/v1/sessions/{session_id}` | session title rename | session owner |
+| `DELETE` | `/api/v1/sessions/{session_id}` | session delete | session owner |
+| `GET` | `/api/v1/sessions/{session_id}/events` | SSE 購読 | session owner |
+| `GET` | `/api/v1/sessions/{session_id}/history` | 履歴ページ取得 | session owner |
+| `POST` | `/api/v1/sessions/{session_id}/messages` | prompt 送信 | session owner |
+| `POST` | `/api/v1/sessions/{session_id}/cancel` | 実行中 turn の cancel | session owner |
+| `POST` | `/api/v1/sessions/{session_id}/permissions/{requestId}` | permission 要求への応答 | session owner |
+| `POST` | `/api/v1/sessions/{session_id}/close` | session 終了 | session owner |
 | `GET` | `/api/v1/completions/slash` | slash command 補完 | 認証済み principal + 指定 session の owner |
 | `GET` | `/healthz` | liveness / readiness | kube probe / internal monitor |
 
-`GET /api/v1/sessions` が返すのは system-wide な全件一覧ではなく、認証済み principal が
-owner である session 一覧です。retention window 内にある closed session も current state 付きで
-返し、front-end は attachable / read-only を判別できます。session title metadata と並び順の正本も
+`GET /api/v1/workspaces` が返すのは system-wide な全件ではなく、認証済み principal が owner である
+workspace 一覧です。`GET /api/v1/sessions` は owner 全体の recent session を返し、各 item に
+`workspace_id` を含めます。retention window 内にある closed session も current state 付きで返し、
+front-end は attachable / read-only を判別できます。session title metadata と並び順の正本も
 backend が持ちます。
+compatibility `POST /api/v1/sessions` は `default_workspace_id` を使って委譲し、binding が無くても
+active workspace が 1 件だけなら lazily に補完できます。それ以外は `409 workspace_required` を返します。
+
+第一段階では `upstream_url` は workspace create 時にだけ受け付ける immutable field とし、
+`PATCH /api/v1/workspaces/{workspace_id}` は rename と default ref 更新だけを扱います。
+`default_ref` は strict な ref validation を通した値だけを受け付け、Git には shell 展開せず
+構造化引数で渡します。
+redirect は follow を無効化するか、各 redirect target に同じ scheme / host / resolved IP
+policy を再適用し、non-globally-routable 宛は拒否します。
+Git が発生させる secondary fetch（bundle URI, submodule, alternates など）は、
+同じ policy を強制できるまでは無効化するか、すべての到達先を再検証します。
+redirect を許可する場合でも credential は target ごとに再束縛し、cross-host で転送しません。
+global / system gitconfig 由来の credential helper は無効化し、明示許可した credential source
+だけを Git 実行へ渡します。
+repo-controlled な Git execution path（filter / smudge / clean driver、hook、repo include 設定など）は
+checkout manager 実行時には無効化します。
+`DELETE /api/v1/workspaces/{workspace_id}` は、`closed` / `deleting` / `deleted` 以外の session が残る間は
+`409 workspace_has_active_sessions` で拒否し、first phase では cascade delete を行いません。
+compatibility `POST /api/v1/sessions` を維持している期間は、default workspace を削除しても
+新しい default を一意に再束縛できる場合にだけ delete を許可します。
+削除対象が default workspace だった場合は、その owner の default binding をクリアし、
+残る active workspace が 1 件だけならそれを再割当てできます。
 
 current MVP の recent activity は create / prompt accept の成功時だけ更新します。
 session snapshot 読み出し、permission resolve、cancel、close、history 読み出しや stream delta
@@ -1029,7 +1137,7 @@ session metadata を使って候補を返します。
 
 - Web
   - same-origin の `Secure` + `HttpOnly` cookie を使う
-  - state-mutating な `POST` には `X-CSRF-Token` を必須にする
+  - state-mutating な `POST` / `PATCH` / `DELETE` には `X-CSRF-Token` を必須にする
   - SSE は同一 origin の cookie 認証で張る
 - CLI
   - `Authorization: Bearer <token>` を使う
@@ -1228,11 +1336,13 @@ Web と CLI の候補内容をそろえます。
 
 - Web は same-origin `Secure` + `HttpOnly` cookie、CLI は bearer token で backend を認証する
 - backend は transport 差を `AuthenticatedPrincipal` へ正規化し、以後の認可は principal 単位で扱う
-- `FrontendSession` は作成時に owner を束縛し、MVP では owner 以外の attach / replay / prompt /
-  permission / close を許可しない
+- `Workspace` と `FrontendSession` は作成時に owner を束縛し、owner 以外の workspace 操作、
+  attach / replay / prompt / permission / close を許可しない
 - session ID は CSPRNG で生成するが、access token ではない。すべての session-scoped API は
   owner check を再実行する
-- Web の state-mutating `POST` は `X-CSRF-Token` を必須にし、CORS は same-origin のみ許可する
+- `upstream_url` を受け取る write path は scheme、credential 埋め込み、host / egress policy を
+  検証する。第一段階では `upstream_url` を immutable にし、workspace 更新での迂回を防ぐ
+- Web の state-mutating `POST` / `PATCH` / `DELETE` は `X-CSRF-Token` を必須にし、CORS は same-origin のみ許可する
 - principal ごとの active session 数、SSE 接続数、prompt rate を制限し、DoS を session 単位で
   吸収しきれない場合でも backend 全体を守る
 

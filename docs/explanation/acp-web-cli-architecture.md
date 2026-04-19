@@ -667,7 +667,8 @@ owner-facing API は `Deleting` 中に `404` を返します。
 durable state とその投影の正本は
 `docs/explanation/user-workspace-session-architecture.md` の 6.1 に置きます。
 永続 store 側では次の durable state を持てる。
-`provisioning / cloning / starting / active / detached / restartable / closing / closed / deleting / failed / deleted`
+`provisioning / cloning / starting / active / detached`
+`restartable / closing / closed / deleting / failed / deleted`
 この図では、それを
 `Creating / Ready / Streaming / Busy / Canceling / Detached / Restartable / Closing / Closed`
 と内部 cleanup state へ投影して表す。
@@ -1428,9 +1429,9 @@ Web と CLI の候補内容をそろえます。
   させ、外部公開しない
 - `WorkspaceFileAdapter` は child doc 5.2.1 の dirfd-based containment を通った path だけを
   allowlisted workspace root 配下で read / write する。symlink escape と `..` traversal は拒否する
-- `TerminalBroker` は session-scoped process group、制限済み working directory、
-  scrub 済み env、child doc 6.3 と同じ closed env allowlist、
-  kernel-enforced filesystem sandbox、timeout、CPU / memory / output cap を前提にする
+- `TerminalBroker` は session-scoped process group を前提にする。
+  制限済み working directory、scrub 済み env、child doc 6.3 と同じ closed env allowlist、
+  kernel-enforced filesystem sandbox、timeout、CPU / memory / output cap も前提にする
 - sandbox 内では approved binary set だけを execute 可能にし、raw system `git` は実行不可にする。
   `kill` は自分が起動した process group にだけ作用させる
 - terminal 実行権と file write 権は audit log を残し、deny / timeout / cancel も同じく記録する

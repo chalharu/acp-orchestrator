@@ -17,11 +17,15 @@ started to outgrow `copilot-sandbox-container`.
 
 - `docs/README.md`
 - `docs/explanation/acp-web-cli-architecture.md`
+- `docs/explanation/user-workspace-session-architecture.md`
 - `docs/explanation/cli-feedback-first-mvp.md`
 - `docs/explanation/web-feedback-first-mvp.md`
 
 The architecture document under `docs/explanation/acp-web-cli-architecture.md`
 explains the long-term shape of the stack.
+The workspace hierarchy design document explains the
+`User -> Workspace -> Session` ownership model.
+It also covers Git upstream registration, per-session clone, and cleanup.
 The feedback-first CLI document captures why the repo keeps a minimal
 user-visible slice working throughout development.
 The matching Web feedback-first document defines the first browser-facing slice

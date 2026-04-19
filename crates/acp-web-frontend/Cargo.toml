@@ -15,15 +15,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 acp-contracts = { path = "../acp-contracts", version = "=0.1.0" }
-console_error_panic_hook = "0.1"
-futures-channel = "0.3"
-futures-util = "0.3"
-gloo-net = { version = "0.6", features = ["http", "json"] }
-leptos = { version = "0.8.19", features = ["csr"] }
-pulldown-cmark = "0.13"
-serde_json = "1"
-wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = [
+console_error_panic_hook = "=0.1.7"
+futures-channel = "=0.3.32"
+futures-util = "=0.3.32"
+gloo-net = { version = "=0.6.0", features = ["http", "json"] }
+leptos = { version = "=0.8.19", features = ["csr"] }
+pulldown-cmark = "=0.13.3"
+serde_json = "=1.0.149"
+wasm-bindgen = "=0.2.118"
+web-sys = { version = "=0.3.95", features = [
   "Document",
   "Element",
   "Event",
@@ -44,7 +44,7 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 chrono = { version = "=0.4.44", features = ["serde"] }
-wasm-bindgen-test = "0.3"
+wasm-bindgen-test = "=0.3.68"
 
 [profile.release]
 opt-level = "z"

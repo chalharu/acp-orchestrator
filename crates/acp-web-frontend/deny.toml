@@ -1,3 +1,9 @@
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "transitive through Leptos until upstream replaces paste" },
+]
+unused-ignored-advisory = "allow"
+
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
@@ -6,13 +12,9 @@ wildcards = "deny"
 version = 2
 allow = [
   "Apache-2.0",
-  "BSD-3-Clause",
   "BSL-1.0",
   "CC0-1.0",
-  "CDLA-Permissive-2.0",
-  "ISC",
   "MIT",
-  "MPL-2.0",
   "Unicode-3.0",
   "Unlicense",
   "Zlib",
@@ -24,27 +26,11 @@ ignore-sources = ["https://github.com/chalharu/acp-orchestrator"]
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
-crate = "acp-app-support"
-
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
-crate = "acp-cli"
-
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
 crate = "acp-contracts"
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
-crate = "acp-mock"
-
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
-crate = "acp-orchestrator"
-
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
-crate = "acp-web-backend"
+crate = "acp-web-frontend"
 
 [[licenses.exceptions]]
 allow = ["LGPL-2.1-or-later"]

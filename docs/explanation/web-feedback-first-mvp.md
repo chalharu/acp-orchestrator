@@ -148,7 +148,7 @@ startup hint を visible にしたうえで live chat route へ移す**ための
 | UI action | 現在の役割 | 実際に使っている backend API | 認可・境界メモ |
 | --- | --- | --- | --- |
 | composer send | prompt を送信する | message send API | session owner に限って実行し、mutating `POST` として CSRF を掛ける |
-| chat activity | pending permission や transcript 内 status activity を扱う | permission resolution API + slash completions API | session owner に限って permission を解決し、slash help は backend completion catalog を再利用する |
+| chat activity | pending permission や transcript 内 status activity を扱う | permission resolution API | session owner に限って permission を解決する。browser の slash help は shared slash metadata から local に組み立てる |
 | cancel action | 実行中 turn を止める | cancel API | chat area 側と composer 側の両方に cancel affordance がある |
 | `New session` entry | 新しい会話へ移る | `/app/` route 経由で session create API | 既存 session を閉じるのではなく、新規 session bootstrap を始める |
 | session list | owned session を行き来する | session list API + session snapshot API | list の recent ordering は backend を正本とし、browser 側で並べ替えない。session を開くだけでは並び替えず、user prompt の送信時だけ前へ寄せる |
@@ -269,7 +269,7 @@ opening browser: https://127.0.0.1:8443/app/
 3. transcript に流す `user` / `assistant` / `status` の表示カテゴリ
 4. permission request / cancel の UI action 語彙
 5. same-origin cookie + CSRF + owner-check を最初から崩さない前提
-6. session list / history / close / slash completions は backend 側にあり、browser UI がまだ追いついていないという分離
+6. session list / history / close は backend 側にあり、browser 側はそれを minimal UI と local `/help` 補完で束ねているという分離
 
 これにより、後続の Web 実装は「session list UI・close action・slash 操作・pane layout をどう育てるか」
 に集中でき、launcher / auth / route / transcript の意味を作り直さずに済みます。

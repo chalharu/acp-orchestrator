@@ -5,10 +5,10 @@
 //! SSE events.
 
 use acp_contracts::{
-    CancelTurnResponse, CompletionCandidate, CreateSessionResponse, DeleteSessionResponse,
-    ErrorResponse, PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
+    CancelTurnResponse, CreateSessionResponse, DeleteSessionResponse, ErrorResponse,
+    PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
     ResolvePermissionRequest, SessionListItem, SessionListResponse, SessionResponse,
-    SessionSnapshot, SlashCompletionsResponse, StreamEvent,
+    SessionSnapshot, StreamEvent,
 };
 use futures_channel::mpsc;
 use gloo_net::http::Request;
@@ -70,7 +70,7 @@ pub async fn create_session() -> Result<String, String> {
 
 /// Load the current snapshot for an existing session.
 pub async fn load_session(session_id: &str) -> Result<SessionSnapshot, SessionLoadError> {
-    let url = format!("/api/v1/sessions/{session_id}");
+    let url = session_path(session_id);
     let response = Request::get(&url)
         .send()
         .await
@@ -103,35 +103,12 @@ pub async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
     Ok(listed.sessions)
 }
 
-/// Query backend-backed slash completions for the current session.
-pub async fn get_slash_completions(
-    session_id: &str,
-    prefix: &str,
-) -> Result<Vec<CompletionCandidate>, String> {
-    let response = Request::get(&format!(
-        "/api/v1/completions/slash?sessionId={}&prefix={}",
-        encode_component(session_id),
-        encode_component(prefix),
-    ))
-    .send()
-    .await
-    .map_err(|error| error.to_string())?;
-
-    if !response.ok() {
-        return Err(response_error_message(response, "Slash completion failed").await);
-    }
-
-    let completions: SlashCompletionsResponse =
-        response.json().await.map_err(|error| error.to_string())?;
-    Ok(completions.candidates)
-}
-
 /// Open the session event stream and return the raw `EventSource` plus a parsed
 /// event receiver.
 pub fn open_session_event_stream(
     session_id: &str,
 ) -> Result<(EventSource, mpsc::UnboundedReceiver<SseItem>), String> {
-    let url = format!("/api/v1/sessions/{session_id}/events");
+    let url = format!("{}/events", session_path(session_id));
     let event_source = EventSource::new(&url)
         .map_err(|source| format!("Failed to open event stream: {source:?}"))?;
 
@@ -144,7 +121,7 @@ pub fn open_session_event_stream(
 
 /// POST a new message to an existing session.
 pub async fn send_message(session_id: &str, text: &str) -> Result<(), String> {
-    let url = format!("/api/v1/sessions/{session_id}/messages");
+    let url = format!("{}/messages", session_path(session_id));
     let body = serde_json::to_string(&PromptRequest {
         text: text.to_string(),
     })
@@ -178,7 +155,7 @@ pub async fn resolve_permission(
 
 pub async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String> {
     let csrf = csrf_token();
-    let url = format!("/api/v1/sessions/{session_id}/cancel");
+    let url = format!("{}/cancel", session_path(session_id));
     let response = Request::post(&url)
         .header("x-csrf-token", &csrf)
         .send()
@@ -194,7 +171,7 @@ pub async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String>
 
 /// PATCH the session title.
 pub async fn rename_session(session_id: &str, title: &str) -> Result<SessionSnapshot, String> {
-    let url = format!("/api/v1/sessions/{session_id}");
+    let url = session_path(session_id);
     let body = serde_json::to_string(&RenameSessionRequest {
         title: title.to_string(),
     })
@@ -214,7 +191,7 @@ pub async fn rename_session(session_id: &str, title: &str) -> Result<SessionSnap
 /// DELETE a session permanently.
 pub async fn delete_session(session_id: &str) -> Result<DeleteSessionResponse, String> {
     let csrf = csrf_token();
-    let url = format!("/api/v1/sessions/{session_id}");
+    let url = session_path(session_id);
     let response = Request::delete(&url)
         .header("x-csrf-token", &csrf)
         .send()
@@ -341,15 +318,19 @@ fn format_api_failure(action: &str, status: u16, backend_message: Option<String>
         .unwrap_or_else(|| format!("{action}: HTTP {status}"))
 }
 
+fn session_path(session_id: &str) -> String {
+    format!("/api/v1/sessions/{}", encode_component(session_id))
+}
+
 fn permission_url(session_id: &str, request_id: &str) -> String {
     format!(
-        "/api/v1/sessions/{}/permissions/{}",
-        encode_component(session_id),
+        "{}/permissions/{}",
+        session_path(session_id),
         encode_component(request_id),
     )
 }
 
-fn encode_component(value: &str) -> String {
+pub(crate) fn encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -360,6 +341,36 @@ fn encode_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+pub(crate) fn decode_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        let high = *bytes.get(index + 1)?;
+        let low = *bytes.get(index + 2)?;
+        decoded.push((hex_value(high)? << 4) | hex_value(low)?);
+        index += 3;
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn session_unavailable_message(status: u16, backend_message: Option<String>) -> String {
@@ -390,6 +401,25 @@ mod tests {
             session_unavailable_message(404, Some("session not found".to_string())),
             "This session is unavailable (session not found). Start a fresh chat."
         );
+    }
+
+    #[test]
+    fn session_path_encodes_special_characters() {
+        assert_eq!(session_path("s_123"), "/api/v1/sessions/s_123");
+        assert_eq!(session_path("s/1"), "/api/v1/sessions/s%2F1");
+        assert_eq!(session_path("../../etc"), "/api/v1/sessions/..%2F..%2Fetc");
+    }
+
+    #[test]
+    fn decode_component_decodes_percent_encoded_utf8() {
+        assert_eq!(decode_component("s%2F1"), Some("s/1".to_string()));
+        assert_eq!(
+            decode_component("hello%20world"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(decode_component("%E3%81%82"), Some("あ".to_string()));
+        assert_eq!(decode_component("%ZZ"), None);
+        assert_eq!(decode_component("%A"), None);
     }
 
     #[test]

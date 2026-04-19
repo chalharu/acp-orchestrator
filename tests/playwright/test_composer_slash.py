@@ -130,6 +130,22 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
 
         self.assertEqual(composer.input_value(), "")
 
+    def test_tab_keeps_slash_text_and_moves_focus(self) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+
+        composer.click()
+        page.keyboard.press("Slash")
+        page.locator(PALETTE_SELECTOR).wait_for(state="visible", timeout=10_000)
+
+        composer.press("Tab")
+        page.wait_for_function(
+            "() => document.activeElement?.classList.contains('composer__submit')",
+            timeout=10_000,
+        )
+
+        self.assertEqual(composer.input_value(), "/")
+
     def test_sending_restores_focus_to_the_composer(self) -> None:
         page = self.open_app()
         composer = page.locator(TEXTAREA_SELECTOR)
@@ -146,6 +162,72 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
         )
 
         self.assertEqual(composer.input_value(), "")
+
+    def test_pending_reply_does_not_steal_focus_back_after_sidebar_click(self) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+        submit = page.locator(SUBMIT_SELECTOR)
+        toggle = page.locator(".session-sidebar__toggle")
+
+        composer.click()
+        page.keyboard.type("test", delay=100)
+        submit.click()
+
+        page.wait_for_function(
+            "() => document.querySelector('#composer-input')?.disabled === true",
+            timeout=10_000,
+        )
+        toggle.click()
+        page.wait_for_function(
+            "() => document.activeElement?.classList.contains('session-sidebar__toggle')",
+            timeout=10_000,
+        )
+
+        page.get_by_text(MOCK_REPLY_TEXT).wait_for(timeout=30_000)
+        page.wait_for_timeout(500)
+
+        self.assertNotEqual(
+            page.evaluate("() => document.activeElement?.id"), "composer-input"
+        )
+        self.assertTrue(
+            page.evaluate(
+                "() => document.activeElement?.classList.contains('session-sidebar__toggle')"
+            )
+        )
+
+    def test_pending_reply_does_not_steal_focus_back_after_keyboard_focus_change(
+        self,
+    ) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+        submit = page.locator(SUBMIT_SELECTOR)
+        toggle = page.locator(".session-sidebar__toggle")
+
+        composer.click()
+        page.keyboard.type("test", delay=100)
+        submit.click()
+
+        page.wait_for_function(
+            "() => document.querySelector('#composer-input')?.disabled === true",
+            timeout=10_000,
+        )
+        toggle.focus()
+        page.wait_for_function(
+            "() => document.activeElement?.classList.contains('session-sidebar__toggle')",
+            timeout=10_000,
+        )
+
+        page.get_by_text(MOCK_REPLY_TEXT).wait_for(timeout=30_000)
+        page.wait_for_timeout(500)
+
+        self.assertNotEqual(
+            page.evaluate("() => document.activeElement?.id"), "composer-input"
+        )
+        self.assertTrue(
+            page.evaluate(
+                "() => document.activeElement?.classList.contains('session-sidebar__toggle')"
+            )
+        )
 
     def test_deleting_only_session_opens_a_fresh_chat(self) -> None:
         page = self.open_app()

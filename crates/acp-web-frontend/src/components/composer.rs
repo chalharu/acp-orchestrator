@@ -2,6 +2,7 @@
 
 use acp_contracts::CompletionCandidate;
 use leptos::{html as leptos_html, prelude::*};
+use wasm_bindgen::{JsCast, closure::Closure};
 
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
 
@@ -10,8 +11,6 @@ pub struct ComposerSlashSignals {
     pub visible: Signal<bool>,
     pub candidates: Signal<Vec<CompletionCandidate>>,
     pub selected_index: Signal<usize>,
-    pub loading: Signal<bool>,
-    pub error: Signal<Option<String>>,
     pub apply_on_enter: Signal<bool>,
 }
 
@@ -26,13 +25,13 @@ pub struct ComposerSlashCallbacks {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SlashPaletteState {
-    Error(String),
     Empty,
     Ready(Vec<(usize, CompletionCandidate)>),
 }
 
 #[derive(Clone)]
 struct SubmitDraftContext {
+    form: NodeRef<leptos_html::Form>,
     textarea: NodeRef<leptos_html::Textarea>,
     disabled: Signal<bool>,
     on_submit: Callback<String>,
@@ -51,9 +50,11 @@ pub fn Composer(
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) -> impl IntoView {
+    let form = NodeRef::<leptos_html::Form>::new();
     let textarea = NodeRef::<leptos_html::Textarea>::new();
     let restore_focus_after_submit = RwSignal::new(false);
     let submit_context = SubmitDraftContext {
+        form,
         textarea,
         disabled,
         on_submit,
@@ -69,6 +70,7 @@ pub fn Composer(
         <form
             class="panel composer"
             autocomplete="off"
+            node_ref=form
             on:submit=handle_submit
         >
             <ComposerEditor
@@ -111,6 +113,12 @@ fn ComposerEditor(
     }
 }
 
+const SLASH_PALETTE_LISTBOX_ID: &str = "slash-palette-listbox";
+
+fn slash_option_id(index: usize) -> String {
+    format!("slash-option-{index}")
+}
+
 #[component]
 fn ComposerInput(
     draft: RwSignal<String>,
@@ -129,6 +137,18 @@ fn ComposerInput(
             id="composer-input"
             name="prompt"
             rows="4"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
+            aria-controls=SLASH_PALETTE_LISTBOX_ID
+            aria-expanded=move || if slash_signals.visible.get() { "true" } else { "false" }
+            aria-activedescendant=move || {
+                if slash_signals.visible.get() && !slash_signals.candidates.get().is_empty() {
+                    Some(slash_option_id(slash_signals.selected_index.get()))
+                } else {
+                    None
+                }
+            }
             node_ref=textarea
             placeholder="Write a prompt or type / for commands."
             prop:value=move || draft.get()
@@ -152,6 +172,60 @@ fn update_draft(draft: RwSignal<String>, ev: web_sys::Event) {
 }
 
 fn bind_submit_focus(submit_context: SubmitDraftContext) {
+    let form = submit_context.form;
+    let restore = submit_context.restore_focus_after_submit;
+
+    Effect::new(move |_| {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(form) = form.get() else {
+            return;
+        };
+        let form_node = form.unchecked_into::<web_sys::Node>();
+        let focus_form_node = form_node.clone();
+        let pointer_listener = Closure::wrap(Box::new(move |ev: web_sys::PointerEvent| {
+            if !restore.get_untracked() {
+                return;
+            }
+            let Some(target) = ev.target() else {
+                restore.set(false);
+                return;
+            };
+            let Some(target_node) = target.dyn_ref::<web_sys::Node>() else {
+                restore.set(false);
+                return;
+            };
+            if !form_node.contains(Some(target_node)) {
+                restore.set(false);
+            }
+        }) as Box<dyn FnMut(web_sys::PointerEvent)>);
+        let focus_listener = Closure::wrap(Box::new(move |ev: web_sys::FocusEvent| {
+            if !restore.get_untracked() {
+                return;
+            }
+            let Some(target) = ev.target() else {
+                restore.set(false);
+                return;
+            };
+            let Some(target_node) = target.dyn_ref::<web_sys::Node>() else {
+                restore.set(false);
+                return;
+            };
+            if !focus_form_node.contains(Some(target_node)) {
+                restore.set(false);
+            }
+        }) as Box<dyn FnMut(web_sys::FocusEvent)>);
+        let _ = document.add_event_listener_with_callback(
+            "pointerdown",
+            pointer_listener.as_ref().unchecked_ref(),
+        );
+        let _ = document
+            .add_event_listener_with_callback("focusin", focus_listener.as_ref().unchecked_ref());
+        pointer_listener.forget();
+        focus_listener.forget();
+    });
+
     Effect::new(move |_| {
         if !submit_context.restore_focus_after_submit.get() || submit_context.disabled.get() {
             return;
@@ -171,14 +245,17 @@ fn handle_composer_keydown(
     slash_signals: ComposerSlashSignals,
     slash_callbacks: ComposerSlashCallbacks,
 ) {
+    if ev.is_composing() {
+        return;
+    }
+
     if handle_slash_palette_keydown(
         &ev,
         draft,
         submit_context.clone(),
         slash_signals,
         slash_callbacks,
-    ) || ev.is_composing()
-    {
+    ) {
         return;
     }
 
@@ -202,7 +279,6 @@ fn handle_slash_palette_keydown(
     match ev.key().as_str() {
         "ArrowDown" => slash_callbacks.select_next.run(()),
         "ArrowUp" => slash_callbacks.select_previous.run(()),
-        "Tab" => slash_callbacks.apply_selected.run(()),
         "Enter" if !ev.shift_key() => {
             if slash_signals.apply_on_enter.get_untracked() {
                 slash_callbacks.apply_selected.run(());
@@ -269,20 +345,10 @@ fn SlashPalette(
 }
 
 fn should_render_slash_palette(slash_signals: ComposerSlashSignals) -> bool {
-    if !slash_signals.visible.get() {
-        return false;
-    }
-
-    slash_signals.error.get().is_some()
-        || !slash_signals.candidates.get().is_empty()
-        || !slash_signals.loading.get()
+    slash_signals.visible.get()
 }
 
 fn slash_palette_state(slash_signals: ComposerSlashSignals) -> SlashPaletteState {
-    if let Some(message) = slash_signals.error.get() {
-        return SlashPaletteState::Error(message);
-    }
-
     let items = slash_signals
         .candidates
         .get()
@@ -303,12 +369,6 @@ fn render_slash_palette_state(
     on_apply_index: Callback<usize>,
 ) -> AnyView {
     match state {
-        SlashPaletteState::Error(message) => view! {
-            <p class="composer__slash-empty composer__slash-empty--error">
-                {message}
-            </p>
-        }
-        .into_any(),
         SlashPaletteState::Empty => {
             view! { <p class="composer__slash-empty">"No matching slash commands."</p> }.into_any()
         }
@@ -330,7 +390,7 @@ fn SlashPaletteList(
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
     view! {
-        <ul class="composer__slash-list">
+        <ul id=SLASH_PALETTE_LISTBOX_ID role="listbox" class="composer__slash-list">
             <For
                 each=move || items.clone()
                 key=|(index, candidate)| (index.to_owned(), candidate.label.clone())
@@ -357,9 +417,14 @@ fn SlashPaletteItem(
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
     let CompletionCandidate { label, detail, .. } = candidate;
+    let option_id = slash_option_id(index);
 
     view! {
-        <li>
+        <li
+            id=option_id
+            role="option"
+            aria-selected=if is_selected { "true" } else { "false" }
+        >
             <button
                 type="button"
                 class=if is_selected {
@@ -367,6 +432,7 @@ fn SlashPaletteItem(
                 } else {
                     "composer__slash-item"
                 }
+                tabindex="-1"
                 on:mousedown=move |ev| {
                     ev.prevent_default();
                     on_apply_index.run(index);

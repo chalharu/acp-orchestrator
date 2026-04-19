@@ -900,7 +900,7 @@ workspace hierarchy で追加される制約だけを補います。
 - `AuthenticatedPrincipal -> User` の materialize を導入する
 - `WorkspaceStorePort` と repository 実装を導入する
 - 完了条件は、既存の live session route を崩さずに owner-scoped な workspace / session metadata を
-  保存・読込できることです
+  保存・読込できることである
 
 ### 13.2 `slice-02-workspace-api-contracts`
 
@@ -914,7 +914,7 @@ workspace hierarchy で追加される制約だけを補います。
 - compatibility `POST /api/v1/sessions` は default workspace 解決または
   `409 workspace_required` で維持する
 - 完了条件は、workspace の作成・一覧・更新・削除と、workspace 配下 session 一覧を
-  API から扱えることです
+  API から扱えることである
 
 ### 13.3 `slice-03-session-checkout-startup`
 
@@ -929,7 +929,7 @@ workspace hierarchy で追加される制約だけを補います。
 - `provisioning -> cloning -> starting -> active` の durable lifecycle を保存する
 - phase 1 の Git safety policy を適用する
 - 完了条件は、workspace から作った session が isolated checkout を持って起動し、
-  既存の live session interaction も維持されることです
+  既存の live session interaction も維持されることである
 
 ### 13.4 `slice-04-cleanup-recovery`
 
@@ -942,7 +942,7 @@ workspace hierarchy で追加される制約だけを補います。
 - janitor / orphan cleanup を実装する
 - TTL detach / close の流れを durable lifecycle に合わせる
 - 完了条件は、close / delete で確実にディスクを解放でき、
-  restart recovery が決定的になることです
+  restart recovery が決定的になることである
 
 ### 13.5 `slice-05-web-workspace-flow`
 
@@ -953,7 +953,7 @@ workspace hierarchy で追加される制約だけを補います。
 - workspace-scoped deep link を追加する
 - `/app/sessions/{session_id}` の compatibility redirect を維持する
 - 既存 Web shell に最小限の workspace 作成 / 選択 UI を追加する
-- 完了条件は、Web から workspace を作成または選択し、その配下で session を開始・遷移できることです
+- 完了条件は、Web から workspace を作成または選択し、その配下で session を開始・遷移できることである
 
 ### 13.6 このスライス順を支える前提
 
@@ -966,5 +966,5 @@ workspace hierarchy で追加される制約だけを補います。
 
 - pinned ref を phase 1 の `slice-03` に含めるかは先に決めておくとよい
 - ここでいう pinned ref は、`workspace.default_ref` とは別に session create request ごとに渡す
-  checkout target です
-- 候補は branch 名、tag、commit SHA、完全修飾 ref です
+  checkout target である
+- 候補は branch 名、tag、commit SHA、完全修飾 ref である

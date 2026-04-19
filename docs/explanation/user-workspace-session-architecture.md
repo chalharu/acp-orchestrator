@@ -311,7 +311,7 @@ workspace delete は 5 段階で進めます。
   - workspace directory tree 全体の recursive cleanup は lock の外で行う
 - step 5
   - workspace metadata と workspace-level binding を掃除する
-  - 最後に `deleted` にする
+- 最後は `deleted` とする
 
 補足ルールも明示しておきます。
 

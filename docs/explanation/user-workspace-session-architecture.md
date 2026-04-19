@@ -884,3 +884,87 @@ workspace hierarchy で追加される制約だけを補います。
 残課題はあります。
 ただし、`User -> Workspace -> Session` の責務、所有境界、clone / cleanup の基本方針は
 この文書で固定できます。
+
+## 13. 次スプリントの実装スライス
+
+この設計を次スプリントで実装へ落とす場合は、次の 5 スライスに分けて進めるのが適切です。
+依存順は `slice-01 -> slice-02 -> slice-03 -> slice-04` です。
+`slice-05` は `slice-02` と `slice-03` の後に進めます。
+
+### 13.1 `slice-01-domain-storage-foundation`
+
+主目的は、domain model と durable storage の土台を作ることです。
+
+- `users` と `workspaces` を追加する
+- `sessions.workspace_id` と `sessions.owner_user_id` を追加する
+- `AuthenticatedPrincipal -> User` の materialize を導入する
+- `WorkspaceStorePort` と repository 実装を導入する
+- 完了条件は、既存の live session route を崩さずに owner-scoped な workspace / session metadata を
+  保存・読込できることです
+
+### 13.2 `slice-02-workspace-api-contracts`
+
+依存は `slice-01-domain-storage-foundation` です。
+主目的は、Workspace API と contract を揃えることです。
+
+- `WorkspaceSummary` / `WorkspaceDetail` を追加する
+- session DTO に `workspace_id` を追加する
+- `/api/v1/workspaces` CRUD を追加する
+- `/api/v1/workspaces/{workspace_id}/sessions` を追加する
+- compatibility `POST /api/v1/sessions` は default workspace 解決または
+  `409 workspace_required` で維持する
+- 完了条件は、workspace の作成・一覧・更新・削除と、workspace 配下 session 一覧を
+  API から扱えることです
+
+### 13.3 `slice-03-session-checkout-startup`
+
+依存は `slice-01-domain-storage-foundation` と `slice-02-workspace-api-contracts` です。
+主目的は、workspace 起点の session 起動へ切り替えることです。
+
+- `WorkspaceCheckoutPort` を追加する
+- session ごとの checkout directory を作る
+- session 起動時に upstream を clone する
+- `checkout_ref` と `checkout_commit_sha` を永続化する
+- worker を session checkout の `cwd` で起動する
+- `provisioning -> cloning -> starting -> active` の durable lifecycle を保存する
+- phase 1 の Git safety policy を適用する
+- 完了条件は、workspace から作った session が isolated checkout を持って起動し、
+  既存の live session interaction も維持されることです
+
+### 13.4 `slice-04-cleanup-recovery`
+
+依存は `slice-03-session-checkout-startup` です。
+主目的は、close / delete / restart の lifecycle を完成させることです。
+
+- close と delete を分離する
+- `repo/` と `runtime/` を確実に回収する
+- `failed` / `deleting` recovery を実装する
+- janitor / orphan cleanup を実装する
+- TTL detach / close の流れを durable lifecycle に合わせる
+- 完了条件は、close / delete で確実にディスクを解放でき、
+  restart recovery が決定的になることです
+
+### 13.5 `slice-05-web-workspace-flow`
+
+依存は `slice-02-workspace-api-contracts` と `slice-03-session-checkout-startup` です。
+主目的は、Web を workspace 起点の導線へ切り替えることです。
+
+- `/app/` を immediate session creation から workspace bootstrap / select に変更する
+- workspace-scoped deep link を追加する
+- `/app/sessions/{session_id}` の compatibility redirect を維持する
+- 既存 Web shell に最小限の workspace 作成 / 選択 UI を追加する
+- 完了条件は、Web から workspace を作成または選択し、その配下で session を開始・遷移できることです
+
+### 13.6 このスライス順を支える前提
+
+- `/app/` では default workspace を自動作成しない
+- phase 1 の transport は `https` を使う
+- private repository は orchestrator 管理の `credential_reference_id` で扱う
+- backend 再起動後に live worker を失った session は `restartable` として扱う
+
+### 13.7 先に決めておくとよい保留事項
+
+- pinned ref を phase 1 の `slice-03` に含めるかは先に決めておくとよい
+- ここでいう pinned ref は、`workspace.default_ref` とは別に session create request ごとに渡す
+  checkout target です
+- 候補は branch 名、tag、commit SHA、完全修飾 ref です

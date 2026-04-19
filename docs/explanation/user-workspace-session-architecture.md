@@ -3,7 +3,7 @@
 ## 0. この文書の位置づけ
 
 この文書は、`docs/explanation/acp-web-cli-architecture.md` を補う
-**target design の詳細設計**である。
+**target design の詳細設計**です。
 既存の target architecture は Web / CLI / backend の責務分離を主題にする。
 ここでは `User -> Workspace -> Session` の所有構造、永続メタデータ、Git clone、
 session cleanup を具体化する。
@@ -351,25 +351,25 @@ backend 再起動時には durable state とディスク状態を照合します
 
 `GET /api/v1/sessions` は owner 全体の recent session を返し、
 各 item に `workspace_id` と必要なら `workspace_name` を含めます。
-`POST /api/v1/sessions` は migration 用の compatibility endpoint である。
+`POST /api/v1/sessions` は migration 用の compatibility endpoint です。
 backend は user の default workspace を解決する。
 内部的には `POST /api/v1/workspaces/{workspace_id}/sessions` へ委譲する。
 この path は、後述の bootstrap / backfill で default workspace を準備した段階でだけ有効化する。
 default workspace がまだ存在しない場合は、backend が勝手に曖昧な workspace を作らない。
 `409 workspace_required` を返して workspace bootstrap へ進ませる。
-default workspace の正本は `users.default_workspace_id` である。
+default workspace の正本は `users.default_workspace_id` です。
 null のまま active workspace が複数ある場合は compatibility path を失敗させる。
 active workspace が 1 件しかない場合だけ、backend が `default_workspace_id` を lazily 補完できる。
-初期段階では `upstream_url` は create 時にだけ設定できる immutable field である。
+初期段階では `upstream_url` は create 時にだけ設定できる immutable field です。
 別 upstream へ切り替える場合は新しい workspace を作る。
-`default_ref` は mutable である。
+`default_ref` は mutable です。
 branch / tag / commit selector として妥当な値だけを受け付ける。
 先頭 `-`、制御文字、曖昧な revision expression を拒否する。
 Git 実行時は shell 展開せず、構造化された引数として渡す。
 `DELETE /api/v1/workspaces/{workspace_id}` は、非 terminal な session が残る間は
 `409 workspace_has_active_sessions` で拒否する。
 first phase では cascade delete を行わない。
-workspace delete を許す terminal state は `closed` / `deleting` / `deleted` である。
+workspace delete を許す terminal state は `closed` / `deleting` / `deleted` です。
 `failed` / `closing` を含むそれ以外の状態はすべて block 対象にする。
 `deleting` は owner-facing API では見えない。
 ただし purge が既に始まっているため、workspace delete の blocker にはしない。

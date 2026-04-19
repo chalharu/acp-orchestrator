@@ -664,7 +664,7 @@ owner-facing API は `Deleting` 中に `404` を返します。
 `Creating / Ready / Streaming / Busy / Canceling / Detached / Closing / Closed`
 と内部 cleanup state へ投影して表す。
 `Creating` は `provisioning / cloning / starting` を束ねる。
-`Ready / Streaming / Busy / Canceling` は durable な `active` の投影である。
+`Ready / Streaming / Busy / Canceling` は durable な `active` の投影です。
 
 ```mermaid
 stateDiagram-v2
@@ -927,7 +927,7 @@ ACP 固有型に依存しません。
 - `ListWorkspaceSessions`
   - 1 つの workspace に属する session 一覧を owner check 付きで返す
 - `CreateSession`
-  - workspace 解決、checkout materialization、session ID 発行、owner / policy の束縛を行う
+  - workspace 解決、checkout materialization、session ID 発行、owner / policy を束縛する
   - AcpWorker を起動し、`initialize`、必要なら `authenticate`、`session/new` を実行する
   - 初回 snapshot を準備する
 - `CloseSession`

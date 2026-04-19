@@ -24,3 +24,7 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
+
+[[licenses.exceptions]]
+allow = ["CC0-1.0"]
+crate = "base16"

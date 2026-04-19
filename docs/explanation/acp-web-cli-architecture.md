@@ -666,9 +666,8 @@ purge を進める cleanup state であり、どちらも通常の client state 
 owner-facing API は `Deleting` 中に `404` を返します。
 durable state とその投影の正本は
 `docs/explanation/user-workspace-session-architecture.md` の 6.1 に置きます。
-永続 store 側では
+永続 store 側では次の durable state を持てる。
 `provisioning / cloning / starting / active / detached / restartable / closing / closed / deleting / failed / deleted`
-のような durable state を持てる。
 この図では、それを
 `Creating / Ready / Streaming / Busy / Canceling / Detached / Restartable / Closing / Closed`
 と内部 cleanup state へ投影して表す。
@@ -1403,9 +1402,10 @@ Web と CLI の候補内容をそろえます。
   attach / replay / prompt / permission / close を許可しない
 - session ID は CSPRNG で生成するが、access token ではない。すべての session-scoped API は
   owner check を再実行する
-- `upstream_url` を受け取る write path は scheme、credential 埋め込み、host / egress policy、
-  optional な managed credential reference (`credential_reference_id`) を検証する。第一段階では
-  `https` だけを扱い、private repository は managed credential reference を必須にする。
+- `upstream_url` を受け取る write path は、scheme、credential 埋め込み、
+  host / egress policy、optional な managed credential reference を検証する。
+  第一段階では `https` だけを扱う。private repository では
+  managed credential reference (`credential_reference_id`) を必須にする。
   `upstream_url` と `credential_reference_id` は immutable にし、workspace 更新での迂回を防ぐ
 - push は clone / fetch と同列に扱わず、phase 1 では session owner の明示承認がある場合だけ
   workspace upstream 宛へ許可する。checkout branch から同名 upstream branch への単一 refspec だけを許可し、
@@ -1428,10 +1428,11 @@ Web と CLI の候補内容をそろえます。
   させ、外部公開しない
 - `WorkspaceFileAdapter` は child doc 5.2.1 の dirfd-based containment を通った path だけを
   allowlisted workspace root 配下で read / write する。symlink escape と `..` traversal は拒否する
-- `TerminalBroker` は session-scoped process group、制限済み working directory、scrub 済み env、
-  child doc 6.3 と同じ closed env allowlist、kernel-enforced filesystem sandbox、timeout、
-  CPU / memory / output cap を前提にする。sandbox 内では approved binary set だけを execute 可能にし、
-  raw system `git` は実行不可にする。`kill` は自分が起動した process group にだけ作用させる
+- `TerminalBroker` は session-scoped process group、制限済み working directory、
+  scrub 済み env、child doc 6.3 と同じ closed env allowlist、
+  kernel-enforced filesystem sandbox、timeout、CPU / memory / output cap を前提にする
+- sandbox 内では approved binary set だけを execute 可能にし、raw system `git` は実行不可にする。
+  `kill` は自分が起動した process group にだけ作用させる
 - terminal 実行権と file write 権は audit log を残し、deny / timeout / cancel も同じく記録する
 
 ### 11.5 Web / 保存データの保護

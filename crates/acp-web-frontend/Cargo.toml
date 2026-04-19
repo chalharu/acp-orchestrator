@@ -29,11 +29,13 @@ web-sys = { version = "0.3", features = [
   "Event",
   "EventSource",
   "EventTarget",
+  "FocusEvent",
   "HtmlElement",
   "HtmlMetaElement",
   "HtmlTextAreaElement",
   "Location",
   "MessageEvent",
+  "Node",
   "Storage",
   "Window",
 ] }

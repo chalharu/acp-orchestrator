@@ -1136,20 +1136,47 @@ fn SessionSidebarRenameForm(
     on_commit_rename: Callback<()>,
     on_cancel_rename: Callback<()>,
 ) -> impl IntoView {
+    let rename_form = NodeRef::<leptos::html::Div>::new();
+    let rename_form_for_focusout = rename_form;
+
     view! {
-        <SessionSidebarRenameInput
-            rename_draft=rename_draft
-            is_saving_rename=is_saving_rename
-            on_commit_rename=on_commit_rename
-            on_cancel_rename=on_cancel_rename
-        />
-        <SessionSidebarRenameButtons
-            is_saving_rename=is_saving_rename
-            save_disabled=save_disabled
-            on_commit_rename=on_commit_rename
-            on_cancel_rename=on_cancel_rename
-        />
+        <div
+            class="session-sidebar__rename-form"
+            node_ref=rename_form
+            on:focusout=move |ev: web_sys::FocusEvent| {
+                let Some(container) = rename_form_for_focusout.get() else {
+                    return;
+                };
+                let container = container.unchecked_into::<web_sys::Node>();
+                if focus_event_leaves_node(&ev, &container) {
+                    on_commit_rename.run(());
+                }
+            }
+        >
+            <SessionSidebarRenameInput
+                rename_draft=rename_draft
+                is_saving_rename=is_saving_rename
+                on_commit_rename=on_commit_rename
+                on_cancel_rename=on_cancel_rename
+            />
+            <SessionSidebarRenameButtons
+                is_saving_rename=is_saving_rename
+                save_disabled=save_disabled
+                on_commit_rename=on_commit_rename
+                on_cancel_rename=on_cancel_rename
+            />
+        </div>
     }
+}
+
+fn focus_event_leaves_node(ev: &web_sys::FocusEvent, container: &web_sys::Node) -> bool {
+    let Some(related_target) = ev.related_target() else {
+        return true;
+    };
+    let Ok(related_node) = related_target.dyn_into::<web_sys::Node>() else {
+        return true;
+    };
+    !container.contains(Some(&related_node))
 }
 
 #[component]

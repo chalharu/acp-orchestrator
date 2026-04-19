@@ -337,6 +337,10 @@ a:hover {
   box-shadow: 0 0 0 2px rgba(201, 119, 76, 0.2);
 }
 
+.session-sidebar__rename-form {
+  display: contents;
+}
+
 .session-sidebar__empty {
   padding: 0.25rem 0.1rem;
   font-size: 0.875rem;

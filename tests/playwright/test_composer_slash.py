@@ -167,6 +167,31 @@ class ComposerSlashPlaywrightTest(unittest.TestCase):
         )
         self.assertFalse(composer.is_disabled())
 
+    def test_clicking_outside_session_rename_input_commits_the_title(self) -> None:
+        page = self.open_app()
+        composer = page.locator(TEXTAREA_SELECTOR)
+        rename_button = page.get_by_role("button", name="Rename session").first
+        rename_input = page.locator(".session-sidebar__rename-input")
+        title = page.locator(".session-sidebar__session-title").first
+        renamed_title = "Blur committed title"
+
+        rename_button.click()
+        rename_input.wait_for(state="visible", timeout=10_000)
+        rename_input.fill(renamed_title)
+
+        composer.click()
+        page.wait_for_function(
+            """([selector, expected]) => {
+                const node = document.querySelector(selector);
+                return node !== null && node.textContent.trim() === expected;
+            }""",
+            arg=[".session-sidebar__session-title", renamed_title],
+            timeout=10_000,
+        )
+
+        self.assertFalse(rename_input.is_visible())
+        self.assertEqual(title.text_content().strip(), renamed_title)
+
     def test_mobile_sidebar_keeps_actions_visible_and_dismisses_from_corner_taps(
         self,
     ) -> None:

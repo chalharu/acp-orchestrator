@@ -13,8 +13,8 @@ backend contract、session route、permission 操作を先に固めるための*
 です。
 
 この文書は **現在実装の MVP** を説明するため、browser route は引き続き `/app/*` と表記します。
-一方、`User -> Workspace -> Session` の target design では、将来の canonical web entry route を
-`/` に寄せ、旧 `/app/*` は compatibility redirect で扱う前提です。
+一方、`User -> Workspace -> Session` の target design では、canonical web entry route を `/` に寄せ、
+phase 1 でも `/app/*` を引き継がない前提です。
 
 ## 2. 開発前提
 

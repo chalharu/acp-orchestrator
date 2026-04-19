@@ -172,9 +172,14 @@ fn update_draft(draft: RwSignal<String>, ev: web_sys::Event) {
 }
 
 fn bind_submit_focus(submit_context: SubmitDraftContext) {
-    let form = submit_context.form;
-    let restore = submit_context.restore_focus_after_submit;
+    bind_focus_restore_cancel(
+        submit_context.form,
+        submit_context.restore_focus_after_submit,
+    );
+    restore_submit_focus_when_ready(submit_context);
+}
 
+fn bind_focus_restore_cancel(form: NodeRef<leptos_html::Form>, restore: RwSignal<bool>) {
     Effect::new(move |_| {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return;
@@ -183,49 +188,59 @@ fn bind_submit_focus(submit_context: SubmitDraftContext) {
             return;
         };
         let form_node = form.unchecked_into::<web_sys::Node>();
-        let focus_form_node = form_node.clone();
-        let pointer_listener = Closure::wrap(Box::new(move |ev: web_sys::PointerEvent| {
-            if !restore.get_untracked() {
-                return;
-            }
-            let Some(target) = ev.target() else {
-                restore.set(false);
-                return;
-            };
-            let Some(target_node) = target.dyn_ref::<web_sys::Node>() else {
-                restore.set(false);
-                return;
-            };
-            if !form_node.contains(Some(target_node)) {
-                restore.set(false);
-            }
-        }) as Box<dyn FnMut(web_sys::PointerEvent)>);
-        let focus_listener = Closure::wrap(Box::new(move |ev: web_sys::FocusEvent| {
-            if !restore.get_untracked() {
-                return;
-            }
-            let Some(target) = ev.target() else {
-                restore.set(false);
-                return;
-            };
-            let Some(target_node) = target.dyn_ref::<web_sys::Node>() else {
-                restore.set(false);
-                return;
-            };
-            if !focus_form_node.contains(Some(target_node)) {
-                restore.set(false);
-            }
-        }) as Box<dyn FnMut(web_sys::FocusEvent)>);
-        let _ = document.add_event_listener_with_callback(
-            "pointerdown",
-            pointer_listener.as_ref().unchecked_ref(),
-        );
-        let _ = document
-            .add_event_listener_with_callback("focusin", focus_listener.as_ref().unchecked_ref());
-        pointer_listener.forget();
-        focus_listener.forget();
+        attach_pointer_restore_cancel_listener(&document, &form_node, restore);
+        attach_focus_restore_cancel_listener(&document, &form_node, restore);
     });
+}
 
+fn attach_pointer_restore_cancel_listener(
+    document: &web_sys::Document,
+    form_node: &web_sys::Node,
+    restore: RwSignal<bool>,
+) {
+    let form_node = form_node.clone();
+    let listener = Closure::wrap(Box::new(move |ev: web_sys::PointerEvent| {
+        clear_restore_when_target_leaves_form(ev.target(), &form_node, restore);
+    }) as Box<dyn FnMut(web_sys::PointerEvent)>);
+    let _ =
+        document.add_event_listener_with_callback("pointerdown", listener.as_ref().unchecked_ref());
+    listener.forget();
+}
+
+fn attach_focus_restore_cancel_listener(
+    document: &web_sys::Document,
+    form_node: &web_sys::Node,
+    restore: RwSignal<bool>,
+) {
+    let form_node = form_node.clone();
+    let listener = Closure::wrap(Box::new(move |ev: web_sys::FocusEvent| {
+        clear_restore_when_target_leaves_form(ev.target(), &form_node, restore);
+    }) as Box<dyn FnMut(web_sys::FocusEvent)>);
+    let _ = document.add_event_listener_with_callback("focusin", listener.as_ref().unchecked_ref());
+    listener.forget();
+}
+
+fn clear_restore_when_target_leaves_form(
+    target: Option<web_sys::EventTarget>,
+    form_node: &web_sys::Node,
+    restore: RwSignal<bool>,
+) {
+    if !restore.get_untracked() {
+        return;
+    }
+    let Some(target_node) = target
+        .as_ref()
+        .and_then(|target| target.dyn_ref::<web_sys::Node>())
+    else {
+        restore.set(false);
+        return;
+    };
+    if !form_node.contains(Some(target_node)) {
+        restore.set(false);
+    }
+}
+
+fn restore_submit_focus_when_ready(submit_context: SubmitDraftContext) {
     Effect::new(move |_| {
         if !submit_context.restore_focus_after_submit.get() || submit_context.disabled.get() {
             return;

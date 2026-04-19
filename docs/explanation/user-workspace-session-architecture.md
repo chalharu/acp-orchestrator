@@ -572,7 +572,7 @@ compatibility `POST /api/v1/sessions`、workspace delete blocker、immutable fie
 parent architecture の 8.3 です。
 default workspace binding と race 制御の正本も同じく 8.3 です。
 compatibility create の default binding 解決は、
-`PUT /api/v1/users/me/default-workspace` と workspace delete step 1 と同じ
+`PUT /api/v1/users/me/default-workspace` や workspace delete step 1 と同じ
 owner transaction で直列化します。
 session row 作成も同じ owner transaction に含めます。
 この文書で追加する API 契約は次の 4 点です。

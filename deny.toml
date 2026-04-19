@@ -6,18 +6,19 @@ unused-ignored-advisory = "allow"
 
 [bans]
 multiple-versions = "allow"
+wildcards = "deny"
 
 [licenses]
 version = 2
 unused-allowed-license = "allow"
+unused-license-exception = "allow"
 allow = [
-  "AGPL-3.0-only",
   "Apache-2.0",
   "BSD-3-Clause",
   "BSL-1.0",
+  "CC0-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
-  "LGPL-2.1-or-later",
   "MIT",
   "MPL-2.0",
   "Unicode-3.0",
@@ -25,6 +26,37 @@ allow = [
   "Zlib",
 ]
 
+[licenses.private]
+ignore-sources = ["https://github.com/chalharu/acp-orchestrator"]
+
 [[licenses.exceptions]]
-allow = ["CC0-1.0"]
-crate = "base16"
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-cli"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-mock"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-orchestrator"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-web-backend"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-web-frontend"
+
+[[licenses.exceptions]]
+allow = ["LGPL-2.1-or-later"]
+crate = "r-efi"

@@ -14,7 +14,7 @@ license = "AGPL-3.0-only"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-acp-contracts = { path = "../acp-contracts" }
+acp-contracts = { path = "../acp-contracts", version = "=0.1.0" }
 console_error_panic_hook = "0.1"
 futures-channel = "0.3"
 futures-util = "0.3"

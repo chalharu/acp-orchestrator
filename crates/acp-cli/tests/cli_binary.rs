@@ -1,4 +1,4 @@
-use std::{io, process::Stdio, time::Duration};
+use std::{io, path::PathBuf, process::Stdio, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{MessageRole, SessionHistoryResponse};
@@ -14,6 +14,13 @@ use tokio::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn test_state_dir() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "acp-cli-backend-test-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
+}
 
 #[tokio::test]
 async fn session_list_reports_an_empty_owner_index() -> Result<()> {
@@ -158,7 +165,7 @@ fn chat_script_delay(delay_ms: u64) -> Duration {
     let scaled_delay_ms = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
         delay_ms.saturating_mul(5)
     } else {
-        delay_ms.saturating_mul(2)
+        delay_ms.saturating_mul(3)
     };
     Duration::from_millis(scaled_delay_ms)
 }
@@ -345,6 +352,7 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;

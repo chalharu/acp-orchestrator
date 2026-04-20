@@ -12,6 +12,14 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPrincipal {
     pub id: String,
+    pub kind: AuthenticatedPrincipalKind,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticatedPrincipalKind {
+    Bearer,
+    BrowserSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +95,8 @@ fn extract_bearer_principal(
 
     Ok(Some(AuthenticatedPrincipal {
         id: token.to_string(),
+        kind: AuthenticatedPrincipalKind::Bearer,
+        subject: token.to_string(),
     }))
 }
 
@@ -98,7 +108,11 @@ fn extract_cookie_principal(headers: &HeaderMap) -> Result<AuthenticatedPrincipa
         .as_hyphenated()
         .to_string();
 
-    Ok(AuthenticatedPrincipal { id: token })
+    Ok(AuthenticatedPrincipal {
+        id: token.clone(),
+        kind: AuthenticatedPrincipalKind::BrowserSession,
+        subject: token,
+    })
 }
 
 fn validate_csrf(headers: &HeaderMap) -> Result<(), AuthError> {
@@ -163,6 +177,8 @@ mod tests {
         let principal = authorize_request(&headers, true).expect("valid bearer token should work");
 
         assert_eq!(principal.id, "developer");
+        assert_eq!(principal.kind, AuthenticatedPrincipalKind::Bearer);
+        assert_eq!(principal.subject, "developer");
     }
 
     #[test]
@@ -179,6 +195,8 @@ mod tests {
             authorize_request(&headers, false).expect("cookie authentication should work");
 
         assert_eq!(principal.id, SESSION_ID);
+        assert_eq!(principal.kind, AuthenticatedPrincipalKind::BrowserSession);
+        assert_eq!(principal.subject, SESSION_ID);
     }
 
     #[test]
@@ -241,6 +259,8 @@ mod tests {
             authorize_request(&headers, true).expect("matching csrf tokens should succeed");
 
         assert_eq!(principal.id, SESSION_ID);
+        assert_eq!(principal.kind, AuthenticatedPrincipalKind::BrowserSession);
+        assert_eq!(principal.subject, SESSION_ID);
     }
 
     #[test]

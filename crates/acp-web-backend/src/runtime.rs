@@ -8,7 +8,7 @@ use acp_app_support::{
 use clap::Parser;
 use snafu::prelude::*;
 
-use crate::{AppState, MockClientError, ServerConfig, serve_with_shutdown};
+use crate::{AppState, AppStateBuildError, ServerConfig, serve_with_shutdown};
 
 type Result<T, E = BackendAppError> = std::result::Result<T, E>;
 const READY_CHECK_ATTEMPTS: usize = 50;
@@ -43,7 +43,7 @@ pub enum BackendAppError {
     Setup { source: ListenerSetupError },
 
     #[snafu(display("building backend state failed"))]
-    BuildState { source: MockClientError },
+    BuildState { source: AppStateBuildError },
 
     #[snafu(display("building the backend readiness HTTP client failed"))]
     BuildHttpClient { source: reqwest::Error },
@@ -69,6 +69,8 @@ struct Cli {
     acp_server: Option<String>,
     #[arg(long, default_value_t = false)]
     startup_hints: bool,
+    #[arg(long, default_value = ".acp-state")]
+    state_dir: PathBuf,
     /// Directory containing the Trunk-compiled Leptos CSR bundle.
     /// The backend serves the fingerprinted output through stable alias routes.
     /// When absent the WASM asset routes return 503 until the frontend is built.
@@ -103,6 +105,7 @@ async fn run(cli: Cli) -> Result<()> {
         session_cap: cli.session_cap,
         acp_server,
         startup_hints: cli.startup_hints,
+        state_dir: cli.state_dir,
         frontend_dist: cli.frontend_dist,
     })
     .context(BuildStateSnafu)?;
@@ -145,6 +148,7 @@ mod tests {
             session_cap: 8,
             acp_server: acp_server.map(str::to_string),
             startup_hints: false,
+            state_dir: PathBuf::from(".acp-state"),
             frontend_dist: None,
         }
     }

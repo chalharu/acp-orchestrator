@@ -18,6 +18,7 @@ fn default_server_config_points_to_the_local_acp_server() {
     assert_eq!(config.session_cap, 8);
     assert_eq!(config.acp_server, "127.0.0.1:8090");
     assert!(!config.startup_hints);
+    assert_eq!(config.state_dir, std::path::PathBuf::from(".acp-state"));
 }
 
 #[test]
@@ -376,6 +377,7 @@ fn write_temp_frontend_dist_with_unreadable_wasm() -> std::path::PathBuf {
 fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
     AppState {
         store: Arc::new(SessionStore::new(1)),
+        workspace_store: new_ephemeral_workspace_store(),
         reply_provider: Arc::new(StaticReplyProvider {
             reply: String::new(),
         }),
@@ -844,6 +846,7 @@ async fn create_session_seeds_startup_hints_when_enabled() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
         store: store.clone(),
+        workspace_store: new_ephemeral_workspace_store(),
         reply_provider: Arc::new(StartupHintProvider {
             hint: "bundled mock verification ready".to_string(),
         }),
@@ -873,6 +876,7 @@ async fn create_session_skips_startup_hints_when_disabled() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
         store,
+        workspace_store: new_ephemeral_workspace_store(),
         reply_provider: Arc::new(StartupHintProvider {
             hint: "should stay hidden".to_string(),
         }),
@@ -907,6 +911,7 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
         store,
+        workspace_store: new_ephemeral_workspace_store(),
         reply_provider: Arc::new(NoStartupHintProvider),
         startup_hints: true,
         frontend_dist: None,
@@ -931,6 +936,7 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),
+        workspace_store: new_ephemeral_workspace_store(),
         reply_provider: Arc::new(FailingStartupHintProvider {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
@@ -973,6 +979,7 @@ async fn create_session_reports_rollback_failures() {
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),
+        workspace_store: new_ephemeral_workspace_store(),
         reply_provider: Arc::new(RollbackFailingStartupHintProvider {
             store: store.clone(),
             owner: "alice".to_string(),
@@ -1038,6 +1045,133 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
             .as_slice(),
         [session.id]
     );
+}
+
+#[tokio::test]
+async fn legacy_session_routes_persist_owner_scoped_metadata() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_store = Arc::new(
+        SqliteWorkspaceRepository::new(
+            std::env::temp_dir()
+                .join(format!(
+                    "acp-server-route-metadata-{}",
+                    uuid::Uuid::new_v4().simple()
+                ))
+                .join("db.sqlite"),
+        )
+        .expect("workspace repository should initialize"),
+    );
+    let state = AppState::with_workspace_store(
+        store.clone(),
+        workspace_store.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer alice".parse().expect("authorization should parse"),
+    );
+
+    let created = create_session(State(state.clone()), headers.clone())
+        .await
+        .expect("session creation should succeed")
+        .1
+        .0
+        .session;
+    let principal = authorize_request(&headers, true).expect("headers should authorize");
+    let user = workspace_store
+        .materialize_user(&principal)
+        .await
+        .expect("principal materialization should be stable");
+    let created_metadata = workspace_store
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("created session metadata should load")
+        .expect("created session metadata should exist");
+
+    assert_eq!(created_metadata.owner_user_id, user.user_id);
+    assert_eq!(created_metadata.status, "active");
+    assert!(!created_metadata.workspace_id.is_empty());
+
+    let renamed = rename_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        headers.clone(),
+        Json(RenameSessionRequest {
+            title: "Renamed session".to_string(),
+        }),
+    )
+    .await
+    .expect("session rename should succeed")
+    .0
+    .session;
+    let renamed_metadata = workspace_store
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("renamed session metadata should load")
+        .expect("renamed session metadata should exist");
+
+    assert_eq!(renamed.title, "Renamed session");
+    assert_eq!(renamed_metadata.title, "Renamed session");
+    assert_eq!(renamed_metadata.workspace_id, created_metadata.workspace_id);
+    assert_eq!(
+        renamed_metadata.last_activity_at,
+        created_metadata.last_activity_at
+    );
+
+    let _ = post_message(
+        State(state.clone()),
+        Path(created.id.clone()),
+        headers.clone(),
+        Json(PromptRequest {
+            text: "hello metadata".to_string(),
+        }),
+    )
+    .await
+    .expect("prompt submission should succeed");
+    let active_metadata = workspace_store
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("active session metadata should load")
+        .expect("active session metadata should exist");
+
+    assert_eq!(active_metadata.status, "active");
+    assert!(active_metadata.last_activity_at >= renamed_metadata.last_activity_at);
+
+    let _ = close_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        headers.clone(),
+    )
+    .await
+    .expect("session close should succeed");
+    let closed_metadata = workspace_store
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("closed session metadata should load")
+        .expect("closed session metadata should exist");
+
+    assert_eq!(closed_metadata.status, "closed");
+    assert!(closed_metadata.closed_at.is_some());
+
+    let _ = delete_session(State(state), Path(created.id.clone()), headers.clone())
+        .await
+        .expect("session deletion should succeed");
+    let deleted_metadata = workspace_store
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("deleted session metadata should load")
+        .expect("deleted session metadata should exist");
+
+    assert_eq!(deleted_metadata.status, "deleted");
+    assert!(deleted_metadata.deleted_at.is_some());
+    let snapshot_error = store
+        .session_snapshot("alice", &created.id)
+        .await
+        .expect_err("deleted sessions should be removed from the live store");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
 }
 
 #[tokio::test]

@@ -25,3 +25,4 @@ unicode-width.workspace = true
 acp-app-support = { workspace = true, features = ["test-helpers"] }
 acp-mock = { path = "../acp-mock", version = "=0.1.0" }
 acp-web-backend = { path = "../acp-web-backend", version = "=0.1.0" }
+uuid.workspace = true

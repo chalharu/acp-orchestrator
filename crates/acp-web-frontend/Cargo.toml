@@ -18,7 +18,7 @@ acp-contracts = { path = "../acp-contracts", version = "=0.1.0" }
 console_error_panic_hook = "=0.1.7"
 futures-channel = "=0.3.32"
 futures-util = "=0.3.32"
-gloo-net = { version = "=0.6.0", features = ["http", "json"] }
+gloo-net = { version = "=0.7.0", features = ["http", "json"] }
 leptos = { version = "=0.8.19", features = ["csr"] }
 pulldown-cmark = "=0.13.3"
 serde_json = "=1.0.149"

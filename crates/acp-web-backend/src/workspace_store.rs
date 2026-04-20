@@ -509,11 +509,48 @@ fn load_bootstrap_workspace(
 }
 
 fn load_workspace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
+    let identity = load_workspace_identity_fields(row)?;
+    let timestamps = load_workspace_timestamp_fields(row)?;
+
     Ok(WorkspaceRecord {
+        workspace_id: identity.workspace_id,
+        owner_user_id: identity.owner_user_id,
+        name: identity.name,
+        status: identity.status,
+        created_at: timestamps.created_at,
+        updated_at: timestamps.updated_at,
+        deleted_at: timestamps.deleted_at,
+    })
+}
+
+struct WorkspaceIdentityFields {
+    workspace_id: String,
+    owner_user_id: String,
+    name: String,
+    status: String,
+}
+
+fn load_workspace_identity_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceIdentityFields> {
+    Ok(WorkspaceIdentityFields {
         workspace_id: row.get(0)?,
         owner_user_id: row.get(1)?,
         name: row.get(2)?,
         status: row.get(3)?,
+    })
+}
+
+struct WorkspaceTimestampFields {
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+fn load_workspace_timestamp_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceTimestampFields> {
+    Ok(WorkspaceTimestampFields {
         created_at: parse_timestamp_for_row(row.get::<_, String>(4)?, 4)?,
         updated_at: parse_timestamp_for_row(row.get::<_, String>(5)?, 5)?,
         deleted_at: parse_optional_timestamp_for_row(row.get(6)?, 6)?,
@@ -584,9 +621,44 @@ struct SessionTimingFields {
 }
 
 fn load_session_timing_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionTimingFields> {
+    let deadlines = load_session_deadline_fields(row)?;
+    let lifecycle = load_session_lifecycle_timestamps(row)?;
+
     Ok(SessionTimingFields {
+        detach_deadline_at: deadlines.detach_deadline_at,
+        restartable_deadline_at: deadlines.restartable_deadline_at,
+        created_at: lifecycle.created_at,
+        last_activity_at: lifecycle.last_activity_at,
+        closed_at: lifecycle.closed_at,
+        deleted_at: lifecycle.deleted_at,
+    })
+}
+
+struct SessionDeadlineFields {
+    detach_deadline_at: Option<DateTime<Utc>>,
+    restartable_deadline_at: Option<DateTime<Utc>>,
+}
+
+fn load_session_deadline_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SessionDeadlineFields> {
+    Ok(SessionDeadlineFields {
         detach_deadline_at: parse_optional_timestamp_for_row(row.get(9)?, 9)?,
         restartable_deadline_at: parse_optional_timestamp_for_row(row.get(10)?, 10)?,
+    })
+}
+
+struct SessionLifecycleTimestamps {
+    created_at: DateTime<Utc>,
+    last_activity_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+fn load_session_lifecycle_timestamps(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SessionLifecycleTimestamps> {
+    Ok(SessionLifecycleTimestamps {
         created_at: parse_timestamp_for_row(row.get::<_, String>(11)?, 11)?,
         last_activity_at: parse_timestamp_for_row(row.get::<_, String>(12)?, 12)?,
         closed_at: parse_optional_timestamp_for_row(row.get(13)?, 13)?,
@@ -836,6 +908,7 @@ fn resolve_deleted_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::sleep;
 
     fn test_repository() -> SqliteWorkspaceRepository {
         let root = std::env::temp_dir().join(format!(
@@ -859,6 +932,17 @@ mod tests {
             id: subject.to_string(),
             kind: AuthenticatedPrincipalKind::BrowserSession,
             subject: subject.to_string(),
+        }
+    }
+
+    fn snapshot(id: &str, title: &str, status: SessionStatus) -> SessionSnapshot {
+        SessionSnapshot {
+            id: id.to_string(),
+            title: title.to_string(),
+            status,
+            latest_sequence: 0,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
         }
     }
 
@@ -967,5 +1051,189 @@ mod tests {
             .expect("saved session metadata should exist");
 
         assert_eq!(loaded, record);
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_reuses_workspace_and_preserves_activity_without_touch() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let snapshot = snapshot("s_persisted", "Initial title", SessionStatus::Active);
+
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, false, None)
+            .await
+            .expect("initial persistence should succeed");
+        let first = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("initial metadata should load")
+            .expect("initial metadata should exist");
+
+        repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &SessionSnapshot {
+                    title: "Renamed title".to_string(),
+                    ..snapshot.clone()
+                },
+                false,
+                None,
+            )
+            .await
+            .expect("second persistence should succeed");
+        let second = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("updated metadata should load")
+            .expect("updated metadata should exist");
+
+        assert_eq!(second.workspace_id, first.workspace_id);
+        assert_eq!(second.created_at, first.created_at);
+        assert_eq!(second.last_activity_at, first.last_activity_at);
+        assert_eq!(second.title, "Renamed title");
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_tracks_activity_close_and_delete_transitions() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let snapshot = snapshot("s_transition", "Transition", SessionStatus::Active);
+
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, false, None)
+            .await
+            .expect("initial persistence should succeed");
+        let initial = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("initial metadata should load")
+            .expect("initial metadata should exist");
+
+        sleep(Duration::from_millis(5)).await;
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, true, None)
+            .await
+            .expect("activity touch should succeed");
+        let active = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("active metadata should load")
+            .expect("active metadata should exist");
+
+        assert!(active.last_activity_at >= initial.last_activity_at);
+        assert!(active.closed_at.is_none());
+        assert!(active.deleted_at.is_none());
+
+        sleep(Duration::from_millis(5)).await;
+        repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &SessionSnapshot {
+                    status: SessionStatus::Closed,
+                    ..snapshot.clone()
+                },
+                false,
+                None,
+            )
+            .await
+            .expect("close transition should succeed");
+        let closed = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("closed metadata should load")
+            .expect("closed metadata should exist");
+
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+        assert!(closed.deleted_at.is_none());
+
+        sleep(Duration::from_millis(5)).await;
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, false, Some("deleted"))
+            .await
+            .expect("delete transition should succeed");
+        let deleted = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("deleted metadata should load")
+            .expect("deleted metadata should exist");
+
+        assert_eq!(deleted.status, "deleted");
+        assert!(deleted.closed_at.is_some());
+        assert!(deleted.deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_surfaces_build_failures_from_broken_schema() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        repository
+            .open_connection()
+            .expect("opening the test database should succeed")
+            .execute("DROP TABLE workspaces", [])
+            .expect("dropping workspaces should succeed");
+
+        let error = repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &snapshot("s_broken", "Broken", SessionStatus::Active),
+                false,
+                None,
+            )
+            .await
+            .expect_err("broken schema should fail");
+
+        assert!(
+            matches!(error, WorkspaceStoreError::Database(message) if message.contains("no such table"))
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_store_error_helpers_preserve_context() {
+        let display_error = WorkspaceStoreError::Database("db unavailable".to_string());
+        assert_eq!(display_error.to_string(), "db unavailable");
+
+        let mapped_error = database_error("write failed");
+        assert_eq!(mapped_error.to_string(), "write failed");
+
+        let parse_error = parse_timestamp("not-a-timestamp".to_string())
+            .expect_err("invalid timestamps should fail");
+        assert!(parse_error.to_string().contains("invalid timestamp"));
+
+        assert!(matches!(
+            parse_timestamp_for_row("not-a-timestamp".to_string(), 11)
+                .expect_err("invalid row timestamps should fail"),
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, _)
+        ));
+
+        assert!(matches!(
+            parse_optional_timestamp_for_row(Some("still-not-a-timestamp".to_string()), 12)
+                .expect_err("invalid optional row timestamps should fail"),
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, _)
+        ));
+
+        let join_error_value = tokio::spawn(async move { panic!("boom") })
+            .await
+            .expect_err("panicking tasks should yield join errors");
+        let join_mapped = join_error(join_error_value);
+        assert!(
+            join_mapped
+                .to_string()
+                .contains("blocking workspace task failed")
+        );
+    }
+
+    #[test]
+    fn ensure_parent_dir_accepts_parentless_paths() {
+        assert!(ensure_parent_dir(Path::new("")).is_ok());
     }
 }

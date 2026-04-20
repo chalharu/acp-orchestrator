@@ -1,8 +1,8 @@
 use super::*;
 use crate::mock_client::{ReplyFuture, ReplyResult};
-use crate::workspace_store::{SessionMetadataRecord, WorkspaceRecord};
+use crate::workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord};
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
-use acp_contracts::SessionStatus;
+use acp_contracts::{SessionSnapshot, SessionStatus};
 use async_trait::async_trait;
 use axum::{
     body::to_bytes,
@@ -1052,55 +1052,14 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
 
 #[tokio::test]
 async fn legacy_session_routes_persist_owner_scoped_metadata() {
-    let store = Arc::new(SessionStore::new(4));
-    let workspace_store = metadata_test_workspace_store();
-    let state = AppState::with_workspace_store(
-        store.clone(),
-        workspace_store.clone(),
-        Arc::new(TrackingReplyProvider {
-            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
-        }),
-    );
-    let headers = bearer_headers("alice");
+    let context = metadata_test_context().await;
+    let (created, created_metadata) = create_persisted_session(&context).await;
 
-    let created = create_session(State(state.clone()), headers.clone())
-        .await
-        .expect("session creation should succeed")
-        .1
-        .0
-        .session;
-    let user = materialized_user_for_headers(workspace_store.as_ref(), &headers).await;
-    let created_metadata = load_session_metadata_or_panic(
-        workspace_store.as_ref(),
-        &user.user_id,
-        &created.id,
-        "created",
-    )
-    .await;
-
-    assert_eq!(created_metadata.owner_user_id, user.user_id);
+    assert_eq!(created_metadata.owner_user_id, context.user.user_id);
     assert_eq!(created_metadata.status, "active");
     assert!(!created_metadata.workspace_id.is_empty());
 
-    let renamed = rename_session(
-        State(state.clone()),
-        Path(created.id.clone()),
-        headers.clone(),
-        Json(RenameSessionRequest {
-            title: "Renamed session".to_string(),
-        }),
-    )
-    .await
-    .expect("session rename should succeed")
-    .0
-    .session;
-    let renamed_metadata = load_session_metadata_or_panic(
-        workspace_store.as_ref(),
-        &user.user_id,
-        &created.id,
-        "renamed",
-    )
-    .await;
+    let (renamed, renamed_metadata) = rename_persisted_session(&context, &created.id).await;
 
     assert_eq!(renamed.title, "Renamed session");
     assert_eq!(renamed_metadata.title, "Renamed session");
@@ -1110,59 +1069,22 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
         created_metadata.last_activity_at
     );
 
-    let _ = post_message(
-        State(state.clone()),
-        Path(created.id.clone()),
-        headers.clone(),
-        Json(PromptRequest {
-            text: "hello metadata".to_string(),
-        }),
-    )
-    .await
-    .expect("prompt submission should succeed");
-    let active_metadata = load_session_metadata_or_panic(
-        workspace_store.as_ref(),
-        &user.user_id,
-        &created.id,
-        "active",
-    )
-    .await;
+    let active_metadata = post_message_and_load_metadata(&context, &created.id).await;
 
     assert_eq!(active_metadata.status, "active");
     assert!(active_metadata.last_activity_at >= renamed_metadata.last_activity_at);
 
-    let _ = close_session(
-        State(state.clone()),
-        Path(created.id.clone()),
-        headers.clone(),
-    )
-    .await
-    .expect("session close should succeed");
-    let closed_metadata = load_session_metadata_or_panic(
-        workspace_store.as_ref(),
-        &user.user_id,
-        &created.id,
-        "closed",
-    )
-    .await;
+    let closed_metadata = close_session_and_load_metadata(&context, &created.id).await;
 
     assert_eq!(closed_metadata.status, "closed");
     assert!(closed_metadata.closed_at.is_some());
 
-    let _ = delete_session(State(state), Path(created.id.clone()), headers.clone())
-        .await
-        .expect("session deletion should succeed");
-    let deleted_metadata = load_session_metadata_or_panic(
-        workspace_store.as_ref(),
-        &user.user_id,
-        &created.id,
-        "deleted",
-    )
-    .await;
+    let deleted_metadata = delete_session_and_load_metadata(&context, &created.id).await;
 
     assert_eq!(deleted_metadata.status, "deleted");
     assert!(deleted_metadata.deleted_at.is_some());
-    let snapshot_error = store
+    let snapshot_error = context
+        .store
         .session_snapshot("alice", &created.id)
         .await
         .expect_err("deleted sessions should be removed from the live store");
@@ -1291,6 +1213,149 @@ fn metadata_test_workspace_store() -> Arc<SqliteWorkspaceRepository> {
         )
         .expect("workspace repository should initialize"),
     )
+}
+
+struct MetadataTestContext {
+    store: Arc<SessionStore>,
+    workspace_store: Arc<SqliteWorkspaceRepository>,
+    state: AppState,
+    headers: HeaderMap,
+    user: UserRecord,
+}
+
+async fn metadata_test_context() -> MetadataTestContext {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_store = metadata_test_workspace_store();
+    let state = AppState::with_workspace_store(
+        store.clone(),
+        workspace_store.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let headers = bearer_headers("alice");
+    let user = materialized_user_for_headers(workspace_store.as_ref(), &headers).await;
+
+    MetadataTestContext {
+        store,
+        workspace_store,
+        state,
+        headers,
+        user,
+    }
+}
+
+async fn create_persisted_session(
+    context: &MetadataTestContext,
+) -> (SessionSnapshot, SessionMetadataRecord) {
+    let session = create_session(State(context.state.clone()), context.headers.clone())
+        .await
+        .expect("session creation should succeed")
+        .1
+        .0
+        .session;
+    let metadata = load_session_metadata_or_panic(
+        context.workspace_store.as_ref(),
+        &context.user.user_id,
+        &session.id,
+        "created",
+    )
+    .await;
+
+    (session, metadata)
+}
+
+async fn rename_persisted_session(
+    context: &MetadataTestContext,
+    session_id: &str,
+) -> (SessionSnapshot, SessionMetadataRecord) {
+    let session = rename_session(
+        State(context.state.clone()),
+        Path(session_id.to_string()),
+        context.headers.clone(),
+        Json(RenameSessionRequest {
+            title: "Renamed session".to_string(),
+        }),
+    )
+    .await
+    .expect("session rename should succeed")
+    .0
+    .session;
+    let metadata = load_session_metadata_or_panic(
+        context.workspace_store.as_ref(),
+        &context.user.user_id,
+        session_id,
+        "renamed",
+    )
+    .await;
+
+    (session, metadata)
+}
+
+async fn post_message_and_load_metadata(
+    context: &MetadataTestContext,
+    session_id: &str,
+) -> SessionMetadataRecord {
+    let _ = post_message(
+        State(context.state.clone()),
+        Path(session_id.to_string()),
+        context.headers.clone(),
+        Json(PromptRequest {
+            text: "hello metadata".to_string(),
+        }),
+    )
+    .await
+    .expect("prompt submission should succeed");
+
+    load_session_metadata_or_panic(
+        context.workspace_store.as_ref(),
+        &context.user.user_id,
+        session_id,
+        "active",
+    )
+    .await
+}
+
+async fn close_session_and_load_metadata(
+    context: &MetadataTestContext,
+    session_id: &str,
+) -> SessionMetadataRecord {
+    let _ = close_session(
+        State(context.state.clone()),
+        Path(session_id.to_string()),
+        context.headers.clone(),
+    )
+    .await
+    .expect("session close should succeed");
+
+    load_session_metadata_or_panic(
+        context.workspace_store.as_ref(),
+        &context.user.user_id,
+        session_id,
+        "closed",
+    )
+    .await
+}
+
+async fn delete_session_and_load_metadata(
+    context: &MetadataTestContext,
+    session_id: &str,
+) -> SessionMetadataRecord {
+    let _ = delete_session(
+        State(context.state.clone()),
+        Path(session_id.to_string()),
+        context.headers.clone(),
+    )
+    .await
+    .expect("session deletion should succeed");
+
+    load_session_metadata_or_panic(
+        context.workspace_store.as_ref(),
+        &context.user.user_id,
+        session_id,
+        "deleted",
+    )
+    .await
 }
 
 fn bearer_headers(owner: &str) -> HeaderMap {

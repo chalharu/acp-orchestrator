@@ -135,33 +135,74 @@ async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<(String, String)> {
     let mut stdin = take_child_stdin(&mut chat, "missing chat stdin")?;
     let session_id = wait_for_session_id(stack).await?;
 
-    stdin.write_all(b"/help\nhello from cli binary\n").await?;
-    wait_for_assistant_history_count(stack, &session_id, 1).await?;
-
-    stdin.write_all(b"verify permission\n").await?;
-    wait_for_pending_permission(stack, &session_id, "req_1").await?;
-    stdin.write_all(b"/approve req_1\n").await?;
-    wait_for_no_pending_permissions(stack, &session_id).await?;
-    wait_for_assistant_history_count(stack, &session_id, 2).await?;
-
-    stdin.write_all(b"verify permission\n").await?;
-    wait_for_pending_permission(stack, &session_id, "req_2").await?;
-    stdin.write_all(b"/deny req_2\n").await?;
-    wait_for_no_pending_permissions(stack, &session_id).await?;
-
-    stdin.write_all(b"verify cancel\n").await?;
-    wait_for_user_message(stack, &session_id, "verify cancel").await?;
-    sleep(Duration::from_millis(300)).await;
-    stdin.write_all(b"/cancel\n").await?;
-    sleep(Duration::from_millis(300)).await;
+    run_basic_chat_roundtrip(stack, &session_id, &mut stdin).await?;
+    resolve_permission_turn(
+        stack,
+        &session_id,
+        &mut stdin,
+        "req_1",
+        b"/approve req_1\n",
+        2,
+    )
+    .await?;
+    resolve_permission_turn(stack, &session_id, &mut stdin, "req_2", b"/deny req_2\n", 2).await?;
+    cancel_running_turn(stack, &session_id, &mut stdin).await?;
 
     stdin.write_all(b"/unknown\n/quit\n").await?;
     drop(stdin);
 
+    Ok((session_id, wait_for_chat_exit(chat).await?))
+}
+
+async fn run_basic_chat_roundtrip(
+    stack: &TestStack,
+    session_id: &str,
+    stdin: &mut ChildStdin,
+) -> Result<()> {
+    stdin.write_all(b"/help\nhello from cli binary\n").await?;
+    wait_for_assistant_history_count(stack, session_id, 1).await
+}
+
+async fn resolve_permission_turn(
+    stack: &TestStack,
+    session_id: &str,
+    stdin: &mut ChildStdin,
+    request_id: &str,
+    resolution_command: &[u8],
+    expected_assistant_count: usize,
+) -> Result<()> {
+    stdin.write_all(b"verify permission\n").await?;
+    wait_for_pending_permission(stack, session_id, request_id).await?;
+    stdin.write_all(resolution_command).await?;
+    wait_for_no_pending_permissions(stack, session_id).await?;
+    wait_for_assistant_history_count(stack, session_id, expected_assistant_count).await
+}
+
+async fn cancel_running_turn(
+    stack: &TestStack,
+    session_id: &str,
+    stdin: &mut ChildStdin,
+) -> Result<()> {
+    stdin.write_all(b"verify cancel\n").await?;
+    wait_for_user_message(stack, session_id, "verify cancel").await?;
+    sleep(cancel_roundtrip_delay()).await;
+    stdin.write_all(b"/cancel\n").await?;
+    sleep(cancel_roundtrip_delay()).await;
+    Ok(())
+}
+
+fn cancel_roundtrip_delay() -> Duration {
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        Duration::from_millis(1_200)
+    } else {
+        Duration::from_millis(600)
+    }
+}
+
+async fn wait_for_chat_exit(chat: Child) -> Result<String> {
     let output = chat.wait_with_output().await?;
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout)?;
-    Ok((session_id, stdout))
+    String::from_utf8(output.stdout).map_err(Into::into)
 }
 
 fn assert_chat_output(output: &str) {

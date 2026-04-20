@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_session_snapshot_tracks_activity_close_and_delete_transitions() {
+    async fn persist_session_snapshot_updates_activity_without_setting_terminal_timestamps() {
         let repository = test_repository();
         let user = repository
             .materialize_user(&bearer_principal("developer"))
@@ -1129,6 +1129,21 @@ mod tests {
         assert!(active.last_activity_at >= initial.last_activity_at);
         assert!(active.closed_at.is_none());
         assert!(active.deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_records_close_and_delete_transitions() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let snapshot = snapshot("s_terminal", "Transition", SessionStatus::Active);
+
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, false, None)
+            .await
+            .expect("initial persistence should succeed");
 
         sleep(Duration::from_millis(5)).await;
         repository

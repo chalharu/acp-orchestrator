@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{cmp::Reverse, collections::HashMap, sync::Arc};
 
 use acp_contracts::{
     ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
@@ -459,7 +459,7 @@ impl SessionStore {
             return;
         }
 
-        closed_sessions.sort_by(|left, right| right.1.cmp(&left.1));
+        closed_sessions.sort_by_key(|(_, closed_at)| Reverse(*closed_at));
         let stale_session_ids = closed_sessions
             .into_iter()
             .skip(self.closed_session_limit)

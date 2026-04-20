@@ -19,6 +19,134 @@ const DURABLE_BEARER_PRINCIPAL_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x402dbecf7ab1458ca5dc1548a2597cec);
 const DURABLE_BROWSER_SESSION_PRINCIPAL_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x6dbdfc9664a54920ac2086040c3a8232);
+const WORKSPACE_STORE_SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    principal_kind TEXT NOT NULL,
+    principal_subject TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE(principal_kind, principal_subject)
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    upstream_url TEXT,
+    default_ref TEXT,
+    credential_reference_id TEXT,
+    status TEXT NOT NULL,
+    bootstrap_kind TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workspaces_owner_bootstrap_kind_idx
+    ON workspaces(owner_user_id, bootstrap_kind)
+    WHERE bootstrap_kind IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    checkout_relpath TEXT,
+    checkout_ref TEXT,
+    checkout_commit_sha TEXT,
+    failure_reason TEXT,
+    detach_deadline_at TEXT,
+    restartable_deadline_at TEXT,
+    created_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    closed_at TEXT,
+    deleted_at TEXT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id),
+    FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS sessions_owner_user_id_idx
+    ON sessions(owner_user_id);
+
+CREATE INDEX IF NOT EXISTS sessions_workspace_id_idx
+    ON sessions(workspace_id);
+"#;
+const LOAD_BOOTSTRAP_WORKSPACE_SQL: &str = r#"
+SELECT workspace_id, owner_user_id, name, status, created_at, updated_at, deleted_at
+FROM workspaces
+WHERE owner_user_id = ?1 AND bootstrap_kind = ?2
+"#;
+const LOAD_SESSION_METADATA_SQL: &str = r#"
+SELECT
+    session_id,
+    workspace_id,
+    owner_user_id,
+    title,
+    status,
+    checkout_relpath,
+    checkout_ref,
+    checkout_commit_sha,
+    failure_reason,
+    detach_deadline_at,
+    restartable_deadline_at,
+    created_at,
+    last_activity_at,
+    closed_at,
+    deleted_at
+FROM sessions
+WHERE owner_user_id = ?1 AND session_id = ?2
+"#;
+const INSERT_BOOTSTRAP_WORKSPACE_SQL: &str = r#"
+INSERT INTO workspaces (
+    workspace_id,
+    owner_user_id,
+    name,
+    upstream_url,
+    default_ref,
+    credential_reference_id,
+    status,
+    bootstrap_kind,
+    created_at,
+    updated_at,
+    deleted_at
+) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5, ?6, ?7, NULL)
+"#;
+const UPSERT_SESSION_METADATA_SQL: &str = r#"
+INSERT INTO sessions (
+    session_id,
+    workspace_id,
+    owner_user_id,
+    title,
+    status,
+    checkout_relpath,
+    checkout_ref,
+    checkout_commit_sha,
+    failure_reason,
+    detach_deadline_at,
+    restartable_deadline_at,
+    created_at,
+    last_activity_at,
+    closed_at,
+    deleted_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+ON CONFLICT(session_id) DO UPDATE SET
+    workspace_id = excluded.workspace_id,
+    owner_user_id = excluded.owner_user_id,
+    title = excluded.title,
+    status = excluded.status,
+    checkout_relpath = excluded.checkout_relpath,
+    checkout_ref = excluded.checkout_ref,
+    checkout_commit_sha = excluded.checkout_commit_sha,
+    failure_reason = excluded.failure_reason,
+    detach_deadline_at = excluded.detach_deadline_at,
+    restartable_deadline_at = excluded.restartable_deadline_at,
+    last_activity_at = excluded.last_activity_at,
+    closed_at = excluded.closed_at,
+    deleted_at = excluded.deleted_at
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
@@ -133,63 +261,7 @@ impl SqliteWorkspaceRepository {
     fn initialize(&self) -> Result<(), WorkspaceStoreError> {
         let connection = self.open_connection()?;
         connection
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    principal_kind TEXT NOT NULL,
-                    principal_subject TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    UNIQUE(principal_kind, principal_subject)
-                );
-
-                CREATE TABLE IF NOT EXISTS workspaces (
-                    workspace_id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    upstream_url TEXT,
-                    default_ref TEXT,
-                    credential_reference_id TEXT,
-                    status TEXT NOT NULL,
-                    bootstrap_kind TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    deleted_at TEXT,
-                    FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
-                );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS workspaces_owner_bootstrap_kind_idx
-                    ON workspaces(owner_user_id, bootstrap_kind)
-                    WHERE bootstrap_kind IS NOT NULL;
-
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL,
-                    owner_user_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    checkout_relpath TEXT,
-                    checkout_ref TEXT,
-                    checkout_commit_sha TEXT,
-                    failure_reason TEXT,
-                    detach_deadline_at TEXT,
-                    restartable_deadline_at TEXT,
-                    created_at TEXT NOT NULL,
-                    last_activity_at TEXT NOT NULL,
-                    closed_at TEXT,
-                    deleted_at TEXT,
-                    FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id),
-                    FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS sessions_owner_user_id_idx
-                    ON sessions(owner_user_id);
-
-                CREATE INDEX IF NOT EXISTS sessions_workspace_id_idx
-                    ON sessions(workspace_id);
-                "#,
-            )
+            .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
             .map_err(database_error)?;
         Ok(())
     }
@@ -292,66 +364,14 @@ impl SqliteWorkspaceRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let existing = load_session_metadata_record(&tx, owner_user_id, &snapshot.id)?;
-        let now = Utc::now();
-        let workspace_id = match existing.as_ref() {
-            Some(record) => record.workspace_id.clone(),
-            None => bootstrap_workspace_in_transaction(&tx, owner_user_id)?.workspace_id,
-        };
-        let created_at = existing
-            .as_ref()
-            .map(|record| record.created_at)
-            .unwrap_or(now);
-        let last_activity_at = if touch_activity {
-            now
-        } else {
-            existing
-                .as_ref()
-                .map(|record| record.last_activity_at)
-                .unwrap_or(created_at)
-        };
-        let status = status_override
-            .unwrap_or(snapshot_status_name(&snapshot.status))
-            .to_string();
-        let closed_at = match status.as_str() {
-            "closed" | "deleted" => existing
-                .as_ref()
-                .and_then(|record| record.closed_at)
-                .or(Some(now)),
-            _ => None,
-        };
-        let deleted_at = match status.as_str() {
-            "deleted" => Some(now),
-            _ => existing.as_ref().and_then(|record| record.deleted_at),
-        };
-        let record = SessionMetadataRecord {
-            session_id: snapshot.id.clone(),
-            workspace_id,
-            owner_user_id: owner_user_id.to_string(),
-            title: snapshot.title.clone(),
-            status,
-            checkout_relpath: existing
-                .as_ref()
-                .and_then(|record| record.checkout_relpath.clone()),
-            checkout_ref: existing
-                .as_ref()
-                .and_then(|record| record.checkout_ref.clone()),
-            checkout_commit_sha: existing
-                .as_ref()
-                .and_then(|record| record.checkout_commit_sha.clone()),
-            failure_reason: existing
-                .as_ref()
-                .and_then(|record| record.failure_reason.clone()),
-            detach_deadline_at: existing
-                .as_ref()
-                .and_then(|record| record.detach_deadline_at),
-            restartable_deadline_at: existing
-                .as_ref()
-                .and_then(|record| record.restartable_deadline_at),
-            created_at,
-            last_activity_at,
-            closed_at,
-            deleted_at,
-        };
+        let record = build_session_metadata_record(
+            &tx,
+            owner_user_id,
+            snapshot,
+            touch_activity,
+            status_override,
+            existing.as_ref(),
+        )?;
         upsert_session_metadata(&tx, &record)?;
         tx.commit().map_err(database_error)?;
         Ok(())
@@ -480,24 +500,24 @@ fn load_bootstrap_workspace(
 ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
     connection
         .query_row(
-            "SELECT workspace_id, owner_user_id, name, status, created_at, updated_at, deleted_at
-             FROM workspaces
-             WHERE owner_user_id = ?1 AND bootstrap_kind = ?2",
+            LOAD_BOOTSTRAP_WORKSPACE_SQL,
             params![owner_user_id, BOOTSTRAP_WORKSPACE_KIND],
-            |row| {
-                Ok(WorkspaceRecord {
-                    workspace_id: row.get(0)?,
-                    owner_user_id: row.get(1)?,
-                    name: row.get(2)?,
-                    status: row.get(3)?,
-                    created_at: parse_timestamp_for_row(row.get::<_, String>(4)?, 4)?,
-                    updated_at: parse_timestamp_for_row(row.get::<_, String>(5)?, 5)?,
-                    deleted_at: parse_optional_timestamp_for_row(row.get(6)?, 6)?,
-                })
-            },
+            load_workspace_row,
         )
         .optional()
         .map_err(database_error)
+}
+
+fn load_workspace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
+    Ok(WorkspaceRecord {
+        workspace_id: row.get(0)?,
+        owner_user_id: row.get(1)?,
+        name: row.get(2)?,
+        status: row.get(3)?,
+        created_at: parse_timestamp_for_row(row.get::<_, String>(4)?, 4)?,
+        updated_at: parse_timestamp_for_row(row.get::<_, String>(5)?, 5)?,
+        deleted_at: parse_optional_timestamp_for_row(row.get(6)?, 6)?,
+    })
 }
 
 fn load_session_metadata_record(
@@ -507,24 +527,7 @@ fn load_session_metadata_record(
 ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
     connection
         .query_row(
-            "SELECT
-                session_id,
-                workspace_id,
-                owner_user_id,
-                title,
-                status,
-                checkout_relpath,
-                checkout_ref,
-                checkout_commit_sha,
-                failure_reason,
-                detach_deadline_at,
-                restartable_deadline_at,
-                created_at,
-                last_activity_at,
-                closed_at,
-                deleted_at
-             FROM sessions
-             WHERE owner_user_id = ?1 AND session_id = ?2",
+            LOAD_SESSION_METADATA_SQL,
             params![owner_user_id, session_id],
             load_session_row,
         )
@@ -533,16 +536,55 @@ fn load_session_metadata_record(
 }
 
 fn load_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMetadataRecord> {
+    let checkout = load_session_checkout_fields(row)?;
+    let timing = load_session_timing_fields(row)?;
+
     Ok(SessionMetadataRecord {
         session_id: row.get(0)?,
         workspace_id: row.get(1)?,
         owner_user_id: row.get(2)?,
         title: row.get(3)?,
         status: row.get(4)?,
-        checkout_relpath: row.get(5)?,
-        checkout_ref: row.get(6)?,
-        checkout_commit_sha: row.get(7)?,
+        checkout_relpath: checkout.relpath,
+        checkout_ref: checkout.reference,
+        checkout_commit_sha: checkout.commit_sha,
         failure_reason: row.get(8)?,
+        detach_deadline_at: timing.detach_deadline_at,
+        restartable_deadline_at: timing.restartable_deadline_at,
+        created_at: timing.created_at,
+        last_activity_at: timing.last_activity_at,
+        closed_at: timing.closed_at,
+        deleted_at: timing.deleted_at,
+    })
+}
+
+struct SessionCheckoutFields {
+    relpath: Option<String>,
+    reference: Option<String>,
+    commit_sha: Option<String>,
+}
+
+fn load_session_checkout_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SessionCheckoutFields> {
+    Ok(SessionCheckoutFields {
+        relpath: row.get(5)?,
+        reference: row.get(6)?,
+        commit_sha: row.get(7)?,
+    })
+}
+
+struct SessionTimingFields {
+    detach_deadline_at: Option<DateTime<Utc>>,
+    restartable_deadline_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    last_activity_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+fn load_session_timing_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionTimingFields> {
+    Ok(SessionTimingFields {
         detach_deadline_at: parse_optional_timestamp_for_row(row.get(9)?, 9)?,
         restartable_deadline_at: parse_optional_timestamp_for_row(row.get(10)?, 10)?,
         created_at: parse_timestamp_for_row(row.get::<_, String>(11)?, 11)?,
@@ -642,19 +684,7 @@ fn bootstrap_workspace_in_transaction(
 
     connection
         .execute(
-            "INSERT INTO workspaces (
-                workspace_id,
-                owner_user_id,
-                name,
-                upstream_url,
-                default_ref,
-                credential_reference_id,
-                status,
-                bootstrap_kind,
-                created_at,
-                updated_at,
-                deleted_at
-            ) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5, ?6, ?7, NULL)",
+            INSERT_BOOTSTRAP_WORKSPACE_SQL,
             params![
                 workspace.workspace_id,
                 workspace.owner_user_id,
@@ -676,37 +706,7 @@ fn upsert_session_metadata(
 ) -> Result<(), WorkspaceStoreError> {
     connection
         .execute(
-            "INSERT INTO sessions (
-                session_id,
-                workspace_id,
-                owner_user_id,
-                title,
-                status,
-                checkout_relpath,
-                checkout_ref,
-                checkout_commit_sha,
-                failure_reason,
-                detach_deadline_at,
-                restartable_deadline_at,
-                created_at,
-                last_activity_at,
-                closed_at,
-                deleted_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-            ON CONFLICT(session_id) DO UPDATE SET
-                workspace_id = excluded.workspace_id,
-                owner_user_id = excluded.owner_user_id,
-                title = excluded.title,
-                status = excluded.status,
-                checkout_relpath = excluded.checkout_relpath,
-                checkout_ref = excluded.checkout_ref,
-                checkout_commit_sha = excluded.checkout_commit_sha,
-                failure_reason = excluded.failure_reason,
-                detach_deadline_at = excluded.detach_deadline_at,
-                restartable_deadline_at = excluded.restartable_deadline_at,
-                last_activity_at = excluded.last_activity_at,
-                closed_at = excluded.closed_at,
-                deleted_at = excluded.deleted_at",
+            UPSERT_SESSION_METADATA_SQL,
             params![
                 record.session_id,
                 record.workspace_id,
@@ -736,6 +736,103 @@ fn snapshot_status_name(status: &SessionStatus) -> &'static str {
     }
 }
 
+struct SessionLifecycleState {
+    status: String,
+    created_at: DateTime<Utc>,
+    last_activity_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+fn build_session_metadata_record(
+    connection: &Connection,
+    owner_user_id: &str,
+    snapshot: &SessionSnapshot,
+    touch_activity: bool,
+    status_override: Option<&str>,
+    existing: Option<&SessionMetadataRecord>,
+) -> Result<SessionMetadataRecord, WorkspaceStoreError> {
+    let lifecycle = resolve_session_lifecycle(snapshot, touch_activity, status_override, existing);
+
+    Ok(SessionMetadataRecord {
+        session_id: snapshot.id.clone(),
+        workspace_id: resolve_workspace_id(connection, owner_user_id, existing)?,
+        owner_user_id: owner_user_id.to_string(),
+        title: snapshot.title.clone(),
+        status: lifecycle.status,
+        checkout_relpath: existing.and_then(|record| record.checkout_relpath.clone()),
+        checkout_ref: existing.and_then(|record| record.checkout_ref.clone()),
+        checkout_commit_sha: existing.and_then(|record| record.checkout_commit_sha.clone()),
+        failure_reason: existing.and_then(|record| record.failure_reason.clone()),
+        detach_deadline_at: existing.and_then(|record| record.detach_deadline_at),
+        restartable_deadline_at: existing.and_then(|record| record.restartable_deadline_at),
+        created_at: lifecycle.created_at,
+        last_activity_at: lifecycle.last_activity_at,
+        closed_at: lifecycle.closed_at,
+        deleted_at: lifecycle.deleted_at,
+    })
+}
+
+fn resolve_workspace_id(
+    connection: &Connection,
+    owner_user_id: &str,
+    existing: Option<&SessionMetadataRecord>,
+) -> Result<String, WorkspaceStoreError> {
+    match existing {
+        Some(record) => Ok(record.workspace_id.clone()),
+        None => Ok(bootstrap_workspace_in_transaction(connection, owner_user_id)?.workspace_id),
+    }
+}
+
+fn resolve_session_lifecycle(
+    snapshot: &SessionSnapshot,
+    touch_activity: bool,
+    status_override: Option<&str>,
+    existing: Option<&SessionMetadataRecord>,
+) -> SessionLifecycleState {
+    let now = Utc::now();
+    let created_at = existing.map(|record| record.created_at).unwrap_or(now);
+    let status = status_override
+        .unwrap_or(snapshot_status_name(&snapshot.status))
+        .to_string();
+
+    SessionLifecycleState {
+        last_activity_at: if touch_activity {
+            now
+        } else {
+            existing
+                .map(|record| record.last_activity_at)
+                .unwrap_or(created_at)
+        },
+        closed_at: resolve_closed_at(existing, &status, now),
+        deleted_at: resolve_deleted_at(existing, &status, now),
+        status,
+        created_at,
+    }
+}
+
+fn resolve_closed_at(
+    existing: Option<&SessionMetadataRecord>,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    match status {
+        "closed" | "deleted" => existing.and_then(|record| record.closed_at).or(Some(now)),
+        _ => None,
+    }
+}
+
+fn resolve_deleted_at(
+    existing: Option<&SessionMetadataRecord>,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    match status {
+        "deleted" => Some(now),
+        _ => existing.and_then(|record| record.deleted_at),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +850,14 @@ mod tests {
         AuthenticatedPrincipal {
             id: subject.to_string(),
             kind: AuthenticatedPrincipalKind::Bearer,
+            subject: subject.to_string(),
+        }
+    }
+
+    fn browser_principal(subject: &str) -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            id: subject.to_string(),
+            kind: AuthenticatedPrincipalKind::BrowserSession,
             subject: subject.to_string(),
         }
     }
@@ -798,6 +903,26 @@ mod tests {
         assert_eq!(second.workspace_id, first.workspace_id);
         assert_eq!(second.owner_user_id, user.user_id);
         assert_eq!(second.name, BOOTSTRAP_WORKSPACE_NAME);
+    }
+
+    #[tokio::test]
+    async fn browser_principal_materialization_hashes_the_cookie_subject() {
+        let repository = test_repository();
+        let principal = browser_principal("11111111-1111-4111-8111-111111111111");
+
+        let first = repository
+            .materialize_user(&principal)
+            .await
+            .expect("first browser materialization should succeed");
+        let second = repository
+            .materialize_user(&principal)
+            .await
+            .expect("second browser materialization should succeed");
+
+        assert_eq!(first.user_id, second.user_id);
+        assert_eq!(first.principal_kind, "browser_session");
+        assert_eq!(first.principal_subject, second.principal_subject);
+        assert_ne!(first.principal_subject, principal.subject);
     }
 
     #[tokio::test]

@@ -1,6 +1,9 @@
 use super::*;
 use crate::mock_client::{ReplyFuture, ReplyResult};
+use crate::workspace_store::{SessionMetadataRecord, WorkspaceRecord};
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
+use acp_contracts::SessionStatus;
+use async_trait::async_trait;
 use axum::{
     body::to_bytes,
     http::{
@@ -1050,17 +1053,7 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
 #[tokio::test]
 async fn legacy_session_routes_persist_owner_scoped_metadata() {
     let store = Arc::new(SessionStore::new(4));
-    let workspace_store = Arc::new(
-        SqliteWorkspaceRepository::new(
-            std::env::temp_dir()
-                .join(format!(
-                    "acp-server-route-metadata-{}",
-                    uuid::Uuid::new_v4().simple()
-                ))
-                .join("db.sqlite"),
-        )
-        .expect("workspace repository should initialize"),
-    );
+    let workspace_store = metadata_test_workspace_store();
     let state = AppState::with_workspace_store(
         store.clone(),
         workspace_store.clone(),
@@ -1068,11 +1061,7 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
     );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
+    let headers = bearer_headers("alice");
 
     let created = create_session(State(state.clone()), headers.clone())
         .await
@@ -1080,16 +1069,14 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
         .1
         .0
         .session;
-    let principal = authorize_request(&headers, true).expect("headers should authorize");
-    let user = workspace_store
-        .materialize_user(&principal)
-        .await
-        .expect("principal materialization should be stable");
-    let created_metadata = workspace_store
-        .load_session_metadata(&user.user_id, &created.id)
-        .await
-        .expect("created session metadata should load")
-        .expect("created session metadata should exist");
+    let user = materialized_user_for_headers(workspace_store.as_ref(), &headers).await;
+    let created_metadata = load_session_metadata_or_panic(
+        workspace_store.as_ref(),
+        &user.user_id,
+        &created.id,
+        "created",
+    )
+    .await;
 
     assert_eq!(created_metadata.owner_user_id, user.user_id);
     assert_eq!(created_metadata.status, "active");
@@ -1107,11 +1094,13 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
     .expect("session rename should succeed")
     .0
     .session;
-    let renamed_metadata = workspace_store
-        .load_session_metadata(&user.user_id, &created.id)
-        .await
-        .expect("renamed session metadata should load")
-        .expect("renamed session metadata should exist");
+    let renamed_metadata = load_session_metadata_or_panic(
+        workspace_store.as_ref(),
+        &user.user_id,
+        &created.id,
+        "renamed",
+    )
+    .await;
 
     assert_eq!(renamed.title, "Renamed session");
     assert_eq!(renamed_metadata.title, "Renamed session");
@@ -1131,11 +1120,13 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
     )
     .await
     .expect("prompt submission should succeed");
-    let active_metadata = workspace_store
-        .load_session_metadata(&user.user_id, &created.id)
-        .await
-        .expect("active session metadata should load")
-        .expect("active session metadata should exist");
+    let active_metadata = load_session_metadata_or_panic(
+        workspace_store.as_ref(),
+        &user.user_id,
+        &created.id,
+        "active",
+    )
+    .await;
 
     assert_eq!(active_metadata.status, "active");
     assert!(active_metadata.last_activity_at >= renamed_metadata.last_activity_at);
@@ -1147,11 +1138,13 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
     )
     .await
     .expect("session close should succeed");
-    let closed_metadata = workspace_store
-        .load_session_metadata(&user.user_id, &created.id)
-        .await
-        .expect("closed session metadata should load")
-        .expect("closed session metadata should exist");
+    let closed_metadata = load_session_metadata_or_panic(
+        workspace_store.as_ref(),
+        &user.user_id,
+        &created.id,
+        "closed",
+    )
+    .await;
 
     assert_eq!(closed_metadata.status, "closed");
     assert!(closed_metadata.closed_at.is_some());
@@ -1159,11 +1152,13 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
     let _ = delete_session(State(state), Path(created.id.clone()), headers.clone())
         .await
         .expect("session deletion should succeed");
-    let deleted_metadata = workspace_store
-        .load_session_metadata(&user.user_id, &created.id)
-        .await
-        .expect("deleted session metadata should load")
-        .expect("deleted session metadata should exist");
+    let deleted_metadata = load_session_metadata_or_panic(
+        workspace_store.as_ref(),
+        &user.user_id,
+        &created.id,
+        "deleted",
+    )
+    .await;
 
     assert_eq!(deleted_metadata.status, "deleted");
     assert!(deleted_metadata.deleted_at.is_some());
@@ -1172,6 +1167,175 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
         .await
         .expect_err("deleted sessions should be removed from the live store");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+#[tokio::test]
+async fn create_session_scrubs_workspace_store_failures() {
+    let state = AppState::with_workspace_store(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(FailingWorkspaceStore::new("db path leaked")),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+
+    let error = create_session(State(state), bearer_headers("alice"))
+        .await
+        .expect_err("workspace store failures should surface as internal errors");
+
+    assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
+}
+
+#[tokio::test]
+async fn rename_session_keeps_working_when_workspace_materialization_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    let state = AppState::with_workspace_store(
+        store,
+        Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+
+    let renamed = rename_session(
+        State(state),
+        Path(session.id.clone()),
+        bearer_headers("alice"),
+        Json(RenameSessionRequest {
+            title: "Renamed while metadata failed".to_string(),
+        }),
+    )
+    .await
+    .expect("live session rename should still succeed");
+
+    assert_eq!(renamed.0.session.title, "Renamed while metadata failed");
+}
+
+#[tokio::test]
+async fn post_message_keeps_working_when_workspace_materialization_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    let response = post_message(
+        State(failing_workspace_state(store)),
+        Path(session.id.clone()),
+        bearer_headers("alice"),
+        Json(PromptRequest {
+            text: "hello from a degraded metadata store".to_string(),
+        }),
+    )
+    .await
+    .expect("live prompt submission should still succeed");
+
+    assert!(response.0.accepted);
+}
+
+#[tokio::test]
+async fn close_session_keeps_working_when_workspace_materialization_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    let response = close_session(
+        State(failing_workspace_state(store)),
+        Path(session.id.clone()),
+        bearer_headers("alice"),
+    )
+    .await
+    .expect("live session close should still succeed");
+
+    assert_eq!(response.0.session.status, SessionStatus::Closed);
+}
+
+#[tokio::test]
+async fn delete_session_keeps_working_when_workspace_materialization_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    let state = failing_workspace_state(store.clone());
+
+    let response = delete_session(
+        State(state),
+        Path(session.id.clone()),
+        bearer_headers("alice"),
+    )
+    .await
+    .expect("live session deletion should still succeed");
+
+    assert!(response.0.deleted);
+    let snapshot_error = store
+        .session_snapshot("alice", &session.id)
+        .await
+        .expect_err("deleted sessions should be removed from the live store");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+fn metadata_test_workspace_store() -> Arc<SqliteWorkspaceRepository> {
+    Arc::new(
+        SqliteWorkspaceRepository::new(
+            std::env::temp_dir()
+                .join(format!(
+                    "acp-server-route-metadata-{}",
+                    uuid::Uuid::new_v4().simple()
+                ))
+                .join("db.sqlite"),
+        )
+        .expect("workspace repository should initialize"),
+    )
+}
+
+fn bearer_headers(owner: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {owner}")
+            .parse()
+            .expect("authorization should parse"),
+    );
+    headers
+}
+
+async fn materialized_user_for_headers(
+    workspace_store: &SqliteWorkspaceRepository,
+    headers: &HeaderMap,
+) -> UserRecord {
+    let principal = authorize_request(headers, true).expect("headers should authorize");
+    workspace_store
+        .materialize_user(&principal)
+        .await
+        .expect("principal materialization should be stable")
+}
+
+async fn load_session_metadata_or_panic(
+    workspace_store: &SqliteWorkspaceRepository,
+    user_id: &str,
+    session_id: &str,
+    stage: &str,
+) -> SessionMetadataRecord {
+    workspace_store
+        .load_session_metadata(user_id, session_id)
+        .await
+        .unwrap_or_else(|_| panic!("{stage} session metadata should load"))
+        .unwrap_or_else(|| panic!("{stage} session metadata should exist"))
+}
+
+fn failing_workspace_state(store: Arc<SessionStore>) -> AppState {
+    AppState::with_workspace_store(
+        store,
+        Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    )
 }
 
 #[tokio::test]
@@ -1286,6 +1450,61 @@ impl ReplyProvider for TrackingReplyProvider {
             .lock()
             .expect("cleanup tracking should not poison")
             .push(session_id.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct FailingWorkspaceStore {
+    error: WorkspaceStoreError,
+}
+
+impl FailingWorkspaceStore {
+    fn new(message: &str) -> Self {
+        Self {
+            error: WorkspaceStoreError::Database(message.to_string()),
+        }
+    }
+}
+
+#[async_trait]
+impl WorkspaceStorePort for FailingWorkspaceStore {
+    async fn materialize_user(
+        &self,
+        _principal: &AuthenticatedPrincipal,
+    ) -> Result<UserRecord, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn bootstrap_workspace(
+        &self,
+        _owner_user_id: &str,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn save_session_metadata(
+        &self,
+        _record: &SessionMetadataRecord,
+    ) -> Result<(), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn persist_session_snapshot(
+        &self,
+        _owner_user_id: &str,
+        _snapshot: &SessionSnapshot,
+        _touch_activity: bool,
+        _status_override: Option<&str>,
+    ) -> Result<(), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn load_session_metadata(
+        &self,
+        _owner_user_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
+        Err(self.error.clone())
     }
 }
 

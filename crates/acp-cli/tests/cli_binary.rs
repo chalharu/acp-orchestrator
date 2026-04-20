@@ -1,7 +1,7 @@
 use std::{io, path::PathBuf, process::Stdio, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
-use acp_contracts::{MessageRole, SessionHistoryResponse};
+use acp_contracts::{MessageRole, SessionHistoryResponse, SessionListResponse, SessionResponse};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
 use reqwest::Client;
@@ -129,52 +129,39 @@ impl Drop for TestStack {
     }
 }
 
-const CHAT_SCRIPT: [(&[u8], u64); 8] = [
-    (b"\n/help\nhello from cli binary\n", 600),
-    (b"verify permission\n", 300),
-    (b"/approve req_1\n", 300),
-    (b"verify permission\n", 300),
-    (b"/deny req_2\n", 300),
-    (b"verify cancel\n", 300),
-    (b"/cancel\n", 300),
-    (b"/unknown\n/quit\n", 0),
-];
-
 async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<(String, String)> {
     let mut chat =
         spawn_interactive_command(["chat", "--new", "--server-url", stack.backend_url.as_str()])?;
     let mut stdin = take_child_stdin(&mut chat, "missing chat stdin")?;
-    write_chat_script(&mut stdin).await?;
+    let session_id = wait_for_session_id(stack).await?;
+
+    stdin.write_all(b"/help\nhello from cli binary\n").await?;
+    wait_for_assistant_history_count(stack, &session_id, 1).await?;
+
+    stdin.write_all(b"verify permission\n").await?;
+    wait_for_pending_permission(stack, &session_id, "req_1").await?;
+    stdin.write_all(b"/approve req_1\n").await?;
+    wait_for_no_pending_permissions(stack, &session_id).await?;
+    wait_for_assistant_history_count(stack, &session_id, 2).await?;
+
+    stdin.write_all(b"verify permission\n").await?;
+    wait_for_pending_permission(stack, &session_id, "req_2").await?;
+    stdin.write_all(b"/deny req_2\n").await?;
+    wait_for_no_pending_permissions(stack, &session_id).await?;
+
+    stdin.write_all(b"verify cancel\n").await?;
+    wait_for_user_message(stack, &session_id, "verify cancel").await?;
+    sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"/cancel\n").await?;
+    sleep(Duration::from_millis(300)).await;
+
+    stdin.write_all(b"/unknown\n/quit\n").await?;
     drop(stdin);
 
     let output = chat.wait_with_output().await?;
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
-    Ok((extract_session_id(&stdout)?, stdout))
-}
-
-async fn write_chat_script(stdin: &mut ChildStdin) -> Result<()> {
-    for (input, delay_ms) in CHAT_SCRIPT {
-        stdin.write_all(input).await?;
-        sleep(chat_script_delay(delay_ms)).await;
-    }
-    Ok(())
-}
-
-fn chat_script_delay(delay_ms: u64) -> Duration {
-    let scaled_delay_ms = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
-        delay_ms.saturating_mul(5)
-    } else {
-        delay_ms.saturating_mul(3)
-    };
-    Duration::from_millis(scaled_delay_ms)
-}
-
-fn extract_session_id(output: &str) -> Result<String> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("session: ").map(str::to_string))
-        .ok_or_else(|| io::Error::other("missing session id in chat output").into())
+    Ok((session_id, stdout))
 }
 
 fn assert_chat_output(output: &str) {
@@ -284,6 +271,127 @@ async fn close_session_and_reopen_read_only(stack: &TestStack, session_id: &str)
     assert!(read_only_stdout.contains("[user] hello from cli binary"));
     assert!(read_only_stdout.contains("[assistant] mock assistant:"));
     Ok(())
+}
+
+async fn wait_for_session_id(stack: &TestStack) -> Result<String> {
+    for _ in 0..200 {
+        let response = fetch_session_list(&stack.client, &stack.backend_url).await?;
+        if let Some(session) = response.sessions.first() {
+            return Ok(session.id.clone());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(io::Error::other("timed out waiting for the backend session list").into())
+}
+
+async fn wait_for_assistant_history_count(
+    stack: &TestStack,
+    session_id: &str,
+    expected_count: usize,
+) -> Result<()> {
+    for _ in 0..200 {
+        let history = fetch_history(&stack.client, &stack.backend_url, session_id).await?;
+        let assistant_count = history
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message.role, MessageRole::Assistant)
+                    && message.text.starts_with("mock assistant:")
+            })
+            .count();
+        if assistant_count >= expected_count {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(io::Error::other("timed out waiting for assistant history").into())
+}
+
+async fn wait_for_pending_permission(
+    stack: &TestStack,
+    session_id: &str,
+    request_id: &str,
+) -> Result<()> {
+    for _ in 0..200 {
+        let session = fetch_session(&stack.client, &stack.backend_url, session_id).await?;
+        if session
+            .session
+            .pending_permissions
+            .iter()
+            .any(|request| request.request_id == request_id)
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(io::Error::other(format!(
+        "timed out waiting for pending permission {request_id}"
+    ))
+    .into())
+}
+
+async fn wait_for_no_pending_permissions(stack: &TestStack, session_id: &str) -> Result<()> {
+    for _ in 0..200 {
+        let session = fetch_session(&stack.client, &stack.backend_url, session_id).await?;
+        if session.session.pending_permissions.is_empty() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(io::Error::other("timed out waiting for pending permissions to clear").into())
+}
+
+async fn wait_for_user_message(
+    stack: &TestStack,
+    session_id: &str,
+    expected_text: &str,
+) -> Result<()> {
+    for _ in 0..200 {
+        let history = fetch_history(&stack.client, &stack.backend_url, session_id).await?;
+        if history.messages.iter().any(|message| {
+            matches!(message.role, MessageRole::User) && message.text == expected_text
+        }) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(io::Error::other(format!(
+        "timed out waiting for user message {expected_text}"
+    ))
+    .into())
+}
+
+async fn fetch_session_list(client: &Client, backend_url: &str) -> Result<SessionListResponse> {
+    client
+        .get(format!("{backend_url}/api/v1/sessions"))
+        .bearer_auth("developer")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
+}
+
+async fn fetch_session(
+    client: &Client,
+    backend_url: &str,
+    session_id: &str,
+) -> Result<SessionResponse> {
+    client
+        .get(format!("{backend_url}/api/v1/sessions/{session_id}"))
+        .bearer_auth("developer")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
 }
 
 async fn fetch_history(

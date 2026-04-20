@@ -95,6 +95,7 @@ async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()>
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -123,6 +124,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;

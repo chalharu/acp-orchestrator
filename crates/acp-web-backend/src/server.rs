@@ -55,10 +55,16 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::sessions::TurnHandle;
 use crate::{
-    auth::{AuthError, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, authorize_request, cookie_value},
+    auth::{
+        AuthError, AuthenticatedPrincipal, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME,
+        authorize_request, cookie_value,
+    },
     completions::resolve_slash_completions,
     mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStore, SessionStoreError},
+    workspace_store::{
+        SqliteWorkspaceRepository, UserRecord, WorkspaceStoreError, WorkspaceStorePort,
+    },
 };
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -71,6 +77,7 @@ pub struct ServerConfig {
     pub session_cap: usize,
     pub acp_server: String,
     pub startup_hints: bool,
+    pub state_dir: PathBuf,
     /// Directory containing the Trunk-compiled Leptos CSR bundle.
     /// The backend serves the fingerprinted files through stable alias routes.
     /// When `None`, the WASM asset routes return `503 Service Unavailable`.
@@ -83,24 +90,82 @@ impl Default for ServerConfig {
             session_cap: 8,
             acp_server: "127.0.0.1:8090".to_string(),
             startup_hints: false,
+            state_dir: PathBuf::from(".acp-state"),
             frontend_dist: None,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+pub enum AppStateBuildError {
+    ReplyProvider(MockClientError),
+    WorkspaceStore(WorkspaceStoreError),
+}
+
+impl AppStateBuildError {
+    fn message(&self) -> String {
+        match self {
+            Self::ReplyProvider(source) => source.to_string(),
+            Self::WorkspaceStore(source) => source.to_string(),
+        }
+    }
+}
+
+impl Display for AppStateBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for AppStateBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ReplyProvider(source) => Some(source),
+            Self::WorkspaceStore(source) => Some(source),
+        }
+    }
+}
+
+impl From<MockClientError> for AppStateBuildError {
+    fn from(source: MockClientError) -> Self {
+        Self::ReplyProvider(source)
+    }
+}
+
+impl From<WorkspaceStoreError> for AppStateBuildError {
+    fn from(source: WorkspaceStoreError) -> Self {
+        Self::WorkspaceStore(source)
+    }
+}
+
+#[derive(Clone)]
 pub struct AppState {
     store: Arc<SessionStore>,
+    workspace_store: Arc<dyn WorkspaceStorePort>,
     reply_provider: Arc<dyn ReplyProvider>,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
     frontend_dist: Option<Arc<PathBuf>>,
 }
 
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("store", &self.store)
+            .field("startup_hints", &self.startup_hints)
+            .field("frontend_dist", &self.frontend_dist)
+            .finish()
+    }
+}
+
 impl AppState {
-    pub fn new(config: ServerConfig) -> Result<Self, MockClientError> {
+    pub fn new(config: ServerConfig) -> Result<Self, AppStateBuildError> {
+        let workspace_store = Arc::new(SqliteWorkspaceRepository::new(
+            config.state_dir.join("db.sqlite"),
+        )?);
         Ok(Self {
             store: Arc::new(SessionStore::new(config.session_cap)),
+            workspace_store,
             reply_provider: Arc::new(MockClient::new(config.acp_server)?),
             startup_hints: config.startup_hints,
             frontend_dist: config.frontend_dist.map(Arc::new),
@@ -113,10 +178,43 @@ impl AppState {
     ) -> Self {
         Self {
             store,
+            workspace_store: new_ephemeral_workspace_store(),
             reply_provider,
             startup_hints: false,
             frontend_dist: None,
         }
+    }
+
+    pub fn with_workspace_store(
+        store: Arc<SessionStore>,
+        workspace_store: Arc<dyn WorkspaceStorePort>,
+        reply_provider: Arc<dyn ReplyProvider>,
+    ) -> Self {
+        Self {
+            store,
+            workspace_store,
+            reply_provider,
+            startup_hints: false,
+            frontend_dist: None,
+        }
+    }
+
+    fn principal(
+        &self,
+        headers: &HeaderMap,
+        requires_csrf: bool,
+    ) -> Result<AuthenticatedPrincipal, AppError> {
+        authorize_request(headers, requires_csrf).map_err(AppError::from)
+    }
+
+    async fn owner_context(
+        &self,
+        headers: &HeaderMap,
+        requires_csrf: bool,
+    ) -> Result<OwnerContext, AppError> {
+        let principal = self.principal(headers, requires_csrf)?;
+        let user = self.workspace_store.materialize_user(&principal).await?;
+        Ok(OwnerContext { principal, user })
     }
 }
 
@@ -159,6 +257,101 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/sessions/{session_id}/close", post(close_session))
         .route("/api/v1/completions/slash", get(get_slash_completions))
         .with_state(state)
+}
+
+#[derive(Debug, Clone)]
+struct OwnerContext {
+    principal: AuthenticatedPrincipal,
+    user: UserRecord,
+}
+
+fn new_ephemeral_workspace_store() -> Arc<dyn WorkspaceStorePort> {
+    let db_path = std::env::temp_dir().join(format!(
+        "acp-web-backend-test-state-{}",
+        Uuid::new_v4().simple()
+    ));
+    Arc::new(
+        SqliteWorkspaceRepository::new(db_path.join("db.sqlite"))
+            .expect("ephemeral workspace repository should initialize"),
+    )
+}
+
+async fn persist_session_metadata(
+    state: &AppState,
+    user: &UserRecord,
+    snapshot: &SessionSnapshot,
+    touch_activity: bool,
+    status_override: Option<&str>,
+) -> Result<(), AppError> {
+    state
+        .workspace_store
+        .persist_session_snapshot(&user.user_id, snapshot, touch_activity, status_override)
+        .await
+        .map_err(AppError::from)?;
+    Ok(())
+}
+
+async fn persist_session_metadata_best_effort(
+    state: &AppState,
+    user: &UserRecord,
+    snapshot: &SessionSnapshot,
+    touch_activity: bool,
+    status_override: Option<&str>,
+    action: &'static str,
+) {
+    if let Err(error) =
+        persist_session_metadata(state, user, snapshot, touch_activity, status_override).await
+    {
+        let error_message = error.message();
+        tracing::warn!(
+            session_id = %snapshot.id,
+            owner_user_id = %user.user_id,
+            action,
+            "failed to persist session metadata: {error_message}"
+        );
+    }
+}
+
+async fn materialize_user_best_effort(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    action: &'static str,
+) -> Option<UserRecord> {
+    match state.workspace_store.materialize_user(principal).await {
+        Ok(user) => Some(user),
+        Err(error) => {
+            let error_message = error.message();
+            tracing::warn!(
+                principal_kind = ?principal.kind,
+                action,
+                "failed to materialize durable user: {error_message}"
+            );
+            None
+        }
+    }
+}
+
+async fn persist_session_metadata_for_principal_best_effort(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    snapshot: &SessionSnapshot,
+    touch_activity: bool,
+    status_override: Option<&str>,
+    action: &'static str,
+) {
+    let Some(user) = materialize_user_best_effort(state, principal, action).await else {
+        return;
+    };
+
+    persist_session_metadata_best_effort(
+        state,
+        &user,
+        snapshot,
+        touch_activity,
+        status_override,
+        action,
+    )
+    .await;
 }
 
 pub async fn serve_with_shutdown<F>(
@@ -213,6 +406,34 @@ where
 fn log_connection_task_join_result(next: Option<Result<(), tokio::task::JoinError>>) {
     if let Some(Err(error)) = next {
         tracing::warn!(%error, "web backend connection task aborted");
+    }
+}
+
+async fn persist_prompt_snapshot_best_effort(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    session_id: &str,
+    snapshot_result: Result<SessionSnapshot, SessionStoreError>,
+) {
+    match snapshot_result {
+        Ok(snapshot) => {
+            persist_session_metadata_for_principal_best_effort(
+                state,
+                principal,
+                &snapshot,
+                true,
+                None,
+                "submit_prompt",
+            )
+            .await;
+        }
+        Err(error) => {
+            let error_message = error.message();
+            tracing::warn!(
+                session_id = %session_id,
+                "failed to snapshot session metadata after prompt submission: {error_message}"
+            );
+        }
     }
 }
 
@@ -666,7 +887,7 @@ async fn list_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SessionListResponse>, AppError> {
-    let principal = authorize_request(&headers, false)?;
+    let principal = state.principal(&headers, false)?;
     let sessions = state.store.list_owned_sessions(&principal.id).await;
 
     Ok(Json(SessionListResponse { sessions }))
@@ -676,14 +897,14 @@ async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<CreateSessionResponse>), AppError> {
-    let principal = authorize_request(&headers, true)?;
-    let session = state.store.create_session(&principal.id).await?;
+    let owner = state.owner_context(&headers, true).await?;
+    let session = state.store.create_session(&owner.principal.id).await?;
     let session_id = session.id.clone();
-    let session = match seed_startup_hint(&state, &principal.id, session).await {
+    let session = match seed_startup_hint(&state, &owner.principal.id, session).await {
         Ok(session) => session,
         Err(error) => {
             if let Err(rollback_error) =
-                rollback_failed_session(&state, &principal.id, &session_id).await
+                rollback_failed_session(&state, &owner.principal.id, &session_id).await
             {
                 return Err(AppError::Internal(format!(
                     "{}; session rollback failed: {}",
@@ -694,6 +915,18 @@ async fn create_session(
             return Err(error);
         }
     };
+    if let Err(error) = persist_session_metadata(&state, &owner.user, &session, true, None).await {
+        if let Err(rollback_error) =
+            rollback_failed_session(&state, &owner.principal.id, &session_id).await
+        {
+            return Err(AppError::Internal(format!(
+                "{}; session rollback failed: {}",
+                error.message(),
+                rollback_error.message()
+            )));
+        }
+        return Err(error);
+    }
 
     Ok((StatusCode::CREATED, Json(CreateSessionResponse { session })))
 }
@@ -741,7 +974,7 @@ async fn get_session(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, AppError> {
-    let principal = authorize_request(&headers, false)?;
+    let principal = state.principal(&headers, false)?;
     let session = state
         .store
         .session_snapshot(&principal.id, &session_id)
@@ -756,7 +989,7 @@ async fn rename_session(
     headers: HeaderMap,
     Json(request): Json<RenameSessionRequest>,
 ) -> Result<Json<RenameSessionResponse>, AppError> {
-    let principal = authorize_request(&headers, true)?;
+    let principal = state.principal(&headers, true)?;
     let title = request.title.trim().to_string();
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty".to_string()));
@@ -770,6 +1003,10 @@ async fn rename_session(
         .store
         .rename_session(&principal.id, &session_id, title)
         .await?;
+    persist_session_metadata_for_principal_best_effort(
+        &state, &principal, &session, false, None, "rename",
+    )
+    .await;
 
     Ok(Json(RenameSessionResponse { session }))
 }
@@ -779,12 +1016,25 @@ async fn delete_session(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<DeleteSessionResponse>, AppError> {
-    let principal = authorize_request(&headers, true)?;
+    let principal = state.principal(&headers, true)?;
+    let snapshot = state
+        .store
+        .session_snapshot(&principal.id, &session_id)
+        .await?;
     state
         .store
         .delete_session(&principal.id, &session_id)
         .await?;
     state.reply_provider.forget_session(&session_id);
+    persist_session_metadata_for_principal_best_effort(
+        &state,
+        &principal,
+        &snapshot,
+        false,
+        Some("deleted"),
+        "delete",
+    )
+    .await;
 
     Ok(Json(DeleteSessionResponse { deleted: true }))
 }
@@ -794,7 +1044,7 @@ async fn get_session_history(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<SessionHistoryResponse>, AppError> {
-    let principal = authorize_request(&headers, false)?;
+    let principal = state.principal(&headers, false)?;
     let messages = state
         .store
         .session_history(&principal.id, &session_id)
@@ -812,11 +1062,16 @@ async fn post_message(
     headers: HeaderMap,
     Json(request): Json<PromptRequest>,
 ) -> Result<Json<PromptResponse>, AppError> {
-    let principal = authorize_request(&headers, true)?;
+    let principal = state.principal(&headers, true)?;
     let pending = state
         .store
         .submit_prompt(&principal.id, &session_id, request.text)
         .await?;
+    let snapshot_result = state
+        .store
+        .session_snapshot(&principal.id, &session_id)
+        .await;
+    persist_prompt_snapshot_best_effort(&state, &principal, &session_id, snapshot_result).await;
     dispatch_assistant_request(state.reply_provider.clone(), pending);
 
     Ok(Json(PromptResponse { accepted: true }))
@@ -827,12 +1082,21 @@ async fn close_session(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<CloseSessionResponse>, AppError> {
-    let principal = authorize_request(&headers, true)?;
+    let principal = state.principal(&headers, true)?;
     let session = state
         .store
         .close_session(&principal.id, &session_id)
         .await?;
     state.reply_provider.forget_session(&session_id);
+    persist_session_metadata_for_principal_best_effort(
+        &state,
+        &principal,
+        &session,
+        false,
+        Some("closed"),
+        "close",
+    )
+    .await;
 
     Ok(Json(CloseSessionResponse { session }))
 }
@@ -842,7 +1106,7 @@ async fn cancel_turn(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<CancelTurnResponse>, AppError> {
-    let principal = authorize_request(&headers, true)?;
+    let principal = state.principal(&headers, true)?;
     let cancelled = state
         .store
         .cancel_active_turn(&principal.id, &session_id)
@@ -857,7 +1121,7 @@ async fn resolve_permission(
     headers: HeaderMap,
     Json(request): Json<ResolvePermissionRequest>,
 ) -> Result<Json<ResolvePermissionResponse>, AppError> {
-    let principal = authorize_request(&headers, true)?;
+    let principal = state.principal(&headers, true)?;
     let resolution = state
         .store
         .resolve_permission(&principal.id, &session_id, &request_id, request.decision)
@@ -879,7 +1143,7 @@ async fn get_slash_completions(
     Query(query): Query<SlashCompletionsQuery>,
     headers: HeaderMap,
 ) -> Result<Json<SlashCompletionsResponse>, AppError> {
-    let principal = authorize_request(&headers, false)?;
+    let principal = state.principal(&headers, false)?;
     let response_future = resolve_slash_completions(
         &state.store,
         &principal.id,
@@ -896,7 +1160,7 @@ async fn stream_session_events(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let principal = authorize_request(&headers, false)?;
+    let principal = state.principal(&headers, false)?;
     let (snapshot, receiver) = state
         .store
         .session_events(&principal.id, &session_id)
@@ -1015,6 +1279,13 @@ impl From<SessionStoreError> for AppError {
                 Self::TooManyRequests(error.message().to_string())
             }
         }
+    }
+}
+
+impl From<WorkspaceStoreError> for AppError {
+    fn from(error: WorkspaceStoreError) -> Self {
+        tracing::error!(error = %error.message(), "workspace store operation failed");
+        Self::Internal("internal server error".to_string())
     }
 }
 

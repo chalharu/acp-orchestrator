@@ -1,0 +1,31 @@
+[graph]
+targets = ["wasm32-unknown-unknown"]
+
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "transitive through Leptos until upstream replaces paste" },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "BSL-1.0",
+  "CC0-1.0",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-web-frontend"

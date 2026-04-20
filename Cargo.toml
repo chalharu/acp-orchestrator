@@ -21,8 +21,8 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
-acp-app-support = { path = "crates/acp-app-support" }
-acp-contracts = { path = "crates/acp-contracts" }
+acp-app-support = { path = "crates/acp-app-support", version = "=0.1.0" }
+acp-contracts = { path = "crates/acp-contracts", version = "=0.1.0" }
 agent-client-protocol = "=0.10.4"
 async-trait = "=0.1.89"
 axum = { version = "=0.8.9", features = ["macros"] }
@@ -64,9 +64,9 @@ uuid = { version = "=1.23.1", features = ["serde", "v4"] }
 
 [dependencies]
 acp-app-support.workspace = true
-acp-cli = { path = "crates/acp-cli" }
-acp-mock = { path = "crates/acp-mock" }
-acp-web-backend = { path = "crates/acp-web-backend" }
+acp-cli = { path = "crates/acp-cli", version = "=0.1.0" }
+acp-mock = { path = "crates/acp-mock", version = "=0.1.0" }
+acp-web-backend = { path = "crates/acp-web-backend", version = "=0.1.0" }
 dirs.workspace = true
 libc.workspace = true
 open.workspace = true

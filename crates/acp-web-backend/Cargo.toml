@@ -31,7 +31,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 acp-app-support = { workspace = true, features = ["test-helpers"] }
-acp-mock = { path = "../acp-mock" }
+acp-mock = { path = "../acp-mock", version = "=0.1.0" }
 anyhow = "=1.0.102"
 eventsource-stream.workspace = true
 futures-util.workspace = true

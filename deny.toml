@@ -1,26 +1,54 @@
-[advisories]
-ignore = [
-  { id = "RUSTSEC-2024-0436", reason = "transitive through Leptos in the standalone frontend crate until upstream replaces paste" },
+[graph]
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-pc-windows-msvc",
+  "aarch64-unknown-linux-gnu",
+  "i686-pc-windows-msvc",
+  "i686-unknown-linux-gnu",
+  "x86_64-pc-windows-gnu",
+  "x86_64-pc-windows-msvc",
+  "x86_64-unknown-linux-gnu",
 ]
-unused-ignored-advisory = "allow"
 
 [bans]
 multiple-versions = "allow"
+wildcards = "deny"
 
 [licenses]
 version = 2
-unused-allowed-license = "allow"
 allow = [
-  "AGPL-3.0-only",
   "Apache-2.0",
   "BSD-3-Clause",
   "BSL-1.0",
-  "CDLA-Permissive-2.0",
+  "CC0-1.0",
   "ISC",
-  "LGPL-2.1-or-later",
   "MIT",
   "MPL-2.0",
   "Unicode-3.0",
   "Unlicense",
   "Zlib",
 ]
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-cli"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-mock"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-orchestrator"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-web-backend"

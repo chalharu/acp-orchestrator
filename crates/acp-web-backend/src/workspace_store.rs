@@ -1132,13 +1132,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_session_snapshot_records_close_and_delete_transitions() {
+    async fn persist_session_snapshot_records_close_transitions() {
         let repository = test_repository();
         let user = repository
             .materialize_user(&bearer_principal("developer"))
             .await
             .expect("principal materialization should succeed");
-        let snapshot = snapshot("s_terminal", "Transition", SessionStatus::Active);
+        let snapshot = snapshot("s_closed", "Transition", SessionStatus::Active);
 
         repository
             .persist_session_snapshot(&user.user_id, &snapshot, false, None)
@@ -1167,6 +1167,21 @@ mod tests {
         assert_eq!(closed.status, "closed");
         assert!(closed.closed_at.is_some());
         assert!(closed.deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_records_delete_transitions() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let snapshot = snapshot("s_deleted", "Transition", SessionStatus::Active);
+
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, false, None)
+            .await
+            .expect("initial persistence should succeed");
 
         sleep(Duration::from_millis(5)).await;
         repository

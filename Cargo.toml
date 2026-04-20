@@ -40,7 +40,7 @@ hyper-util = { version = "=0.1.20", features = [
   "tokio",
 ] }
 libc = "=0.2.185"
-open = "=5.3.3"
+open = "=5.3.4"
 ratatui = "=0.30.0"
 rcgen = "=0.14.7"
 reqwest = { version = "=0.13.2", default-features = false, features = [

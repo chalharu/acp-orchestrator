@@ -83,6 +83,7 @@ async fn spawn_browser_test_stack() -> Result<TestStack> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await

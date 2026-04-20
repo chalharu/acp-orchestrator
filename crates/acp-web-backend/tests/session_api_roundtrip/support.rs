@@ -1,4 +1,4 @@
-use std::{future::pending, pin::Pin, time::Duration};
+use std::{future::pending, path::PathBuf, pin::Pin, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
@@ -18,6 +18,13 @@ pub(super) use tokio::time::sleep;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
+
+pub(super) fn test_state_dir() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "acp-session-api-roundtrip-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
+}
 
 pub(super) async fn expect_next_event(stream: &mut SseStream) -> Result<StreamEvent> {
     let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
@@ -495,6 +502,7 @@ pub(super) async fn spawn_direct_backend_server(
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .context("building direct backend state")?;
@@ -533,6 +541,7 @@ pub(super) async fn spawn_graceful_backend_server(
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .context("building graceful backend state")?;

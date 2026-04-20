@@ -5,6 +5,7 @@ async fn assert_invalid_rename_title(title: String, expected_message: &str) -> R
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -40,6 +41,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -84,6 +86,7 @@ async fn session_lookup_rejects_different_principal() -> Result<()> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -110,6 +113,7 @@ async fn rename_and_delete_reject_different_principal() -> Result<()> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -151,6 +155,7 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
         session_cap: 1,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -176,6 +181,7 @@ async fn session_list_is_owner_scoped_and_keeps_retained_closed_sessions() -> Re
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -214,6 +220,7 @@ async fn getting_a_session_does_not_reorder_the_owned_session_list() -> Result<(
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -253,6 +260,7 @@ async fn prompt_submission_moves_session_to_front_of_list() -> Result<()> {
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -281,6 +289,7 @@ async fn session_title_defaults_to_new_chat_and_auto_sets_from_first_prompt() ->
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -317,6 +326,7 @@ async fn session_can_be_renamed_and_title_appears_in_list_and_snapshot() -> Resu
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -351,6 +361,7 @@ async fn manual_rename_prevents_auto_title_from_first_prompt() -> Result<()> {
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -379,6 +390,7 @@ async fn session_can_be_deleted_and_is_no_longer_accessible() -> Result<()> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -415,6 +427,7 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
         session_cap: 128,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -466,6 +479,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;
@@ -499,6 +513,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;

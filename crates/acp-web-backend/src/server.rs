@@ -302,12 +302,12 @@ async fn persist_session_metadata_best_effort(
     if let Err(error) =
         persist_session_metadata(state, user, snapshot, touch_activity, status_override).await
     {
+        let error_message = error.message();
         tracing::warn!(
             session_id = %snapshot.id,
             owner_user_id = %user.user_id,
             action,
-            error = %error.message(),
-            "failed to persist session metadata"
+            "failed to persist session metadata: {error_message}"
         );
     }
 }
@@ -320,11 +320,11 @@ async fn materialize_user_best_effort(
     match state.workspace_store.materialize_user(principal).await {
         Ok(user) => Some(user),
         Err(error) => {
+            let error_message = error.message();
             tracing::warn!(
                 principal_kind = ?principal.kind,
                 action,
-                error = %error.message(),
-                "failed to materialize durable user"
+                "failed to materialize durable user: {error_message}"
             );
             None
         }
@@ -406,6 +406,34 @@ where
 fn log_connection_task_join_result(next: Option<Result<(), tokio::task::JoinError>>) {
     if let Some(Err(error)) = next {
         tracing::warn!(%error, "web backend connection task aborted");
+    }
+}
+
+async fn persist_prompt_snapshot_best_effort(
+    state: &AppState,
+    principal: &AuthenticatedPrincipal,
+    session_id: &str,
+    snapshot_result: Result<SessionSnapshot, SessionStoreError>,
+) {
+    match snapshot_result {
+        Ok(snapshot) => {
+            persist_session_metadata_for_principal_best_effort(
+                state,
+                principal,
+                &snapshot,
+                true,
+                None,
+                "submit_prompt",
+            )
+            .await;
+        }
+        Err(error) => {
+            let error_message = error.message();
+            tracing::warn!(
+                session_id = %session_id,
+                "failed to snapshot session metadata after prompt submission: {error_message}"
+            );
+        }
     }
 }
 
@@ -1039,30 +1067,11 @@ async fn post_message(
         .store
         .submit_prompt(&principal.id, &session_id, request.text)
         .await?;
-    match state
+    let snapshot_result = state
         .store
         .session_snapshot(&principal.id, &session_id)
-        .await
-    {
-        Ok(snapshot) => {
-            persist_session_metadata_for_principal_best_effort(
-                &state,
-                &principal,
-                &snapshot,
-                true,
-                None,
-                "submit_prompt",
-            )
-            .await;
-        }
-        Err(error) => {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %error.message(),
-                "failed to snapshot session metadata after prompt submission"
-            );
-        }
-    }
+        .await;
+    persist_prompt_snapshot_best_effort(&state, &principal, &session_id, snapshot_result).await;
     dispatch_assistant_request(state.reply_provider.clone(), pending);
 
     Ok(Json(PromptResponse { accepted: true }))

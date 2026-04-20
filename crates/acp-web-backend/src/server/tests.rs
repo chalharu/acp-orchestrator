@@ -1,5 +1,5 @@
 use super::*;
-use crate::mock_client::{ReplyFuture, ReplyResult};
+use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
 use crate::workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord};
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
 use acp_contracts::{SessionSnapshot, SessionStatus};
@@ -1108,6 +1108,191 @@ async fn create_session_scrubs_workspace_store_failures() {
     assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
 }
 
+#[test]
+fn app_state_build_errors_format_and_expose_sources() {
+    let reply_error = AppStateBuildError::from(MockClientError::TurnRuntime {
+        message: "reply provider failed".to_string(),
+    });
+    let workspace_error = AppStateBuildError::from(WorkspaceStoreError::Database(
+        "workspace store failed".to_string(),
+    ));
+
+    assert_eq!(
+        reply_error.to_string(),
+        "coordinating the prompt turn failed: reply provider failed"
+    );
+    assert_eq!(
+        std::error::Error::source(&reply_error)
+            .expect("reply provider sources should exist")
+            .to_string(),
+        "coordinating the prompt turn failed: reply provider failed"
+    );
+    assert_eq!(workspace_error.to_string(), "workspace store failed");
+    assert_eq!(
+        std::error::Error::source(&workspace_error)
+            .expect("workspace store sources should exist")
+            .to_string(),
+        "workspace store failed"
+    );
+}
+
+#[test]
+fn app_state_debug_reports_public_fields() {
+    let state = AppState::with_workspace_store(
+        Arc::new(SessionStore::new(4)),
+        metadata_test_workspace_store(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let debug = format!("{state:?}");
+
+    assert!(debug.contains("AppState"));
+    assert!(debug.contains("startup_hints"));
+    assert!(debug.contains("frontend_dist"));
+}
+
+#[test]
+fn app_state_new_reports_workspace_store_initialization_failures() {
+    let blocking_path = std::env::temp_dir().join(format!(
+        "acp-web-backend-state-blocker-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let cleanup_path = blocking_path.clone();
+    std::fs::write(&blocking_path, "blocker").expect("creating the blocking file should succeed");
+
+    let error = AppState::new(ServerConfig {
+        session_cap: 4,
+        acp_server: "127.0.0.1:65535".to_string(),
+        startup_hints: false,
+        state_dir: blocking_path,
+        frontend_dist: None,
+    })
+    .expect_err("invalid state roots should fail");
+
+    assert!(matches!(error, AppStateBuildError::WorkspaceStore(_)));
+    let _ = std::fs::remove_file(cleanup_path);
+}
+
+#[tokio::test]
+async fn materialize_user_best_effort_returns_none_when_workspace_storage_fails() {
+    let state = AppState::with_workspace_store(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(FailingWorkspaceStore::new("materialization unavailable")),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let principal =
+        authorize_request(&bearer_headers("alice"), true).expect("bearer headers should authorize");
+
+    let user = materialize_user_best_effort(&state, &principal, "test").await;
+
+    assert!(user.is_none());
+}
+
+#[tokio::test]
+async fn persist_session_metadata_best_effort_swallows_workspace_storage_errors() {
+    let state = AppState::with_workspace_store(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+
+    persist_session_metadata_best_effort(
+        &state,
+        &sample_user_record(),
+        &sample_snapshot("s_best_effort"),
+        true,
+        None,
+        "test",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn persist_prompt_snapshot_best_effort_swallows_snapshot_failures() {
+    let state = AppState::with_workspace_store(
+        Arc::new(SessionStore::new(4)),
+        metadata_test_workspace_store(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let principal =
+        authorize_request(&bearer_headers("alice"), true).expect("bearer headers should authorize");
+
+    persist_prompt_snapshot_best_effort(
+        &state,
+        &principal,
+        "s_missing",
+        Err(SessionStoreError::NotFound),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn create_session_reports_metadata_rollback_failures() {
+    let store = Arc::new(SessionStore::new(1));
+    let state = AppState {
+        store: store.clone(),
+        workspace_store: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
+            store,
+            "alice",
+            "metadata write failed",
+            true,
+        )),
+        reply_provider: Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let error = create_session(State(state), bearer_headers("alice"))
+        .await
+        .expect_err("metadata rollback failures should surface as internal errors");
+
+    assert!(matches!(
+        error,
+        AppError::Internal(message)
+            if message.contains("internal server error")
+                && message.contains("session rollback failed: session not found")
+    ));
+}
+
+#[tokio::test]
+async fn create_session_rolls_back_when_metadata_persistence_fails() {
+    let store = Arc::new(SessionStore::new(1));
+    let state = AppState {
+        store: store.clone(),
+        workspace_store: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
+            store.clone(),
+            "alice",
+            "metadata write failed",
+            false,
+        )),
+        reply_provider: Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let error = create_session(State(state), bearer_headers("alice"))
+        .await
+        .expect_err("metadata persistence failures should roll back the session");
+
+    assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
+    let snapshot_error = store
+        .session_snapshot("alice", "s_1")
+        .await
+        .expect_err("failed creations should be rolled back");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
 #[tokio::test]
 async fn rename_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
@@ -1403,6 +1588,28 @@ fn failing_workspace_state(store: Arc<SessionStore>) -> AppState {
     )
 }
 
+fn sample_user_record() -> UserRecord {
+    let now = chrono::Utc::now();
+    UserRecord {
+        user_id: "u_test".to_string(),
+        principal_kind: "bearer".to_string(),
+        principal_subject: "durable-subject".to_string(),
+        created_at: now,
+        last_seen_at: now,
+    }
+}
+
+fn sample_snapshot(session_id: &str) -> SessionSnapshot {
+    SessionSnapshot {
+        id: session_id.to_string(),
+        title: "Test session".to_string(),
+        status: SessionStatus::Active,
+        latest_sequence: 0,
+        messages: Vec::new(),
+        pending_permissions: Vec::new(),
+    }
+}
+
 #[tokio::test]
 async fn tracking_reply_provider_returns_no_output() {
     let store = SessionStore::new(4);
@@ -1531,6 +1738,32 @@ impl FailingWorkspaceStore {
     }
 }
 
+#[derive(Debug)]
+struct RollbackFailingMetadataWorkspaceStore {
+    store: Arc<SessionStore>,
+    live_owner: String,
+    user: UserRecord,
+    error: WorkspaceStoreError,
+    discard_before_fail: bool,
+}
+
+impl RollbackFailingMetadataWorkspaceStore {
+    fn new(
+        store: Arc<SessionStore>,
+        live_owner: &str,
+        message: &str,
+        discard_before_fail: bool,
+    ) -> Self {
+        Self {
+            store,
+            live_owner: live_owner.to_string(),
+            user: sample_user_record(),
+            error: WorkspaceStoreError::Database(message.to_string()),
+            discard_before_fail,
+        }
+    }
+}
+
 #[async_trait]
 impl WorkspaceStorePort for FailingWorkspaceStore {
     async fn materialize_user(
@@ -1570,6 +1803,62 @@ impl WorkspaceStorePort for FailingWorkspaceStore {
         _session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
         Err(self.error.clone())
+    }
+}
+
+#[async_trait]
+impl WorkspaceStorePort for RollbackFailingMetadataWorkspaceStore {
+    async fn materialize_user(
+        &self,
+        _principal: &AuthenticatedPrincipal,
+    ) -> Result<UserRecord, WorkspaceStoreError> {
+        Ok(self.user.clone())
+    }
+
+    async fn bootstrap_workspace(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        Ok(WorkspaceRecord {
+            workspace_id: "w_test".to_string(),
+            owner_user_id: owner_user_id.to_string(),
+            name: "Default workspace".to_string(),
+            status: "active".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        })
+    }
+
+    async fn save_session_metadata(
+        &self,
+        _record: &SessionMetadataRecord,
+    ) -> Result<(), WorkspaceStoreError> {
+        Ok(())
+    }
+
+    async fn persist_session_snapshot(
+        &self,
+        _owner_user_id: &str,
+        snapshot: &SessionSnapshot,
+        _touch_activity: bool,
+        _status_override: Option<&str>,
+    ) -> Result<(), WorkspaceStoreError> {
+        if self.discard_before_fail {
+            let _ = self
+                .store
+                .discard_session(&self.live_owner, &snapshot.id)
+                .await;
+        }
+        Err(self.error.clone())
+    }
+
+    async fn load_session_metadata(
+        &self,
+        _owner_user_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
+        Ok(None)
     }
 }
 

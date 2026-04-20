@@ -42,21 +42,29 @@ Types:
   `.github/linter-service.yaml`.
 - The supported local validation baseline for this Rust workspace is:
   - `cargo fmt --all`
+  - `cargo deny check`
   - `cargo test --workspace`
   - `cargo clippy --workspace --all-targets -- -D warnings`
 - **Web frontend (Leptos CSR):** `crates/acp-web-frontend` is a standalone trunk
   project. It targets `wasm32-unknown-unknown`.
-  Build it separately from the Cargo workspace. To build it locally:
+  Build and test it separately from the Cargo workspace. To validate it locally:
 
   ```sh
   rustup target add wasm32-unknown-unknown
   cargo install trunk --locked          # or grab the prebuilt binary
+  cargo test --manifest-path crates/acp-web-frontend/Cargo.toml --lib
+  cargo check --manifest-path crates/acp-web-frontend/Cargo.toml --target wasm32-unknown-unknown
   cd crates/acp-web-frontend && trunk build --release
   ```
 
   The backend serves the generated `dist/` bundle at runtime through stable
   `/app/assets/acp-web-frontend*.{js,wasm}` aliases.
   Normal `cargo build/test --workspace` commands skip the frontend crate.
+- **Browser regression coverage:** build the frontend bundle, then run
+  `cargo test -p acp-web-backend --test browser_ui_fantoccini -- --ignored --test-threads=1`.
+  The suite expects Chrome and ChromeDriver. Override `ACP_WEB_FRONTEND_DIST`,
+  `ACP_CHROME_BINARY`, or `ACP_CHROMEDRIVER_BIN` when needed.
+  GitHub Actions mirrors this flow in `.github/workflows/browser-ui.yaml`.
 - If a change is coverage-sensitive or a PR is failing Sonar coverage, mirror the
   hosted coverage job with
   `cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1`.

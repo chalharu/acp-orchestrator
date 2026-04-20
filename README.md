@@ -77,7 +77,9 @@ events over SSE. Pending permission requests surface browser controls in the
 chat area. Use **Approve**, **Deny**, or **Cancel** there. The composer
 supports `/help` only in the browser, with a small floating suggestion overlay.
 Recent slash or connection activity is recorded inside the transcript stream.
-Deleting the last remaining session returns to a fresh new-chat view.
+The session sidebar keeps the UI minimal while still surfacing each session's
+last activity timestamp and active/closed state. Deleting the last remaining
+session returns to a fresh new-chat view.
 
 When stdin/stdout are not terminals, the CLI keeps the older line-oriented mode
 for scripting and pipe-driven tests.
@@ -98,10 +100,13 @@ verification, use the built-in mock prompts below:
   assistant reply arrives and confirm `[status] turn cancelled`. In the browser,
   use the visible **Cancel** button while the turn is pending.
 
-For browser regression coverage, run
-`python3 -m unittest discover -s tests/playwright -p 'test_*.py'` against a
-running web stack. If Chromium needs a user-space sysroot for shared libraries
-or fonts, set `ACP_PLAYWRIGHT_SYSROOT=/path/to/sysroot` first.
+For browser regression coverage, build the frontend bundle, ensure Chrome and
+ChromeDriver are available, then run
+`cargo test -p acp-web-backend --test browser_ui_fantoccini -- --ignored --test-threads=1`.
+The suite serves the real `/app/` shell and drives it through Fantoccini.
+Set `ACP_WEB_FRONTEND_DIST`, `ACP_CHROME_BINARY`, or `ACP_CHROMEDRIVER_BIN`
+when your local paths differ from the defaults. GitHub Actions mirrors the same
+flow in `.github/workflows/browser-ui.yaml`.
 
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.

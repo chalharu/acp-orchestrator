@@ -1,9 +1,12 @@
-use std::{io, path::PathBuf, process::Stdio, time::Duration};
+use std::{io, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{MessageRole, SessionHistoryResponse, SessionListResponse, SessionResponse};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
-use acp_web_backend::{AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown};
+use acp_web_backend::{
+    AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown,
+    workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
+};
 use reqwest::Client;
 use tokio::{
     io::AsyncWriteExt,
@@ -497,13 +500,17 @@ async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {
 }
 
 async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::Sender<()>)> {
-    let state = AppState::new(ServerConfig {
+    let config = ServerConfig {
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,
-    })?;
+    };
+    let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
+        SqliteWorkspaceRepository::new(config.state_dir.join("db.sqlite"))?,
+    );
+    let state = AppState::new(config, workspace_repository)?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

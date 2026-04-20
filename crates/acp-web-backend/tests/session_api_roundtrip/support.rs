@@ -1,4 +1,4 @@
-use std::{future::pending, path::PathBuf, pin::Pin, time::Duration};
+use std::{future::pending, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
@@ -10,6 +10,9 @@ pub(super) use acp_contracts::{MessageRole, PermissionDecision, StreamEvent, Str
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 pub(super) use acp_web_backend::ServerConfig;
 use acp_web_backend::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
+use acp_web_backend::{
+    workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
+};
 pub(super) use anyhow::{Context, Result};
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
@@ -436,7 +439,7 @@ async fn maybe_spawn_mock_server(
 async fn spawn_backend_server(
     backend_config: ServerConfig,
 ) -> Result<(String, oneshot::Sender<()>)> {
-    let state = AppState::new(backend_config).context("building backend state")?;
+    let state = build_backend_state(backend_config)?;
     let backend_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("binding backend listener")?;
@@ -498,7 +501,7 @@ pub(super) async fn spawn_direct_mock_server()
 pub(super) async fn spawn_direct_backend_server(
     mock_address: String,
 ) -> Result<(String, JoinHandle<std::io::Result<()>>)> {
-    let state = AppState::new(ServerConfig {
+    let state = build_backend_state(ServerConfig {
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
@@ -537,7 +540,7 @@ pub(super) async fn spawn_graceful_mock_server()
 pub(super) async fn spawn_graceful_backend_server(
     mock_address: String,
 ) -> Result<(String, oneshot::Sender<()>, JoinHandle<std::io::Result<()>>)> {
-    let state = AppState::new(ServerConfig {
+    let state = build_backend_state(ServerConfig {
         session_cap: 8,
         acp_server: mock_address,
         startup_hints: false,
@@ -560,4 +563,12 @@ pub(super) async fn spawn_graceful_backend_server(
     });
 
     Ok((format!("https://{address}"), shutdown_tx, handle))
+}
+
+fn build_backend_state(backend_config: ServerConfig) -> Result<AppState> {
+    let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
+        SqliteWorkspaceRepository::new(backend_config.state_dir.join("db.sqlite"))
+            .context("building workspace repository")?,
+    );
+    AppState::new(backend_config, workspace_repository).context("building backend state")
 }

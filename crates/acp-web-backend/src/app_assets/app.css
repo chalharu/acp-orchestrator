@@ -255,7 +255,7 @@ a:hover {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fffaf4;
-  min-height: 2rem;
+  min-height: 2.6rem;
   overflow: hidden;
 }
 
@@ -272,9 +272,15 @@ a:hover {
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.4rem;
   overflow: hidden;
+}
+
+.session-sidebar__session-copy {
+  min-width: 0;
+  display: grid;
+  gap: 0.2rem;
 }
 
 .session-sidebar__session-title {
@@ -284,6 +290,41 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-sidebar__session-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+.session-sidebar__session-activity {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-sidebar__status-pill {
+  flex-shrink: 0;
+  padding: 0.08rem 0.35rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-soft);
+}
+
+.session-sidebar__status-pill--success {
+  border-color: #7aa67b;
+  background: #eef8ee;
+  color: #355d36;
+}
+
+.session-sidebar__status-pill--neutral {
+  border-color: var(--line);
+  background: var(--surface);
 }
 
 .session-sidebar__action-btn {

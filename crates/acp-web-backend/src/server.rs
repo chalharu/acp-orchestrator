@@ -24,16 +24,17 @@ use acp_contracts::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, CONTENT_TYPE, REFERRER_POLICY, SET_COOKIE},
     },
+    middleware::{self, Next},
     response::{
         Html, IntoResponse, Redirect, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use futures_util::{Stream, StreamExt, stream};
 use hyper::server::conn::http1;
@@ -54,6 +55,8 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::sessions::TurnHandle;
+#[cfg(test)]
+use crate::workspace_store::SqliteWorkspaceRepository;
 use crate::{
     auth::{
         AuthError, AuthenticatedPrincipal, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME,
@@ -62,9 +65,8 @@ use crate::{
     completions::resolve_slash_completions,
     mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStore, SessionStoreError},
-    workspace_store::{
-        SqliteWorkspaceRepository, UserRecord, WorkspaceStoreError, WorkspaceStorePort,
-    },
+    workspace_repository::WorkspaceRepository,
+    workspace_store::{UserRecord, WorkspaceStoreError},
 };
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -141,7 +143,7 @@ impl From<WorkspaceStoreError> for AppStateBuildError {
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<SessionStore>,
-    workspace_store: Arc<dyn WorkspaceStorePort>,
+    workspace_repository: Arc<dyn WorkspaceRepository>,
     reply_provider: Arc<dyn ReplyProvider>,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
@@ -159,61 +161,56 @@ impl std::fmt::Debug for AppState {
 }
 
 impl AppState {
-    pub fn new(config: ServerConfig) -> Result<Self, AppStateBuildError> {
-        let workspace_store = Arc::new(SqliteWorkspaceRepository::new(
-            config.state_dir.join("db.sqlite"),
-        )?);
+    pub fn new(
+        config: ServerConfig,
+        workspace_repository: Arc<dyn WorkspaceRepository>,
+    ) -> Result<Self, AppStateBuildError> {
         Ok(Self {
             store: Arc::new(SessionStore::new(config.session_cap)),
-            workspace_store,
+            workspace_repository,
             reply_provider: Arc::new(MockClient::new(config.acp_server)?),
             startup_hints: config.startup_hints,
             frontend_dist: config.frontend_dist.map(Arc::new),
         })
     }
 
+    #[cfg(test)]
     pub fn with_dependencies(
         store: Arc<SessionStore>,
         reply_provider: Arc<dyn ReplyProvider>,
     ) -> Self {
         Self {
             store,
-            workspace_store: new_ephemeral_workspace_store(),
+            workspace_repository: new_ephemeral_workspace_repository(),
             reply_provider,
             startup_hints: false,
             frontend_dist: None,
         }
     }
 
-    pub fn with_workspace_store(
+    #[cfg(test)]
+    pub fn with_workspace_repository(
         store: Arc<SessionStore>,
-        workspace_store: Arc<dyn WorkspaceStorePort>,
+        workspace_repository: Arc<dyn WorkspaceRepository>,
         reply_provider: Arc<dyn ReplyProvider>,
     ) -> Self {
         Self {
             store,
-            workspace_store,
+            workspace_repository,
             reply_provider,
             startup_hints: false,
             frontend_dist: None,
         }
     }
 
-    fn principal(
-        &self,
-        headers: &HeaderMap,
-        requires_csrf: bool,
-    ) -> Result<AuthenticatedPrincipal, AppError> {
-        authorize_request(headers, requires_csrf).map_err(AppError::from)
-    }
-
     async fn owner_context(
         &self,
-        headers: &HeaderMap,
-        requires_csrf: bool,
+        principal: AuthenticatedPrincipal,
     ) -> Result<OwnerContext, AppError> {
-        let principal = self.principal(headers, requires_csrf)?;
-        let user = self.workspace_store.materialize_user(&principal).await?;
+        let user = self
+            .workspace_repository
+            .materialize_user(&principal)
+            .await?;
         Ok(OwnerContext { principal, user })
     }
 }
@@ -233,29 +230,8 @@ pub fn app(state: AppState) -> Router {
         )
         .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
-        .route("/api/v1/sessions", get(list_sessions).post(create_session))
-        .route(
-            "/api/v1/sessions/{session_id}",
-            get(get_session)
-                .patch(rename_session)
-                .delete(delete_session),
-        )
-        .route(
-            "/api/v1/sessions/{session_id}/history",
-            get(get_session_history),
-        )
-        .route(
-            "/api/v1/sessions/{session_id}/events",
-            get(stream_session_events),
-        )
-        .route("/api/v1/sessions/{session_id}/messages", post(post_message))
-        .route("/api/v1/sessions/{session_id}/cancel", post(cancel_turn))
-        .route(
-            "/api/v1/sessions/{session_id}/permissions/{request_id}",
-            post(resolve_permission),
-        )
-        .route("/api/v1/sessions/{session_id}/close", post(close_session))
-        .route("/api/v1/completions/slash", get(get_slash_completions))
+        .merge(read_api_routes())
+        .merge(write_api_routes())
         .with_state(state)
 }
 
@@ -265,7 +241,59 @@ struct OwnerContext {
     user: UserRecord,
 }
 
-fn new_ephemeral_workspace_store() -> Arc<dyn WorkspaceStorePort> {
+fn read_api_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/sessions", get(list_sessions))
+        .route("/api/v1/sessions/{session_id}", get(get_session))
+        .route(
+            "/api/v1/sessions/{session_id}/history",
+            get(get_session_history),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/events",
+            get(stream_session_events),
+        )
+        .route("/api/v1/completions/slash", get(get_slash_completions))
+        .layer(middleware::from_fn(authorize_read_request))
+}
+
+fn write_api_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/sessions", post(create_session))
+        .route(
+            "/api/v1/sessions/{session_id}",
+            patch(rename_session).delete(delete_session),
+        )
+        .route("/api/v1/sessions/{session_id}/messages", post(post_message))
+        .route("/api/v1/sessions/{session_id}/cancel", post(cancel_turn))
+        .route(
+            "/api/v1/sessions/{session_id}/permissions/{request_id}",
+            post(resolve_permission),
+        )
+        .route("/api/v1/sessions/{session_id}/close", post(close_session))
+        .layer(middleware::from_fn(authorize_write_request))
+}
+
+async fn authorize_read_request(request: Request, next: Next) -> Result<Response, AppError> {
+    authorize_request_with_principal(request, next, false).await
+}
+
+async fn authorize_write_request(request: Request, next: Next) -> Result<Response, AppError> {
+    authorize_request_with_principal(request, next, true).await
+}
+
+async fn authorize_request_with_principal(
+    mut request: Request,
+    next: Next,
+    requires_csrf: bool,
+) -> Result<Response, AppError> {
+    let principal = authorize_request(request.headers(), requires_csrf).map_err(AppError::from)?;
+    request.extensions_mut().insert(principal);
+    Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+fn new_ephemeral_workspace_repository() -> Arc<dyn WorkspaceRepository> {
     let db_path = std::env::temp_dir().join(format!(
         "acp-web-backend-test-state-{}",
         Uuid::new_v4().simple()
@@ -284,7 +312,7 @@ async fn persist_session_metadata(
     status_override: Option<&str>,
 ) -> Result<(), AppError> {
     state
-        .workspace_store
+        .workspace_repository
         .persist_session_snapshot(&user.user_id, snapshot, touch_activity, status_override)
         .await
         .map_err(AppError::from)?;
@@ -317,7 +345,7 @@ async fn materialize_user_best_effort(
     principal: &AuthenticatedPrincipal,
     action: &'static str,
 ) -> Option<UserRecord> {
-    match state.workspace_store.materialize_user(principal).await {
+    match state.workspace_repository.materialize_user(principal).await {
         Ok(user) => Some(user),
         Err(error) => {
             let error_message = error.message();
@@ -885,9 +913,8 @@ fn accept_error_is_transient(error: &io::Error) -> bool {
 
 async fn list_sessions(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionListResponse>, AppError> {
-    let principal = state.principal(&headers, false)?;
     let sessions = state.store.list_owned_sessions(&principal.id).await;
 
     Ok(Json(SessionListResponse { sessions }))
@@ -895,9 +922,9 @@ async fn list_sessions(
 
 async fn create_session(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<(StatusCode, Json<CreateSessionResponse>), AppError> {
-    let owner = state.owner_context(&headers, true).await?;
+    let owner = state.owner_context(principal).await?;
     let session = state.store.create_session(&owner.principal.id).await?;
     let session_id = session.id.clone();
     let session = match seed_startup_hint(&state, &owner.principal.id, session).await {
@@ -972,9 +999,8 @@ async fn rollback_failed_session(
 async fn get_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionResponse>, AppError> {
-    let principal = state.principal(&headers, false)?;
     let session = state
         .store
         .session_snapshot(&principal.id, &session_id)
@@ -986,10 +1012,9 @@ async fn get_session(
 async fn rename_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<RenameSessionRequest>,
 ) -> Result<Json<RenameSessionResponse>, AppError> {
-    let principal = state.principal(&headers, true)?;
     let title = request.title.trim().to_string();
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty".to_string()));
@@ -1014,9 +1039,8 @@ async fn rename_session(
 async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<DeleteSessionResponse>, AppError> {
-    let principal = state.principal(&headers, true)?;
     let snapshot = state
         .store
         .session_snapshot(&principal.id, &session_id)
@@ -1042,9 +1066,8 @@ async fn delete_session(
 async fn get_session_history(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionHistoryResponse>, AppError> {
-    let principal = state.principal(&headers, false)?;
     let messages = state
         .store
         .session_history(&principal.id, &session_id)
@@ -1059,10 +1082,9 @@ async fn get_session_history(
 async fn post_message(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<PromptRequest>,
 ) -> Result<Json<PromptResponse>, AppError> {
-    let principal = state.principal(&headers, true)?;
     let pending = state
         .store
         .submit_prompt(&principal.id, &session_id, request.text)
@@ -1080,9 +1102,8 @@ async fn post_message(
 async fn close_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<CloseSessionResponse>, AppError> {
-    let principal = state.principal(&headers, true)?;
     let session = state
         .store
         .close_session(&principal.id, &session_id)
@@ -1104,9 +1125,8 @@ async fn close_session(
 async fn cancel_turn(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<CancelTurnResponse>, AppError> {
-    let principal = state.principal(&headers, true)?;
     let cancelled = state
         .store
         .cancel_active_turn(&principal.id, &session_id)
@@ -1118,10 +1138,9 @@ async fn cancel_turn(
 async fn resolve_permission(
     State(state): State<AppState>,
     Path((session_id, request_id)): Path<(String, String)>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<ResolvePermissionRequest>,
 ) -> Result<Json<ResolvePermissionResponse>, AppError> {
-    let principal = state.principal(&headers, true)?;
     let resolution = state
         .store
         .resolve_permission(&principal.id, &session_id, &request_id, request.decision)
@@ -1141,9 +1160,8 @@ struct SlashCompletionsQuery {
 async fn get_slash_completions(
     State(state): State<AppState>,
     Query(query): Query<SlashCompletionsQuery>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SlashCompletionsResponse>, AppError> {
-    let principal = state.principal(&headers, false)?;
     let response_future = resolve_slash_completions(
         &state.store,
         &principal.id,
@@ -1158,9 +1176,8 @@ async fn get_slash_completions(
 async fn stream_session_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    headers: HeaderMap,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let principal = state.principal(&headers, false)?;
     let (snapshot, receiver) = state
         .store
         .session_events(&principal.id, &session_id)

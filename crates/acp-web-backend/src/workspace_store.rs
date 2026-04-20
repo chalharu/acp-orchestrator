@@ -1,24 +1,22 @@
 use std::{
     fmt,
+    fmt::Write as _,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
 use acp_contracts::{SessionSnapshot, SessionStatus};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 
 use crate::auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind};
+use crate::workspace_repository::WorkspaceRepository;
 
 const BOOTSTRAP_WORKSPACE_KIND: &str = "legacy-session-routes";
 const BOOTSTRAP_WORKSPACE_NAME: &str = "Default workspace";
 const ACTIVE_WORKSPACE_STATUS: &str = "active";
-const DURABLE_BEARER_PRINCIPAL_NAMESPACE: uuid::Uuid =
-    uuid::Uuid::from_u128(0x402dbecf7ab1458ca5dc1548a2597cec);
-const DURABLE_BROWSER_SESSION_PRINCIPAL_NAMESPACE: uuid::Uuid =
-    uuid::Uuid::from_u128(0x6dbdfc9664a54920ac2086040c3a8232);
 const WORKSPACE_STORE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -209,38 +207,6 @@ impl fmt::Display for WorkspaceStoreError {
 
 impl std::error::Error for WorkspaceStoreError {}
 
-#[async_trait]
-pub trait WorkspaceStorePort: Send + Sync {
-    async fn materialize_user(
-        &self,
-        principal: &AuthenticatedPrincipal,
-    ) -> Result<UserRecord, WorkspaceStoreError>;
-
-    async fn bootstrap_workspace(
-        &self,
-        owner_user_id: &str,
-    ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
-
-    async fn save_session_metadata(
-        &self,
-        record: &SessionMetadataRecord,
-    ) -> Result<(), WorkspaceStoreError>;
-
-    async fn persist_session_snapshot(
-        &self,
-        owner_user_id: &str,
-        snapshot: &SessionSnapshot,
-        touch_activity: bool,
-        status_override: Option<&str>,
-    ) -> Result<(), WorkspaceStoreError>;
-
-    async fn load_session_metadata(
-        &self,
-        owner_user_id: &str,
-        session_id: &str,
-    ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteWorkspaceRepository {
     db_path: Arc<PathBuf>,
@@ -387,8 +353,8 @@ impl SqliteWorkspaceRepository {
     }
 }
 
-#[async_trait]
-impl WorkspaceStorePort for SqliteWorkspaceRepository {
+#[async_trait::async_trait]
+impl WorkspaceRepository for SqliteWorkspaceRepository {
     async fn materialize_user(
         &self,
         principal: &AuthenticatedPrincipal,
@@ -725,14 +691,16 @@ impl AuthenticatedPrincipalKind {
 }
 
 fn durable_principal_subject(principal: &AuthenticatedPrincipal) -> String {
-    let namespace = match principal.kind {
-        AuthenticatedPrincipalKind::Bearer => DURABLE_BEARER_PRINCIPAL_NAMESPACE,
-        AuthenticatedPrincipalKind::BrowserSession => DURABLE_BROWSER_SESSION_PRINCIPAL_NAMESPACE,
-    };
-
-    uuid::Uuid::new_v5(&namespace, principal.subject.as_bytes())
-        .simple()
-        .to_string()
+    let mut digest = Sha256::new();
+    digest.update(principal.kind.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(principal.subject.as_bytes());
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn bootstrap_workspace_in_transaction(

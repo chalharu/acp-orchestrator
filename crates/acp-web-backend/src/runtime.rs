@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, path::PathBuf};
+use std::{env, ffi::OsString, path::PathBuf, sync::Arc};
 
 use acp_app_support::{
     BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
@@ -8,7 +8,10 @@ use acp_app_support::{
 use clap::Parser;
 use snafu::prelude::*;
 
-use crate::{AppState, AppStateBuildError, ServerConfig, serve_with_shutdown};
+use crate::{
+    AppState, AppStateBuildError, ServerConfig, serve_with_shutdown,
+    workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
+};
 
 type Result<T, E = BackendAppError> = std::result::Result<T, E>;
 const READY_CHECK_ATTEMPTS: usize = 50;
@@ -101,14 +104,19 @@ async fn run(cli: Cli) -> Result<()> {
     let endpoint = listener_endpoint(&listener, "web backend", "https://")
         .map_err(|source| BackendAppError::Setup { source })?;
 
-    let state = AppState::new(ServerConfig {
+    let config = ServerConfig {
         session_cap: cli.session_cap,
         acp_server,
         startup_hints: cli.startup_hints,
         state_dir: cli.state_dir,
         frontend_dist: cli.frontend_dist,
-    })
-    .context(BuildStateSnafu)?;
+    };
+    let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
+        SqliteWorkspaceRepository::new(config.state_dir.join("db.sqlite"))
+            .map_err(AppStateBuildError::from)
+            .context(BuildStateSnafu)?,
+    );
+    let state = AppState::new(config, workspace_repository).context(BuildStateSnafu)?;
     let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
         .context(BuildHttpClientSnafu)?;
     let ready = async {

@@ -4,6 +4,7 @@ mod mock_client;
 pub mod runtime;
 pub mod server;
 pub mod sessions;
+pub mod workspace_repository;
 pub mod workspace_store;
 
 pub use mock_client::{MockClient, MockClientError, ReplyFuture, ReplyProvider, ReplyResult};

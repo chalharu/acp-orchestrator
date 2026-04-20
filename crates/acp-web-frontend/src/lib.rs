@@ -303,6 +303,7 @@ struct SidebarSession {
     id: String,
     href: String,
     title: String,
+    activity_label: String,
     is_current: bool,
     is_closed: bool,
 }
@@ -957,6 +958,7 @@ fn session_sidebar_item_callbacks(
 fn session_sidebar_item_view(
     href: String,
     title: String,
+    activity_label: String,
     is_current: bool,
     is_closed: bool,
     rename_draft: RwSignal<String>,
@@ -970,12 +972,15 @@ fn session_sidebar_item_view(
                 fallback={
                     let href = href.clone();
                     let title = title.clone();
+                    let activity_label = activity_label.clone();
                     move || {
                         view! {
                             <SessionSidebarItemDisplay
                                 href=href.clone()
                                 title=title.clone()
+                                activity_label=activity_label.clone()
                                 is_current=is_current
+                                is_closed=is_closed
                                 is_deleting=item_signals.is_deleting
                                 rename_action_disabled=item_signals.rename_action_disabled
                                 delete_action_disabled=item_signals.delete_action_disabled
@@ -1031,6 +1036,7 @@ fn SessionSidebarItem(
     session_sidebar_item_view(
         item.href,
         item.title,
+        item.activity_label,
         item.is_current,
         item.is_closed,
         rename_draft,
@@ -1043,7 +1049,9 @@ fn SessionSidebarItem(
 fn SessionSidebarItemDisplay(
     href: String,
     title: String,
+    activity_label: String,
     is_current: bool,
+    is_closed: bool,
     #[prop(into)] is_deleting: Signal<bool>,
     #[prop(into)] rename_action_disabled: Signal<bool>,
     #[prop(into)] delete_action_disabled: Signal<bool>,
@@ -1056,7 +1064,15 @@ fn SessionSidebarItemDisplay(
             href=href
             aria-current=if is_current { Some("page") } else { None }
         >
-            <span class="session-sidebar__session-title">{title}</span>
+            <span class="session-sidebar__session-copy">
+                <span class="session-sidebar__session-title">{title}</span>
+                <span class="session-sidebar__session-meta">
+                    <span class="session-sidebar__session-activity">{activity_label}</span>
+                    <span class=move || session_sidebar_status_pill_class(is_closed)>
+                        {session_sidebar_status_label(is_closed)}
+                    </span>
+                </span>
+            </span>
         </a>
         <button
             type="button"
@@ -2324,11 +2340,31 @@ fn sidebar_sessions(sessions: &[SessionListItem], current_session_id: &str) -> V
             } else {
                 session.title.clone()
             },
+            activity_label: sidebar_session_activity_label(session),
             id: session.id.clone(),
             is_current: session.id == current_session_id,
             is_closed: matches!(session.status, SessionStatus::Closed),
         })
         .collect()
+}
+
+fn sidebar_session_activity_label(session: &SessionListItem) -> String {
+    format!(
+        "Updated {}",
+        session.last_activity_at.format("%Y-%m-%d %H:%M UTC")
+    )
+}
+
+fn session_sidebar_status_label(is_closed: bool) -> &'static str {
+    if is_closed { "closed" } else { "active" }
+}
+
+fn session_sidebar_status_pill_class(is_closed: bool) -> &'static str {
+    if is_closed {
+        "session-sidebar__status-pill session-sidebar__status-pill--neutral"
+    } else {
+        "session-sidebar__status-pill session-sidebar__status-pill--success"
+    }
 }
 
 fn mark_session_closed(sessions: &mut [SessionListItem], session_id: &str) {
@@ -2446,7 +2482,8 @@ mod tests {
         next_session_destination, remove_session_from_list, rename_session_in_list,
         route_from_pathname, session_action_busy, session_bootstrap_from_snapshot,
         session_composer_cancel_visible, session_composer_disabled,
-        session_composer_status_message, should_release_turn_state, sidebar_sessions,
+        session_composer_status_message, session_sidebar_status_label,
+        session_sidebar_status_pill_class, should_release_turn_state, sidebar_sessions,
         turn_state_for_snapshot, worker_badge_state,
     };
     use acp_contracts::{
@@ -2630,6 +2667,7 @@ mod tests {
                     id: "s_newest".to_string(),
                     href: "/app/sessions/s_newest".to_string(),
                     title: "Task about rust".to_string(),
+                    activity_label: "Updated 2026-04-17 01:00 UTC".to_string(),
                     is_current: false,
                     is_closed: false,
                 },
@@ -2637,6 +2675,7 @@ mod tests {
                     id: "s_closed".to_string(),
                     href: "/app/sessions/s_closed".to_string(),
                     title: "Old exploration".to_string(),
+                    activity_label: "Updated 2026-04-17 01:00 UTC".to_string(),
                     is_current: true,
                     is_closed: true,
                 },
@@ -2669,6 +2708,21 @@ mod tests {
 
         let items = sidebar_sessions(&sessions, "s_other");
         assert_eq!(items[0].title, "New chat");
+        assert_eq!(items[0].activity_label, "Updated 2026-04-17 01:00 UTC");
+    }
+
+    #[test]
+    fn session_sidebar_status_helpers_match_open_and_closed_sessions() {
+        assert_eq!(session_sidebar_status_label(false), "active");
+        assert_eq!(session_sidebar_status_label(true), "closed");
+        assert_eq!(
+            session_sidebar_status_pill_class(false),
+            "session-sidebar__status-pill session-sidebar__status-pill--success"
+        );
+        assert_eq!(
+            session_sidebar_status_pill_class(true),
+            "session-sidebar__status-pill session-sidebar__status-pill--neutral"
+        );
     }
 
     #[test]

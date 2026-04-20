@@ -1,0 +1,65 @@
+name: Browser UI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-ui:
+    name: Browser UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-all-crates: "true"
+          workspaces: |
+            . -> target
+
+      - name: Install web build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown
+          cargo install trunk --locked
+
+      - name: Set up Chrome and ChromeDriver
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@2dbff04819ebbfd5c974947148805a825b8a07fd # v2.1.0
+        with:
+          chrome-version: stable
+          install-chromedriver: true
+          install-dependencies: true
+
+      - name: Build frontend bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd crates/acp-web-frontend
+          trunk build --release
+
+      - name: Run Rust browser regression suite
+        shell: bash
+        env:
+          ACP_CHROME_BINARY: ${{ steps.setup-chrome.outputs.chrome-path }}
+          ACP_CHROMEDRIVER_BIN: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+          ACP_WEB_FRONTEND_DIST: ${{ github.workspace }}/crates/acp-web-frontend/dist
+        run: |
+          set -euo pipefail
+          "${ACP_CHROME_BINARY}" --version
+          "${ACP_CHROMEDRIVER_BIN}" --version
+          cargo test -p acp-web-backend --test browser_ui_fantoccini -- --ignored --test-threads=1

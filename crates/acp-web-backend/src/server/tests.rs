@@ -1,11 +1,15 @@
 use super::*;
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
-use crate::workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord};
+use crate::workspace_repository::WorkspaceRepository;
+use crate::workspace_store::{
+    SessionMetadataRecord, SqliteWorkspaceRepository, UserRecord, WorkspaceRecord,
+};
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
 use acp_contracts::{SessionSnapshot, SessionStatus};
 use async_trait::async_trait;
 use axum::{
-    body::to_bytes,
+    body::{Body, to_bytes},
+    extract::Extension,
     http::{
         HeaderValue,
         header::{COOKIE, SET_COOKIE},
@@ -13,6 +17,7 @@ use axum::{
 };
 use std::sync::{Arc as StdArc, Mutex};
 use tokio::time::timeout;
+use tower::ServiceExt;
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -380,7 +385,7 @@ fn write_temp_frontend_dist_with_unreadable_wasm() -> std::path::PathBuf {
 fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
     AppState {
         store: Arc::new(SessionStore::new(1)),
-        workspace_store: new_ephemeral_workspace_store(),
+        workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(StaticReplyProvider {
             reply: String::new(),
         }),
@@ -809,16 +814,10 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
         .create_session("alice")
         .await
         .expect("session creation should succeed");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
     let _ = post_message(
         State(state),
         Path(session.id.clone()),
-        headers,
+        bearer_principal("alice"),
         Json(PromptRequest {
             text: "hello".to_string(),
         }),
@@ -849,20 +848,14 @@ async fn create_session_seeds_startup_hints_when_enabled() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
         store: store.clone(),
-        workspace_store: new_ephemeral_workspace_store(),
+        workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(StartupHintProvider {
             hint: "bundled mock verification ready".to_string(),
         }),
         startup_hints: true,
         frontend_dist: None,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
-    let response = create_session(State(state), headers)
+    let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
 
@@ -879,20 +872,14 @@ async fn create_session_skips_startup_hints_when_disabled() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
         store,
-        workspace_store: new_ephemeral_workspace_store(),
+        workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(StartupHintProvider {
             hint: "should stay hidden".to_string(),
         }),
         startup_hints: false,
         frontend_dist: None,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
-    let response = create_session(State(state), headers)
+    let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
 
@@ -914,18 +901,12 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
         store,
-        workspace_store: new_ephemeral_workspace_store(),
+        workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(NoStartupHintProvider),
         startup_hints: true,
         frontend_dist: None,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
-    let response = create_session(State(state), headers)
+    let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
 
@@ -939,20 +920,14 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),
-        workspace_store: new_ephemeral_workspace_store(),
+        workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(FailingStartupHintProvider {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         startup_hints: true,
         frontend_dist: None,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
-    let error = create_session(State(state), headers)
+    let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("failed startup hint priming should fail the request");
 
@@ -982,7 +957,7 @@ async fn create_session_reports_rollback_failures() {
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),
-        workspace_store: new_ephemeral_workspace_store(),
+        workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(RollbackFailingStartupHintProvider {
             store: store.clone(),
             owner: "alice".to_string(),
@@ -991,13 +966,7 @@ async fn create_session_reports_rollback_failures() {
         startup_hints: true,
         frontend_dist: None,
     };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
-    let error = create_session(State(state), headers)
+    let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("rollback failures should surface as internal errors");
 
@@ -1030,15 +999,13 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
         .create_session("alice")
         .await
         .expect("session creation should succeed");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
-    let response = close_session(State(state), Path(session.id.clone()), headers)
-        .await
-        .expect("closing the session should succeed");
+    let response = close_session(
+        State(state),
+        Path(session.id.clone()),
+        bearer_principal("alice"),
+    )
+    .await
+    .expect("closing the session should succeed");
 
     assert_eq!(response.0.session.id, session.id);
     assert_eq!(
@@ -1093,7 +1060,7 @@ async fn legacy_session_routes_persist_owner_scoped_metadata() {
 
 #[tokio::test]
 async fn create_session_scrubs_workspace_store_failures() {
-    let state = AppState::with_workspace_store(
+    let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
         Arc::new(FailingWorkspaceStore::new("db path leaked")),
         Arc::new(TrackingReplyProvider {
@@ -1101,7 +1068,7 @@ async fn create_session_scrubs_workspace_store_failures() {
         }),
     );
 
-    let error = create_session(State(state), bearer_headers("alice"))
+    let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("workspace store failures should surface as internal errors");
 
@@ -1138,7 +1105,7 @@ fn app_state_build_errors_format_and_expose_sources() {
 
 #[test]
 fn app_state_debug_reports_public_fields() {
-    let state = AppState::with_workspace_store(
+    let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
         metadata_test_workspace_store(),
         Arc::new(TrackingReplyProvider {
@@ -1153,7 +1120,7 @@ fn app_state_debug_reports_public_fields() {
 }
 
 #[test]
-fn app_state_new_reports_workspace_store_initialization_failures() {
+fn workspace_store_initialization_failures_map_into_app_state_build_errors() {
     let blocking_path = std::env::temp_dir().join(format!(
         "acp-web-backend-state-blocker-{}",
         uuid::Uuid::new_v4().simple()
@@ -1161,14 +1128,9 @@ fn app_state_new_reports_workspace_store_initialization_failures() {
     let cleanup_path = blocking_path.clone();
     std::fs::write(&blocking_path, "blocker").expect("creating the blocking file should succeed");
 
-    let error = AppState::new(ServerConfig {
-        session_cap: 4,
-        acp_server: "127.0.0.1:65535".to_string(),
-        startup_hints: false,
-        state_dir: blocking_path,
-        frontend_dist: None,
-    })
-    .expect_err("invalid state roots should fail");
+    let error = SqliteWorkspaceRepository::new(blocking_path.join("db.sqlite"))
+        .map_err(AppStateBuildError::from)
+        .expect_err("invalid state roots should fail");
 
     assert!(matches!(error, AppStateBuildError::WorkspaceStore(_)));
     let _ = std::fs::remove_file(cleanup_path);
@@ -1176,7 +1138,7 @@ fn app_state_new_reports_workspace_store_initialization_failures() {
 
 #[tokio::test]
 async fn materialize_user_best_effort_returns_none_when_workspace_storage_fails() {
-    let state = AppState::with_workspace_store(
+    let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
         Arc::new(FailingWorkspaceStore::new("materialization unavailable")),
         Arc::new(TrackingReplyProvider {
@@ -1193,7 +1155,7 @@ async fn materialize_user_best_effort_returns_none_when_workspace_storage_fails(
 
 #[tokio::test]
 async fn persist_session_metadata_best_effort_swallows_workspace_storage_errors() {
-    let state = AppState::with_workspace_store(
+    let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
         Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
         Arc::new(TrackingReplyProvider {
@@ -1214,7 +1176,7 @@ async fn persist_session_metadata_best_effort_swallows_workspace_storage_errors(
 
 #[tokio::test]
 async fn persist_prompt_snapshot_best_effort_swallows_snapshot_failures() {
-    let state = AppState::with_workspace_store(
+    let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
         metadata_test_workspace_store(),
         Arc::new(TrackingReplyProvider {
@@ -1238,7 +1200,7 @@ async fn create_session_reports_metadata_rollback_failures() {
     let store = Arc::new(SessionStore::new(1));
     let state = AppState {
         store: store.clone(),
-        workspace_store: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
+        workspace_repository: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
             store,
             "alice",
             "metadata write failed",
@@ -1251,7 +1213,7 @@ async fn create_session_reports_metadata_rollback_failures() {
         frontend_dist: None,
     };
 
-    let error = create_session(State(state), bearer_headers("alice"))
+    let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("metadata rollback failures should surface as internal errors");
 
@@ -1268,7 +1230,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
     let store = Arc::new(SessionStore::new(1));
     let state = AppState {
         store: store.clone(),
-        workspace_store: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
+        workspace_repository: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
             store.clone(),
             "alice",
             "metadata write failed",
@@ -1281,7 +1243,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         frontend_dist: None,
     };
 
-    let error = create_session(State(state), bearer_headers("alice"))
+    let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("metadata persistence failures should roll back the session");
 
@@ -1300,7 +1262,7 @@ async fn rename_session_keeps_working_when_workspace_materialization_fails() {
         .create_session("alice")
         .await
         .expect("session creation should succeed");
-    let state = AppState::with_workspace_store(
+    let state = AppState::with_workspace_repository(
         store,
         Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
         Arc::new(TrackingReplyProvider {
@@ -1311,7 +1273,7 @@ async fn rename_session_keeps_working_when_workspace_materialization_fails() {
     let renamed = rename_session(
         State(state),
         Path(session.id.clone()),
-        bearer_headers("alice"),
+        bearer_principal("alice"),
         Json(RenameSessionRequest {
             title: "Renamed while metadata failed".to_string(),
         }),
@@ -1332,7 +1294,7 @@ async fn post_message_keeps_working_when_workspace_materialization_fails() {
     let response = post_message(
         State(failing_workspace_state(store)),
         Path(session.id.clone()),
-        bearer_headers("alice"),
+        bearer_principal("alice"),
         Json(PromptRequest {
             text: "hello from a degraded metadata store".to_string(),
         }),
@@ -1353,7 +1315,7 @@ async fn close_session_keeps_working_when_workspace_materialization_fails() {
     let response = close_session(
         State(failing_workspace_state(store)),
         Path(session.id.clone()),
-        bearer_headers("alice"),
+        bearer_principal("alice"),
     )
     .await
     .expect("live session close should still succeed");
@@ -1373,7 +1335,7 @@ async fn delete_session_keeps_working_when_workspace_materialization_fails() {
     let response = delete_session(
         State(state),
         Path(session.id.clone()),
-        bearer_headers("alice"),
+        bearer_principal("alice"),
     )
     .await
     .expect("live session deletion should still succeed");
@@ -1402,30 +1364,30 @@ fn metadata_test_workspace_store() -> Arc<SqliteWorkspaceRepository> {
 
 struct MetadataTestContext {
     store: Arc<SessionStore>,
-    workspace_store: Arc<SqliteWorkspaceRepository>,
+    workspace_repository: Arc<SqliteWorkspaceRepository>,
     state: AppState,
-    headers: HeaderMap,
+    principal: Extension<AuthenticatedPrincipal>,
     user: UserRecord,
 }
 
 async fn metadata_test_context() -> MetadataTestContext {
     let store = Arc::new(SessionStore::new(4));
-    let workspace_store = metadata_test_workspace_store();
-    let state = AppState::with_workspace_store(
+    let workspace_repository = metadata_test_workspace_store();
+    let state = AppState::with_workspace_repository(
         store.clone(),
-        workspace_store.clone(),
+        workspace_repository.clone(),
         Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
     );
     let headers = bearer_headers("alice");
-    let user = materialized_user_for_headers(workspace_store.as_ref(), &headers).await;
+    let user = materialized_user_for_headers(workspace_repository.as_ref(), &headers).await;
 
     MetadataTestContext {
         store,
-        workspace_store,
+        workspace_repository,
         state,
-        headers,
+        principal: bearer_principal("alice"),
         user,
     }
 }
@@ -1433,14 +1395,14 @@ async fn metadata_test_context() -> MetadataTestContext {
 async fn create_persisted_session(
     context: &MetadataTestContext,
 ) -> (SessionSnapshot, SessionMetadataRecord) {
-    let session = create_session(State(context.state.clone()), context.headers.clone())
+    let session = create_session(State(context.state.clone()), context.principal.clone())
         .await
         .expect("session creation should succeed")
         .1
         .0
         .session;
     let metadata = load_session_metadata_or_panic(
-        context.workspace_store.as_ref(),
+        context.workspace_repository.as_ref(),
         &context.user.user_id,
         &session.id,
         "created",
@@ -1457,7 +1419,7 @@ async fn rename_persisted_session(
     let session = rename_session(
         State(context.state.clone()),
         Path(session_id.to_string()),
-        context.headers.clone(),
+        context.principal.clone(),
         Json(RenameSessionRequest {
             title: "Renamed session".to_string(),
         }),
@@ -1467,7 +1429,7 @@ async fn rename_persisted_session(
     .0
     .session;
     let metadata = load_session_metadata_or_panic(
-        context.workspace_store.as_ref(),
+        context.workspace_repository.as_ref(),
         &context.user.user_id,
         session_id,
         "renamed",
@@ -1484,7 +1446,7 @@ async fn post_message_and_load_metadata(
     let _ = post_message(
         State(context.state.clone()),
         Path(session_id.to_string()),
-        context.headers.clone(),
+        context.principal.clone(),
         Json(PromptRequest {
             text: "hello metadata".to_string(),
         }),
@@ -1493,7 +1455,7 @@ async fn post_message_and_load_metadata(
     .expect("prompt submission should succeed");
 
     load_session_metadata_or_panic(
-        context.workspace_store.as_ref(),
+        context.workspace_repository.as_ref(),
         &context.user.user_id,
         session_id,
         "active",
@@ -1508,13 +1470,13 @@ async fn close_session_and_load_metadata(
     let _ = close_session(
         State(context.state.clone()),
         Path(session_id.to_string()),
-        context.headers.clone(),
+        context.principal.clone(),
     )
     .await
     .expect("session close should succeed");
 
     load_session_metadata_or_panic(
-        context.workspace_store.as_ref(),
+        context.workspace_repository.as_ref(),
         &context.user.user_id,
         session_id,
         "closed",
@@ -1529,13 +1491,13 @@ async fn delete_session_and_load_metadata(
     let _ = delete_session(
         State(context.state.clone()),
         Path(session_id.to_string()),
-        context.headers.clone(),
+        context.principal.clone(),
     )
     .await
     .expect("session deletion should succeed");
 
     load_session_metadata_or_panic(
-        context.workspace_store.as_ref(),
+        context.workspace_repository.as_ref(),
         &context.user.user_id,
         session_id,
         "deleted",
@@ -1552,6 +1514,10 @@ fn bearer_headers(owner: &str) -> HeaderMap {
             .expect("authorization should parse"),
     );
     headers
+}
+
+fn bearer_principal(owner: &str) -> Extension<AuthenticatedPrincipal> {
+    Extension(authorize_request(&bearer_headers(owner), false).expect("headers should authorize"))
 }
 
 async fn materialized_user_for_headers(
@@ -1579,7 +1545,7 @@ async fn load_session_metadata_or_panic(
 }
 
 fn failing_workspace_state(store: Arc<SessionStore>) -> AppState {
-    AppState::with_workspace_store(
+    AppState::with_workspace_repository(
         store,
         Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
         Arc::new(TrackingReplyProvider {
@@ -1646,19 +1612,13 @@ async fn slash_completion_handler_returns_catalog_entries_for_the_owner() {
         .create_session("alice")
         .await
         .expect("session creation should succeed");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer alice".parse().expect("authorization should parse"),
-    );
-
     let response = get_slash_completions(
         State(state),
         Query(SlashCompletionsQuery {
             session_id: session.id,
             prefix: "/he".to_string(),
         }),
-        headers,
+        bearer_principal("alice"),
     )
     .await
     .expect("authorized slash completion queries should succeed");
@@ -1681,18 +1641,20 @@ async fn slash_completion_handler_requires_bearer_authentication() {
         .await
         .expect("session creation should succeed");
 
-    let error = get_slash_completions(
-        State(state),
-        Query(SlashCompletionsQuery {
-            session_id: session.id,
-            prefix: "/".to_string(),
-        }),
-        HeaderMap::new(),
-    )
-    .await
-    .expect_err("missing bearer auth must fail");
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/api/v1/completions/slash?sessionId={}&prefix=%2F",
+                    session.id
+                ))
+                .body(Body::empty())
+                .expect("request building should succeed"),
+        )
+        .await
+        .expect("router calls should complete");
 
-    assert!(matches!(error, AppError::Unauthorized(_)));
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[derive(Debug)]
@@ -1765,7 +1727,7 @@ impl RollbackFailingMetadataWorkspaceStore {
 }
 
 #[async_trait]
-impl WorkspaceStorePort for FailingWorkspaceStore {
+impl WorkspaceRepository for FailingWorkspaceStore {
     async fn materialize_user(
         &self,
         _principal: &AuthenticatedPrincipal,
@@ -1807,7 +1769,7 @@ impl WorkspaceStorePort for FailingWorkspaceStore {
 }
 
 #[async_trait]
-impl WorkspaceStorePort for RollbackFailingMetadataWorkspaceStore {
+impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
     async fn materialize_user(
         &self,
         _principal: &AuthenticatedPrincipal,

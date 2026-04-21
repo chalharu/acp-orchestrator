@@ -23,6 +23,7 @@ const BOOTSTRAP_WORKSPACE_KIND: &str = "legacy-session-routes";
 const BOOTSTRAP_WORKSPACE_NAME: &str = "Default workspace";
 const ACTIVE_WORKSPACE_STATUS: &str = "active";
 const LOCAL_ACCOUNT_PRINCIPAL_KIND: &str = "local_account";
+const LEGACY_BROWSER_SESSIONS_TABLE: &str = "legacy_browser_sessions";
 const WORKSPACE_STORE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -260,23 +261,29 @@ impl SqliteWorkspaceRepository {
     }
 
     fn initialize(&self) -> Result<(), WorkspaceStoreError> {
-        let connection = self.open_connection()?;
-        connection
-            .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        ensure_users_column(&connection, "username", "TEXT")?;
-        ensure_users_column(&connection, "password_hash", "TEXT")?;
-        ensure_users_column(&connection, "is_admin", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_users_column(&connection, "deleted_at", "TEXT")?;
-        promote_legacy_bearer_admins(&connection)?;
-        connection
-            .execute_batch(
-                "DROP INDEX IF EXISTS users_username_idx;
+        stage_legacy_browser_sessions_table(&tx)?;
+        tx.execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
+            .map_err(database_error)?;
+        ensure_users_column(&tx, "username", "TEXT")?;
+        ensure_users_column(&tx, "password_hash", "TEXT")?;
+        ensure_users_column(&tx, "is_admin", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_users_column(&tx, "deleted_at", "TEXT")?;
+        promote_legacy_bearer_admins(&tx)?;
+        migrate_legacy_local_accounts(&tx)?;
+        migrate_legacy_browser_sessions(&tx)?;
+        drop_legacy_auth_tables(&tx)?;
+        tx.execute_batch(
+            "DROP INDEX IF EXISTS users_username_idx;
                  CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx
                     ON users(username)
                     WHERE username IS NOT NULL AND deleted_at IS NULL;",
-            )
-            .map_err(database_error)?;
+        )
+        .map_err(database_error)?;
+        tx.commit().map_err(database_error)?;
         Ok(())
     }
 
@@ -911,14 +918,7 @@ fn ensure_users_column(
     column_name: &str,
     column_definition: &str,
 ) -> Result<(), WorkspaceStoreError> {
-    let mut statement = connection
-        .prepare("PRAGMA table_info(users)")
-        .map_err(database_error)?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(database_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(database_error)?;
+    let columns = table_columns(connection, "users")?;
     if columns.iter().any(|column| column == column_name) {
         return Ok(());
     }
@@ -928,6 +928,233 @@ fn ensure_users_column(
             &format!("ALTER TABLE users ADD COLUMN {column_name} {column_definition}"),
             [],
         )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn table_exists(connection: &Connection, table_name: &str) -> Result<bool, WorkspaceStoreError> {
+    connection
+        .query_row(
+            "SELECT 1
+             FROM sqlite_master
+             WHERE type = 'table' AND name = ?1",
+            params![table_name],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(database_error)
+}
+
+fn table_columns(
+    connection: &Connection,
+    table_name: &str,
+) -> Result<Vec<String>, WorkspaceStoreError> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .map_err(database_error)?;
+    statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool, WorkspaceStoreError> {
+    Ok(table_columns(connection, table_name)?
+        .iter()
+        .any(|column| column == column_name))
+}
+
+fn stage_legacy_browser_sessions_table(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    if !table_exists(connection, "browser_sessions")?
+        || table_has_column(connection, "browser_sessions", "user_id")?
+    {
+        return Ok(());
+    }
+
+    if table_exists(connection, LEGACY_BROWSER_SESSIONS_TABLE)? {
+        return Err(WorkspaceStoreError::Database(format!(
+            "legacy browser sessions table '{LEGACY_BROWSER_SESSIONS_TABLE}' already exists"
+        )));
+    }
+
+    connection
+        .execute(
+            "ALTER TABLE browser_sessions RENAME TO legacy_browser_sessions",
+            [],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct LegacyLocalAccountRecord {
+    username: String,
+    password_hash: String,
+    is_admin: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+fn load_legacy_local_accounts(
+    connection: &Connection,
+) -> Result<Option<(Vec<LegacyLocalAccountRecord>, bool)>, WorkspaceStoreError> {
+    if !table_exists(connection, "local_accounts")? {
+        return Ok(None);
+    }
+
+    let has_is_admin = table_has_column(connection, "local_accounts", "is_admin")?;
+    let mut statement = connection
+        .prepare(if has_is_admin {
+            "SELECT user_name, password_hash, is_admin, created_at, updated_at
+             FROM local_accounts
+             ORDER BY created_at ASC, user_name ASC"
+        } else {
+            "SELECT user_name, password_hash, 0, created_at, updated_at
+             FROM local_accounts
+             ORDER BY created_at ASC, user_name ASC"
+        })
+        .map_err(database_error)?;
+    let accounts = statement
+        .query_map([], |row| {
+            Ok(LegacyLocalAccountRecord {
+                username: row.get(0)?,
+                password_hash: row.get(1)?,
+                is_admin: row.get::<_, i64>(2)? != 0,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    Ok(Some((accounts, has_is_admin)))
+}
+
+fn migrate_legacy_local_accounts(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    let Some((accounts, has_is_admin)) = load_legacy_local_accounts(connection)? else {
+        return Ok(());
+    };
+    let promote_oldest = !has_is_admin || !accounts.iter().any(|account| account.is_admin);
+
+    for (index, account) in accounts.iter().enumerate() {
+        let is_admin = account.is_admin || (promote_oldest && index == 0);
+        let principal_subject = durable_local_account_subject(&account.username);
+        if load_user_by_principal(connection, LOCAL_ACCOUNT_PRINCIPAL_KIND, &principal_subject)?
+            .is_some()
+        {
+            continue;
+        }
+
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    username,
+                    password_hash,
+                    is_admin,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+                params![
+                    format!("u_{}", Uuid::new_v4().simple()),
+                    LOCAL_ACCOUNT_PRINCIPAL_KIND,
+                    principal_subject,
+                    &account.username,
+                    &account.password_hash,
+                    if is_admin { 1 } else { 0 },
+                    &account.created_at,
+                    &account.updated_at,
+                ],
+            )
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct LegacyBrowserSessionRecord {
+    browser_session_id: String,
+    principal_subject: String,
+    created_at: String,
+    last_seen_at: String,
+}
+
+fn load_legacy_browser_sessions(
+    connection: &Connection,
+) -> Result<Vec<LegacyBrowserSessionRecord>, WorkspaceStoreError> {
+    if !table_exists(connection, LEGACY_BROWSER_SESSIONS_TABLE)? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT session_token, principal_subject, created_at, last_seen_at
+             FROM legacy_browser_sessions",
+        )
+        .map_err(database_error)?;
+    statement
+        .query_map([], |row| {
+            Ok(LegacyBrowserSessionRecord {
+                browser_session_id: row.get(0)?,
+                principal_subject: row.get(1)?,
+                created_at: row.get(2)?,
+                last_seen_at: row.get(3)?,
+            })
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+}
+
+fn migrate_legacy_browser_sessions(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    for session in load_legacy_browser_sessions(connection)? {
+        let Some(user) =
+            load_active_local_account_by_username(connection, &session.principal_subject)?
+        else {
+            continue;
+        };
+
+        connection
+            .execute(
+                "INSERT INTO browser_sessions (
+                    browser_session_id,
+                    user_id,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                 ) VALUES (?1, ?2, ?3, ?4, NULL)
+                 ON CONFLICT(browser_session_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    created_at = excluded.created_at,
+                    last_seen_at = excluded.last_seen_at,
+                    deleted_at = NULL",
+                params![
+                    session.browser_session_id,
+                    user.user_id,
+                    session.created_at,
+                    session.last_seen_at,
+                ],
+            )
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+fn drop_legacy_auth_tables(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    connection
+        .execute("DROP TABLE IF EXISTS local_accounts", [])
+        .map_err(database_error)?;
+    connection
+        .execute("DROP TABLE IF EXISTS legacy_browser_sessions", [])
         .map_err(database_error)?;
     Ok(())
 }
@@ -1912,6 +2139,72 @@ mod tests {
             .expect("legacy bearer user should insert");
     }
 
+    fn insert_legacy_local_account(
+        connection: &Connection,
+        username: &str,
+        password: &str,
+        created_at: &str,
+        updated_at: &str,
+        is_admin: Option<bool>,
+    ) {
+        let password_hash = hash_password(password).expect("legacy password hash should encode");
+        match is_admin {
+            Some(is_admin) => {
+                connection
+                    .execute(
+                        "INSERT INTO local_accounts (
+                            user_name,
+                            password_hash,
+                            is_admin,
+                            created_at,
+                            updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            username,
+                            password_hash,
+                            if is_admin { 1 } else { 0 },
+                            created_at,
+                            updated_at
+                        ],
+                    )
+                    .expect("legacy local account with admin flag should insert");
+            }
+            None => {
+                connection
+                    .execute(
+                        "INSERT INTO local_accounts (
+                            user_name,
+                            password_hash,
+                            created_at,
+                            updated_at
+                        ) VALUES (?1, ?2, ?3, ?4)",
+                        params![username, password_hash, created_at, updated_at],
+                    )
+                    .expect("legacy local account should insert");
+            }
+        }
+    }
+
+    fn insert_legacy_browser_session(
+        connection: &Connection,
+        browser_session_id: &str,
+        username: &str,
+        created_at: &str,
+        last_seen_at: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO browser_sessions (
+                    session_token,
+                    principal_subject,
+                    created_at,
+                    last_seen_at
+                ) VALUES (?1, ?2, ?3, ?4)",
+                params![browser_session_id, username, created_at, last_seen_at],
+            )
+            .expect("legacy browser session should insert");
+    }
+
     fn snapshot(id: &str, title: &str, status: SessionStatus) -> SessionSnapshot {
         SessionSnapshot {
             id: id.to_string(),
@@ -2392,6 +2685,274 @@ mod tests {
             .expect("materialization should succeed after migration");
 
         assert!(user.is_admin);
+    }
+
+    #[tokio::test]
+    async fn initialization_migrates_legacy_local_accounts_and_browser_sessions_without_admin_flags()
+     {
+        let (db_path, connection) = legacy_user_db_connection(
+            "legacy-local-accounts-no-admin",
+            "CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );",
+        );
+        insert_legacy_local_account(
+            &connection,
+            "alice",
+            "password123",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T01:00:00Z",
+            None,
+        );
+        insert_legacy_local_account(
+            &connection,
+            "bob",
+            "password456",
+            "2024-01-02T00:00:00Z",
+            "2024-01-02T01:00:00Z",
+            None,
+        );
+        insert_legacy_browser_session(
+            &connection,
+            "legacy-session-alice",
+            "alice",
+            "2024-01-03T00:00:00Z",
+            "2024-01-03T01:00:00Z",
+        );
+        insert_legacy_browser_session(
+            &connection,
+            "legacy-session-missing",
+            "missing",
+            "2024-01-03T00:00:00Z",
+            "2024-01-03T01:00:00Z",
+        );
+        drop(connection);
+
+        let repository =
+            SqliteWorkspaceRepository::new(db_path).expect("repository should migrate");
+        let accounts = repository
+            .list_local_accounts()
+            .await
+            .expect("listing migrated accounts should succeed");
+        let alice = accounts
+            .iter()
+            .find(|account| account.username == "alice")
+            .expect("alice should be migrated");
+        let bob = accounts
+            .iter()
+            .find(|account| account.username == "bob")
+            .expect("bob should be migrated");
+        let authenticated = repository
+            .authenticate_browser_session("legacy-session-alice")
+            .await
+            .expect("legacy browser session should authenticate")
+            .expect("alice session should be preserved");
+        let missing = repository
+            .authenticate_browser_session("legacy-session-missing")
+            .await
+            .expect("orphaned legacy browser session lookup should succeed");
+        let signed_in = repository
+            .sign_in_local_account("fresh-session", "alice", "password123")
+            .await
+            .expect("migrated account should preserve the password hash");
+
+        assert!(alice.is_admin);
+        assert!(!bob.is_admin);
+        assert_eq!(authenticated.user_id, alice.user_id);
+        assert_eq!(authenticated.username.as_deref(), Some("alice"));
+        assert!(missing.is_none());
+        assert_eq!(signed_in.user_id, alice.user_id);
+    }
+
+    #[tokio::test]
+    async fn initialization_migrates_legacy_local_accounts_and_browser_sessions_with_admin_flags() {
+        let (db_path, connection) = legacy_user_db_connection(
+            "legacy-local-accounts-with-admin",
+            "CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );",
+        );
+        insert_legacy_local_account(
+            &connection,
+            "alice",
+            "password123",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T01:00:00Z",
+            Some(false),
+        );
+        insert_legacy_local_account(
+            &connection,
+            "bob",
+            "password456",
+            "2024-01-02T00:00:00Z",
+            "2024-01-02T01:00:00Z",
+            Some(true),
+        );
+        insert_legacy_browser_session(
+            &connection,
+            "legacy-session-bob",
+            "bob",
+            "2024-01-03T00:00:00Z",
+            "2024-01-03T01:00:00Z",
+        );
+        drop(connection);
+
+        let repository =
+            SqliteWorkspaceRepository::new(db_path).expect("repository should migrate");
+        let accounts = repository
+            .list_local_accounts()
+            .await
+            .expect("listing migrated accounts should succeed");
+        let alice = accounts
+            .iter()
+            .find(|account| account.username == "alice")
+            .expect("alice should be migrated");
+        let bob = accounts
+            .iter()
+            .find(|account| account.username == "bob")
+            .expect("bob should be migrated");
+        let authenticated = repository
+            .authenticate_browser_session("legacy-session-bob")
+            .await
+            .expect("legacy browser session should authenticate")
+            .expect("bob session should be preserved");
+        let signed_in = repository
+            .sign_in_local_account("fresh-session-bob", "bob", "password456")
+            .await
+            .expect("migrated admin account should preserve the password hash");
+
+        assert!(!alice.is_admin);
+        assert!(bob.is_admin);
+        assert_eq!(authenticated.user_id, bob.user_id);
+        assert_eq!(authenticated.username.as_deref(), Some("bob"));
+        assert!(authenticated.is_admin);
+        assert_eq!(signed_in.user_id, bob.user_id);
+    }
+
+    #[tokio::test]
+    async fn initialization_does_not_overwrite_current_local_accounts_when_legacy_tables_remain() {
+        let (db_path, connection) = legacy_user_db_connection(
+            "mixed-current-and-legacy-local-accounts",
+            "CREATE TABLE users (
+                    user_id TEXT PRIMARY KEY,
+                    principal_kind TEXT NOT NULL,
+                    principal_subject TEXT NOT NULL,
+                    username TEXT,
+                    password_hash TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    UNIQUE(principal_kind, principal_subject)
+                );
+                CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );",
+        );
+        let current_password_hash =
+            hash_password("password-new").expect("current password hash should build");
+        let now = timestamp(&Utc::now());
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    username,
+                    password_hash,
+                    is_admin,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6, NULL)",
+                params![
+                    "u_current_alice",
+                    LOCAL_ACCOUNT_PRINCIPAL_KIND,
+                    durable_local_account_subject("alice"),
+                    "alice",
+                    current_password_hash,
+                    now,
+                ],
+            )
+            .expect("current local account should insert");
+        insert_legacy_local_account(
+            &connection,
+            "alice",
+            "password-old",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T01:00:00Z",
+            Some(true),
+        );
+        insert_legacy_browser_session(
+            &connection,
+            "legacy-session-alice",
+            "alice",
+            "2024-01-03T00:00:00Z",
+            "2024-01-03T01:00:00Z",
+        );
+        drop(connection);
+
+        let repository =
+            SqliteWorkspaceRepository::new(db_path).expect("repository should migrate");
+        let accounts = repository
+            .list_local_accounts()
+            .await
+            .expect("listing migrated accounts should succeed");
+        let alice = accounts
+            .iter()
+            .find(|account| account.username == "alice")
+            .expect("alice should remain available");
+        let authenticated = repository
+            .authenticate_browser_session("legacy-session-alice")
+            .await
+            .expect("legacy browser session should authenticate")
+            .expect("alice session should be preserved");
+        let signed_in = repository
+            .sign_in_local_account("fresh-session-alice", "alice", "password-new")
+            .await
+            .expect("current password should remain authoritative");
+        let old_password_error = repository
+            .sign_in_local_account("rejected-session-alice", "alice", "password-old")
+            .await
+            .expect_err("stale legacy password should not replace the current one");
+
+        assert_eq!(accounts.len(), 1);
+        assert!(!alice.is_admin);
+        assert_eq!(authenticated.user_id, alice.user_id);
+        assert_eq!(signed_in.user_id, alice.user_id);
+        assert_eq!(
+            old_password_error,
+            WorkspaceStoreError::Unauthorized("invalid username or password".to_string())
+        );
     }
 
     #[tokio::test]

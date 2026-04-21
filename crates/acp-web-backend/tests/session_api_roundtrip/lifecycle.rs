@@ -7,6 +7,7 @@ async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
         session_cap: 8,
         acp_server: "127.0.0.1:9".to_string(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await?;

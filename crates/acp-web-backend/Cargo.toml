@@ -8,6 +8,7 @@ license.workspace = true
 acp-app-support.workspace = true
 acp-contracts.workspace = true
 agent-client-protocol.workspace = true
+argon2.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
@@ -18,8 +19,10 @@ hyper-util.workspace = true
 libc.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 snafu.workspace = true
 subtle.workspace = true
 tokio.workspace = true
@@ -34,5 +37,9 @@ acp-app-support = { workspace = true, features = ["test-helpers"] }
 acp-mock = { path = "../acp-mock", version = "=0.1.0" }
 anyhow = "=1.0.102"
 eventsource-stream.workspace = true
+fantoccini = { version = "=0.22.1", default-features = false, features = [
+  "rustls-tls",
+] }
 futures-util.workspace = true
 tokio.workspace = true
+tower = "=0.5.3"

@@ -12,6 +12,14 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPrincipal {
     pub id: String,
+    pub kind: AuthenticatedPrincipalKind,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticatedPrincipalKind {
+    Bearer,
+    BrowserSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,15 +45,18 @@ impl AuthError {
 ///
 /// `requires_csrf` applies only to cookie-authenticated browser requests. Bearer-authenticated
 /// loopback clients rely on the `Authorization` header and intentionally bypass CSRF.
+/// This helper is header-only: it cannot resolve browser cookies into durable signed-in users.
+/// Production web routing must use the stateful resolver in `server.rs` instead of treating the
+/// raw `acp_session` UUID as the browser principal.
 pub fn authorize_request(
     headers: &HeaderMap,
     requires_csrf: bool,
 ) -> Result<AuthenticatedPrincipal, AuthError> {
-    if let Some(principal) = extract_bearer_principal(headers)? {
+    if let Some(principal) = bearer_principal(headers)? {
         return Ok(principal);
     }
 
-    let principal = extract_cookie_principal(headers)?;
+    let principal = browser_principal_from_token(browser_session_token(headers)?);
     if requires_csrf {
         validate_csrf(headers)?;
     }
@@ -65,9 +76,7 @@ pub fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .find(|value| !value.is_empty())
 }
 
-fn extract_bearer_principal(
-    headers: &HeaderMap,
-) -> Result<Option<AuthenticatedPrincipal>, AuthError> {
+pub fn bearer_principal(headers: &HeaderMap) -> Result<Option<AuthenticatedPrincipal>, AuthError> {
     // Slice 0 bearer identity is loopback-only trust, not secret-based authentication.
     // Any future non-loopback exposure must replace this with real token validation.
     let Some(value) = headers.get(AUTHORIZATION) else {
@@ -87,21 +96,29 @@ fn extract_bearer_principal(
 
     Ok(Some(AuthenticatedPrincipal {
         id: token.to_string(),
+        kind: AuthenticatedPrincipalKind::Bearer,
+        subject: token.to_string(),
     }))
 }
 
-fn extract_cookie_principal(headers: &HeaderMap) -> Result<AuthenticatedPrincipal, AuthError> {
+pub fn browser_session_token(headers: &HeaderMap) -> Result<String, AuthError> {
     let token =
         cookie_value(headers, SESSION_COOKIE_NAME).ok_or(AuthError::MissingAuthentication)?;
-    let token = Uuid::parse_str(token)
+    Ok(Uuid::parse_str(token)
         .map_err(|_| AuthError::InvalidAuthentication)?
         .as_hyphenated()
-        .to_string();
-
-    Ok(AuthenticatedPrincipal { id: token })
+        .to_string())
 }
 
-fn validate_csrf(headers: &HeaderMap) -> Result<(), AuthError> {
+fn browser_principal_from_token(token: String) -> AuthenticatedPrincipal {
+    AuthenticatedPrincipal {
+        id: token.clone(),
+        kind: AuthenticatedPrincipalKind::BrowserSession,
+        subject: token,
+    }
+}
+
+pub fn validate_csrf(headers: &HeaderMap) -> Result<(), AuthError> {
     let expected = cookie_value(headers, CSRF_COOKIE_NAME)
         .ok_or(AuthError::MissingCsrfToken)
         .and_then(normalize_uuid_token)?;
@@ -163,6 +180,8 @@ mod tests {
         let principal = authorize_request(&headers, true).expect("valid bearer token should work");
 
         assert_eq!(principal.id, "developer");
+        assert_eq!(principal.kind, AuthenticatedPrincipalKind::Bearer);
+        assert_eq!(principal.subject, "developer");
     }
 
     #[test]
@@ -179,6 +198,8 @@ mod tests {
             authorize_request(&headers, false).expect("cookie authentication should work");
 
         assert_eq!(principal.id, SESSION_ID);
+        assert_eq!(principal.kind, AuthenticatedPrincipalKind::BrowserSession);
+        assert_eq!(principal.subject, SESSION_ID);
     }
 
     #[test]
@@ -241,6 +262,8 @@ mod tests {
             authorize_request(&headers, true).expect("matching csrf tokens should succeed");
 
         assert_eq!(principal.id, SESSION_ID);
+        assert_eq!(principal.kind, AuthenticatedPrincipalKind::BrowserSession);
+        assert_eq!(principal.subject, SESSION_ID);
     }
 
     #[test]

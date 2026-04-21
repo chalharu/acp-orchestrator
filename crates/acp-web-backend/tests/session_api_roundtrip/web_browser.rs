@@ -83,6 +83,7 @@ async fn spawn_browser_test_stack() -> Result<TestStack> {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
+        state_dir: test_state_dir(),
         frontend_dist: None,
     })
     .await
@@ -96,6 +97,8 @@ async fn bootstrap_browser_session(
     assert_browser_shell(&app_document);
 
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
+    let _ = bootstrap_browser_account(browser, backend_url, &csrf_token, "admin", "password123")
+        .await?;
     let created: CreateSessionResponse =
         create_browser_session(browser, backend_url, &csrf_token).await?;
     let session_id = created.session.id.clone();

@@ -1,7 +1,10 @@
 //! ACP Web frontend – Leptos CSR, compiled to WebAssembly.
 //!
 //! Slice 1 minimal chat flow:
-//! - `/app/`              – prepares a fresh session, then redirects into chat
+//! - `/app/`              – prepares a fresh session, or routes to bootstrap registration
+//! - `/app/register/`     – bootstrap registration for the first local account
+//! - `/app/sign-in/`      – username/password sign-in for existing local accounts
+//! - `/app/accounts/`     – minimal admin-only local account management
 //! - `/app/sessions/{id}` – live session: transcript, SSE updates, composer
 //!
 //! Auth: same-origin cookie (`acp_session`).
@@ -9,7 +12,11 @@
 //! `<meta name="acp-csrf-token">` in the shell document).
 
 mod api;
+mod application;
 mod components;
+mod domain;
+mod infrastructure;
+mod presentation;
 mod slash;
 
 use acp_contracts::{
@@ -27,6 +34,7 @@ use web_sys::EventSource;
 use components::{
     ChatActivity, Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, Transcript,
 };
+use presentation::{AccountsPage, RegisterPage, SessionSidebarAuthControls, SignInPage};
 use slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
     local_slash_candidates, parse_browser_slash_action, slash_palette_is_visible,
@@ -68,6 +76,9 @@ fn App() -> impl IntoView {
     view! {
         {move || match current_route() {
             AppRoute::Home => view! { <HomePage /> }.into_any(),
+            AppRoute::Register => view! { <RegisterPage /> }.into_any(),
+            AppRoute::SignIn => view! { <SignInPage /> }.into_any(),
+            AppRoute::Accounts => view! { <AccountsPage /> }.into_any(),
             AppRoute::Session(session_id) => view! { <SessionView session_id=session_id /> }.into_any(),
             AppRoute::NotFound => {
                 view! {
@@ -303,6 +314,7 @@ struct SidebarSession {
     id: String,
     href: String,
     title: String,
+    activity_label: String,
     is_current: bool,
     is_closed: bool,
 }
@@ -442,6 +454,7 @@ fn session_view_content(
         <main class="app-shell app-shell--session">
             <SessionShell
                 current_session_id=current_session_id
+                auth_error=signals.action_error
                 sidebar_open=sidebar_open
                 shell_signals=shell_signals
                 main_signals=main_signals
@@ -497,6 +510,7 @@ fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
 #[component]
 fn SessionShell(
     current_session_id: String,
+    auth_error: RwSignal<Option<String>>,
     sidebar_open: RwSignal<bool>,
     shell_signals: SessionShellSignals,
     main_signals: SessionMainSignals,
@@ -514,6 +528,7 @@ fn SessionShell(
         <div class=move || session_layout_class(sidebar_open.get())>
             <SessionSidebar
                 current_session_id=current_session_id
+                auth_error=auth_error
                 sessions=shell_signals.sessions
                 session_list_loaded=shell_signals.list.loaded
                 session_list_error=shell_signals.list.error
@@ -674,6 +689,7 @@ fn StatusBadgeView(#[prop(into)] badge: Signal<StatusBadge>) -> impl IntoView {
 #[component]
 fn SessionSidebar(
     current_session_id: String,
+    auth_error: RwSignal<Option<String>>,
     #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
     #[prop(into)] session_list_loaded: Signal<bool>,
     #[prop(into)] session_list_error: Signal<Option<String>>,
@@ -686,12 +702,17 @@ fn SessionSidebar(
     on_rename_session: Callback<(String, String)>,
     on_delete_session: Callback<String>,
 ) -> impl IntoView {
+    let session_id_for_items = current_session_id.clone();
     let session_items =
-        Signal::derive(move || sidebar_sessions(&sessions.get(), &current_session_id));
+        Signal::derive(move || sidebar_sessions(&sessions.get(), &session_id_for_items));
 
     view! {
         <aside class=move || session_sidebar_class(sidebar_open.get())>
-            <SessionSidebarHeader sidebar_open=sidebar_open />
+            <SessionSidebarHeader
+                current_session_id=current_session_id
+                auth_error=auth_error
+                sidebar_open=sidebar_open
+            />
             <SessionSidebarStatus session_list_error=session_list_error session_items=session_items />
             <SessionSidebarNav
                 session_items=session_items
@@ -710,15 +731,22 @@ fn SessionSidebar(
 }
 
 #[component]
-fn SessionSidebarHeader(sidebar_open: RwSignal<bool>) -> impl IntoView {
+fn SessionSidebarHeader(
+    current_session_id: String,
+    auth_error: RwSignal<Option<String>>,
+    sidebar_open: RwSignal<bool>,
+) -> impl IntoView {
     view! {
         <div class="session-sidebar__header">
-            <a class="session-sidebar__new-link" href="/app/" aria-label="New chat">
-                <span class="session-sidebar__new-link-icon" aria-hidden="true">
-                    "+"
-                </span>
-                <span class="session-sidebar__new-link-label">"New chat"</span>
-            </a>
+            <div class="session-sidebar__header-links">
+                <a class="session-sidebar__new-link" href="/app/" aria-label="New chat">
+                    <span class="session-sidebar__new-link-icon" aria-hidden="true">
+                        "+"
+                    </span>
+                    <span class="session-sidebar__new-link-label">"New chat"</span>
+                </a>
+                <SessionSidebarAuthControls current_session_id=current_session_id error=auth_error />
+            </div>
             <button
                 type="button"
                 class="session-sidebar__dismiss"
@@ -955,27 +983,29 @@ fn session_sidebar_item_callbacks(
 }
 
 fn session_sidebar_item_view(
-    href: String,
-    title: String,
-    is_current: bool,
-    is_closed: bool,
+    item: SidebarSession,
     rename_draft: RwSignal<String>,
     item_signals: SessionSidebarItemSignals,
     callbacks: SessionSidebarItemCallbacks,
 ) -> impl IntoView {
+    let is_current = item.is_current;
+    let is_closed = item.is_closed;
     view! {
         <li class=move || session_sidebar_item_class(is_current, is_closed)>
             <Show
                 when=move || item_signals.is_renaming.get()
                 fallback={
-                    let href = href.clone();
-                    let title = title.clone();
+                    let href = item.href.clone();
+                    let title = item.title.clone();
+                    let activity_label = item.activity_label.clone();
                     move || {
                         view! {
                             <SessionSidebarItemDisplay
                                 href=href.clone()
                                 title=title.clone()
+                                activity_label=activity_label.clone()
                                 is_current=is_current
+                                is_closed=is_closed
                                 is_deleting=item_signals.is_deleting
                                 rename_action_disabled=item_signals.rename_action_disabled
                                 delete_action_disabled=item_signals.delete_action_disabled
@@ -1019,7 +1049,7 @@ fn SessionSidebarItem(
         rename_draft,
     );
     let callbacks = session_sidebar_item_callbacks(
-        item.id,
+        item.id.clone(),
         item.title.clone(),
         rename_draft,
         renaming_session_id,
@@ -1028,22 +1058,16 @@ fn SessionSidebarItem(
         on_delete_session,
     );
 
-    session_sidebar_item_view(
-        item.href,
-        item.title,
-        item.is_current,
-        item.is_closed,
-        rename_draft,
-        item_signals,
-        callbacks,
-    )
+    session_sidebar_item_view(item, rename_draft, item_signals, callbacks)
 }
 
 #[component]
 fn SessionSidebarItemDisplay(
     href: String,
     title: String,
+    activity_label: String,
     is_current: bool,
+    is_closed: bool,
     #[prop(into)] is_deleting: Signal<bool>,
     #[prop(into)] rename_action_disabled: Signal<bool>,
     #[prop(into)] delete_action_disabled: Signal<bool>,
@@ -1056,7 +1080,15 @@ fn SessionSidebarItemDisplay(
             href=href
             aria-current=if is_current { Some("page") } else { None }
         >
-            <span class="session-sidebar__session-title">{title}</span>
+            <span class="session-sidebar__session-copy">
+                <span class="session-sidebar__session-title">{title}</span>
+                <span class="session-sidebar__session-meta">
+                    <span class="session-sidebar__session-activity">{activity_label}</span>
+                    <span class=move || session_sidebar_status_pill_class(is_closed)>
+                        {session_sidebar_status_label(is_closed)}
+                    </span>
+                </span>
+            </span>
         </a>
         <button
             type="button"
@@ -1479,20 +1511,43 @@ fn session_submit_callback(session_id: String, signals: SessionSignals) -> Callb
 
 fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: RwSignal<bool>) {
     leptos::task::spawn_local(async move {
-        match resolve_home_session_id().await {
-            Ok(session_id) => {
-                if let Err(message) = navigate_to(&app_session_path(&session_id)) {
-                    clear_prepared_session_id();
-                    error.set(Some(message));
-                    preparing.set(false);
-                }
-            }
-            Err(message) => {
-                error.set(Some(message));
-                preparing.set(false);
-            }
+        let result = match infrastructure::api::auth_status().await {
+            Ok(status) => navigate_home_target(application::auth::home_route_target(&status)).await,
+            Err(message) => Err(message),
+        };
+
+        if let Err(message) = result {
+            set_home_redirect_error(error, preparing, message);
         }
     });
+}
+
+async fn navigate_home_target(target: domain::auth::HomeRouteTarget) -> Result<(), String> {
+    match target {
+        domain::auth::HomeRouteTarget::Register => navigate_to("/app/register/"),
+        domain::auth::HomeRouteTarget::SignIn => navigate_to("/app/sign-in/"),
+        domain::auth::HomeRouteTarget::PrepareSession => navigate_prepared_home_session().await,
+    }
+}
+
+async fn navigate_prepared_home_session() -> Result<(), String> {
+    let session_id = resolve_home_session_id().await?;
+    match navigate_to(&app_session_path(&session_id)) {
+        Ok(()) => Ok(()),
+        Err(message) => {
+            clear_prepared_session_id();
+            Err(message)
+        }
+    }
+}
+
+fn set_home_redirect_error(
+    error: RwSignal<Option<String>>,
+    preparing: RwSignal<bool>,
+    message: String,
+) {
+    error.set(Some(message));
+    preparing.set(false);
 }
 
 async fn resolve_home_session_id() -> Result<String, String> {
@@ -2169,6 +2224,9 @@ fn status_badge_class(badge: StatusBadge) -> &'static str {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppRoute {
     Home,
+    Register,
+    SignIn,
+    Accounts,
     Session(String),
     NotFound,
 }
@@ -2185,6 +2243,15 @@ fn current_route() -> AppRoute {
 fn route_from_pathname(pathname: &str) -> AppRoute {
     if pathname == "/app" || pathname == "/app/" {
         return AppRoute::Home;
+    }
+    if pathname == "/app/register" || pathname == "/app/register/" {
+        return AppRoute::Register;
+    }
+    if pathname == "/app/sign-in" || pathname == "/app/sign-in/" {
+        return AppRoute::SignIn;
+    }
+    if pathname == "/app/accounts" || pathname == "/app/accounts/" {
+        return AppRoute::Accounts;
     }
 
     pathname
@@ -2324,11 +2391,31 @@ fn sidebar_sessions(sessions: &[SessionListItem], current_session_id: &str) -> V
             } else {
                 session.title.clone()
             },
+            activity_label: sidebar_session_activity_label(session),
             id: session.id.clone(),
             is_current: session.id == current_session_id,
             is_closed: matches!(session.status, SessionStatus::Closed),
         })
         .collect()
+}
+
+fn sidebar_session_activity_label(session: &SessionListItem) -> String {
+    format!(
+        "Updated {}",
+        session.last_activity_at.format("%Y-%m-%d %H:%M UTC")
+    )
+}
+
+fn session_sidebar_status_label(is_closed: bool) -> &'static str {
+    if is_closed { "closed" } else { "active" }
+}
+
+fn session_sidebar_status_pill_class(is_closed: bool) -> &'static str {
+    if is_closed {
+        "session-sidebar__status-pill session-sidebar__status-pill--neutral"
+    } else {
+        "session-sidebar__status-pill session-sidebar__status-pill--success"
+    }
 }
 
 fn mark_session_closed(sessions: &mut [SessionListItem], session_id: &str) {
@@ -2446,7 +2533,8 @@ mod tests {
         next_session_destination, remove_session_from_list, rename_session_in_list,
         route_from_pathname, session_action_busy, session_bootstrap_from_snapshot,
         session_composer_cancel_visible, session_composer_disabled,
-        session_composer_status_message, should_release_turn_state, sidebar_sessions,
+        session_composer_status_message, session_sidebar_status_label,
+        session_sidebar_status_pill_class, should_release_turn_state, sidebar_sessions,
         turn_state_for_snapshot, worker_badge_state,
     };
     use acp_contracts::{
@@ -2630,6 +2718,7 @@ mod tests {
                     id: "s_newest".to_string(),
                     href: "/app/sessions/s_newest".to_string(),
                     title: "Task about rust".to_string(),
+                    activity_label: "Updated 2026-04-17 01:00 UTC".to_string(),
                     is_current: false,
                     is_closed: false,
                 },
@@ -2637,6 +2726,7 @@ mod tests {
                     id: "s_closed".to_string(),
                     href: "/app/sessions/s_closed".to_string(),
                     title: "Old exploration".to_string(),
+                    activity_label: "Updated 2026-04-17 01:00 UTC".to_string(),
                     is_current: true,
                     is_closed: true,
                 },
@@ -2651,6 +2741,9 @@ mod tests {
 
     #[test]
     fn route_from_pathname_decodes_session_id_segments() {
+        assert_eq!(route_from_pathname("/app/register/"), AppRoute::Register);
+        assert_eq!(route_from_pathname("/app/sign-in/"), AppRoute::SignIn);
+        assert_eq!(route_from_pathname("/app/accounts/"), AppRoute::Accounts);
         assert_eq!(
             route_from_pathname("/app/sessions/s%2F1"),
             AppRoute::Session("s/1".to_string())
@@ -2669,6 +2762,21 @@ mod tests {
 
         let items = sidebar_sessions(&sessions, "s_other");
         assert_eq!(items[0].title, "New chat");
+        assert_eq!(items[0].activity_label, "Updated 2026-04-17 01:00 UTC");
+    }
+
+    #[test]
+    fn session_sidebar_status_helpers_match_open_and_closed_sessions() {
+        assert_eq!(session_sidebar_status_label(false), "active");
+        assert_eq!(session_sidebar_status_label(true), "closed");
+        assert_eq!(
+            session_sidebar_status_pill_class(false),
+            "session-sidebar__status-pill session-sidebar__status-pill--success"
+        );
+        assert_eq!(
+            session_sidebar_status_pill_class(true),
+            "session-sidebar__status-pill session-sidebar__status-pill--neutral"
+        );
     }
 
     #[test]

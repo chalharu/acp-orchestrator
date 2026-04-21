@@ -344,14 +344,10 @@ impl SqliteWorkspaceRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let now = Utc::now();
+        let previous = previous_session_token;
+        let next = next_session_token;
         insert_local_account(&tx, user_name, &password_hash, &now)?;
-        rotate_browser_session_binding(
-            &tx,
-            previous_session_token,
-            next_session_token,
-            user_name,
-            &now,
-        )?;
+        rotate_browser_session_binding(&tx, previous, next, user_name, &now)?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -395,13 +391,9 @@ impl SqliteWorkspaceRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let now = Utc::now();
-        rotate_browser_session_binding(
-            &tx,
-            previous_session_token,
-            next_session_token,
-            user_name,
-            &now,
-        )?;
+        let previous = previous_session_token;
+        let next = next_session_token;
+        rotate_browser_session_binding(&tx, previous, next, user_name, &now)?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -1009,14 +1001,25 @@ fn rotate_browser_session_binding(
     user_name: &str,
     now: &DateTime<Utc>,
 ) -> Result<(), WorkspaceStoreError> {
-    if previous_session_token != next_session_token {
-        tx.execute(
-            "DELETE FROM browser_sessions WHERE session_token = ?1",
-            params![previous_session_token],
-        )
-        .map_err(database_error)?;
+    let previous = previous_session_token;
+    let next = next_session_token;
+    if previous == next {
+        return upsert_browser_session_binding(tx, next, user_name, now);
     }
-    upsert_browser_session_binding(tx, next_session_token, user_name, now)
+    delete_browser_session_binding(tx, previous)?;
+    upsert_browser_session_binding(tx, next, user_name, now)
+}
+
+fn delete_browser_session_binding(
+    tx: &rusqlite::Transaction<'_>,
+    session_token: &str,
+) -> Result<(), WorkspaceStoreError> {
+    tx.execute(
+        "DELETE FROM browser_sessions WHERE session_token = ?1",
+        params![session_token],
+    )
+    .map_err(database_error)?;
+    Ok(())
 }
 
 fn local_account_insert_error(error: rusqlite::Error) -> WorkspaceStoreError {
@@ -1422,6 +1425,29 @@ mod tests {
                 .browser_session_user_name(next_session_token)
                 .await
                 .expect("next browser session lookup should succeed"),
+            Some("alice".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_session_rotation_with_the_same_token_keeps_authentication_bound() {
+        let repository = test_repository();
+        let session_token = "11111111-1111-4111-8111-111111111111";
+
+        repository
+            .sign_in_browser_session(session_token, "alice")
+            .await
+            .expect("initial sign-in should succeed");
+        repository
+            .rotate_browser_session(session_token, session_token, "alice")
+            .await
+            .expect("same-token rotation should succeed");
+
+        assert_eq!(
+            repository
+                .browser_session_user_name(session_token)
+                .await
+                .expect("browser session lookup should succeed"),
             Some("alice".to_string())
         );
     }

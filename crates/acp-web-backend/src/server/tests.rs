@@ -127,7 +127,15 @@ fn csrf_errors_become_forbidden_responses() {
 
 #[tokio::test]
 async fn app_entrypoint_bootstraps_browser_cookies_and_chat_shell_markup() {
-    let response = app_entrypoint(HeaderMap::new()).await;
+    assert_app_shell_bootstrap(app_entrypoint(HeaderMap::new()).await).await;
+}
+
+#[tokio::test]
+async fn app_register_entrypoint_bootstraps_browser_cookies_and_chat_shell_markup() {
+    assert_app_shell_bootstrap(app_register_entrypoint(HeaderMap::new()).await).await;
+}
+
+async fn assert_app_shell_bootstrap(response: Response) {
     let set_cookies = response
         .headers()
         .get_all(SET_COOKIE)
@@ -351,6 +359,32 @@ async fn browser_sign_up_rejects_duplicate_user_names() {
     assert_eq!(
         json_response::<ErrorResponse>(duplicate).await.error,
         "unable to create account"
+    );
+}
+
+#[tokio::test]
+async fn browser_sign_up_scrubs_workspace_store_failures() {
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(FailingWorkspaceStore::new("registration unavailable")),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let router = app(state);
+
+    let failed = router
+        .oneshot(browser_sign_up_request(
+            "alice",
+            TEST_LOCAL_PASSWORD,
+            TEST_BROWSER_SESSION_TOKEN,
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        json_response::<ErrorResponse>(failed).await.error,
+        "internal server error"
     );
 }
 

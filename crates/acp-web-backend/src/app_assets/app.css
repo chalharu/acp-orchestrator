@@ -126,45 +126,10 @@ a:hover {
   flex-wrap: wrap;
 }
 
-.chat-topbar__primary,
 .chat-topbar__badges {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-}
-
-.chat-topbar__primary {
-  align-items: center;
-}
-
-.chat-topbar__auth {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.chat-topbar__auth-label {
-  margin: 0;
-  display: grid;
-  gap: 0.08rem;
-  text-align: right;
-}
-
-.chat-topbar__auth-caption {
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-
-.chat-topbar__auth-user {
-  font-size: 0.92rem;
-}
-
-.chat-topbar__sign-out {
-  background: var(--surface);
 }
 
 .session-layout {
@@ -216,6 +181,13 @@ a:hover {
   justify-content: space-between;
 }
 
+.session-sidebar__header-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .session-sidebar__new-link {
   display: inline-flex;
   align-items: center;
@@ -244,6 +216,10 @@ a:hover {
   border-color: #8d4f30;
   background: #8d4f30;
   color: #fff9f3;
+}
+
+.session-sidebar__secondary-link {
+  font-size: 0.875rem;
 }
 
 .session-sidebar__dismiss {
@@ -448,66 +424,6 @@ a:hover {
 .empty-state,
 .banner {
   padding: 0.9rem 1rem;
-}
-
-.auth-panel {
-  width: min(28rem, 100%);
-  margin: 0 auto;
-  display: grid;
-  gap: 1rem;
-}
-
-.auth-panel__copy {
-  display: grid;
-  gap: 0.45rem;
-}
-
-.auth-panel__eyebrow,
-.auth-panel__title {
-  margin: 0;
-}
-
-.auth-panel__eyebrow {
-  font-size: 0.76rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-
-.auth-panel__title {
-  font-size: clamp(1.6rem, 3vw, 2rem);
-  line-height: 1.1;
-}
-
-.auth-form {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.auth-form__label {
-  font-size: 0.88rem;
-  color: var(--ink-soft);
-}
-
-.auth-form__input {
-  width: 100%;
-  min-height: 2.9rem;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--page-bg);
-  color: var(--ink);
-}
-
-.auth-form__actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.auth-form__submit {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: #fff9f3;
 }
 
 .muted,
@@ -925,6 +841,86 @@ textarea:focus-visible {
   }
 }
 
+.account-shell {
+  width: min(920px, 100%);
+}
+
+.account-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.account-panel__header,
+.account-row__summary,
+.account-row__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.account-panel__section {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.account-form,
+.account-row {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.account-form__field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.account-form__field input {
+  width: 100%;
+}
+
+.account-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.account-list__item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffaf4;
+  padding: 0.9rem;
+}
+
+.account-row__delete {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.account-notice {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+input[type="text"],
+input[type="password"] {
+  min-height: 2.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+}
+
 @media (max-width: 640px) {
   #app-root {
     padding: 0;
@@ -1029,26 +1025,9 @@ textarea:focus-visible {
   .pending-list__actions,
   .pending-panel__footer,
   .composer__footer,
-  .composer__actions,
-  .chat-topbar__auth {
+  .composer__actions {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .chat-topbar__auth-label {
-    text-align: left;
-  }
-
-  .auth-panel {
-    width: 100%;
-  }
-
-  .auth-form__actions {
-    justify-content: stretch;
-  }
-
-  .auth-form__submit {
-    width: 100%;
   }
 
   .composer__slash-item {

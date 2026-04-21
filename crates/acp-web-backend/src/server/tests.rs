@@ -1,5 +1,4 @@
 use super::*;
-use crate::auth::{CSRF_HEADER_NAME, authorize_request};
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
 use crate::workspace_repository::WorkspaceRepository;
 use crate::workspace_store::{
@@ -7,25 +6,21 @@ use crate::workspace_store::{
 };
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
 use acp_contracts::{
-    AuthSessionResponse, SessionSnapshot, SessionStatus, SignInRequest, SignUpRequest,
+    AuthStatusResponse, BootstrapRegistrationRequest, SessionSnapshot, SessionStatus, SignInRequest,
 };
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
     extract::Extension,
     http::{
-        HeaderValue, Request,
-        header::CONTENT_TYPE,
+        HeaderValue,
         header::{COOKIE, SET_COOKIE},
     },
+    response::Response,
 };
 use std::sync::{Arc as StdArc, Mutex};
 use tokio::time::timeout;
 use tower::ServiceExt;
-
-const TEST_BROWSER_SESSION_TOKEN: &str = "11111111-1111-4111-8111-111111111111";
-const TEST_BROWSER_CSRF_TOKEN: &str = "22222222-2222-4222-8222-222222222222";
-const TEST_LOCAL_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -99,18 +94,6 @@ fn auth_errors_become_unauthorized_responses() {
 }
 
 #[test]
-fn workspace_store_conflicts_become_generic_conflict_responses() {
-    let error = AppError::from(WorkspaceStoreError::Conflict(
-        "user name already exists".to_string(),
-    ));
-
-    assert!(matches!(
-        error,
-        AppError::Conflict(message) if message == "request conflicts with current state"
-    ));
-}
-
-#[test]
 fn csrf_errors_become_forbidden_responses() {
     let missing: AppError = AuthError::MissingCsrfToken.into();
     let invalid: AppError = AuthError::InvalidCsrfToken.into();
@@ -127,15 +110,7 @@ fn csrf_errors_become_forbidden_responses() {
 
 #[tokio::test]
 async fn app_entrypoint_bootstraps_browser_cookies_and_chat_shell_markup() {
-    assert_app_shell_bootstrap(app_entrypoint(HeaderMap::new()).await).await;
-}
-
-#[tokio::test]
-async fn app_register_entrypoint_bootstraps_browser_cookies_and_chat_shell_markup() {
-    assert_app_shell_bootstrap(app_register_entrypoint(HeaderMap::new()).await).await;
-}
-
-async fn assert_app_shell_bootstrap(response: Response) {
+    let response = app_entrypoint(HeaderMap::new()).await;
     let set_cookies = response
         .headers()
         .get_all(SET_COOKIE)
@@ -211,6 +186,203 @@ async fn app_session_entrypoint_reuses_the_app_shell() {
 }
 
 #[tokio::test]
+async fn app_sign_in_entrypoint_reuses_the_app_shell() {
+    let response = app_sign_in_entrypoint(HeaderMap::new()).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("id=\"app-root\""));
+    assert!(body.contains("wasm-init.js"));
+}
+
+#[tokio::test]
+async fn bootstrap_registration_changes_auth_status_for_the_browser_session() {
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        new_ephemeral_workspace_repository(),
+        Arc::new(StaticReplyProvider {
+            reply: "test reply".to_string(),
+        }),
+    );
+    let shell = app_entrypoint(HeaderMap::new()).await;
+    let headers = browser_cookie_headers(&shell);
+    let body = to_bytes(shell.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be utf-8");
+    let csrf_token = extract_meta_content(&body, "acp-csrf-token");
+
+    let initial = auth_status(State(state.clone()), headers.clone())
+        .await
+        .expect("auth status should load");
+    assert_eq!(
+        initial.0,
+        AuthStatusResponse {
+            bootstrap_required: true,
+            account: None,
+        }
+    );
+
+    let mut write_headers = headers.clone();
+    write_headers.insert("x-csrf-token", HeaderValue::from_str(&csrf_token).unwrap());
+    let principal =
+        authorize_request(&write_headers, true).expect("browser headers should authorize");
+    let registered = bootstrap_register(
+        State(state.clone()),
+        Extension(principal),
+        Json(BootstrapRegistrationRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("bootstrap registration should succeed");
+    assert_eq!(registered.0, StatusCode::CREATED);
+    assert_eq!(registered.1.0.account.username, "admin");
+
+    let after = auth_status(State(state), headers)
+        .await
+        .expect("auth status should load after registration");
+    assert!(after.0.account.is_some());
+    assert!(!after.0.bootstrap_required);
+}
+
+#[tokio::test]
+async fn sign_in_rebinds_existing_accounts_to_a_new_browser_session() {
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        new_ephemeral_workspace_repository(),
+        Arc::new(StaticReplyProvider {
+            reply: "test reply".to_string(),
+        }),
+    );
+    let shell = app_entrypoint(HeaderMap::new()).await;
+    let headers = browser_cookie_headers(&shell);
+    let body = to_bytes(shell.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be utf-8");
+    let csrf_token = extract_meta_content(&body, "acp-csrf-token");
+
+    let mut write_headers = headers.clone();
+    write_headers.insert("x-csrf-token", HeaderValue::from_str(&csrf_token).unwrap());
+    let principal =
+        authorize_request(&write_headers, true).expect("browser headers should authorize");
+    let _registered = bootstrap_register(
+        State(state.clone()),
+        Extension(principal),
+        Json(BootstrapRegistrationRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("bootstrap registration should succeed");
+
+    let second_shell = app_entrypoint(HeaderMap::new()).await;
+    let second_headers = browser_cookie_headers(&second_shell);
+    let second_body = to_bytes(second_shell.into_body(), usize::MAX)
+        .await
+        .expect("second entrypoint body should be readable");
+    let second_body =
+        String::from_utf8(second_body.to_vec()).expect("second entrypoint body should be utf-8");
+    let second_csrf_token = extract_meta_content(&second_body, "acp-csrf-token");
+    let before = auth_status(State(state.clone()), second_headers.clone())
+        .await
+        .expect("auth status should load before sign-in");
+    assert!(before.0.account.is_none());
+    assert!(!before.0.bootstrap_required);
+
+    let mut second_write_headers = second_headers.clone();
+    second_write_headers.insert(
+        "x-csrf-token",
+        HeaderValue::from_str(&second_csrf_token).unwrap(),
+    );
+    let second_principal = authorize_request(&second_write_headers, true)
+        .expect("second browser headers should authorize");
+    let signed_in = sign_in(
+        State(state.clone()),
+        Extension(second_principal),
+        Json(SignInRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("sign-in should succeed");
+    assert_eq!(signed_in.0.account.username, "admin");
+
+    let after = auth_status(State(state), second_headers)
+        .await
+        .expect("auth status should load after sign-in");
+    assert_eq!(after.0.account, Some(signed_in.0.account));
+}
+
+#[tokio::test]
+async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        new_ephemeral_workspace_repository(),
+        Arc::new(StaticReplyProvider {
+            reply: "test reply".to_string(),
+        }),
+    );
+    let shell = app_entrypoint(HeaderMap::new()).await;
+    let headers = browser_cookie_headers(&shell);
+    let body = to_bytes(shell.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be utf-8");
+    let csrf_token = extract_meta_content(&body, "acp-csrf-token");
+
+    let mut write_headers = headers.clone();
+    write_headers.insert("x-csrf-token", HeaderValue::from_str(&csrf_token).unwrap());
+    let principal =
+        authorize_request(&write_headers, true).expect("browser headers should authorize");
+    let _registered = bootstrap_register(
+        State(state.clone()),
+        Extension(principal.clone()),
+        Json(BootstrapRegistrationRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("bootstrap registration should succeed");
+    let created = create_session(State(state.clone()), Extension(principal.clone()))
+        .await
+        .expect("session creation should succeed")
+        .1
+        .0
+        .session;
+    state
+        .workspace_repository
+        .create_local_account("member", "password123", false)
+        .await
+        .expect("member creation should succeed");
+
+    let _signed_in = sign_in(
+        State(state.clone()),
+        Extension(principal.clone()),
+        Json(SignInRequest {
+            username: "member".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("sign-in should succeed");
+
+    let snapshot_error = state
+        .store
+        .session_snapshot(&principal.id, &created.id)
+        .await
+        .expect_err("rebound browser sessions should lose prior live chats");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+#[tokio::test]
 async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
     let response = redirect_to_app().await.into_response();
     let location = response
@@ -223,383 +395,15 @@ async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
 }
 
 #[tokio::test]
-async fn auth_session_route_reports_unauthenticated_browser_state() {
-    let response = test_router()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/auth/session")
-                .body(Body::empty())
-                .expect("request building should succeed"),
-        )
-        .await
-        .expect("router calls should complete");
+async fn redirect_to_sign_in_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_sign_in().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(response).await,
-        AuthSessionResponse {
-            authenticated: false,
-            is_admin: false,
-            bootstrap_registration_open: true,
-            user_name: None,
-        }
-    );
-}
-
-#[tokio::test]
-async fn optional_authenticated_principal_prefers_bearer_auth() {
-    let principal = optional_authenticated_principal(&test_state(), &bearer_headers("alice"))
-        .await
-        .expect("optional bearer auth should succeed");
-
-    assert_eq!(
-        principal.map(|principal| principal.subject),
-        Some("alice".to_string())
-    );
-}
-
-#[tokio::test]
-async fn browser_sign_up_starts_an_authenticated_browser_session() {
-    let router = test_router();
-    let original_session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
-    let mut session_token = original_session_token.clone();
-
-    register_browser_account_for_test(
-        router.clone(),
-        &mut session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-    assert_ne!(session_token, original_session_token);
-    assert_browser_auth_session(router.clone(), &original_session_token, None, false, false).await;
-    assert_browser_auth_session(router, &session_token, Some("alice"), true, false).await;
-}
-
-#[tokio::test]
-async fn auth_session_route_reports_bootstrap_open_until_the_first_local_account_exists() {
-    let router = test_router();
-    let mut session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
-
-    assert_browser_auth_session(router.clone(), &session_token, None, false, true).await;
-    register_browser_account_for_test(
-        router.clone(),
-        &mut session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-    assert_browser_auth_session(router, &session_token, Some("alice"), true, false).await;
-}
-
-#[tokio::test]
-async fn browser_sign_up_requires_admin_after_bootstrap() {
-    let router = test_router();
-    let mut admin_session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
-
-    register_browser_account_for_test(
-        router.clone(),
-        &mut admin_session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-
-    register_browser_account_as_admin_for_test(
-        router.clone(),
-        &admin_session_token,
-        "alice",
-        "bob",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-
-    let mut bob_session_token = "55555555-5555-4555-8555-555555555555".to_string();
-    sign_in_browser_session_for_test(
-        router.clone(),
-        &mut bob_session_token,
-        "bob",
-        TEST_LOCAL_PASSWORD,
-        false,
-    )
-    .await;
-
-    assert_unauthenticated_browser_sign_up_is_rejected(router.clone()).await;
-    assert_non_admin_browser_sign_up_is_rejected(router, &bob_session_token).await;
-}
-
-#[tokio::test]
-async fn browser_sign_in_authenticates_registered_users_and_sign_out_revokes_session_routes() {
-    let router = test_router();
-    let mut session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
-
-    assert_browser_session_requires_sign_in(router.clone(), &session_token).await;
-    register_browser_account_for_test(
-        router.clone(),
-        &mut session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-    sign_out_browser_session_for_test(router.clone(), &session_token).await;
-    let pre_sign_in_session_token = session_token.clone();
-    sign_in_browser_session_for_test(
-        router.clone(),
-        &mut session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-        true,
-    )
-    .await;
-    assert_ne!(session_token, pre_sign_in_session_token);
-    assert_browser_auth_session(
-        router.clone(),
-        &pre_sign_in_session_token,
-        None,
-        false,
-        false,
-    )
-    .await;
-    assert_browser_auth_session(router.clone(), &session_token, Some("alice"), true, false).await;
-    assert_browser_session_creation(router.clone(), &session_token, StatusCode::CREATED).await;
-    sign_out_browser_session_for_test(router.clone(), &session_token).await;
-    assert_browser_session_requires_sign_in(router, &session_token).await;
-}
-
-#[tokio::test]
-async fn browser_sign_in_rejects_invalid_passwords() {
-    let router = test_router();
-    let mut session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
-
-    register_browser_account_for_test(
-        router.clone(),
-        &mut session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-    sign_out_browser_session_for_test(router.clone(), &session_token).await;
-
-    let invalid = router
-        .oneshot(browser_sign_in_request(
-            "alice",
-            "wrong-password",
-            &session_token,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        json_response::<ErrorResponse>(invalid).await.error,
-        "invalid user name or password"
-    );
-}
-
-#[tokio::test]
-async fn browser_sign_up_rejects_duplicate_user_names() {
-    let router = test_router();
-    let mut session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
-
-    register_browser_account_for_test(
-        router.clone(),
-        &mut session_token,
-        "alice",
-        TEST_LOCAL_PASSWORD,
-    )
-    .await;
-
-    let duplicate = router
-        .oneshot(browser_sign_up_request(
-            "alice",
-            TEST_LOCAL_PASSWORD,
-            &session_token,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        json_response::<ErrorResponse>(duplicate).await.error,
-        "unable to create account"
-    );
-}
-
-#[tokio::test]
-async fn browser_sign_up_scrubs_workspace_store_failures() {
-    let state = AppState::with_workspace_repository(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(FailingWorkspaceStore::for_bootstrap_registration(
-            WorkspaceStoreError::Database("registration unavailable".to_string()),
-        )),
-        Arc::new(TrackingReplyProvider {
-            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
-        }),
-    );
-    let router = app(state);
-
-    let failed = router
-        .oneshot(browser_sign_up_request(
-            "alice",
-            TEST_LOCAL_PASSWORD,
-            TEST_BROWSER_SESSION_TOKEN,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(
-        json_response::<ErrorResponse>(failed).await.error,
-        "internal server error"
-    );
-}
-
-#[tokio::test]
-async fn browser_sign_up_scrubs_bootstrap_conflicts() {
-    let state = AppState::with_workspace_repository(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(FailingWorkspaceStore::for_bootstrap_registration(
-            WorkspaceStoreError::Conflict("already exists".to_string()),
-        )),
-        Arc::new(TrackingReplyProvider {
-            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
-        }),
-    );
-    let router = app(state);
-
-    let failed = router
-        .oneshot(browser_sign_up_request(
-            "alice",
-            TEST_LOCAL_PASSWORD,
-            TEST_BROWSER_SESSION_TOKEN,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        json_response::<ErrorResponse>(failed).await.error,
-        "unable to create account"
-    );
-}
-
-#[tokio::test]
-async fn admin_browser_sign_up_scrubs_workspace_store_failures() {
-    let state = AppState::with_workspace_repository(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(FailingWorkspaceStore::for_admin_registration(
-            "alice",
-            WorkspaceStoreError::Database("registration unavailable".to_string()),
-        )),
-        Arc::new(TrackingReplyProvider {
-            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
-        }),
-    );
-    let router = app(state);
-
-    let failed = router
-        .oneshot(browser_sign_up_request(
-            "bob",
-            TEST_LOCAL_PASSWORD,
-            TEST_BROWSER_SESSION_TOKEN,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(
-        json_response::<ErrorResponse>(failed).await.error,
-        "internal server error"
-    );
-}
-
-#[test]
-fn sign_in_user_names_must_not_be_empty() {
-    assert!(matches!(
-        normalize_sign_in_user_name(" \t "),
-        Err(AppError::BadRequest(message)) if message == "user name must not be empty"
-    ));
-}
-
-#[test]
-fn sign_in_user_names_must_not_be_too_long_or_contain_control_characters() {
-    let too_long = "a".repeat(101);
-    assert!(matches!(
-        normalize_sign_in_user_name(&too_long),
-        Err(AppError::BadRequest(message)) if message == "user name must not exceed 100 characters"
-    ));
-    assert!(matches!(
-        normalize_sign_in_user_name("alice\tbob"),
-        Err(AppError::BadRequest(message)) if message == "user name must not contain control characters"
-    ));
-}
-
-#[test]
-fn sign_in_passwords_must_not_be_empty_or_too_long() {
-    let too_long = "p".repeat(201);
-    assert!(matches!(
-        normalize_sign_in_password(""),
-        Err(AppError::BadRequest(message)) if message == "password must not be empty"
-    ));
-    assert!(matches!(
-        normalize_sign_in_password(&too_long),
-        Err(AppError::BadRequest(message)) if message == "password must not exceed 200 characters"
-    ));
-}
-
-#[test]
-fn registration_passwords_must_be_at_least_eight_characters() {
-    assert!(matches!(
-        normalize_registration_password("short"),
-        Err(AppError::BadRequest(message)) if message == "password must be at least 8 characters"
-    ));
-}
-
-#[tokio::test]
-async fn browser_session_revocation_returns_when_revocation_is_inactive() {
-    let (_tx, rx) = tokio::sync::watch::channel(false);
-    timeout(
-        Duration::from_millis(50),
-        browser_session_revocation(Some(rx)),
-    )
-    .await
-    .expect("inactive revocation handles should return immediately");
-}
-
-#[tokio::test]
-async fn browser_session_revocation_returns_when_the_channel_closes_or_is_revoked() {
-    let (closed_tx, closed_rx) = tokio::sync::watch::channel(true);
-    drop(closed_tx);
-    timeout(
-        Duration::from_millis(50),
-        browser_session_revocation(Some(closed_rx)),
-    )
-    .await
-    .expect("closed revocation channels should return");
-
-    let (revoked_tx, revoked_rx) = tokio::sync::watch::channel(true);
-    let revocation = tokio::spawn(browser_session_revocation(Some(revoked_rx)));
-    tokio::task::yield_now().await;
-    revoked_tx
-        .send(false)
-        .expect("revocation updates should notify subscribers");
-    timeout(Duration::from_millis(50), revocation)
-        .await
-        .expect("revoked channels should finish promptly")
-        .expect("revocation task should complete");
-}
-
-#[tokio::test]
-async fn browser_session_revocation_ignores_updates_until_the_session_is_revoked() {
-    let (revoked_tx, revoked_rx) = tokio::sync::watch::channel(true);
-    let revocation = tokio::spawn(browser_session_revocation(Some(revoked_rx)));
-    tokio::task::yield_now().await;
-    revoked_tx
-        .send(true)
-        .expect("non-revoking updates should still wake subscribers");
-    tokio::task::yield_now().await;
-    revoked_tx
-        .send(false)
-        .expect("revocation updates should notify subscribers");
-    timeout(Duration::from_millis(50), revocation)
-        .await
-        .expect("revoked channels should finish promptly")
-        .expect("revocation task should complete");
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/sign-in/"));
 }
 
 #[tokio::test]
@@ -797,7 +601,6 @@ fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
         reply_provider: Arc::new(StaticReplyProvider {
             reply: String::new(),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: Some(Arc::new(dist)),
     }
@@ -1261,7 +1064,6 @@ async fn create_session_seeds_startup_hints_when_enabled() {
         reply_provider: Arc::new(StartupHintProvider {
             hint: "bundled mock verification ready".to_string(),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -1286,7 +1088,6 @@ async fn create_session_skips_startup_hints_when_disabled() {
         reply_provider: Arc::new(StartupHintProvider {
             hint: "should stay hidden".to_string(),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1314,7 +1115,6 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         store,
         workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(NoStartupHintProvider),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -1336,7 +1136,6 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         reply_provider: Arc::new(FailingStartupHintProvider {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -1376,7 +1175,6 @@ async fn create_session_reports_rollback_failures() {
             owner: "alice".to_string(),
             forgotten_sessions: forgotten_sessions.clone(),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -1434,42 +1232,55 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
 #[tokio::test]
 async fn legacy_session_routes_persist_owner_scoped_metadata() {
     let context = metadata_test_context().await;
-    let (created, created_metadata) = create_persisted_session(&context).await;
+    assert_session_routes_persist_owner_scoped_metadata(&context).await;
+}
 
-    assert_eq!(created_metadata.owner_user_id, context.user.user_id);
-    assert_eq!(created_metadata.status, "active");
-    assert!(!created_metadata.workspace_id.is_empty());
+#[tokio::test]
+async fn browser_session_routes_persist_owner_scoped_metadata() {
+    let context = browser_metadata_test_context().await;
+    assert_session_routes_persist_owner_scoped_metadata(&context).await;
+}
 
-    let (renamed, renamed_metadata) = rename_persisted_session(&context, &created.id).await;
+#[tokio::test]
+async fn browser_session_writes_require_an_authenticated_account() {
+    let context = browser_metadata_test_context().await;
+    let (session, _) = create_persisted_session(&context).await;
+    let replacement_admin = context
+        .workspace_repository
+        .create_local_account("backup-admin", "password123", true)
+        .await
+        .expect("creating a replacement admin should succeed");
+    let invalidated_browser_sessions = context
+        .workspace_repository
+        .delete_local_account(&context.user.user_id, &replacement_admin.user_id)
+        .await
+        .expect("deleting the account should invalidate its browser sessions");
 
-    assert_eq!(renamed.title, "Renamed session");
-    assert_eq!(renamed_metadata.title, "Renamed session");
-    assert_eq!(renamed_metadata.workspace_id, created_metadata.workspace_id);
     assert_eq!(
-        renamed_metadata.last_activity_at,
-        created_metadata.last_activity_at
+        invalidated_browser_sessions,
+        vec![context.live_owner_id.clone()]
     );
 
-    let active_metadata = post_message_and_load_metadata(&context, &created.id).await;
+    let error = post_message(
+        State(context.state.clone()),
+        Path(session.id.clone()),
+        context.principal.clone(),
+        Json(PromptRequest {
+            text: "should not run".to_string(),
+        }),
+    )
+    .await
+    .expect_err("deleted browser accounts should not post prompts");
 
-    assert_eq!(active_metadata.status, "active");
-    assert!(active_metadata.last_activity_at >= renamed_metadata.last_activity_at);
-
-    let closed_metadata = close_session_and_load_metadata(&context, &created.id).await;
-
-    assert_eq!(closed_metadata.status, "closed");
-    assert!(closed_metadata.closed_at.is_some());
-
-    let deleted_metadata = delete_session_and_load_metadata(&context, &created.id).await;
-
-    assert_eq!(deleted_metadata.status, "deleted");
-    assert!(deleted_metadata.deleted_at.is_some());
-    let snapshot_error = context
+    assert!(
+        matches!(error, AppError::Unauthorized(message) if message == "account authentication required")
+    );
+    let snapshot = context
         .store
-        .session_snapshot("alice", &created.id)
+        .session_snapshot(&context.live_owner_id, &session.id)
         .await
-        .expect_err("deleted sessions should be removed from the live store");
-    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+        .expect("live session should still exist before in-memory invalidation");
+    assert!(snapshot.messages.is_empty());
 }
 
 #[tokio::test]
@@ -1551,7 +1362,7 @@ fn workspace_store_initialization_failures_map_into_app_state_build_errors() {
 }
 
 #[tokio::test]
-async fn materialize_user_best_effort_returns_none_when_workspace_storage_fails() {
+async fn owner_context_surfaces_workspace_storage_failures() {
     let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
         Arc::new(FailingWorkspaceStore::new("materialization unavailable")),
@@ -1562,9 +1373,11 @@ async fn materialize_user_best_effort_returns_none_when_workspace_storage_fails(
     let principal =
         authorize_request(&bearer_headers("alice"), true).expect("bearer headers should authorize");
 
-    let user = materialize_user_best_effort(&state, &principal, "test").await;
-
-    assert!(user.is_none());
+    let error = state
+        .owner_context(principal)
+        .await
+        .expect_err("owner context should surface workspace storage failures");
+    assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
 }
 
 #[tokio::test]
@@ -1597,12 +1410,9 @@ async fn persist_prompt_snapshot_best_effort_swallows_snapshot_failures() {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
     );
-    let principal =
-        authorize_request(&bearer_headers("alice"), true).expect("bearer headers should authorize");
-
     persist_prompt_snapshot_best_effort(
         &state,
-        &principal,
+        &sample_user_record(),
         "s_missing",
         Err(SessionStoreError::NotFound),
     )
@@ -1623,7 +1433,6 @@ async fn create_session_reports_metadata_rollback_failures() {
         reply_provider: Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1654,7 +1463,6 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         reply_provider: Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
-        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1782,6 +1590,7 @@ struct MetadataTestContext {
     store: Arc<SessionStore>,
     workspace_repository: Arc<SqliteWorkspaceRepository>,
     state: AppState,
+    live_owner_id: String,
     principal: Extension<AuthenticatedPrincipal>,
     user: UserRecord,
 }
@@ -1803,9 +1612,90 @@ async fn metadata_test_context() -> MetadataTestContext {
         store,
         workspace_repository,
         state,
+        live_owner_id: "alice".to_string(),
         principal: bearer_principal("alice"),
         user,
     }
+}
+
+async fn browser_metadata_test_context() -> MetadataTestContext {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let shell = app_entrypoint(HeaderMap::new()).await;
+    let mut headers = browser_cookie_headers(&shell);
+    let body = to_bytes(shell.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+    let csrf_token = extract_meta_content(&body, "acp-csrf-token");
+    headers.insert("x-csrf-token", HeaderValue::from_str(&csrf_token).unwrap());
+    let principal = authorize_request(&headers, true).expect("browser headers should authorize");
+    let _registered = bootstrap_register(
+        State(state.clone()),
+        Extension(principal.clone()),
+        Json(BootstrapRegistrationRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("bootstrap registration should succeed");
+    let user = materialized_user_for_headers(workspace_repository.as_ref(), &headers).await;
+
+    MetadataTestContext {
+        store,
+        workspace_repository,
+        state,
+        live_owner_id: principal.id.clone(),
+        principal: Extension(principal),
+        user,
+    }
+}
+
+async fn assert_session_routes_persist_owner_scoped_metadata(context: &MetadataTestContext) {
+    let (created, created_metadata) = create_persisted_session(context).await;
+
+    assert_eq!(created_metadata.owner_user_id, context.user.user_id);
+    assert_eq!(created_metadata.status, "active");
+    assert!(!created_metadata.workspace_id.is_empty());
+
+    let (renamed, renamed_metadata) = rename_persisted_session(context, &created.id).await;
+
+    assert_eq!(renamed.title, "Renamed session");
+    assert_eq!(renamed_metadata.title, "Renamed session");
+    assert_eq!(renamed_metadata.workspace_id, created_metadata.workspace_id);
+    assert_eq!(
+        renamed_metadata.last_activity_at,
+        created_metadata.last_activity_at
+    );
+
+    let active_metadata = post_message_and_load_metadata(context, &created.id).await;
+
+    assert_eq!(active_metadata.status, "active");
+    assert!(active_metadata.last_activity_at >= renamed_metadata.last_activity_at);
+
+    let closed_metadata = close_session_and_load_metadata(context, &created.id).await;
+
+    assert_eq!(closed_metadata.status, "closed");
+    assert!(closed_metadata.closed_at.is_some());
+
+    let deleted_metadata = delete_session_and_load_metadata(context, &created.id).await;
+
+    assert_eq!(deleted_metadata.status, "deleted");
+    assert!(deleted_metadata.deleted_at.is_some());
+    let snapshot_error = context
+        .store
+        .session_snapshot(&context.live_owner_id, &created.id)
+        .await
+        .expect_err("deleted sessions should be removed from the live store");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
 }
 
 async fn create_persisted_session(
@@ -1932,279 +1822,34 @@ fn bearer_headers(owner: &str) -> HeaderMap {
     headers
 }
 
-fn browser_cookie_header_value(session_token: &str) -> String {
-    format!("acp_session={session_token}; acp_csrf={TEST_BROWSER_CSRF_TOKEN}")
+fn bearer_principal(owner: &str) -> Extension<AuthenticatedPrincipal> {
+    Extension(authorize_request(&bearer_headers(owner), false).expect("headers should authorize"))
 }
 
-fn browser_read_request(uri: &str, session_token: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .header(COOKIE, browser_cookie_header_value(session_token))
-        .body(Body::empty())
-        .expect("request building should succeed")
-}
-
-fn browser_write_request(uri: &str, body: Body, session_token: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header(COOKIE, browser_cookie_header_value(session_token))
-        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
-        .body(body)
-        .expect("request building should succeed")
-}
-
-fn browser_sign_in_request(user_name: &str, password: &str, session_token: &str) -> Request<Body> {
-    let payload = serde_json::to_vec(&SignInRequest {
-        user_name: user_name.to_string(),
-        password: password.to_string(),
-    })
-    .expect("sign-in request should serialize");
-    Request::builder()
-        .method("POST")
-        .uri("/api/v1/auth/session")
-        .header(COOKIE, browser_cookie_header_value(session_token))
-        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(payload))
-        .expect("request building should succeed")
-}
-
-fn browser_sign_up_request(user_name: &str, password: &str, session_token: &str) -> Request<Body> {
-    let payload = serde_json::to_vec(&SignUpRequest {
-        user_name: user_name.to_string(),
-        password: password.to_string(),
-    })
-    .expect("sign-up request should serialize");
-    Request::builder()
-        .method("POST")
-        .uri("/api/v1/auth/register")
-        .header(COOKIE, browser_cookie_header_value(session_token))
-        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(payload))
-        .expect("request building should succeed")
-}
-
-fn browser_sign_out_request(session_token: &str) -> Request<Body> {
-    Request::builder()
-        .method("DELETE")
-        .uri("/api/v1/auth/session")
-        .header(COOKIE, browser_cookie_header_value(session_token))
-        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
-        .body(Body::empty())
-        .expect("request building should succeed")
-}
-
-fn rotated_browser_session_token(response: &Response) -> String {
-    response
+fn browser_cookie_headers(response: &Response) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let cookie_header = response
         .headers()
         .get_all(SET_COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .find_map(|cookie| {
-            cookie
-                .strip_prefix("acp_session=")
-                .and_then(|value| value.split(';').next())
-                .map(str::to_string)
-        })
-        .expect("rotated session cookie should be present")
+        .filter_map(|cookie| cookie.split(';').next())
+        .collect::<Vec<_>>()
+        .join("; ");
+    headers.insert(COOKIE, HeaderValue::from_str(&cookie_header).unwrap());
+    headers
 }
 
-async fn assert_browser_session_requires_sign_in(router: Router, session_token: &str) {
-    let unauthorized = router
-        .oneshot(browser_write_request(
-            "/api/v1/sessions",
-            Body::empty(),
-            session_token,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        json_response::<ErrorResponse>(unauthorized).await.error,
-        "sign-in required"
-    );
-}
-
-async fn register_browser_account_for_test(
-    router: Router,
-    session_token: &mut String,
-    user_name: &str,
-    password: &str,
-) {
-    let sign_up = router
-        .oneshot(browser_sign_up_request(user_name, password, session_token))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(sign_up.status(), StatusCode::OK);
-    *session_token = rotated_browser_session_token(&sign_up);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(sign_up).await,
-        AuthSessionResponse {
-            authenticated: true,
-            is_admin: true,
-            bootstrap_registration_open: false,
-            user_name: Some(user_name.to_string()),
-        }
-    );
-}
-
-async fn register_browser_account_as_admin_for_test(
-    router: Router,
-    session_token: &str,
-    current_admin_user_name: &str,
-    user_name: &str,
-    password: &str,
-) {
-    let sign_up = router
-        .clone()
-        .oneshot(browser_sign_up_request(user_name, password, session_token))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(sign_up.status(), StatusCode::OK);
-    assert!(
-        sign_up
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .next()
-            .is_none(),
-        "admin account creation must not rotate the current browser session"
-    );
-    assert_eq!(
-        json_response::<AuthSessionResponse>(sign_up).await,
-        AuthSessionResponse {
-            authenticated: true,
-            is_admin: true,
-            bootstrap_registration_open: false,
-            user_name: Some(current_admin_user_name.to_string()),
-        }
-    );
-    assert_browser_auth_session(
-        router,
-        session_token,
-        Some(current_admin_user_name),
-        true,
-        false,
-    )
-    .await;
-}
-
-async fn assert_unauthenticated_browser_sign_up_is_rejected(router: Router) {
-    let unauthenticated = router
-        .oneshot(browser_sign_up_request(
-            "bob",
-            TEST_LOCAL_PASSWORD,
-            "44444444-4444-4444-8444-444444444444",
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        json_response::<ErrorResponse>(unauthenticated).await.error,
-        "sign-in required"
-    );
-}
-
-async fn assert_non_admin_browser_sign_up_is_rejected(router: Router, session_token: &str) {
-    let forbidden = router
-        .oneshot(browser_sign_up_request(
-            "charlie",
-            TEST_LOCAL_PASSWORD,
-            session_token,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        json_response::<ErrorResponse>(forbidden).await.error,
-        "admin access required"
-    );
-}
-
-async fn sign_in_browser_session_for_test(
-    router: Router,
-    session_token: &mut String,
-    user_name: &str,
-    password: &str,
-    expected_is_admin: bool,
-) {
-    let sign_in = router
-        .oneshot(browser_sign_in_request(user_name, password, session_token))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(sign_in.status(), StatusCode::OK);
-    *session_token = rotated_browser_session_token(&sign_in);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(sign_in).await,
-        AuthSessionResponse {
-            authenticated: true,
-            is_admin: expected_is_admin,
-            bootstrap_registration_open: false,
-            user_name: Some(user_name.to_string()),
-        }
-    );
-}
-
-async fn assert_browser_auth_session(
-    router: Router,
-    session_token: &str,
-    expected_user_name: Option<&str>,
-    expected_is_admin: bool,
-    expected_bootstrap_registration_open: bool,
-) {
-    let auth_session = router
-        .oneshot(browser_read_request("/api/v1/auth/session", session_token))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(auth_session.status(), StatusCode::OK);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(auth_session).await,
-        AuthSessionResponse {
-            authenticated: expected_user_name.is_some(),
-            is_admin: expected_is_admin,
-            bootstrap_registration_open: expected_bootstrap_registration_open,
-            user_name: expected_user_name.map(str::to_string),
-        }
-    );
-}
-
-async fn assert_browser_session_creation(
-    router: Router,
-    session_token: &str,
-    expected_status: StatusCode,
-) {
-    let created = router
-        .oneshot(browser_write_request(
-            "/api/v1/sessions",
-            Body::empty(),
-            session_token,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(created.status(), expected_status);
-}
-
-async fn sign_out_browser_session_for_test(router: Router, session_token: &str) {
-    let signed_out = router
-        .oneshot(browser_sign_out_request(session_token))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(signed_out.status(), StatusCode::OK);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(signed_out).await,
-        AuthSessionResponse {
-            authenticated: false,
-            is_admin: false,
-            bootstrap_registration_open: false,
-            user_name: None,
-        }
-    );
-}
-
-fn bearer_principal(owner: &str) -> Extension<AuthenticatedPrincipal> {
-    Extension(authorize_request(&bearer_headers(owner), false).expect("headers should authorize"))
+fn extract_meta_content(document: &str, name: &str) -> String {
+    let name_needle = format!(r#"name="{name}""#);
+    let tag = document
+        .lines()
+        .find(|line| line.contains("<meta ") && line.contains(&name_needle))
+        .expect("meta tag should exist")
+        .trim();
+    let content_start = tag.find(r#"content=""#).unwrap() + r#"content=""#.len();
+    let content_end = tag[content_start..].find('"').unwrap() + content_start;
+    tag[content_start..content_end].to_string()
 }
 
 async fn materialized_user_for_headers(
@@ -2231,16 +1876,6 @@ async fn load_session_metadata_or_panic(
         .unwrap_or_else(|| panic!("{stage} session metadata should exist"))
 }
 
-async fn json_response<T>(response: Response) -> T
-where
-    T: serde::de::DeserializeOwned,
-{
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("response body should be readable");
-    serde_json::from_slice(&body).expect("response body should decode as JSON")
-}
-
 fn failing_workspace_state(store: Arc<SessionStore>) -> AppState {
     AppState::with_workspace_repository(
         store,
@@ -2257,8 +1892,12 @@ fn sample_user_record() -> UserRecord {
         user_id: "u_test".to_string(),
         principal_kind: "bearer".to_string(),
         principal_subject: "durable-subject".to_string(),
+        username: Some("admin".to_string()),
+        password_hash: None,
+        is_admin: true,
         created_at: now,
         last_seen_at: now,
+        deleted_at: None,
     }
 }
 
@@ -2387,43 +2026,12 @@ impl ReplyProvider for TrackingReplyProvider {
 #[derive(Debug)]
 struct FailingWorkspaceStore {
     error: WorkspaceStoreError,
-    bootstrap_registration_open: Option<bool>,
-    browser_session_user_name: Option<Option<String>>,
-    local_account: Option<Option<crate::workspace_store::LocalAccountRecord>>,
 }
 
 impl FailingWorkspaceStore {
     fn new(message: &str) -> Self {
-        Self::with_error(WorkspaceStoreError::Database(message.to_string()))
-    }
-
-    fn with_error(error: WorkspaceStoreError) -> Self {
         Self {
-            error,
-            bootstrap_registration_open: None,
-            browser_session_user_name: None,
-            local_account: None,
-        }
-    }
-
-    fn for_bootstrap_registration(error: WorkspaceStoreError) -> Self {
-        Self {
-            error,
-            bootstrap_registration_open: Some(true),
-            browser_session_user_name: Some(None),
-            local_account: Some(None),
-        }
-    }
-
-    fn for_admin_registration(current_admin_user_name: &str, error: WorkspaceStoreError) -> Self {
-        Self {
-            error,
-            bootstrap_registration_open: Some(false),
-            browser_session_user_name: Some(Some(current_admin_user_name.to_string())),
-            local_account: Some(Some(crate::workspace_store::LocalAccountRecord {
-                user_name: current_admin_user_name.to_string(),
-                is_admin: true,
-            })),
+            error: WorkspaceStoreError::Database(message.to_string()),
         }
     }
 }
@@ -2463,77 +2071,6 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         Err(self.error.clone())
     }
 
-    async fn register_local_user(
-        &self,
-        _user_name: &str,
-        _password: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Err(self.error.clone())
-    }
-
-    async fn load_local_account(
-        &self,
-        _user_name: &str,
-    ) -> Result<Option<crate::workspace_store::LocalAccountRecord>, WorkspaceStoreError> {
-        self.local_account.clone().ok_or_else(|| self.error.clone())
-    }
-
-    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError> {
-        self.bootstrap_registration_open
-            .ok_or_else(|| self.error.clone())
-    }
-
-    async fn authenticate_local_user(
-        &self,
-        _user_name: &str,
-        _password: &str,
-    ) -> Result<bool, WorkspaceStoreError> {
-        Err(self.error.clone())
-    }
-
-    async fn register_local_user_and_rotate_browser_session(
-        &self,
-        _previous_session_token: &str,
-        _next_session_token: &str,
-        _user_name: &str,
-        _password: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Err(self.error.clone())
-    }
-
-    async fn rotate_browser_session(
-        &self,
-        _previous_session_token: &str,
-        _next_session_token: &str,
-        _user_name: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Err(self.error.clone())
-    }
-
-    async fn sign_in_browser_session(
-        &self,
-        _session_token: &str,
-        _user_name: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Err(self.error.clone())
-    }
-
-    async fn browser_session_user_name(
-        &self,
-        _session_token: &str,
-    ) -> Result<Option<String>, WorkspaceStoreError> {
-        self.browser_session_user_name
-            .clone()
-            .ok_or_else(|| self.error.clone())
-    }
-
-    async fn sign_out_browser_session(
-        &self,
-        _session_token: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Err(self.error.clone())
-    }
-
     async fn bootstrap_workspace(
         &self,
         _owner_user_id: &str,
@@ -2565,6 +2102,71 @@ impl WorkspaceRepository for FailingWorkspaceStore {
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
         Err(self.error.clone())
     }
+
+    async fn auth_status(
+        &self,
+        _browser_session_id: Option<&str>,
+    ) -> Result<(bool, Option<UserRecord>), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn authenticate_browser_session(
+        &self,
+        _browser_session_id: &str,
+    ) -> Result<Option<UserRecord>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn bootstrap_local_account(
+        &self,
+        _browser_session_id: &str,
+        _username: &str,
+        _password: &str,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn sign_in_local_account(
+        &self,
+        _browser_session_id: &str,
+        _username: &str,
+        _password: &str,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn list_local_accounts(
+        &self,
+    ) -> Result<Vec<acp_contracts::LocalAccount>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn create_local_account(
+        &self,
+        _username: &str,
+        _password: &str,
+        _is_admin: bool,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn update_local_account(
+        &self,
+        _target_user_id: &str,
+        _current_user_id: &str,
+        _password: Option<&str>,
+        _is_admin: Option<bool>,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn delete_local_account(
+        &self,
+        _target_user_id: &str,
+        _current_user_id: &str,
+    ) -> Result<Vec<String>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
 }
 
 #[async_trait]
@@ -2574,77 +2176,6 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _principal: &AuthenticatedPrincipal,
     ) -> Result<UserRecord, WorkspaceStoreError> {
         Ok(self.user.clone())
-    }
-
-    async fn register_local_user(
-        &self,
-        _user_name: &str,
-        _password: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Ok(())
-    }
-
-    async fn load_local_account(
-        &self,
-        _user_name: &str,
-    ) -> Result<Option<crate::workspace_store::LocalAccountRecord>, WorkspaceStoreError> {
-        Ok(Some(crate::workspace_store::LocalAccountRecord {
-            user_name: self.live_owner.clone(),
-            is_admin: true,
-        }))
-    }
-
-    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError> {
-        Ok(false)
-    }
-
-    async fn authenticate_local_user(
-        &self,
-        _user_name: &str,
-        _password: &str,
-    ) -> Result<bool, WorkspaceStoreError> {
-        Ok(true)
-    }
-
-    async fn register_local_user_and_rotate_browser_session(
-        &self,
-        _previous_session_token: &str,
-        _next_session_token: &str,
-        _user_name: &str,
-        _password: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Ok(())
-    }
-
-    async fn rotate_browser_session(
-        &self,
-        _previous_session_token: &str,
-        _next_session_token: &str,
-        _user_name: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Ok(())
-    }
-
-    async fn sign_in_browser_session(
-        &self,
-        _session_token: &str,
-        _user_name: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Ok(())
-    }
-
-    async fn browser_session_user_name(
-        &self,
-        _session_token: &str,
-    ) -> Result<Option<String>, WorkspaceStoreError> {
-        Ok(Some(self.live_owner.clone()))
-    }
-
-    async fn sign_out_browser_session(
-        &self,
-        _session_token: &str,
-    ) -> Result<(), WorkspaceStoreError> {
-        Ok(())
     }
 
     async fn bootstrap_workspace(
@@ -2691,6 +2222,89 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
         Ok(None)
+    }
+
+    async fn auth_status(
+        &self,
+        _browser_session_id: Option<&str>,
+    ) -> Result<(bool, Option<UserRecord>), WorkspaceStoreError> {
+        Ok((false, Some(self.user.clone())))
+    }
+
+    async fn authenticate_browser_session(
+        &self,
+        _browser_session_id: &str,
+    ) -> Result<Option<UserRecord>, WorkspaceStoreError> {
+        Ok(Some(self.user.clone()))
+    }
+
+    async fn bootstrap_local_account(
+        &self,
+        _browser_session_id: &str,
+        _username: &str,
+        _password: &str,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        Ok(acp_contracts::LocalAccount {
+            user_id: self.user.user_id.clone(),
+            username: self
+                .user
+                .username
+                .clone()
+                .unwrap_or_else(|| "admin".to_string()),
+            is_admin: self.user.is_admin,
+            created_at: self.user.created_at,
+        })
+    }
+
+    async fn sign_in_local_account(
+        &self,
+        _browser_session_id: &str,
+        _username: &str,
+        _password: &str,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        self.bootstrap_local_account("", "", "").await
+    }
+
+    async fn list_local_accounts(
+        &self,
+    ) -> Result<Vec<acp_contracts::LocalAccount>, WorkspaceStoreError> {
+        Ok(vec![acp_contracts::LocalAccount {
+            user_id: self.user.user_id.clone(),
+            username: self
+                .user
+                .username
+                .clone()
+                .unwrap_or_else(|| "admin".to_string()),
+            is_admin: self.user.is_admin,
+            created_at: self.user.created_at,
+        }])
+    }
+
+    async fn create_local_account(
+        &self,
+        _username: &str,
+        _password: &str,
+        _is_admin: bool,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        self.bootstrap_local_account("", "", "").await
+    }
+
+    async fn update_local_account(
+        &self,
+        _target_user_id: &str,
+        _current_user_id: &str,
+        _password: Option<&str>,
+        _is_admin: Option<bool>,
+    ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
+        self.bootstrap_local_account("", "", "").await
+    }
+
+    async fn delete_local_account(
+        &self,
+        _target_user_id: &str,
+        _current_user_id: &str,
+    ) -> Result<Vec<String>, WorkspaceStoreError> {
+        Ok(Vec::new())
     }
 }
 

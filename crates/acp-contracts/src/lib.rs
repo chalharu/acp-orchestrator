@@ -58,29 +58,6 @@ pub struct SessionResponse {
     pub session: SessionSnapshot,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AuthSessionResponse {
-    pub authenticated: bool,
-    #[serde(default)]
-    pub is_admin: bool,
-    #[serde(default)]
-    pub bootstrap_registration_open: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_name: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SignInRequest {
-    pub user_name: String,
-    pub password: String,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SignUpRequest {
-    pub user_name: String,
-    pub password: String,
-}
-
 pub type CreateSessionResponse = SessionResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +123,78 @@ pub struct SessionHistoryResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CloseSessionResponse {
     pub session: SessionSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAccount {
+    pub user_id: String,
+    pub username: String,
+    pub is_admin: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthStatusResponse {
+    pub bootstrap_required: bool,
+    pub account: Option<LocalAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapRegistrationRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapRegistrationResponse {
+    pub account: LocalAccount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignInRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignInResponse {
+    pub account: LocalAccount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountListResponse {
+    pub current_user_id: String,
+    pub accounts: Vec<LocalAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateAccountRequest {
+    pub username: String,
+    pub password: String,
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateAccountResponse {
+    pub account: LocalAccount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateAccountRequest {
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub is_admin: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateAccountResponse {
+    pub account: LocalAccount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteAccountResponse {
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

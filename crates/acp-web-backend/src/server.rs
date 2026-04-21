@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     convert::Infallible,
     fmt::Display,
     future::Future,
@@ -7,7 +6,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,11 +16,14 @@ use acp_app_support::{
     find_frontend_bundle_asset,
 };
 use acp_contracts::{
-    AuthSessionResponse, CancelTurnResponse, CloseSessionResponse, CreateSessionResponse,
-    DeleteSessionResponse, ErrorResponse, HealthResponse, PromptRequest, PromptResponse,
+    AccountListResponse, AuthStatusResponse, BootstrapRegistrationRequest,
+    BootstrapRegistrationResponse, CancelTurnResponse, CloseSessionResponse, CreateAccountRequest,
+    CreateAccountResponse, CreateSessionResponse, DeleteAccountResponse, DeleteSessionResponse,
+    ErrorResponse, HealthResponse, LocalAccount, PromptRequest, PromptResponse,
     RenameSessionRequest, RenameSessionResponse, ResolvePermissionRequest,
     ResolvePermissionResponse, SessionHistoryResponse, SessionListResponse, SessionResponse,
-    SessionSnapshot, SignInRequest, SignUpRequest, SlashCompletionsResponse, StreamEvent,
+    SessionSnapshot, SignInRequest, SignInResponse, SlashCompletionsResponse, StreamEvent,
+    UpdateAccountRequest, UpdateAccountResponse,
 };
 use axum::{
     Json, Router,
@@ -60,8 +62,8 @@ use crate::sessions::TurnHandle;
 use crate::workspace_store::SqliteWorkspaceRepository;
 use crate::{
     auth::{
-        AuthError, AuthenticatedPrincipal, AuthenticatedPrincipalKind, CSRF_COOKIE_NAME,
-        SESSION_COOKIE_NAME, bearer_principal, browser_session_token, cookie_value, validate_csrf,
+        AuthError, AuthenticatedPrincipal, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME,
+        authorize_request, cookie_value,
     },
     completions::resolve_slash_completions,
     mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
@@ -146,7 +148,6 @@ pub struct AppState {
     store: Arc<SessionStore>,
     workspace_repository: Arc<dyn WorkspaceRepository>,
     reply_provider: Arc<dyn ReplyProvider>,
-    browser_session_registry: Arc<BrowserSessionRegistry>,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
     frontend_dist: Option<Arc<PathBuf>>,
@@ -162,50 +163,6 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-#[derive(Default)]
-struct BrowserSessionRegistry {
-    sessions: Mutex<HashMap<String, watch::Sender<bool>>>,
-}
-
-impl BrowserSessionRegistry {
-    fn activate(&self, session_token: &str) -> watch::Receiver<bool> {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .expect("browser session registry should not poison");
-        if let Some(sender) = sessions.get(session_token) {
-            return sender.subscribe();
-        }
-
-        let (sender, receiver) = watch::channel(true);
-        sessions.insert(session_token.to_string(), sender);
-        receiver
-    }
-
-    fn revoke(&self, session_token: &str) {
-        let sender = self
-            .sessions
-            .lock()
-            .expect("browser session registry should not poison")
-            .remove(session_token);
-        if let Some(sender) = sender {
-            let _ = sender.send(false);
-        }
-    }
-}
-
-#[derive(Clone)]
-struct AuthenticatedBrowserSession {
-    revocation: watch::Receiver<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BrowserAuthSessionState {
-    principal: Option<AuthenticatedPrincipal>,
-    is_admin: bool,
-    bootstrap_registration_open: bool,
-}
-
 impl AppState {
     pub fn new(
         config: ServerConfig,
@@ -215,7 +172,6 @@ impl AppState {
             store: Arc::new(SessionStore::new(config.session_cap)),
             workspace_repository,
             reply_provider: Arc::new(MockClient::new(config.acp_server)?),
-            browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
             startup_hints: config.startup_hints,
             frontend_dist: config.frontend_dist.map(Arc::new),
         })
@@ -230,7 +186,6 @@ impl AppState {
             store,
             workspace_repository: new_ephemeral_workspace_repository(),
             reply_provider,
-            browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
             startup_hints: false,
             frontend_dist: None,
         }
@@ -246,7 +201,6 @@ impl AppState {
             store,
             workspace_repository,
             reply_provider,
-            browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
             startup_hints: false,
             frontend_dist: None,
         }
@@ -256,23 +210,35 @@ impl AppState {
         &self,
         principal: AuthenticatedPrincipal,
     ) -> Result<OwnerContext, AppError> {
-        let user = self
-            .workspace_repository
-            .materialize_user(&principal)
-            .await?;
+        let user = match principal.kind {
+            crate::auth::AuthenticatedPrincipalKind::Bearer => {
+                self.workspace_repository
+                    .materialize_user(&principal)
+                    .await?
+            }
+            crate::auth::AuthenticatedPrincipalKind::BrowserSession => self
+                .workspace_repository
+                .authenticate_browser_session(&principal.id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Unauthorized("account authentication required".to_string())
+                })?,
+        };
         Ok(OwnerContext { principal, user })
     }
 }
 
 pub fn app(state: AppState) -> Router {
-    let read_auth_state = state.clone();
-    let write_auth_state = state.clone();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/app", get(redirect_to_app))
         .route("/app/", get(app_entrypoint))
-        .route("/app/register", get(app_register_entrypoint))
+        .route("/app/register", get(redirect_to_register))
         .route("/app/register/", get(app_register_entrypoint))
+        .route("/app/sign-in", get(redirect_to_sign_in))
+        .route("/app/sign-in/", get(app_sign_in_entrypoint))
+        .route("/app/accounts", get(redirect_to_accounts))
+        .route("/app/accounts/", get(app_accounts_entrypoint))
         .route("/app/assets/app.css", get(app_stylesheet))
         .route("/app/assets/wasm-init.js", get(wasm_init_script))
         .route(FRONTEND_JAVASCRIPT_ASSET_PATH, get(wasm_glue_javascript))
@@ -283,15 +249,9 @@ pub fn app(state: AppState) -> Router {
         )
         .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
-        .route(
-            "/api/v1/auth/session",
-            get(get_auth_session)
-                .post(sign_in_browser_session)
-                .delete(sign_out_browser_session),
-        )
-        .route("/api/v1/auth/register", post(sign_up_browser_session))
-        .merge(read_api_routes(read_auth_state))
-        .merge(write_api_routes(write_auth_state))
+        .route("/api/v1/auth/status", get(auth_status))
+        .merge(read_api_routes())
+        .merge(write_api_routes())
         .with_state(state)
 }
 
@@ -301,8 +261,15 @@ struct OwnerContext {
     user: UserRecord,
 }
 
-fn read_api_routes(state: AppState) -> Router<AppState> {
+#[derive(Debug, Clone)]
+struct LiveSessionWriteContext {
+    principal: AuthenticatedPrincipal,
+    user: Option<UserRecord>,
+}
+
+fn read_api_routes() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/accounts", get(list_accounts))
         .route("/api/v1/sessions", get(list_sessions))
         .route("/api/v1/sessions/{session_id}", get(get_session))
         .route(
@@ -314,15 +281,19 @@ fn read_api_routes(state: AppState) -> Router<AppState> {
             get(stream_session_events),
         )
         .route("/api/v1/completions/slash", get(get_slash_completions))
-        .layer(middleware::from_fn_with_state(
-            state,
-            authorize_read_request,
-        ))
+        .layer(middleware::from_fn(authorize_read_request))
 }
 
-fn write_api_routes(state: AppState) -> Router<AppState> {
+fn write_api_routes() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/auth/sign-in", post(sign_in))
+        .route("/api/v1/bootstrap/register", post(bootstrap_register))
         .route("/api/v1/sessions", post(create_session))
+        .route("/api/v1/accounts", post(create_account))
+        .route(
+            "/api/v1/accounts/{user_id}",
+            patch(update_account).delete(delete_account),
+        )
         .route(
             "/api/v1/sessions/{session_id}",
             patch(rename_session).delete(delete_session),
@@ -334,42 +305,24 @@ fn write_api_routes(state: AppState) -> Router<AppState> {
             post(resolve_permission),
         )
         .route("/api/v1/sessions/{session_id}/close", post(close_session))
-        .layer(middleware::from_fn_with_state(
-            state,
-            authorize_write_request,
-        ))
+        .layer(middleware::from_fn(authorize_write_request))
 }
 
-async fn authorize_read_request(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    authorize_request_with_principal(state, request, next, false).await
+async fn authorize_read_request(request: Request, next: Next) -> Result<Response, AppError> {
+    authorize_request_with_principal(request, next, false).await
 }
 
-async fn authorize_write_request(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    authorize_request_with_principal(state, request, next, true).await
+async fn authorize_write_request(request: Request, next: Next) -> Result<Response, AppError> {
+    authorize_request_with_principal(request, next, true).await
 }
 
 async fn authorize_request_with_principal(
-    state: AppState,
     mut request: Request,
     next: Next,
     requires_csrf: bool,
 ) -> Result<Response, AppError> {
-    let authenticated =
-        strict_authenticated_request(&state, request.headers(), requires_csrf).await?;
-    request
-        .extensions_mut()
-        .insert(authenticated.principal.clone());
-    if let Some(browser_session) = authenticated.browser_session {
-        request.extensions_mut().insert(browser_session);
-    }
+    let principal = authorize_request(request.headers(), requires_csrf).map_err(AppError::from)?;
+    request.extensions_mut().insert(principal);
     Ok(next.run(request).await)
 }
 
@@ -421,6 +374,25 @@ async fn persist_session_metadata_best_effort(
     }
 }
 
+async fn persist_session_metadata_for_user_best_effort(
+    state: &AppState,
+    user: &UserRecord,
+    snapshot: &SessionSnapshot,
+    touch_activity: bool,
+    status_override: Option<&str>,
+    action: &'static str,
+) {
+    persist_session_metadata_best_effort(
+        state,
+        user,
+        snapshot,
+        touch_activity,
+        status_override,
+        action,
+    )
+    .await;
+}
+
 async fn materialize_user_best_effort(
     state: &AppState,
     principal: &AuthenticatedPrincipal,
@@ -429,38 +401,37 @@ async fn materialize_user_best_effort(
     match state.workspace_repository.materialize_user(principal).await {
         Ok(user) => Some(user),
         Err(error) => {
+            let error = AppError::from(error);
             let error_message = error.message();
             tracing::warn!(
+                %error_message,
                 principal_kind = ?principal.kind,
                 action,
-                "failed to materialize durable user: {error_message}"
+                "failed to materialize durable user"
             );
             None
         }
     }
 }
 
-async fn persist_session_metadata_for_principal_best_effort(
+async fn live_session_write_context(
     state: &AppState,
-    principal: &AuthenticatedPrincipal,
-    snapshot: &SessionSnapshot,
-    touch_activity: bool,
-    status_override: Option<&str>,
+    principal: AuthenticatedPrincipal,
     action: &'static str,
-) {
-    let Some(user) = materialize_user_best_effort(state, principal, action).await else {
-        return;
-    };
-
-    persist_session_metadata_best_effort(
-        state,
-        &user,
-        snapshot,
-        touch_activity,
-        status_override,
-        action,
-    )
-    .await;
+) -> Result<LiveSessionWriteContext, AppError> {
+    match principal.kind {
+        crate::auth::AuthenticatedPrincipalKind::Bearer => Ok(LiveSessionWriteContext {
+            user: materialize_user_best_effort(state, &principal, action).await,
+            principal,
+        }),
+        crate::auth::AuthenticatedPrincipalKind::BrowserSession => {
+            let owner = state.owner_context(principal).await?;
+            Ok(LiveSessionWriteContext {
+                principal: owner.principal,
+                user: Some(owner.user),
+            })
+        }
+    }
 }
 
 pub async fn serve_with_shutdown<F>(
@@ -520,15 +491,15 @@ fn log_connection_task_join_result(next: Option<Result<(), tokio::task::JoinErro
 
 async fn persist_prompt_snapshot_best_effort(
     state: &AppState,
-    principal: &AuthenticatedPrincipal,
+    user: &UserRecord,
     session_id: &str,
     snapshot_result: Result<SessionSnapshot, SessionStoreError>,
 ) {
     match snapshot_result {
         Ok(snapshot) => {
-            persist_session_metadata_for_principal_best_effort(
+            persist_session_metadata_for_user_best_effort(
                 state,
-                principal,
+                user,
                 &snapshot,
                 true,
                 None,
@@ -622,186 +593,6 @@ fn log_connection_result<E: Display>(result: Result<(), E>) {
     }
 }
 
-struct StrictAuthenticatedRequest {
-    principal: AuthenticatedPrincipal,
-    browser_session: Option<AuthenticatedBrowserSession>,
-}
-
-async fn strict_authenticated_request(
-    state: &AppState,
-    headers: &HeaderMap,
-    requires_csrf: bool,
-) -> Result<StrictAuthenticatedRequest, AppError> {
-    if let Some(principal) = bearer_principal(headers).map_err(AppError::from)? {
-        return Ok(StrictAuthenticatedRequest {
-            principal,
-            browser_session: None,
-        });
-    }
-
-    if requires_csrf {
-        validate_csrf(headers).map_err(AppError::from)?;
-    }
-    let session_token = browser_session_token(headers).map_err(AppError::from)?;
-    let principal = resolve_browser_session_principal(state, &session_token)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("sign-in required".to_string()))?;
-    Ok(StrictAuthenticatedRequest {
-        principal,
-        browser_session: Some(AuthenticatedBrowserSession {
-            revocation: state.browser_session_registry.activate(&session_token),
-        }),
-    })
-}
-
-async fn optional_authenticated_principal(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<Option<AuthenticatedPrincipal>, AppError> {
-    if let Some(principal) = bearer_principal(headers).map_err(AppError::from)? {
-        return Ok(Some(principal));
-    }
-
-    let Ok(session_token) = browser_session_token(headers) else {
-        return Ok(None);
-    };
-
-    resolve_browser_session_principal(state, &session_token).await
-}
-
-async fn resolve_browser_session_principal(
-    state: &AppState,
-    session_token: &str,
-) -> Result<Option<AuthenticatedPrincipal>, AppError> {
-    state
-        .workspace_repository
-        .browser_session_user_name(session_token)
-        .await
-        .map(|user_name| user_name.map(browser_user_principal))
-        .map_err(AppError::from)
-}
-
-async fn load_browser_auth_session_state(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<BrowserAuthSessionState, AppError> {
-    let principal = optional_authenticated_principal(state, headers).await?;
-    browser_auth_session_state(state, principal).await
-}
-
-async fn browser_auth_session_state(
-    state: &AppState,
-    principal: Option<AuthenticatedPrincipal>,
-) -> Result<BrowserAuthSessionState, AppError> {
-    let bootstrap_registration_open = state
-        .workspace_repository
-        .bootstrap_registration_open()
-        .await?;
-    let is_admin = match principal.as_ref() {
-        Some(principal) => state
-            .workspace_repository
-            .load_local_account(&principal.subject)
-            .await?
-            .is_some_and(|account| account.is_admin),
-        None => false,
-    };
-
-    Ok(BrowserAuthSessionState {
-        principal,
-        is_admin,
-        bootstrap_registration_open,
-    })
-}
-
-fn browser_user_principal(user_name: String) -> AuthenticatedPrincipal {
-    AuthenticatedPrincipal {
-        id: user_name.clone(),
-        kind: AuthenticatedPrincipalKind::BrowserSession,
-        subject: user_name,
-    }
-}
-
-fn auth_session_response(session: &BrowserAuthSessionState) -> AuthSessionResponse {
-    AuthSessionResponse {
-        authenticated: session.principal.is_some(),
-        is_admin: session.is_admin,
-        bootstrap_registration_open: session.bootstrap_registration_open,
-        user_name: session
-            .principal
-            .as_ref()
-            .map(|principal| principal.subject.clone()),
-    }
-}
-
-fn normalize_sign_in_user_name(user_name: &str) -> Result<String, AppError> {
-    let user_name = user_name.trim();
-    if user_name.is_empty() {
-        return Err(AppError::BadRequest(
-            "user name must not be empty".to_string(),
-        ));
-    }
-    if user_name.chars().count() > 100 {
-        return Err(AppError::BadRequest(
-            "user name must not exceed 100 characters".to_string(),
-        ));
-    }
-    if user_name.chars().any(char::is_control) {
-        return Err(AppError::BadRequest(
-            "user name must not contain control characters".to_string(),
-        ));
-    }
-    Ok(user_name.to_string())
-}
-
-fn normalize_sign_in_password(password: &str) -> Result<String, AppError> {
-    if password.is_empty() {
-        return Err(AppError::BadRequest(
-            "password must not be empty".to_string(),
-        ));
-    }
-    if password.chars().count() > 200 {
-        return Err(AppError::BadRequest(
-            "password must not exceed 200 characters".to_string(),
-        ));
-    }
-    Ok(password.to_string())
-}
-
-fn normalize_registration_password(password: &str) -> Result<String, AppError> {
-    let password = normalize_sign_in_password(password)?;
-    if password.chars().count() < 8 {
-        return Err(AppError::BadRequest(
-            "password must be at least 8 characters".to_string(),
-        ));
-    }
-    Ok(password)
-}
-
-async fn bind_browser_session_to_user(
-    state: &AppState,
-    session_token: &str,
-    user_name: String,
-    is_admin: bool,
-    bootstrap_registration_open: bool,
-) -> Result<Response, AppError> {
-    let next_session_token = Uuid::new_v4().to_string();
-    state
-        .workspace_repository
-        .rotate_browser_session(session_token, &next_session_token, &user_name)
-        .await?;
-    state.browser_session_registry.revoke(session_token);
-    let _ = state.browser_session_registry.activate(&next_session_token);
-    let session = BrowserAuthSessionState {
-        principal: Some(browser_user_principal(user_name)),
-        is_admin,
-        bootstrap_registration_open,
-    };
-    Ok(auth_session_response_with_rotated_session_cookie(
-        auth_session_response(&session),
-        &next_session_token,
-    ))
-}
-
 fn spawn_connection_task(
     connections: &mut JoinSet<()>,
     acceptor: TlsAcceptor,
@@ -880,153 +671,16 @@ async fn redirect_to_app() -> Redirect {
     Redirect::permanent("/app/")
 }
 
-async fn get_auth_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<AuthSessionResponse>, AppError> {
-    let session = load_browser_auth_session_state(&state, &headers).await?;
-    Ok(Json(auth_session_response(&session)))
+async fn redirect_to_register() -> Redirect {
+    Redirect::permanent("/app/register/")
 }
 
-async fn sign_in_browser_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<SignInRequest>,
-) -> Result<Response, AppError> {
-    validate_csrf(&headers).map_err(AppError::from)?;
-    let session_token = browser_session_token(&headers).map_err(AppError::from)?;
-    let user_name = normalize_sign_in_user_name(&request.user_name)?;
-    let password = normalize_sign_in_password(&request.password)?;
-    let authenticated = state
-        .workspace_repository
-        .authenticate_local_user(&user_name, &password)
-        .await?;
-    if !authenticated {
-        return Err(AppError::Unauthorized(
-            "invalid user name or password".to_string(),
-        ));
-    }
-
-    let account = state
-        .workspace_repository
-        .load_local_account(&user_name)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("invalid user name or password".to_string()))?;
-
-    bind_browser_session_to_user(&state, &session_token, user_name, account.is_admin, false).await
+async fn redirect_to_sign_in() -> Redirect {
+    Redirect::permanent("/app/sign-in/")
 }
 
-async fn sign_up_browser_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<SignUpRequest>,
-) -> Result<Response, AppError> {
-    validate_csrf(&headers).map_err(AppError::from)?;
-    let session_token = browser_session_token(&headers).map_err(AppError::from)?;
-    let current_session = load_browser_auth_session_state(&state, &headers).await?;
-    let user_name = normalize_sign_in_user_name(&request.user_name)?;
-    let password = normalize_registration_password(&request.password)?;
-    if current_session.bootstrap_registration_open {
-        return bootstrap_sign_up_browser_session(&state, &session_token, user_name, password)
-            .await;
-    }
-
-    let principal = require_admin_registration_principal(current_session)?;
-    admin_sign_up_browser_session(&state, principal, user_name, password).await
-}
-
-async fn bootstrap_sign_up_browser_session(
-    state: &AppState,
-    session_token: &str,
-    user_name: String,
-    password: String,
-) -> Result<Response, AppError> {
-    let next_session_token = Uuid::new_v4().to_string();
-    state
-        .workspace_repository
-        .register_local_user_and_rotate_browser_session(
-            session_token,
-            &next_session_token,
-            &user_name,
-            &password,
-        )
-        .await
-        .map_err(map_registration_error)?;
-    state.browser_session_registry.revoke(session_token);
-    let _ = state.browser_session_registry.activate(&next_session_token);
-    Ok(auth_session_response_with_rotated_session_cookie(
-        AuthSessionResponse {
-            authenticated: true,
-            is_admin: true,
-            bootstrap_registration_open: false,
-            user_name: Some(user_name),
-        },
-        &next_session_token,
-    ))
-}
-
-fn require_admin_registration_principal(
-    current_session: BrowserAuthSessionState,
-) -> Result<AuthenticatedPrincipal, AppError> {
-    let Some(principal) = current_session.principal else {
-        return Err(AppError::Unauthorized("sign-in required".to_string()));
-    };
-    if !current_session.is_admin {
-        return Err(AppError::Forbidden("admin access required".to_string()));
-    }
-    Ok(principal)
-}
-
-async fn admin_sign_up_browser_session(
-    state: &AppState,
-    principal: AuthenticatedPrincipal,
-    user_name: String,
-    password: String,
-) -> Result<Response, AppError> {
-    state
-        .workspace_repository
-        .register_local_user(&user_name, &password)
-        .await
-        .map_err(map_registration_error)?;
-    Ok(Json(auth_session_response(&BrowserAuthSessionState {
-        principal: Some(principal),
-        is_admin: true,
-        bootstrap_registration_open: false,
-    }))
-    .into_response())
-}
-
-fn map_registration_error(error: WorkspaceStoreError) -> AppError {
-    match error {
-        WorkspaceStoreError::Conflict(_) => {
-            AppError::BadRequest("unable to create account".to_string())
-        }
-        error => error.into(),
-    }
-}
-
-async fn sign_out_browser_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<AuthSessionResponse>, AppError> {
-    validate_csrf(&headers).map_err(AppError::from)?;
-    let session_token = browser_session_token(&headers).map_err(AppError::from)?;
-    state
-        .workspace_repository
-        .sign_out_browser_session(&session_token)
-        .await?;
-    state.browser_session_registry.revoke(&session_token);
-    let bootstrap_registration_open = state
-        .workspace_repository
-        .bootstrap_registration_open()
-        .await?;
-
-    Ok(Json(AuthSessionResponse {
-        authenticated: false,
-        is_admin: false,
-        bootstrap_registration_open,
-        user_name: None,
-    }))
+async fn redirect_to_accounts() -> Redirect {
+    Redirect::permanent("/app/accounts/")
 }
 
 async fn app_entrypoint(headers: HeaderMap) -> Response {
@@ -1034,6 +688,14 @@ async fn app_entrypoint(headers: HeaderMap) -> Response {
 }
 
 async fn app_register_entrypoint(headers: HeaderMap) -> Response {
+    app_shell_response(&headers)
+}
+
+async fn app_sign_in_entrypoint(headers: HeaderMap) -> Response {
+    app_shell_response(&headers)
+}
+
+async fn app_accounts_entrypoint(headers: HeaderMap) -> Response {
     app_shell_response(&headers)
 }
 
@@ -1146,18 +808,6 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
         app_shell_document(&csrf_token),
     )
         .into_response()
-}
-
-fn auth_session_response_with_rotated_session_cookie(
-    auth_session: AuthSessionResponse,
-    session_token: &str,
-) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.append(
-        SET_COOKIE,
-        build_cookie_header(SESSION_COOKIE_NAME, session_token, true),
-    );
-    (headers, Json(auth_session)).into_response()
 }
 
 fn app_static_text_response(content_type: &'static str, body: &'static str) -> Response {
@@ -1281,6 +931,165 @@ fn cookie_uuid_value(headers: &HeaderMap, name: &str) -> Option<String> {
     })
 }
 
+fn current_browser_session_id(headers: &HeaderMap) -> Option<String> {
+    cookie_uuid_value(headers, SESSION_COOKIE_NAME)
+}
+
+fn require_admin(user: &UserRecord) -> Result<(), AppError> {
+    if user.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("admin access required".to_string()))
+    }
+}
+
+async fn auth_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthStatusResponse>, AppError> {
+    let (bootstrap_required, account) = state
+        .workspace_repository
+        .auth_status(current_browser_session_id(&headers).as_deref())
+        .await?;
+    Ok(Json(AuthStatusResponse {
+        bootstrap_required,
+        account: account
+            .as_ref()
+            .map(user_record_to_local_account)
+            .transpose()?,
+    }))
+}
+
+async fn bootstrap_register(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<BootstrapRegistrationRequest>,
+) -> Result<(StatusCode, Json<BootstrapRegistrationResponse>), AppError> {
+    if !matches!(
+        principal.kind,
+        crate::auth::AuthenticatedPrincipalKind::BrowserSession
+    ) {
+        return Err(AppError::Forbidden(
+            "bootstrap registration requires a browser session".to_string(),
+        ));
+    }
+    let account = state
+        .workspace_repository
+        .bootstrap_local_account(&principal.id, &request.username, &request.password)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(BootstrapRegistrationResponse { account }),
+    ))
+}
+
+async fn sign_in(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<SignInRequest>,
+) -> Result<Json<SignInResponse>, AppError> {
+    if !matches!(
+        principal.kind,
+        crate::auth::AuthenticatedPrincipalKind::BrowserSession
+    ) {
+        return Err(AppError::Forbidden(
+            "password sign-in requires a browser session".to_string(),
+        ));
+    }
+    let account = state
+        .workspace_repository
+        .sign_in_local_account(&principal.id, &request.username, &request.password)
+        .await?;
+    let invalidated_sessions = state
+        .store
+        .delete_sessions_for_owners(std::slice::from_ref(&principal.id))
+        .await;
+    for session_id in invalidated_sessions {
+        state.reply_provider.forget_session(&session_id);
+    }
+    Ok(Json(SignInResponse { account }))
+}
+
+async fn list_accounts(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+) -> Result<Json<AccountListResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
+    require_admin(&owner.user)?;
+    let accounts = state.workspace_repository.list_local_accounts().await?;
+    Ok(Json(AccountListResponse {
+        current_user_id: owner.user.user_id,
+        accounts,
+    }))
+}
+
+async fn create_account(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<CreateAccountRequest>,
+) -> Result<(StatusCode, Json<CreateAccountResponse>), AppError> {
+    let owner = state.owner_context(principal).await?;
+    require_admin(&owner.user)?;
+    let account = state
+        .workspace_repository
+        .create_local_account(&request.username, &request.password, request.is_admin)
+        .await?;
+    Ok((StatusCode::CREATED, Json(CreateAccountResponse { account })))
+}
+
+async fn update_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<UpdateAccountRequest>,
+) -> Result<Json<UpdateAccountResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
+    require_admin(&owner.user)?;
+    let account = state
+        .workspace_repository
+        .update_local_account(
+            &user_id,
+            &owner.user.user_id,
+            request.password.as_deref(),
+            request.is_admin,
+        )
+        .await?;
+    Ok(Json(UpdateAccountResponse { account }))
+}
+
+async fn delete_account(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+) -> Result<Json<DeleteAccountResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
+    require_admin(&owner.user)?;
+    let invalidated_browser_sessions = state
+        .workspace_repository
+        .delete_local_account(&user_id, &owner.user.user_id)
+        .await?;
+    let invalidated_sessions = state
+        .store
+        .delete_sessions_for_owners(&invalidated_browser_sessions)
+        .await;
+    for session_id in invalidated_sessions {
+        state.reply_provider.forget_session(&session_id);
+    }
+    Ok(Json(DeleteAccountResponse { deleted: true }))
+}
+
+fn user_record_to_local_account(user: &UserRecord) -> Result<LocalAccount, AppError> {
+    Ok(LocalAccount {
+        user_id: user.user_id.clone(),
+        username: user
+            .username
+            .clone()
+            .ok_or_else(|| AppError::Internal("local account missing username".to_string()))?,
+        is_admin: user.is_admin,
+        created_at: user.created_at,
+    })
+}
+
 fn build_loopback_tls_acceptor(address: SocketAddr) -> io::Result<TlsAcceptor> {
     let mut subject_alt_names = vec![
         "localhost".to_string(),
@@ -1341,7 +1150,8 @@ async fn list_sessions(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionListResponse>, AppError> {
-    let sessions = state.store.list_owned_sessions(&principal.id).await;
+    let owner = state.owner_context(principal).await?;
+    let sessions = state.store.list_owned_sessions(&owner.principal.id).await;
 
     Ok(Json(SessionListResponse { sessions }))
 }
@@ -1427,9 +1237,10 @@ async fn get_session(
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
     let session = state
         .store
-        .session_snapshot(&principal.id, &session_id)
+        .session_snapshot(&owner.principal.id, &session_id)
         .await?;
 
     Ok(Json(SessionResponse { session }))
@@ -1441,6 +1252,7 @@ async fn rename_session(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<RenameSessionRequest>,
 ) -> Result<Json<RenameSessionResponse>, AppError> {
+    let owner = live_session_write_context(&state, principal, "rename").await?;
     let title = request.title.trim().to_string();
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty".to_string()));
@@ -1452,12 +1264,14 @@ async fn rename_session(
     }
     let session = state
         .store
-        .rename_session(&principal.id, &session_id, title)
+        .rename_session(&owner.principal.id, &session_id, title)
         .await?;
-    persist_session_metadata_for_principal_best_effort(
-        &state, &principal, &session, false, None, "rename",
-    )
-    .await;
+    if let Some(user) = owner.user.as_ref() {
+        persist_session_metadata_for_user_best_effort(
+            &state, user, &session, false, None, "rename",
+        )
+        .await;
+    }
 
     Ok(Json(RenameSessionResponse { session }))
 }
@@ -1467,24 +1281,27 @@ async fn delete_session(
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<DeleteSessionResponse>, AppError> {
+    let owner = live_session_write_context(&state, principal, "delete").await?;
     let snapshot = state
         .store
-        .session_snapshot(&principal.id, &session_id)
+        .session_snapshot(&owner.principal.id, &session_id)
         .await?;
     state
         .store
-        .delete_session(&principal.id, &session_id)
+        .delete_session(&owner.principal.id, &session_id)
         .await?;
     state.reply_provider.forget_session(&session_id);
-    persist_session_metadata_for_principal_best_effort(
-        &state,
-        &principal,
-        &snapshot,
-        false,
-        Some("deleted"),
-        "delete",
-    )
-    .await;
+    if let Some(user) = owner.user.as_ref() {
+        persist_session_metadata_for_user_best_effort(
+            &state,
+            user,
+            &snapshot,
+            false,
+            Some("deleted"),
+            "delete",
+        )
+        .await;
+    }
 
     Ok(Json(DeleteSessionResponse { deleted: true }))
 }
@@ -1494,9 +1311,10 @@ async fn get_session_history(
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionHistoryResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
     let messages = state
         .store
-        .session_history(&principal.id, &session_id)
+        .session_history(&owner.principal.id, &session_id)
         .await?;
 
     Ok(Json(SessionHistoryResponse {
@@ -1511,15 +1329,18 @@ async fn post_message(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<PromptRequest>,
 ) -> Result<Json<PromptResponse>, AppError> {
+    let owner = live_session_write_context(&state, principal, "submit_prompt").await?;
     let pending = state
         .store
-        .submit_prompt(&principal.id, &session_id, request.text)
+        .submit_prompt(&owner.principal.id, &session_id, request.text)
         .await?;
     let snapshot_result = state
         .store
-        .session_snapshot(&principal.id, &session_id)
+        .session_snapshot(&owner.principal.id, &session_id)
         .await;
-    persist_prompt_snapshot_best_effort(&state, &principal, &session_id, snapshot_result).await;
+    if let Some(user) = owner.user.as_ref() {
+        persist_prompt_snapshot_best_effort(&state, user, &session_id, snapshot_result).await;
+    }
     dispatch_assistant_request(state.reply_provider.clone(), pending);
 
     Ok(Json(PromptResponse { accepted: true }))
@@ -1530,20 +1351,23 @@ async fn close_session(
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<CloseSessionResponse>, AppError> {
+    let owner = live_session_write_context(&state, principal, "close").await?;
     let session = state
         .store
-        .close_session(&principal.id, &session_id)
+        .close_session(&owner.principal.id, &session_id)
         .await?;
     state.reply_provider.forget_session(&session_id);
-    persist_session_metadata_for_principal_best_effort(
-        &state,
-        &principal,
-        &session,
-        false,
-        Some("closed"),
-        "close",
-    )
-    .await;
+    if let Some(user) = owner.user.as_ref() {
+        persist_session_metadata_for_user_best_effort(
+            &state,
+            user,
+            &session,
+            false,
+            Some("closed"),
+            "close",
+        )
+        .await;
+    }
 
     Ok(Json(CloseSessionResponse { session }))
 }
@@ -1553,9 +1377,10 @@ async fn cancel_turn(
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<CancelTurnResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
     let cancelled = state
         .store
-        .cancel_active_turn(&principal.id, &session_id)
+        .cancel_active_turn(&owner.principal.id, &session_id)
         .await?;
 
     Ok(Json(CancelTurnResponse { cancelled }))
@@ -1567,9 +1392,15 @@ async fn resolve_permission(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<ResolvePermissionRequest>,
 ) -> Result<Json<ResolvePermissionResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
     let resolution = state
         .store
-        .resolve_permission(&principal.id, &session_id, &request_id, request.decision)
+        .resolve_permission(
+            &owner.principal.id,
+            &session_id,
+            &request_id,
+            request.decision,
+        )
         .await?;
 
     Ok(Json(resolution))
@@ -1588,9 +1419,10 @@ async fn get_slash_completions(
     Query(query): Query<SlashCompletionsQuery>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SlashCompletionsResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
     let response_future = resolve_slash_completions(
         &state.store,
-        &principal.id,
+        &owner.principal.id,
         &query.session_id,
         &query.prefix,
     );
@@ -1603,11 +1435,11 @@ async fn stream_session_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    browser_session: Option<Extension<AuthenticatedBrowserSession>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    let owner = state.owner_context(principal).await?;
     let (snapshot, receiver) = state
         .store
-        .session_events(&principal.id, &session_id)
+        .session_events(&owner.principal.id, &session_id)
         .await?;
 
     let initial_event = stream::once(async move {
@@ -1615,14 +1447,8 @@ async fn stream_session_events(
     });
     let updates = BroadcastStream::new(receiver)
         .filter_map(|result| async move { result.ok().map(to_sse_event).map(Ok) });
-    let revocation = browser_session.map(|Extension(session)| session.revocation);
 
-    Ok(Sse::new(
-        initial_event
-            .chain(updates)
-            .take_until(browser_session_revocation(revocation)),
-    )
-    .keep_alive(
+    Ok(Sse::new(initial_event.chain(updates)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
@@ -1642,24 +1468,6 @@ fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: P
             }
         }
     });
-}
-
-async fn browser_session_revocation(revocation: Option<watch::Receiver<bool>>) {
-    let mut revocation = match revocation {
-        Some(revocation) => revocation,
-        None => match std::future::pending::<std::convert::Infallible>().await {},
-    };
-
-    if !*revocation.borrow() {
-        return;
-    }
-
-    while revocation.changed().await.is_ok() {
-        if *revocation.borrow() {
-            continue;
-        }
-        return;
-    }
 }
 
 fn to_sse_event(event: StreamEvent) -> Event {
@@ -1753,14 +1561,14 @@ impl From<SessionStoreError> for AppError {
 impl From<WorkspaceStoreError> for AppError {
     fn from(error: WorkspaceStoreError) -> Self {
         match error {
-            WorkspaceStoreError::Conflict(_) => {
-                tracing::warn!(error = %error.message(), "workspace store operation conflicted");
-                Self::Conflict("request conflicts with current state".to_string())
-            }
             WorkspaceStoreError::Io(_) | WorkspaceStoreError::Database(_) => {
                 tracing::error!(error = %error.message(), "workspace store operation failed");
                 Self::Internal("internal server error".to_string())
             }
+            WorkspaceStoreError::Unauthorized(message) => Self::Unauthorized(message),
+            WorkspaceStoreError::NotFound(message) => Self::NotFound(message),
+            WorkspaceStoreError::Conflict(message) => Self::Conflict(message),
+            WorkspaceStoreError::Validation(message) => Self::BadRequest(message),
         }
     }
 }

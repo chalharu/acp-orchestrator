@@ -1,204 +1,129 @@
-use acp_contracts::AuthSessionResponse;
-use leptos::prelude::*;
+use acp_contracts::{AuthStatusResponse, LocalAccount};
 
-use crate::{
-    api,
-    domain::auth::{AuthSession, auth_session_from_response, registration_route_access},
-};
+use crate::domain::auth::{AccountCapabilities, AccountsRouteAccess, HomeRouteTarget};
 
-#[derive(Clone, Copy)]
-pub(crate) struct AuthSignals {
-    pub(crate) session: RwSignal<Option<AuthSession>>,
-    pub(crate) checked: RwSignal<bool>,
-    pub(crate) signing_in: RwSignal<bool>,
-    pub(crate) signing_up: RwSignal<bool>,
-    pub(crate) bootstrap_registration_open: RwSignal<bool>,
-    pub(crate) registration_notice: RwSignal<Option<String>>,
-    pub(crate) error: RwSignal<Option<String>>,
-    pub(crate) user_name_draft: RwSignal<String>,
-    pub(crate) password_draft: RwSignal<String>,
-}
-
-struct SignUpSubmission {
-    user_name: String,
-    password: String,
-    was_authenticated_admin: bool,
-}
-
-pub(crate) fn auth_signals() -> AuthSignals {
-    AuthSignals {
-        session: RwSignal::new(None::<AuthSession>),
-        checked: RwSignal::new(false),
-        signing_in: RwSignal::new(false),
-        signing_up: RwSignal::new(false),
-        bootstrap_registration_open: RwSignal::new(false),
-        registration_notice: RwSignal::new(None::<String>),
-        error: RwSignal::new(None::<String>),
-        user_name_draft: RwSignal::new(String::new()),
-        password_draft: RwSignal::new(String::new()),
+pub fn home_route_target(status: &AuthStatusResponse) -> HomeRouteTarget {
+    if status.account.is_some() {
+        HomeRouteTarget::PrepareSession
+    } else if status.bootstrap_required {
+        HomeRouteTarget::Register
+    } else {
+        HomeRouteTarget::SignIn
     }
 }
 
-pub(crate) fn load_auth_session_once(auth: AuthSignals) {
-    let started = RwSignal::new(false);
-    Effect::new(move |_| {
-        if started.get() {
-            return;
-        }
-
-        started.set(true);
-        spawn_auth_session_load(auth);
-    });
+pub fn accounts_route_access(status: &AuthStatusResponse) -> AccountsRouteAccess {
+    match &status.account {
+        Some(account) if account.is_admin => AccountsRouteAccess::Admin(account.clone()),
+        Some(_) => AccountsRouteAccess::Forbidden,
+        None if status.bootstrap_required => AccountsRouteAccess::RegisterRequired,
+        None => AccountsRouteAccess::SignInRequired,
+    }
 }
 
-pub(crate) fn spawn_auth_session_load(auth: AuthSignals) {
-    leptos::task::spawn_local(async move {
-        match api::load_auth_session().await {
-            Ok(response) => {
-                if let Err(message) = apply_auth_session_response(auth, response) {
-                    set_auth_error(auth, message);
-                }
+pub fn account_capabilities(
+    current_user_id: &str,
+    accounts: &[LocalAccount],
+    account: &LocalAccount,
+) -> AccountCapabilities {
+    let admin_count = accounts
+        .iter()
+        .filter(|candidate| candidate.is_admin)
+        .count();
+    let is_current_user = account.user_id == current_user_id;
+    let removing_last_admin = account.is_admin && admin_count <= 1;
+
+    AccountCapabilities {
+        can_delete: !is_current_user && !removing_last_admin,
+        can_toggle_admin: !is_current_user && !removing_last_admin,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts::{AuthStatusResponse, LocalAccount};
+    use chrono::{TimeZone, Utc};
+
+    use super::*;
+
+    fn sample_account(user_id: &str, is_admin: bool) -> LocalAccount {
+        LocalAccount {
+            user_id: user_id.to_string(),
+            username: user_id.to_string(),
+            is_admin,
+            created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn home_target_routes_bootstrap_to_register() {
+        assert_eq!(
+            home_route_target(&AuthStatusResponse {
+                bootstrap_required: true,
+                account: None,
+            }),
+            HomeRouteTarget::Register
+        );
+    }
+
+    #[test]
+    fn home_target_routes_signed_out_users_to_sign_in() {
+        assert_eq!(
+            home_route_target(&AuthStatusResponse {
+                bootstrap_required: false,
+                account: None,
+            }),
+            HomeRouteTarget::SignIn
+        );
+    }
+
+    #[test]
+    fn accounts_access_requires_admin() {
+        assert_eq!(
+            accounts_route_access(&AuthStatusResponse {
+                bootstrap_required: false,
+                account: Some(sample_account("user", false)),
+            }),
+            AccountsRouteAccess::Forbidden
+        );
+        assert_eq!(
+            accounts_route_access(&AuthStatusResponse {
+                bootstrap_required: false,
+                account: None,
+            }),
+            AccountsRouteAccess::SignInRequired
+        );
+    }
+
+    #[test]
+    fn account_capabilities_block_self_delete_and_last_admin_loss() {
+        let admin = sample_account("admin", true);
+        let second_admin = sample_account("admin-2", true);
+        let member = sample_account("member", false);
+        assert_eq!(
+            account_capabilities(&admin.user_id, &[admin.clone(), member.clone()], &admin),
+            AccountCapabilities {
+                can_delete: false,
+                can_toggle_admin: false,
             }
-            Err(message) => set_auth_error(auth, message),
-        }
-    });
-}
-
-pub(crate) fn submit_sign_in(auth: AuthSignals) {
-    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
-    let password = auth.password_draft.get_untracked();
-    if user_name.is_empty() {
-        auth.error
-            .set(Some("Enter a user name to continue.".to_string()));
-        return;
+        );
+        assert_eq!(
+            account_capabilities(
+                &member.user_id.clone(),
+                &[admin.clone(), second_admin, member],
+                &admin,
+            ),
+            AccountCapabilities {
+                can_delete: true,
+                can_toggle_admin: true,
+            }
+        );
+        assert_eq!(
+            account_capabilities("other", std::slice::from_ref(&admin), &admin),
+            AccountCapabilities {
+                can_delete: false,
+                can_toggle_admin: false,
+            }
+        );
     }
-    if password.is_empty() {
-        auth.error
-            .set(Some("Enter a password to continue.".to_string()));
-        return;
-    }
-    if auth.signing_in.get_untracked() || auth.signing_up.get_untracked() {
-        return;
-    }
-
-    auth.signing_in.set(true);
-    auth.error.set(None);
-    auth.registration_notice.set(None);
-    leptos::task::spawn_local(async move {
-        match api::sign_in(&user_name, &password).await {
-            Ok(response) => match apply_auth_session_response(auth, response) {
-                Ok(Some(_)) => clear_auth_drafts(auth),
-                Ok(None) => auth.error.set(Some(
-                    "Sign in did not establish an authenticated session.".to_string(),
-                )),
-                Err(message) => set_auth_error(auth, message),
-            },
-            Err(message) => set_auth_error(auth, message),
-        }
-        auth.signing_in.set(false);
-    });
-}
-
-pub(crate) fn submit_sign_up(auth: AuthSignals) {
-    let Some(submission) = prepare_sign_up_submission(auth) else {
-        return;
-    };
-
-    auth.signing_up.set(true);
-    auth.error.set(None);
-    auth.registration_notice.set(None);
-    leptos::task::spawn_local(async move {
-        match api::sign_up(&submission.user_name, &submission.password).await {
-            Ok(response) => match apply_auth_session_response(auth, response) {
-                Ok(Some(_)) => {
-                    clear_auth_drafts(auth);
-                    if submission.was_authenticated_admin {
-                        auth.registration_notice
-                            .set(Some(format!("Created account {}.", submission.user_name)));
-                    }
-                }
-                Ok(None) => auth.error.set(Some(
-                    "Account creation did not establish an authenticated session.".to_string(),
-                )),
-                Err(message) => set_auth_error(auth, message),
-            },
-            Err(message) => set_auth_error(auth, message),
-        }
-        auth.signing_up.set(false);
-    });
-}
-
-fn prepare_sign_up_submission(auth: AuthSignals) -> Option<SignUpSubmission> {
-    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
-    let password = auth.password_draft.get_untracked();
-    if user_name.is_empty() {
-        auth.error
-            .set(Some("Enter a user name to continue.".to_string()));
-        return None;
-    }
-    if password.chars().count() < 8 {
-        auth.error.set(Some(
-            "Enter a password with at least 8 characters.".to_string(),
-        ));
-        return None;
-    }
-    if auth.signing_in.get_untracked() || auth.signing_up.get_untracked() {
-        return None;
-    }
-    if !sign_up_is_available(auth) {
-        auth.error
-            .set(Some("Account creation is not available.".to_string()));
-        return None;
-    }
-
-    Some(SignUpSubmission {
-        was_authenticated_admin: auth
-            .session
-            .get_untracked()
-            .as_ref()
-            .is_some_and(|session| session.is_admin),
-        user_name,
-        password,
-    })
-}
-
-fn sign_up_is_available(auth: AuthSignals) -> bool {
-    matches!(
-        registration_route_access(
-            auth.session.get_untracked().as_ref(),
-            auth.bootstrap_registration_open.get_untracked(),
-        ),
-        crate::domain::auth::RegistrationRouteAccess::Register
-    )
-}
-
-pub(crate) fn clear_auth_drafts(auth: AuthSignals) {
-    auth.user_name_draft.set(String::new());
-    auth.password_draft.set(String::new());
-}
-
-pub(crate) fn set_auth_error(auth: AuthSignals, message: String) {
-    auth.error.set(Some(message));
-    auth.checked.set(true);
-}
-
-pub(crate) fn apply_auth_session_response(
-    auth: AuthSignals,
-    response: AuthSessionResponse,
-) -> Result<Option<AuthSession>, String> {
-    let bootstrap_registration_open = response.bootstrap_registration_open;
-    let session = auth_session_from_response(response)?;
-    auth.error.set(None);
-    auth.registration_notice.set(None);
-    auth.bootstrap_registration_open
-        .set(bootstrap_registration_open);
-    auth.session.set(session.clone());
-    auth.checked.set(true);
-    Ok(session)
-}
-
-pub(crate) fn current_auth_user_name(auth: AuthSignals) -> Option<String> {
-    auth.session
-        .get_untracked()
-        .map(|session| session.user_name.clone())
 }

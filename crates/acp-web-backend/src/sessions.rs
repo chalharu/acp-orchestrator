@@ -397,6 +397,37 @@ impl SessionStore {
         Ok(())
     }
 
+    pub async fn delete_sessions_for_owners(&self, owners: &[String]) -> Vec<String> {
+        if owners.is_empty() {
+            return Vec::new();
+        }
+        let owner_set = owners
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let handles = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .map(|(session_id, handle)| (session_id.clone(), handle.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let mut removed = Vec::new();
+        for (session_id, handle) in handles {
+            if owner_set.contains(&handle.owner().await) {
+                handle.prepare_delete().await;
+                removed.push(session_id);
+            }
+        }
+
+        let mut sessions = self.sessions.write().await;
+        for session_id in &removed {
+            sessions.remove(session_id);
+        }
+        removed
+    }
+
     pub async fn append_assistant_message(
         &self,
         owner: &str,

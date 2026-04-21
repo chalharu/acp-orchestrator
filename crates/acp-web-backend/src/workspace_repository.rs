@@ -1,11 +1,9 @@
-use acp_contracts::SessionSnapshot;
+use acp_contracts::{LocalAccount, SessionSnapshot};
 use async_trait::async_trait;
 
 use crate::{
     auth::AuthenticatedPrincipal,
-    workspace_store::{
-        LocalAccountRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
-    },
+    workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError},
 };
 
 #[async_trait]
@@ -14,56 +12,6 @@ pub trait WorkspaceRepository: Send + Sync {
         &self,
         principal: &AuthenticatedPrincipal,
     ) -> Result<UserRecord, WorkspaceStoreError>;
-
-    async fn register_local_user(
-        &self,
-        user_name: &str,
-        password: &str,
-    ) -> Result<(), WorkspaceStoreError>;
-
-    async fn load_local_account(
-        &self,
-        user_name: &str,
-    ) -> Result<Option<LocalAccountRecord>, WorkspaceStoreError>;
-
-    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError>;
-
-    async fn authenticate_local_user(
-        &self,
-        user_name: &str,
-        password: &str,
-    ) -> Result<bool, WorkspaceStoreError>;
-
-    async fn register_local_user_and_rotate_browser_session(
-        &self,
-        previous_session_token: &str,
-        next_session_token: &str,
-        user_name: &str,
-        password: &str,
-    ) -> Result<(), WorkspaceStoreError>;
-
-    async fn rotate_browser_session(
-        &self,
-        previous_session_token: &str,
-        next_session_token: &str,
-        user_name: &str,
-    ) -> Result<(), WorkspaceStoreError>;
-
-    async fn sign_in_browser_session(
-        &self,
-        session_token: &str,
-        user_name: &str,
-    ) -> Result<(), WorkspaceStoreError>;
-
-    async fn browser_session_user_name(
-        &self,
-        session_token: &str,
-    ) -> Result<Option<String>, WorkspaceStoreError>;
-
-    async fn sign_out_browser_session(
-        &self,
-        session_token: &str,
-    ) -> Result<(), WorkspaceStoreError>;
 
     async fn bootstrap_workspace(
         &self,
@@ -88,4 +36,51 @@ pub trait WorkspaceRepository: Send + Sync {
         owner_user_id: &str,
         session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError>;
+
+    async fn auth_status(
+        &self,
+        browser_session_id: Option<&str>,
+    ) -> Result<(bool, Option<UserRecord>), WorkspaceStoreError>;
+
+    async fn authenticate_browser_session(
+        &self,
+        browser_session_id: &str,
+    ) -> Result<Option<UserRecord>, WorkspaceStoreError>;
+
+    async fn bootstrap_local_account(
+        &self,
+        browser_session_id: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<LocalAccount, WorkspaceStoreError>;
+
+    async fn sign_in_local_account(
+        &self,
+        browser_session_id: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<LocalAccount, WorkspaceStoreError>;
+
+    async fn list_local_accounts(&self) -> Result<Vec<LocalAccount>, WorkspaceStoreError>;
+
+    async fn create_local_account(
+        &self,
+        username: &str,
+        password: &str,
+        is_admin: bool,
+    ) -> Result<LocalAccount, WorkspaceStoreError>;
+
+    async fn update_local_account(
+        &self,
+        target_user_id: &str,
+        current_user_id: &str,
+        password: Option<&str>,
+        is_admin: Option<bool>,
+    ) -> Result<LocalAccount, WorkspaceStoreError>;
+
+    async fn delete_local_account(
+        &self,
+        target_user_id: &str,
+        current_user_id: &str,
+    ) -> Result<Vec<String>, WorkspaceStoreError>;
 }

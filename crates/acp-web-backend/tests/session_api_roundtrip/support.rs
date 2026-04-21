@@ -2,9 +2,9 @@ use std::{future::pending, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_contracts::{
-    AuthSessionResponse, CancelTurnResponse, CreateSessionResponse, PromptRequest,
-    RenameSessionRequest, RenameSessionResponse, ResolvePermissionRequest,
-    ResolvePermissionResponse, SessionListResponse, SignInRequest, SignUpRequest,
+    BootstrapRegistrationRequest, BootstrapRegistrationResponse, CancelTurnResponse,
+    CreateSessionResponse, PromptRequest, RenameSessionRequest, RenameSessionResponse,
+    ResolvePermissionRequest, ResolvePermissionResponse, SessionListResponse,
 };
 pub(super) use acp_contracts::{MessageRole, PermissionDecision, StreamEvent, StreamEventPayload};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
@@ -77,70 +77,28 @@ pub(super) async fn create_browser_session(
         .context("decoding the created browser session")
 }
 
-pub(super) async fn sign_in_browser_session(
+pub(super) async fn bootstrap_browser_account(
     client: &Client,
     backend_url: &str,
     csrf_token: &str,
-    user_name: &str,
+    username: &str,
     password: &str,
-) -> Result<AuthSessionResponse> {
+) -> Result<BootstrapRegistrationResponse> {
     client
-        .post(format!("{backend_url}/api/v1/auth/session"))
+        .post(format!("{backend_url}/api/v1/bootstrap/register"))
         .header("x-csrf-token", csrf_token)
-        .json(&SignInRequest {
-            user_name: user_name.to_string(),
+        .json(&BootstrapRegistrationRequest {
+            username: username.to_string(),
             password: password.to_string(),
         })
         .send()
         .await
-        .context("signing in a cookie-authenticated browser session")?
+        .context("registering the bootstrap browser account")?
         .error_for_status()
-        .context("cookie-authenticated browser sign-in returned an error")?
+        .context("bootstrap registration returned an error")?
         .json()
         .await
-        .context("decoding the browser sign-in response")
-}
-
-pub(super) async fn register_browser_account(
-    client: &Client,
-    backend_url: &str,
-    csrf_token: &str,
-    user_name: &str,
-    password: &str,
-) -> Result<AuthSessionResponse> {
-    client
-        .post(format!("{backend_url}/api/v1/auth/register"))
-        .header("x-csrf-token", csrf_token)
-        .json(&SignUpRequest {
-            user_name: user_name.to_string(),
-            password: password.to_string(),
-        })
-        .send()
-        .await
-        .context("registering a cookie-authenticated browser account")?
-        .error_for_status()
-        .context("cookie-authenticated browser sign-up returned an error")?
-        .json()
-        .await
-        .context("decoding the browser sign-up response")
-}
-
-pub(super) async fn sign_out_browser_session(
-    client: &Client,
-    backend_url: &str,
-    csrf_token: &str,
-) -> Result<AuthSessionResponse> {
-    client
-        .delete(format!("{backend_url}/api/v1/auth/session"))
-        .header("x-csrf-token", csrf_token)
-        .send()
-        .await
-        .context("signing out a cookie-authenticated browser session")?
-        .error_for_status()
-        .context("cookie-authenticated browser sign-out returned an error")?
-        .json()
-        .await
-        .context("decoding the browser sign-out response")
+        .context("decoding the bootstrap registration response")
 }
 
 pub(super) async fn submit_browser_prompt(

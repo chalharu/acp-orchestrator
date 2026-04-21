@@ -1,14 +1,6 @@
-use std::time::Duration;
-
 use super::support::*;
-use acp_contracts::{AuthSessionResponse, CreateSessionResponse, SignUpRequest};
+use acp_contracts::CreateSessionResponse;
 use acp_mock::MANUAL_PERMISSION_TRIGGER;
-use futures_util::StreamExt;
-
-const BROWSER_TEST_USER_NAME: &str = "browser-test";
-const BROWSER_TEST_PASSWORD: &str = "browser-test-password";
-const BROWSER_SWITCHED_USER_NAME: &str = "browser-test-switched";
-const BROWSER_SWITCHED_PASSWORD: &str = "browser-test-switched-password";
 
 #[tokio::test]
 async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Result<()> {
@@ -86,108 +78,6 @@ async fn browser_cookie_bootstrap_can_cancel_pending_permission_turns() -> Resul
     Ok(())
 }
 
-#[tokio::test]
-async fn browser_sign_out_closes_open_event_streams() -> Result<()> {
-    let stack = spawn_browser_test_stack().await?;
-    let browser = build_browser_client()?;
-    let (csrf_token, _session_id, mut events) =
-        bootstrap_browser_session(&browser, &stack.backend_url).await?;
-
-    let signed_out = sign_out_browser_session(&browser, &stack.backend_url, &csrf_token).await?;
-    assert!(!signed_out.authenticated);
-    assert!(!signed_out.is_admin);
-    assert!(!signed_out.bootstrap_registration_open);
-    assert_eq!(signed_out.user_name, None);
-
-    assert_browser_stream_closes(&mut events).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn browser_re_sign_in_closes_stale_open_event_streams() -> Result<()> {
-    let stack = spawn_browser_test_stack().await?;
-    let browser = build_browser_client()?;
-    let (csrf_token, _session_id, mut events) =
-        bootstrap_browser_session(&browser, &stack.backend_url).await?;
-    register_additional_browser_account(
-        &browser,
-        &stack.backend_url,
-        BROWSER_TEST_USER_NAME,
-        BROWSER_SWITCHED_USER_NAME,
-        BROWSER_SWITCHED_PASSWORD,
-    )
-    .await?;
-
-    assert_browser_sign_in(
-        sign_in_browser_session(
-            &browser,
-            &stack.backend_url,
-            &csrf_token,
-            BROWSER_SWITCHED_USER_NAME,
-            BROWSER_SWITCHED_PASSWORD,
-        )
-        .await?,
-        BROWSER_SWITCHED_USER_NAME,
-        false,
-    );
-
-    assert_browser_stream_closes(&mut events).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn browser_cookie_registration_requires_bootstrap_or_admin_access() -> Result<()> {
-    let stack = spawn_browser_test_stack().await?;
-    let admin_browser = build_browser_client()?;
-    bootstrap_admin_browser(&admin_browser, &stack.backend_url).await?;
-    assert_post_bootstrap_public_registration_is_rejected(&stack.backend_url).await?;
-    register_additional_browser_account(
-        &admin_browser,
-        &stack.backend_url,
-        BROWSER_TEST_USER_NAME,
-        BROWSER_SWITCHED_USER_NAME,
-        BROWSER_SWITCHED_PASSWORD,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn bootstrap_admin_browser(browser: &Client, backend_url: &str) -> Result<()> {
-    let app_document = load_browser_app_shell(browser, backend_url).await?;
-    let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
-    assert_browser_sign_in(
-        register_browser_account(
-            browser,
-            backend_url,
-            &csrf_token,
-            BROWSER_TEST_USER_NAME,
-            BROWSER_TEST_PASSWORD,
-        )
-        .await?,
-        BROWSER_TEST_USER_NAME,
-        true,
-    );
-    Ok(())
-}
-
-async fn assert_post_bootstrap_public_registration_is_rejected(backend_url: &str) -> Result<()> {
-    let unauthenticated_browser = build_browser_client()?;
-    let app_document = load_browser_app_shell(&unauthenticated_browser, backend_url).await?;
-    let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
-    let response = unauthenticated_browser
-        .post(format!("{backend_url}/api/v1/auth/register"))
-        .header("x-csrf-token", &csrf_token)
-        .json(&SignUpRequest {
-            user_name: "blocked".to_string(),
-            password: BROWSER_TEST_PASSWORD.to_string(),
-        })
-        .send()
-        .await
-        .context("submitting an unauthenticated post-bootstrap registration")?;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    Ok(())
-}
-
 async fn spawn_browser_test_stack() -> Result<TestStack> {
     TestStack::spawn(ServerConfig {
         session_cap: 8,
@@ -207,18 +97,8 @@ async fn bootstrap_browser_session(
     assert_browser_shell(&app_document);
 
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
-    assert_browser_sign_in(
-        register_browser_account(
-            browser,
-            backend_url,
-            &csrf_token,
-            BROWSER_TEST_USER_NAME,
-            BROWSER_TEST_PASSWORD,
-        )
-        .await?,
-        BROWSER_TEST_USER_NAME,
-        true,
-    );
+    let _ = bootstrap_browser_account(browser, backend_url, &csrf_token, "admin", "password123")
+        .await?;
     let created: CreateSessionResponse =
         create_browser_session(browser, backend_url, &csrf_token).await?;
     let session_id = created.session.id.clone();
@@ -227,48 +107,9 @@ async fn bootstrap_browser_session(
     Ok((csrf_token, session_id, events))
 }
 
-async fn register_additional_browser_account(
-    browser: &Client,
-    backend_url: &str,
-    current_admin_user_name: &str,
-    user_name: &str,
-    password: &str,
-) -> Result<()> {
-    let app_document = load_browser_app_shell(browser, backend_url).await?;
-    let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
-    assert_browser_sign_in(
-        register_browser_account(browser, backend_url, &csrf_token, user_name, password).await?,
-        current_admin_user_name,
-        true,
-    );
-    Ok(())
-}
-
 fn assert_browser_shell(app_document: &str) {
     assert!(app_document.contains("name=\"acp-csrf-token\""));
     assert!(app_document.contains("id=\"app-root\""));
-}
-
-fn assert_browser_sign_in(
-    response: AuthSessionResponse,
-    expected_user_name: &str,
-    expected_is_admin: bool,
-) {
-    assert!(response.authenticated);
-    assert_eq!(response.is_admin, expected_is_admin);
-    assert!(!response.bootstrap_registration_open);
-    assert_eq!(response.user_name.as_deref(), Some(expected_user_name));
-}
-
-async fn assert_browser_stream_closes(events: &mut SseStream) -> Result<()> {
-    let next = tokio::time::timeout(Duration::from_secs(2), events.next())
-        .await
-        .context("timed out waiting for the browser event stream to close")?;
-    assert!(
-        next.is_none(),
-        "expected the browser event stream to close when authentication changes"
-    );
-    Ok(())
 }
 
 async fn submit_and_assert_browser_prompt(

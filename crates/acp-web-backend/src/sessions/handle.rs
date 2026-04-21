@@ -104,6 +104,10 @@ impl SessionHandle {
         self.data.lock().await.owner == owner
     }
 
+    pub(super) async fn owner(&self) -> String {
+        self.data.lock().await.owner.clone()
+    }
+
     pub(super) async fn is_active(&self) -> bool {
         self.data.lock().await.status == SessionStatus::Active
     }

@@ -568,6 +568,10 @@ async fn app_stylesheet_responds_with_css_content_type() {
     assert!(ct.starts_with("text/css"), "got: {ct}");
     assert!(!body_text.is_empty());
     assert!(body_text.contains("Noto Sans JP"));
+    assert!(body_text.contains(
+        ".account-shell {\n  width: min(1160px, 100%);\n  height: 100%;\n  min-height: 0;\n  overflow-y: auto;"
+    ));
+    assert!(body_text.contains(".account-table-wrap {\n  overflow: auto;"));
 }
 
 #[tokio::test]

@@ -198,6 +198,30 @@ async fn app_sign_in_entrypoint_reuses_the_app_shell() {
 }
 
 #[tokio::test]
+async fn app_register_entrypoint_reuses_the_app_shell() {
+    let response = app_register_entrypoint(HeaderMap::new()).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("id=\"app-root\""));
+    assert!(body.contains("wasm-init.js"));
+}
+
+#[tokio::test]
+async fn app_accounts_entrypoint_reuses_the_app_shell() {
+    let response = app_accounts_entrypoint(HeaderMap::new()).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("id=\"app-root\""));
+    assert!(body.contains("wasm-init.js"));
+}
+
+#[tokio::test]
 async fn bootstrap_registration_changes_auth_status_for_the_browser_session() {
     let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
@@ -250,6 +274,26 @@ async fn bootstrap_registration_changes_auth_status_for_the_browser_session() {
 }
 
 #[tokio::test]
+async fn bootstrap_registration_rejects_non_browser_principals() {
+    let error = bootstrap_register(
+        State(auth_test_state()),
+        bearer_principal("developer"),
+        Json(BootstrapRegistrationRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect_err("bootstrap registration should reject bearer principals");
+
+    assert!(matches!(
+        error,
+        AppError::Forbidden(message)
+            if message == "bootstrap registration requires a browser session"
+    ));
+}
+
+#[tokio::test]
 async fn sign_in_rebinds_existing_accounts_to_a_new_browser_session() {
     let state = auth_test_state();
     let first_browser = BrowserAuthContext::spawn().await;
@@ -278,6 +322,26 @@ async fn sign_in_rebinds_existing_accounts_to_a_new_browser_session() {
         .await
         .expect("auth status should load after sign-in");
     assert_eq!(after.0.account, Some(signed_in.0.account));
+}
+
+#[tokio::test]
+async fn sign_in_rejects_non_browser_principals() {
+    let error = sign_in(
+        State(auth_test_state()),
+        bearer_principal("developer"),
+        Json(SignInRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect_err("password sign-in should reject bearer principals");
+
+    assert!(matches!(
+        error,
+        AppError::Forbidden(message)
+            if message == "password sign-in requires a browser session"
+    ));
 }
 
 #[tokio::test]
@@ -317,6 +381,98 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
 }
 
 #[tokio::test]
+async fn admin_account_handlers_list_and_update_accounts() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    let member = create_member_account(&state, &admin_browser, "member", "password123").await;
+
+    let listed = list_accounts(
+        State(state.clone()),
+        Extension(admin_browser.principal.clone()),
+    )
+    .await
+    .expect("listing accounts should succeed");
+    assert_eq!(listed.0.accounts.len(), 2);
+    assert!(
+        listed
+            .0
+            .accounts
+            .iter()
+            .any(|account| account.user_id == member.user_id)
+    );
+
+    let updated = update_account(
+        State(state.clone()),
+        Path(member.user_id.clone()),
+        Extension(admin_browser.principal.clone()),
+        Json(acp_contracts::UpdateAccountRequest {
+            password: Some("password456".to_string()),
+            is_admin: Some(true),
+        }),
+    )
+    .await
+    .expect("updating the member account should succeed");
+    assert!(updated.0.account.is_admin);
+}
+
+#[tokio::test]
+async fn admin_account_deletions_forget_live_sessions() {
+    let (state, forgotten_sessions) = tracking_auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    let member = create_member_account(&state, &admin_browser, "member", "password123").await;
+    let member_browser = BrowserAuthContext::spawn().await;
+    sign_in_browser_account(&state, &member_browser, "member", "password123").await;
+    let live_session = state
+        .store
+        .create_session(&member_browser.principal.id)
+        .await
+        .expect("member live session should create");
+
+    let deleted = delete_account(
+        State(state.clone()),
+        Path(member.user_id),
+        Extension(admin_browser.principal),
+    )
+    .await
+    .expect("deleting the member account should succeed");
+    assert!(deleted.0.deleted);
+    assert_eq!(
+        state
+            .store
+            .session_snapshot(&member_browser.principal.id, &live_session.id)
+            .await,
+        Err(SessionStoreError::NotFound)
+    );
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("tracking should not poison")
+            .as_slice(),
+        &[live_session.id]
+    );
+}
+
+#[tokio::test]
+async fn account_handlers_require_admin_access() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    create_member_account(&state, &admin_browser, "member", "password123").await;
+    let member_browser = BrowserAuthContext::spawn().await;
+    sign_in_browser_account(&state, &member_browser, "member", "password123").await;
+
+    let error = list_accounts(State(state), Extension(member_browser.principal))
+        .await
+        .expect_err("non-admin users should not list accounts");
+    assert!(matches!(
+        error,
+        AppError::Forbidden(message) if message == "admin access required"
+    ));
+}
+
+#[tokio::test]
 async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
     let response = redirect_to_app().await.into_response();
     let location = response
@@ -329,6 +485,18 @@ async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
 }
 
 #[tokio::test]
+async fn redirect_to_register_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_register().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/register/"));
+}
+
+#[tokio::test]
 async fn redirect_to_sign_in_uses_the_canonical_trailing_slash_route() {
     let response = redirect_to_sign_in().await.into_response();
     let location = response
@@ -338,6 +506,18 @@ async fn redirect_to_sign_in_uses_the_canonical_trailing_slash_route() {
 
     assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
     assert_eq!(location.to_str().ok(), Some("/app/sign-in/"));
+}
+
+#[tokio::test]
+async fn redirect_to_accounts_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_accounts().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/accounts/"));
 }
 
 #[tokio::test]
@@ -1807,6 +1987,18 @@ fn auth_test_state() -> AppState {
     )
 }
 
+fn tracking_auth_test_state() -> (AppState, StdArc<Mutex<Vec<String>>>) {
+    let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        new_ephemeral_workspace_repository(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: forgotten_sessions.clone(),
+        }),
+    );
+    (state, forgotten_sessions)
+}
+
 fn authorize_browser_headers(headers: &HeaderMap, csrf_token: &str) -> AuthenticatedPrincipal {
     let mut write_headers = headers.clone();
     write_headers.insert("x-csrf-token", HeaderValue::from_str(csrf_token).unwrap());
@@ -1824,6 +2016,48 @@ async fn bootstrap_admin_account(state: &AppState, browser: &BrowserAuthContext)
     )
     .await
     .expect("bootstrap registration should succeed");
+}
+
+async fn create_member_account(
+    state: &AppState,
+    admin_browser: &BrowserAuthContext,
+    username: &str,
+    password: &str,
+) -> acp_contracts::LocalAccount {
+    create_account(
+        State(state.clone()),
+        Extension(admin_browser.principal.clone()),
+        Json(acp_contracts::CreateAccountRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+            is_admin: false,
+        }),
+    )
+    .await
+    .expect("member account creation should succeed")
+    .1
+    .0
+    .account
+}
+
+async fn sign_in_browser_account(
+    state: &AppState,
+    browser: &BrowserAuthContext,
+    username: &str,
+    password: &str,
+) -> acp_contracts::LocalAccount {
+    sign_in(
+        State(state.clone()),
+        Extension(browser.principal.clone()),
+        Json(SignInRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        }),
+    )
+    .await
+    .expect("sign-in should succeed")
+    .0
+    .account
 }
 
 fn extract_meta_content(document: &str, name: &str) -> String {
@@ -1896,6 +2130,31 @@ fn sample_snapshot(session_id: &str) -> SessionSnapshot {
         messages: Vec::new(),
         pending_permissions: Vec::new(),
     }
+}
+
+#[test]
+fn workspace_store_errors_map_to_the_expected_app_errors() {
+    let unauthorized: AppError = WorkspaceStoreError::Unauthorized("auth".to_string()).into();
+    let not_found: AppError = WorkspaceStoreError::NotFound("missing".to_string()).into();
+    let conflict: AppError = WorkspaceStoreError::Conflict("conflict".to_string()).into();
+    let bad_request: AppError = WorkspaceStoreError::Validation("invalid".to_string()).into();
+
+    assert!(matches!(
+        unauthorized,
+        AppError::Unauthorized(message) if message == "auth"
+    ));
+    assert!(matches!(
+        not_found,
+        AppError::NotFound(message) if message == "missing"
+    ));
+    assert!(matches!(
+        conflict,
+        AppError::Conflict(message) if message == "conflict"
+    ));
+    assert!(matches!(
+        bad_request,
+        AppError::BadRequest(message) if message == "invalid"
+    ));
 }
 
 #[tokio::test]

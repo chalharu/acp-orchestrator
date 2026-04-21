@@ -1073,13 +1073,16 @@ fn validate_password(password: &str) -> Result<(), WorkspaceStoreError> {
 
 fn hash_password(password: &str) -> Result<String, WorkspaceStoreError> {
     validate_password(password)?;
-    let salt = SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(|error| {
-        WorkspaceStoreError::Database(format!("failed to encode salt: {error}"))
-    })?;
+    let salt = encode_password_salt(Uuid::new_v4().as_bytes())?;
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
         .map_err(|error| WorkspaceStoreError::Database(format!("failed to hash password: {error}")))
+}
+
+fn encode_password_salt(bytes: &[u8]) -> Result<SaltString, WorkspaceStoreError> {
+    SaltString::encode_b64(bytes)
+        .map_err(|error| WorkspaceStoreError::Database(format!("failed to encode salt: {error}")))
 }
 
 fn verify_password(password: &str, password_hash: &str) -> Result<bool, WorkspaceStoreError> {
@@ -1317,14 +1320,9 @@ fn update_local_account_in_transaction(
 ) -> Result<LocalAccount, WorkspaceStoreError> {
     let target = active_local_account(connection, target_user_id)?;
     validate_local_account_admin_change(connection, &target, current_user_id, is_admin)?;
-    let next_password_hash = next_password_hash(password)?;
-    let next_is_admin = is_admin.unwrap_or(target.is_admin);
-    persist_local_account_update(
-        connection,
-        target_user_id,
-        next_password_hash,
-        next_is_admin,
-    )?;
+    let password_hash = next_password_hash(password)?;
+    let is_admin = is_admin.unwrap_or(target.is_admin);
+    persist_local_account_update(connection, target_user_id, password_hash, is_admin)?;
     let updated = active_local_account(connection, target_user_id)?;
     local_account_from_user(&updated)
 }
@@ -1843,6 +1841,77 @@ mod tests {
         }
     }
 
+    fn legacy_user_db_connection(label: &str, schema: &str) -> (std::path::PathBuf, Connection) {
+        let db_path = std::env::temp_dir()
+            .join(format!(
+                "acp-web-backend-{label}-{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .join("db.sqlite");
+        ensure_parent_dir(&db_path).expect("legacy db parent should initialize");
+        let connection = Connection::open(&db_path).expect("legacy database should open");
+        connection
+            .execute_batch(schema)
+            .expect("legacy users table should initialize");
+        (db_path, connection)
+    }
+
+    fn insert_legacy_bearer_user(
+        connection: &Connection,
+        user_id: &str,
+        principal: &AuthenticatedPrincipal,
+    ) {
+        let now = timestamp(&Utc::now());
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    created_at,
+                    last_seen_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    user_id,
+                    AuthenticatedPrincipalKind::Bearer.as_str(),
+                    durable_principal_subject(principal),
+                    now,
+                    now
+                ],
+            )
+            .expect("legacy bearer user should insert");
+    }
+
+    fn insert_legacy_bearer_user_with_auth_columns(
+        connection: &Connection,
+        user_id: &str,
+        principal: &AuthenticatedPrincipal,
+    ) {
+        let now = timestamp(&Utc::now());
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    created_at,
+                    last_seen_at,
+                    username,
+                    password_hash,
+                    is_admin,
+                    deleted_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 0, NULL)",
+                params![
+                    user_id,
+                    AuthenticatedPrincipalKind::Bearer.as_str(),
+                    durable_principal_subject(principal),
+                    now,
+                    now
+                ],
+            )
+            .expect("legacy bearer user should insert");
+    }
+
     fn snapshot(id: &str, title: &str, status: SessionStatus) -> SessionSnapshot {
         SessionSnapshot {
             id: id.to_string(),
@@ -2016,6 +2085,226 @@ mod tests {
             error,
             WorkspaceStoreError::Unauthorized("invalid username or password".to_string())
         );
+
+        let missing = repository
+            .sign_in_local_account(
+                "22222222-2222-4222-8222-222222222222",
+                "missing",
+                "password123",
+            )
+            .await
+            .expect_err("sign-in should reject missing accounts");
+
+        assert_eq!(
+            missing,
+            WorkspaceStoreError::Unauthorized("invalid username or password".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_registration_is_rejected_after_the_first_account() {
+        let repository = test_repository();
+        repository
+            .bootstrap_local_account(
+                "11111111-1111-4111-8111-111111111111",
+                "admin",
+                "password123",
+            )
+            .await
+            .expect("bootstrap should succeed");
+
+        let error = repository
+            .bootstrap_local_account(
+                "22222222-2222-4222-8222-222222222222",
+                "second-admin",
+                "password123",
+            )
+            .await
+            .expect_err("bootstrap should close after the first account");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Conflict(
+                "bootstrap registration is no longer available".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validation_helpers_reject_invalid_usernames_and_passwords() {
+        assert_eq!(
+            validate_username("   ").expect_err("blank usernames should fail"),
+            WorkspaceStoreError::Validation("username must not be empty".to_string())
+        );
+        assert_eq!(
+            validate_username(&"a".repeat(65)).expect_err("long usernames should fail"),
+            WorkspaceStoreError::Validation("username must not exceed 64 characters".to_string())
+        );
+        assert_eq!(
+            validate_username("two words").expect_err("whitespace should fail"),
+            WorkspaceStoreError::Validation("username must not contain whitespace".to_string())
+        );
+        assert_eq!(
+            validate_password("short").expect_err("short passwords should fail"),
+            WorkspaceStoreError::Validation("password must be at least 8 characters".to_string())
+        );
+        assert_eq!(
+            next_password_hash(None).expect("missing passwords should be allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_password_hashes_and_write_errors_are_reported_clearly() {
+        let salt_error =
+            encode_password_salt(&[0; 100]).expect_err("oversized salts should fail to encode");
+        assert!(matches!(
+            salt_error,
+            WorkspaceStoreError::Database(message) if message.contains("failed to encode salt")
+        ));
+
+        let invalid_hash = verify_password("password123", "invalid-hash")
+            .expect_err("invalid password hashes should fail");
+        assert!(matches!(
+            invalid_hash,
+            WorkspaceStoreError::Database(message) if message.contains("invalid password hash")
+        ));
+
+        let conflict = map_account_write_error(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("UNIQUE constraint failed: users.username_idx".to_string()),
+        ));
+        assert_eq!(
+            conflict,
+            WorkspaceStoreError::Conflict("username already exists".to_string())
+        );
+
+        let database = map_account_write_error(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("other failure".to_string()),
+        ));
+        assert_eq!(
+            database,
+            WorkspaceStoreError::Database("other failure".to_string())
+        );
+
+        assert!(matches!(
+            map_account_write_error(rusqlite::Error::InvalidQuery),
+            WorkspaceStoreError::Database(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn signing_in_rejects_accounts_without_password_hashes() {
+        let repository = test_repository();
+        repository
+            .bootstrap_local_account(
+                "11111111-1111-4111-8111-111111111111",
+                "admin",
+                "password123",
+            )
+            .await
+            .expect("bootstrap should succeed");
+        repository
+            .open_connection()
+            .expect("opening the test database should succeed")
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    username,
+                    password_hash,
+                    is_admin,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                ) VALUES (?1, ?2, ?3, ?4, NULL, 0, ?5, ?5, NULL)",
+                params![
+                    "u_member",
+                    LOCAL_ACCOUNT_PRINCIPAL_KIND,
+                    "local-account:member",
+                    "member",
+                    timestamp(&Utc::now()),
+                ],
+            )
+            .expect("local account without a password hash should insert");
+
+        let error = repository
+            .sign_in_local_account(
+                "22222222-2222-4222-8222-222222222222",
+                "member",
+                "password123",
+            )
+            .await
+            .expect_err("sign-in should reject accounts without a password hash");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Unauthorized("invalid username or password".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn updating_an_account_can_change_password_and_admin_access() {
+        let repository = test_repository();
+        let admin = repository
+            .bootstrap_local_account(
+                "11111111-1111-4111-8111-111111111111",
+                "admin",
+                "password123",
+            )
+            .await
+            .expect("bootstrap should succeed");
+        let member = repository
+            .create_local_account("member", "password123", false)
+            .await
+            .expect("secondary account creation should succeed");
+
+        let updated = repository
+            .update_local_account(
+                &member.user_id,
+                &admin.user_id,
+                Some("password456"),
+                Some(true),
+            )
+            .await
+            .expect("account updates should succeed");
+        let signed_in = repository
+            .sign_in_local_account(
+                "22222222-2222-4222-8222-222222222222",
+                "member",
+                "password456",
+            )
+            .await
+            .expect("the updated password should authenticate");
+
+        assert!(updated.is_admin);
+        assert_eq!(signed_in.user_id, member.user_id);
+    }
+
+    #[tokio::test]
+    async fn updating_an_account_can_keep_existing_admin_access() {
+        let repository = test_repository();
+        let admin = repository
+            .bootstrap_local_account(
+                "11111111-1111-4111-8111-111111111111",
+                "admin",
+                "password123",
+            )
+            .await
+            .expect("bootstrap should succeed");
+        let member = repository
+            .create_local_account("member", "password123", false)
+            .await
+            .expect("secondary account creation should succeed");
+
+        let updated = repository
+            .update_local_account(&member.user_id, &admin.user_id, Some("password456"), None)
+            .await
+            .expect("password-only updates should succeed");
+
+        assert!(!updated.is_admin);
     }
 
     #[tokio::test]
@@ -2049,25 +2338,17 @@ mod tests {
 
     #[tokio::test]
     async fn initialization_migrates_legacy_users_before_creating_the_username_index() {
-        let db_path = std::env::temp_dir()
-            .join(format!(
-                "acp-web-backend-legacy-users-{}",
-                uuid::Uuid::new_v4().simple()
-            ))
-            .join("db.sqlite");
-        ensure_parent_dir(&db_path).expect("legacy db parent should initialize");
-        let connection = Connection::open(&db_path).expect("legacy database should open");
-        connection
-            .execute_batch(
-                "CREATE TABLE users (
+        let (db_path, connection) = legacy_user_db_connection(
+            "legacy-users",
+            "CREATE TABLE users (
                     user_id TEXT PRIMARY KEY,
                     principal_kind TEXT NOT NULL,
                     principal_subject TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL
                 );",
-            )
-            .expect("legacy users table should initialize");
+        );
+        insert_legacy_bearer_user(&connection, "u_legacy", &bearer_principal("developer"));
         drop(connection);
 
         let repository =
@@ -2082,17 +2363,9 @@ mod tests {
 
     #[tokio::test]
     async fn initialization_promotes_existing_bearer_users_to_admin() {
-        let db_path = std::env::temp_dir()
-            .join(format!(
-                "acp-web-backend-bearer-admin-migration-{}",
-                uuid::Uuid::new_v4().simple()
-            ))
-            .join("db.sqlite");
-        ensure_parent_dir(&db_path).expect("legacy db parent should initialize");
-        let connection = Connection::open(&db_path).expect("legacy database should open");
-        connection
-            .execute_batch(
-                "CREATE TABLE users (
+        let (db_path, connection) = legacy_user_db_connection(
+            "bearer-admin-migration",
+            "CREATE TABLE users (
                     user_id TEXT PRIMARY KEY,
                     principal_kind TEXT NOT NULL,
                     principal_subject TEXT NOT NULL,
@@ -2103,31 +2376,12 @@ mod tests {
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     deleted_at TEXT
                 );",
-            )
-            .expect("legacy users table should initialize");
-        let now = timestamp(&Utc::now());
-        connection
-            .execute(
-                "INSERT INTO users (
-                    user_id,
-                    principal_kind,
-                    principal_subject,
-                    created_at,
-                    last_seen_at,
-                    username,
-                    password_hash,
-                    is_admin,
-                    deleted_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 0, NULL)",
-                params![
-                    "u_legacy",
-                    AuthenticatedPrincipalKind::Bearer.as_str(),
-                    durable_principal_subject(&bearer_principal("developer")),
-                    now,
-                    now
-                ],
-            )
-            .expect("legacy bearer user should insert");
+        );
+        insert_legacy_bearer_user_with_auth_columns(
+            &connection,
+            "u_legacy",
+            &bearer_principal("developer"),
+        );
         drop(connection);
 
         let repository =
@@ -2245,12 +2499,25 @@ mod tests {
             .update_local_account(&admin.user_id, &admin.user_id, None, Some(false))
             .await
             .expect_err("self demotion should fail");
+        let last_admin_demotion = repository
+            .update_local_account(&admin.user_id, &user.user_id, None, Some(false))
+            .await
+            .expect_err("demoting the last admin should fail");
+        let self_delete = repository
+            .delete_local_account(&admin.user_id, &admin.user_id)
+            .await
+            .expect_err("deleting the signed-in account should fail");
         let last_admin_delete = repository
             .delete_local_account(&admin.user_id, &user.user_id)
             .await
             .expect_err("deleting the last admin should fail");
 
         assert!(matches!(self_demotion, WorkspaceStoreError::Conflict(_)));
+        assert!(matches!(
+            last_admin_demotion,
+            WorkspaceStoreError::Conflict(_)
+        ));
+        assert!(matches!(self_delete, WorkspaceStoreError::Conflict(_)));
         assert!(matches!(
             last_admin_delete,
             WorkspaceStoreError::Conflict(_)
@@ -2506,7 +2773,6 @@ mod tests {
     async fn workspace_store_error_helpers_preserve_context() {
         let display_error = WorkspaceStoreError::Database("db unavailable".to_string());
         assert_eq!(display_error.to_string(), "db unavailable");
-
         let mapped_error = database_error("write failed");
         assert_eq!(mapped_error.to_string(), "write failed");
 
@@ -2534,6 +2800,31 @@ mod tests {
             join_mapped
                 .to_string()
                 .contains("blocking workspace task failed")
+        );
+    }
+
+    #[test]
+    fn workspace_store_accessors_preserve_context() {
+        assert_eq!(WorkspaceStoreError::Io("io".to_string()).message(), "io");
+        assert_eq!(
+            WorkspaceStoreError::Unauthorized("auth".to_string()).message(),
+            "auth"
+        );
+        assert_eq!(
+            WorkspaceStoreError::NotFound("missing".to_string()).message(),
+            "missing"
+        );
+        assert_eq!(
+            WorkspaceStoreError::Conflict("conflict".to_string()).message(),
+            "conflict"
+        );
+        assert_eq!(
+            WorkspaceStoreError::Validation("invalid".to_string()).message(),
+            "invalid"
+        );
+        assert_eq!(
+            AuthenticatedPrincipalKind::BrowserSession.as_str(),
+            "browser_session"
         );
     }
 

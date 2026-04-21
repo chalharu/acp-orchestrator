@@ -1498,42 +1498,43 @@ fn session_submit_callback(session_id: String, signals: SessionSignals) -> Callb
 
 fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: RwSignal<bool>) {
     leptos::task::spawn_local(async move {
-        match infrastructure::api::auth_status().await {
-            Ok(status) => match application::auth::home_route_target(&status) {
-                domain::auth::HomeRouteTarget::Register => {
-                    if let Err(message) = navigate_to("/app/register/") {
-                        error.set(Some(message));
-                        preparing.set(false);
-                    }
-                }
-                domain::auth::HomeRouteTarget::SignIn => {
-                    if let Err(message) = navigate_to("/app/sign-in/") {
-                        error.set(Some(message));
-                        preparing.set(false);
-                    }
-                }
-                domain::auth::HomeRouteTarget::PrepareSession => {
-                    match resolve_home_session_id().await {
-                        Ok(session_id) => {
-                            if let Err(message) = navigate_to(&app_session_path(&session_id)) {
-                                clear_prepared_session_id();
-                                error.set(Some(message));
-                                preparing.set(false);
-                            }
-                        }
-                        Err(message) => {
-                            error.set(Some(message));
-                            preparing.set(false);
-                        }
-                    }
-                }
-            },
-            Err(message) => {
-                error.set(Some(message));
-                preparing.set(false);
-            }
+        let result = match infrastructure::api::auth_status().await {
+            Ok(status) => navigate_home_target(application::auth::home_route_target(&status)).await,
+            Err(message) => Err(message),
+        };
+
+        if let Err(message) = result {
+            set_home_redirect_error(error, preparing, message);
         }
     });
+}
+
+async fn navigate_home_target(target: domain::auth::HomeRouteTarget) -> Result<(), String> {
+    match target {
+        domain::auth::HomeRouteTarget::Register => navigate_to("/app/register/"),
+        domain::auth::HomeRouteTarget::SignIn => navigate_to("/app/sign-in/"),
+        domain::auth::HomeRouteTarget::PrepareSession => navigate_prepared_home_session().await,
+    }
+}
+
+async fn navigate_prepared_home_session() -> Result<(), String> {
+    let session_id = resolve_home_session_id().await?;
+    match navigate_to(&app_session_path(&session_id)) {
+        Ok(()) => Ok(()),
+        Err(message) => {
+            clear_prepared_session_id();
+            Err(message)
+        }
+    }
+}
+
+fn set_home_redirect_error(
+    error: RwSignal<Option<String>>,
+    preparing: RwSignal<bool>,
+    message: String,
+) {
+    error.set(Some(message));
+    preparing.set(false);
 }
 
 async fn resolve_home_session_id() -> Result<String, String> {

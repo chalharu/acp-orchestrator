@@ -37,56 +37,7 @@ async fn slash_prefix_can_be_removed_without_breaking_prompt_submission() -> Res
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
         browser.open_app().await?;
-        let composer = browser.focused_composer().await?;
-        composer.send_keys("/").await.context("typing slash")?;
-
-        browser.wait_for_slash_palette().await?;
-        let item_texts = browser.slash_palette_items().await?;
-        assert!(item_texts.iter().any(|text| text.contains("/help")));
-        assert!(!item_texts.iter().any(|text| text.contains("/cancel")));
-        assert!(!item_texts.iter().any(|text| text.contains("/approve")));
-        assert!(!item_texts.iter().any(|text| text.contains("/deny")));
-        assert!(!item_texts.iter().any(|text| text.contains("/quit")));
-
-        composer
-            .send_keys(&Key::Backspace.to_string())
-            .await
-            .context("deleting the slash prefix")?;
-        browser
-            .wait_for_condition(
-                "return document.querySelector('#composer-input')?.value === '';",
-                Duration::from_secs(10),
-                "empty composer after removing slash",
-            )
-            .await?;
-
-        composer
-            .send_keys("test")
-            .await
-            .context("typing a normal prompt")?;
-
-        browser.assert_composer_submission_ready().await?;
-
-        browser
-            .client
-            .find(Locator::Css(SUBMIT_SELECTOR))
-            .await
-            .context("finding the submit button")?
-            .click()
-            .await
-            .context("submitting the prompt")?;
-
-        browser
-            .wait_for_body_text(MOCK_REPLY_TEXT, Duration::from_secs(30))
-            .await?;
-
-        let composer_value: String = browser
-            .evaluate(
-                "return document.querySelector('#composer-input')?.value ?? '';",
-                "reading composer value after submit",
-            )
-            .await?;
-        assert_eq!(composer_value, "");
+        browser.run_slash_prefix_submission("test").await?;
 
         Ok(())
     }
@@ -274,6 +225,13 @@ impl BrowserHarness {
         Ok(composer)
     }
 
+    async fn open_browser_help_palette(&self) -> Result<fantoccini::elements::Element> {
+        let composer = self.focused_composer().await?;
+        composer.send_keys("/").await.context("typing slash")?;
+        self.wait_for_slash_palette().await?;
+        Ok(composer)
+    }
+
     async fn wait_for_slash_palette(&self) -> Result<()> {
         self.wait_for_condition(
             "return Boolean(document.querySelector('.composer__slash-palette')) \
@@ -284,6 +242,16 @@ impl BrowserHarness {
         .await
     }
 
+    async fn assert_browser_help_only_palette(&self) -> Result<()> {
+        let item_texts = self.slash_palette_items().await?;
+        assert!(item_texts.iter().any(|text| text.contains("/help")));
+        assert!(!item_texts.iter().any(|text| text.contains("/cancel")));
+        assert!(!item_texts.iter().any(|text| text.contains("/approve")));
+        assert!(!item_texts.iter().any(|text| text.contains("/deny")));
+        assert!(!item_texts.iter().any(|text| text.contains("/quit")));
+        Ok(())
+    }
+
     async fn slash_palette_items(&self) -> Result<Vec<String>> {
         self.evaluate(
             "return Array.from(document.querySelectorAll('.composer__slash-item'))\
@@ -291,6 +259,63 @@ impl BrowserHarness {
             "reading slash command labels",
         )
         .await
+    }
+
+    async fn run_slash_prefix_submission(&self, prompt: &str) -> Result<()> {
+        let composer = self.open_browser_help_palette().await?;
+        self.assert_browser_help_only_palette().await?;
+        self.remove_slash_prefix(&composer).await?;
+        self.enter_prompt(&composer, prompt).await?;
+        self.assert_composer_submission_ready().await?;
+        self.click_submit_button().await?;
+        self.wait_for_body_text(MOCK_REPLY_TEXT, Duration::from_secs(30))
+            .await?;
+        self.assert_empty_composer().await
+    }
+
+    async fn remove_slash_prefix(&self, composer: &fantoccini::elements::Element) -> Result<()> {
+        composer
+            .send_keys(&Key::Backspace.to_string())
+            .await
+            .context("deleting the slash prefix")?;
+        self.wait_for_condition(
+            "return document.querySelector('#composer-input')?.value === '';",
+            Duration::from_secs(10),
+            "empty composer after removing slash",
+        )
+        .await
+    }
+
+    async fn enter_prompt(
+        &self,
+        composer: &fantoccini::elements::Element,
+        prompt: &str,
+    ) -> Result<()> {
+        composer
+            .send_keys(prompt)
+            .await
+            .context("typing a normal prompt")
+    }
+
+    async fn click_submit_button(&self) -> Result<()> {
+        self.client
+            .find(Locator::Css(SUBMIT_SELECTOR))
+            .await
+            .context("finding the submit button")?
+            .click()
+            .await
+            .context("submitting the prompt")
+    }
+
+    async fn assert_empty_composer(&self) -> Result<()> {
+        let composer_value: String = self
+            .evaluate(
+                "return document.querySelector('#composer-input')?.value ?? '';",
+                "reading composer value after submit",
+            )
+            .await?;
+        assert_eq!(composer_value, "");
+        Ok(())
     }
 
     async fn assert_composer_submission_ready(&self) -> Result<()> {

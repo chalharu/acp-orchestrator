@@ -255,6 +255,8 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
     let admin_checked = RwSignal::new(account.is_admin);
     let saving = RwSignal::new(false);
     let deleting = RwSignal::new(false);
+    let account_id = account.user_id.clone();
+    let username = account.username.clone();
     let capabilities_account = account.clone();
     let capabilities = Signal::derive(move || {
         account_capabilities(
@@ -263,54 +265,90 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
             &capabilities_account,
         )
     });
-    let save_account = account_save_handler(
-        account.user_id.clone(),
-        state,
-        password,
-        admin_checked,
-        saving,
-    );
-    let delete_account = account_delete_handler(account.user_id.clone(), state, deleting);
+    let role_account = account.clone();
+    let role_label =
+        Signal::derive(move || account_role_label(&role_account, &state.current_user_id.get()));
+    let can_toggle_admin = Signal::derive(move || capabilities.get().can_toggle_admin);
+    let can_delete = Signal::derive(move || capabilities.get().can_delete);
+    let save_account =
+        account_save_handler(account_id.clone(), state, password, admin_checked, saving);
+    let delete_account = account_delete_handler(account_id, state, deleting);
 
     view! {
         <li class="account-list__item">
             <form class="account-row" on:submit=move |event| save_account.run(event)>
-                <div class="account-row__summary">
-                    <strong>{account.username.clone()}</strong>
-                    <span class="muted">{account_role_label(&account, &state.current_user_id.get_untracked())}</span>
-                </div>
-                <label class="account-form__field">
-                    <span>"New password"</span>
-                    <input
-                        type="password"
-                        prop:value=move || password.get()
-                        on:input=move |event| password.set(event_target_value(&event))
-                    />
-                </label>
-                <label class="account-checkbox">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || admin_checked.get()
-                        prop:disabled=move || !capabilities.get().can_toggle_admin
-                        on:change=move |event| admin_checked.set(event_target_checked(&event))
-                    />
-                    <span>"Admin"</span>
-                </label>
-                <div class="account-row__actions">
-                    <button type="submit" prop:disabled=move || saving.get()>
-                        {move || if saving.get() { "Saving…" } else { "Save" }}
-                    </button>
-                    <button
-                        type="button"
-                        class="account-row__delete"
-                        prop:disabled=move || deleting.get() || !capabilities.get().can_delete
-                        on:click=move |event| delete_account.run(event)
-                    >
-                        {move || if deleting.get() { "Deleting…" } else { "Delete" }}
-                    </button>
-                </div>
+                <AccountRowSummary username role_label />
+                <AccountPasswordField password />
+                <AccountAdminToggle admin_checked can_toggle_admin />
+                <AccountRowActions saving deleting can_delete delete_account />
             </form>
         </li>
+    }
+}
+
+#[component]
+fn AccountRowSummary(username: String, role_label: Signal<String>) -> impl IntoView {
+    view! {
+        <div class="account-row__summary">
+            <strong>{username}</strong>
+            <span class="muted">{move || role_label.get()}</span>
+        </div>
+    }
+}
+
+#[component]
+fn AccountPasswordField(password: RwSignal<String>) -> impl IntoView {
+    view! {
+        <label class="account-form__field">
+            <span>"New password"</span>
+            <input
+                type="password"
+                prop:value=move || password.get()
+                on:input=move |event| password.set(event_target_value(&event))
+            />
+        </label>
+    }
+}
+
+#[component]
+fn AccountAdminToggle(
+    admin_checked: RwSignal<bool>,
+    can_toggle_admin: Signal<bool>,
+) -> impl IntoView {
+    view! {
+        <label class="account-checkbox">
+            <input
+                type="checkbox"
+                prop:checked=move || admin_checked.get()
+                prop:disabled=move || !can_toggle_admin.get()
+                on:change=move |event| admin_checked.set(event_target_checked(&event))
+            />
+            <span>"Admin"</span>
+        </label>
+    }
+}
+
+#[component]
+fn AccountRowActions(
+    saving: RwSignal<bool>,
+    deleting: RwSignal<bool>,
+    can_delete: Signal<bool>,
+    delete_account: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <div class="account-row__actions">
+            <button type="submit" prop:disabled=move || saving.get()>
+                {move || save_button_label(saving.get())}
+            </button>
+            <button
+                type="button"
+                class="account-row__delete"
+                prop:disabled=move || deleting.get() || !can_delete.get()
+                on:click=move |event| delete_account.run(event)
+            >
+                {move || delete_button_label(deleting.get())}
+            </button>
+        </div>
     }
 }
 
@@ -386,6 +424,14 @@ fn password_update(password: String) -> Option<String> {
     } else {
         Some(password)
     }
+}
+
+fn save_button_label(saving: bool) -> &'static str {
+    if saving { "Saving…" } else { "Save" }
+}
+
+fn delete_button_label(deleting: bool) -> &'static str {
+    if deleting { "Deleting…" } else { "Delete" }
 }
 
 fn account_role_label(account: &LocalAccount, current_user_id: &str) -> String {

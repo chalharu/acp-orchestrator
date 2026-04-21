@@ -34,7 +34,7 @@ use web_sys::EventSource;
 use components::{
     ChatActivity, Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, Transcript,
 };
-use presentation::{AccountsPage, RegisterPage, SessionSidebarAccountsLink, SignInPage};
+use presentation::{AccountsPage, RegisterPage, SessionSidebarAuthControls, SignInPage};
 use slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
     local_slash_candidates, parse_browser_slash_action, slash_palette_is_visible,
@@ -454,6 +454,7 @@ fn session_view_content(
         <main class="app-shell app-shell--session">
             <SessionShell
                 current_session_id=current_session_id
+                auth_error=signals.action_error
                 sidebar_open=sidebar_open
                 shell_signals=shell_signals
                 main_signals=main_signals
@@ -509,6 +510,7 @@ fn session_main_signals(signals: SessionSignals) -> SessionMainSignals {
 #[component]
 fn SessionShell(
     current_session_id: String,
+    auth_error: RwSignal<Option<String>>,
     sidebar_open: RwSignal<bool>,
     shell_signals: SessionShellSignals,
     main_signals: SessionMainSignals,
@@ -526,6 +528,7 @@ fn SessionShell(
         <div class=move || session_layout_class(sidebar_open.get())>
             <SessionSidebar
                 current_session_id=current_session_id
+                auth_error=auth_error
                 sessions=shell_signals.sessions
                 session_list_loaded=shell_signals.list.loaded
                 session_list_error=shell_signals.list.error
@@ -686,6 +689,7 @@ fn StatusBadgeView(#[prop(into)] badge: Signal<StatusBadge>) -> impl IntoView {
 #[component]
 fn SessionSidebar(
     current_session_id: String,
+    auth_error: RwSignal<Option<String>>,
     #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
     #[prop(into)] session_list_loaded: Signal<bool>,
     #[prop(into)] session_list_error: Signal<Option<String>>,
@@ -698,12 +702,17 @@ fn SessionSidebar(
     on_rename_session: Callback<(String, String)>,
     on_delete_session: Callback<String>,
 ) -> impl IntoView {
+    let session_id_for_items = current_session_id.clone();
     let session_items =
-        Signal::derive(move || sidebar_sessions(&sessions.get(), &current_session_id));
+        Signal::derive(move || sidebar_sessions(&sessions.get(), &session_id_for_items));
 
     view! {
         <aside class=move || session_sidebar_class(sidebar_open.get())>
-            <SessionSidebarHeader sidebar_open=sidebar_open />
+            <SessionSidebarHeader
+                current_session_id=current_session_id
+                auth_error=auth_error
+                sidebar_open=sidebar_open
+            />
             <SessionSidebarStatus session_list_error=session_list_error session_items=session_items />
             <SessionSidebarNav
                 session_items=session_items
@@ -722,7 +731,11 @@ fn SessionSidebar(
 }
 
 #[component]
-fn SessionSidebarHeader(sidebar_open: RwSignal<bool>) -> impl IntoView {
+fn SessionSidebarHeader(
+    current_session_id: String,
+    auth_error: RwSignal<Option<String>>,
+    sidebar_open: RwSignal<bool>,
+) -> impl IntoView {
     view! {
         <div class="session-sidebar__header">
             <div class="session-sidebar__header-links">
@@ -732,7 +745,7 @@ fn SessionSidebarHeader(sidebar_open: RwSignal<bool>) -> impl IntoView {
                     </span>
                     <span class="session-sidebar__new-link-label">"New chat"</span>
                 </a>
-                <SessionSidebarAccountsLink />
+                <SessionSidebarAuthControls current_session_id=current_session_id error=auth_error />
             </div>
             <button
                 type="button"

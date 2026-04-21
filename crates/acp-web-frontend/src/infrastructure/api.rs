@@ -248,6 +248,19 @@ pub async fn sign_in(username: &str, password: &str) -> Result<LocalAccount, Str
     Ok(payload.account)
 }
 
+pub async fn sign_out() -> Result<(), String> {
+    let csrf = csrf_token();
+    let response = Request::post("/api/v1/auth/sign-out")
+        .header("x-csrf-token", &csrf)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.ok() {
+        return Err(response_error_message(response, "Sign out failed").await);
+    }
+    Ok(())
+}
+
 pub async fn list_accounts() -> Result<AccountListResponse, String> {
     let response = Request::get("/api/v1/accounts")
         .send()

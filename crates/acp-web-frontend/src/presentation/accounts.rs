@@ -3,16 +3,26 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::{
+    AppRoute, app_session_path,
     application::auth::{account_capabilities, accounts_route_access},
+    clear_prepared_session_id,
     components::ErrorBanner,
     domain::auth::{AccountCapabilities, AccountConstraintReason, AccountsRouteAccess},
     infrastructure::api,
+    navigate_to, route_from_pathname,
 };
 
 #[component]
-pub fn SessionSidebarAccountsLink() -> impl IntoView {
+pub fn SessionSidebarAuthControls(
+    current_session_id: String,
+    error: RwSignal<Option<String>>,
+) -> impl IntoView {
     let is_admin = RwSignal::new(false);
+    let signed_in = RwSignal::new(false);
     let checked = RwSignal::new(false);
+    let signing_out = RwSignal::new(false);
+    let accounts_href = accounts_path_with_return_to(&app_session_path(&current_session_id));
+    let sign_out = sign_out_handler(error, signing_out);
 
     Effect::new(move |_| {
         if checked.get() {
@@ -20,17 +30,31 @@ pub fn SessionSidebarAccountsLink() -> impl IntoView {
         }
         checked.set(true);
         leptos::task::spawn_local(async move {
-            if let Ok(status) = api::auth_status().await {
-                is_admin.set(status.account.is_some_and(|account| account.is_admin));
+            match api::auth_status().await {
+                Ok(status) => {
+                    signed_in.set(status.account.is_some());
+                    is_admin.set(status.account.is_some_and(|account| account.is_admin));
+                }
+                Err(message) => error.set(Some(message)),
             }
         });
     });
 
     view! {
         <Show when=move || is_admin.get()>
-            <a class="session-sidebar__secondary-link" href="/app/accounts/">
+            <a class="session-sidebar__secondary-link" href=accounts_href.clone()>
                 "Accounts"
             </a>
+        </Show>
+        <Show when=move || signed_in.get()>
+            <button
+                type="button"
+                class="session-sidebar__secondary-link session-sidebar__secondary-button"
+                prop:disabled=move || signing_out.get()
+                on:click=move |event| sign_out.run(event)
+            >
+                {move || sign_out_button_label(signing_out.get())}
+            </button>
         </Show>
     }
 }
@@ -71,6 +95,9 @@ impl AccountsPageState {
 #[component]
 pub fn AccountsPage() -> impl IntoView {
     let state = AccountsPageState::new();
+    let back_to_chat_href = accounts_back_to_chat_path_from_location();
+    let signing_out = RwSignal::new(false);
+    let sign_out = sign_out_handler(state.error, signing_out);
     initialize_accounts_page(state);
 
     view! {
@@ -79,7 +106,18 @@ pub fn AccountsPage() -> impl IntoView {
             <section class="panel account-panel">
                 <div class="account-panel__header">
                     <h1>"Accounts"</h1>
-                    <a href="/app/">"Back to chat"</a>
+                    <div class="account-panel__header-actions">
+                        <a href=back_to_chat_href>"Back to chat"</a>
+                        <Show when=move || accounts_page_shows_sign_out(state.access.get())>
+                            <button
+                                type="button"
+                                on:click=move |event| sign_out.run(event)
+                                prop:disabled=move || signing_out.get()
+                            >
+                                {move || sign_out_button_label(signing_out.get())}
+                            </button>
+                        </Show>
+                    </div>
                 </div>
                 <Show when=move || state.notice.get().is_some()>
                     <p class="account-notice" role="status">
@@ -664,6 +702,83 @@ fn account_count_label(count: usize) -> String {
     }
 }
 
+fn accounts_path_with_return_to(return_to_path: &str) -> String {
+    format!(
+        "/app/accounts/?return_to={}",
+        api::encode_component(return_to_path)
+    )
+}
+
+fn accounts_back_to_chat_path_from_location() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .map(|search| accounts_back_to_chat_path(&search))
+        .unwrap_or_else(|| "/app/".to_string())
+}
+
+fn accounts_back_to_chat_path(search: &str) -> String {
+    query_param(search, "return_to")
+        .filter(|path| matches!(route_from_pathname(path), AppRoute::Session(_)))
+        .unwrap_or_else(|| "/app/".to_string())
+}
+
+fn query_param(search: &str, name: &str) -> Option<String> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == name)
+                .then(|| api::decode_component(value))
+                .flatten()
+        })
+}
+
+fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) -> bool {
+    matches!(
+        access,
+        Some(AccountsRouteAccess::Admin(_)) | Some(AccountsRouteAccess::Forbidden)
+    )
+}
+
+fn sign_out_handler(
+    error: RwSignal<Option<String>>,
+    signing_out: RwSignal<bool>,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_event: web_sys::MouseEvent| {
+        if signing_out.get_untracked() {
+            return;
+        }
+
+        signing_out.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::sign_out().await {
+                Ok(()) => {
+                    clear_prepared_session_id();
+                    if let Err(message) = navigate_to("/app/sign-in/") {
+                        signing_out.set(false);
+                        error.set(Some(message));
+                    }
+                }
+                Err(message) => {
+                    signing_out.set(false);
+                    error.set(Some(message));
+                }
+            }
+        });
+    })
+}
+
+fn sign_out_button_label(signing_out: bool) -> &'static str {
+    if signing_out {
+        "Signing out…"
+    } else {
+        "Sign out"
+    }
+}
+
 fn admin_access_label(is_admin: bool) -> &'static str {
     if is_admin { "Enabled" } else { "Standard" }
 }
@@ -771,5 +886,39 @@ mod tests {
             account_row_hint(false, false, true, true, String::new()),
             "Ready to apply"
         );
+    }
+
+    #[test]
+    fn accounts_paths_preserve_only_session_routes() {
+        assert_eq!(
+            accounts_path_with_return_to("/app/sessions/s%2F1"),
+            "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+        );
+        assert_eq!(
+            accounts_back_to_chat_path("?return_to=%2Fapp%2Fsessions%2Fs%252F1"),
+            "/app/sessions/s%2F1"
+        );
+        assert_eq!(accounts_back_to_chat_path("?return_to=%2Fapp%2F"), "/app/");
+        assert_eq!(
+            accounts_back_to_chat_path("?return_to=https%3A%2F%2Fexample.com"),
+            "/app/"
+        );
+    }
+
+    #[test]
+    fn query_param_and_sign_out_visibility_helpers_match_accounts_routes() {
+        assert_eq!(
+            query_param("?return_to=%2Fapp%2Fsessions%2Fabc&x=1", "return_to"),
+            Some("/app/sessions/abc".to_string())
+        );
+        assert_eq!(query_param("?x=1", "return_to"), None);
+        assert!(accounts_page_shows_sign_out(Some(
+            AccountsRouteAccess::Forbidden
+        )));
+        assert!(!accounts_page_shows_sign_out(Some(
+            AccountsRouteAccess::SignInRequired
+        )));
+        assert_eq!(sign_out_button_label(false), "Sign out");
+        assert_eq!(sign_out_button_label(true), "Signing out…");
     }
 }

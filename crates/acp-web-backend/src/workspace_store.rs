@@ -442,6 +442,19 @@ impl SqliteWorkspaceRepository {
         local_account_from_user(&user)
     }
 
+    fn sign_out_browser_session_sync(
+        &self,
+        browser_session_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        soft_delete_browser_session(&tx, browser_session_id, Utc::now())?;
+        tx.commit().map_err(database_error)?;
+        Ok(())
+    }
+
     fn list_local_accounts_sync(&self) -> Result<Vec<LocalAccount>, WorkspaceStoreError> {
         let connection = self.open_connection()?;
         list_local_accounts(&connection)
@@ -628,6 +641,19 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         let password = password.to_string();
         tokio::task::spawn_blocking(move || {
             repository.sign_in_local_account_sync(&browser_session_id, &username, &password)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn sign_out_browser_session(
+        &self,
+        browser_session_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let browser_session_id = browser_session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.sign_out_browser_session_sync(&browser_session_id)
         })
         .await
         .map_err(join_error)?
@@ -1515,6 +1541,22 @@ fn bind_browser_session_to_user(
     Ok(())
 }
 
+fn soft_delete_browser_session(
+    connection: &Connection,
+    browser_session_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), WorkspaceStoreError> {
+    connection
+        .execute(
+            "UPDATE browser_sessions
+             SET deleted_at = ?1
+             WHERE browser_session_id = ?2 AND deleted_at IS NULL",
+            params![timestamp(&now), browser_session_id],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
 fn active_local_account(
     connection: &Connection,
     user_id: &str,
@@ -2205,6 +2247,146 @@ mod tests {
             .expect("legacy browser session should insert");
     }
 
+    fn legacy_local_accounts_schema(with_admin_flags: bool) -> &'static str {
+        if with_admin_flags {
+            "CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );"
+        } else {
+            "CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );"
+        }
+    }
+
+    fn legacy_local_accounts_db(
+        label: &str,
+        with_admin_flags: bool,
+    ) -> (std::path::PathBuf, Connection) {
+        legacy_user_db_connection(label, legacy_local_accounts_schema(with_admin_flags))
+    }
+
+    fn mixed_current_and_legacy_local_accounts_db() -> (std::path::PathBuf, Connection) {
+        legacy_user_db_connection(
+            "mixed-current-and-legacy-local-accounts",
+            "CREATE TABLE users (
+                    user_id TEXT PRIMARY KEY,
+                    principal_kind TEXT NOT NULL,
+                    principal_subject TEXT NOT NULL,
+                    username TEXT,
+                    password_hash TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    UNIQUE(principal_kind, principal_subject)
+                );
+                CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );",
+        )
+    }
+
+    fn legacy_timestamp(day: usize, hour: usize) -> String {
+        format!("2024-01-{day:02}T{hour:02}:00:00Z")
+    }
+
+    fn insert_legacy_local_accounts_fixture(
+        connection: &Connection,
+        rows: &[(&str, &str, Option<bool>)],
+    ) {
+        for (index, (username, password, is_admin)) in rows.iter().enumerate() {
+            let created_at = legacy_timestamp(index + 1, 0);
+            let updated_at = legacy_timestamp(index + 1, 1);
+            insert_legacy_local_account(
+                connection,
+                username,
+                password,
+                &created_at,
+                &updated_at,
+                *is_admin,
+            );
+        }
+    }
+
+    fn insert_legacy_browser_sessions_fixture(connection: &Connection, rows: &[(&str, &str)]) {
+        for (index, (browser_session_id, username)) in rows.iter().enumerate() {
+            let created_at = legacy_timestamp(index + 3, 0);
+            let last_seen_at = legacy_timestamp(index + 3, 1);
+            insert_legacy_browser_session(
+                connection,
+                browser_session_id,
+                username,
+                &created_at,
+                &last_seen_at,
+            );
+        }
+    }
+
+    fn account_named<'a>(accounts: &'a [LocalAccount], username: &str) -> &'a LocalAccount {
+        accounts
+            .iter()
+            .find(|account| account.username == username)
+            .expect("migrated account should exist")
+    }
+
+    fn insert_current_local_account(connection: &Connection, username: &str, password: &str) {
+        let password_hash = hash_password(password).expect("current password hash should build");
+        let now = timestamp(&Utc::now());
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    username,
+                    password_hash,
+                    is_admin,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6, NULL)",
+                params![
+                    format!("u_current_{username}"),
+                    LOCAL_ACCOUNT_PRINCIPAL_KIND,
+                    durable_local_account_subject(username),
+                    username,
+                    password_hash,
+                    now,
+                ],
+            )
+            .expect("current local account should insert");
+    }
+
     fn snapshot(id: &str, title: &str, status: SessionStatus) -> SessionSnapshot {
         SessionSnapshot {
             id: id.to_string(),
@@ -2392,6 +2574,37 @@ mod tests {
             missing,
             WorkspaceStoreError::Unauthorized("invalid username or password".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn signing_out_invalidates_the_bound_browser_session() {
+        let repository = test_repository();
+        repository
+            .bootstrap_local_account(
+                "11111111-1111-4111-8111-111111111111",
+                "admin",
+                "password123",
+            )
+            .await
+            .expect("bootstrap should succeed");
+
+        repository
+            .sign_out_browser_session("11111111-1111-4111-8111-111111111111")
+            .await
+            .expect("sign-out should succeed");
+
+        let authenticated = repository
+            .authenticate_browser_session("11111111-1111-4111-8111-111111111111")
+            .await
+            .expect("authentication lookup should succeed");
+        let status = repository
+            .auth_status(Some("11111111-1111-4111-8111-111111111111"))
+            .await
+            .expect("auth status should load");
+
+        assert!(authenticated.is_none());
+        assert!(!status.0);
+        assert!(status.1.is_none());
     }
 
     #[tokio::test]
@@ -2690,50 +2903,18 @@ mod tests {
     #[tokio::test]
     async fn initialization_migrates_legacy_local_accounts_and_browser_sessions_without_admin_flags()
      {
-        let (db_path, connection) = legacy_user_db_connection(
-            "legacy-local-accounts-no-admin",
-            "CREATE TABLE local_accounts (
-                    user_name TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE browser_sessions (
-                    session_token TEXT PRIMARY KEY,
-                    principal_subject TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
-                );",
-        );
-        insert_legacy_local_account(
+        let (db_path, connection) =
+            legacy_local_accounts_db("legacy-local-accounts-no-admin", false);
+        insert_legacy_local_accounts_fixture(
             &connection,
-            "alice",
-            "password123",
-            "2024-01-01T00:00:00Z",
-            "2024-01-01T01:00:00Z",
-            None,
+            &[("alice", "password123", None), ("bob", "password456", None)],
         );
-        insert_legacy_local_account(
+        insert_legacy_browser_sessions_fixture(
             &connection,
-            "bob",
-            "password456",
-            "2024-01-02T00:00:00Z",
-            "2024-01-02T01:00:00Z",
-            None,
-        );
-        insert_legacy_browser_session(
-            &connection,
-            "legacy-session-alice",
-            "alice",
-            "2024-01-03T00:00:00Z",
-            "2024-01-03T01:00:00Z",
-        );
-        insert_legacy_browser_session(
-            &connection,
-            "legacy-session-missing",
-            "missing",
-            "2024-01-03T00:00:00Z",
-            "2024-01-03T01:00:00Z",
+            &[
+                ("legacy-session-alice", "alice"),
+                ("legacy-session-missing", "missing"),
+            ],
         );
         drop(connection);
 
@@ -2743,14 +2924,8 @@ mod tests {
             .list_local_accounts()
             .await
             .expect("listing migrated accounts should succeed");
-        let alice = accounts
-            .iter()
-            .find(|account| account.username == "alice")
-            .expect("alice should be migrated");
-        let bob = accounts
-            .iter()
-            .find(|account| account.username == "bob")
-            .expect("bob should be migrated");
+        let alice = account_named(&accounts, "alice");
+        let bob = account_named(&accounts, "bob");
         let authenticated = repository
             .authenticate_browser_session("legacy-session-alice")
             .await
@@ -2775,45 +2950,16 @@ mod tests {
 
     #[tokio::test]
     async fn initialization_migrates_legacy_local_accounts_and_browser_sessions_with_admin_flags() {
-        let (db_path, connection) = legacy_user_db_connection(
-            "legacy-local-accounts-with-admin",
-            "CREATE TABLE local_accounts (
-                    user_name TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE browser_sessions (
-                    session_token TEXT PRIMARY KEY,
-                    principal_subject TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
-                );",
-        );
-        insert_legacy_local_account(
+        let (db_path, connection) =
+            legacy_local_accounts_db("legacy-local-accounts-with-admin", true);
+        insert_legacy_local_accounts_fixture(
             &connection,
-            "alice",
-            "password123",
-            "2024-01-01T00:00:00Z",
-            "2024-01-01T01:00:00Z",
-            Some(false),
+            &[
+                ("alice", "password123", Some(false)),
+                ("bob", "password456", Some(true)),
+            ],
         );
-        insert_legacy_local_account(
-            &connection,
-            "bob",
-            "password456",
-            "2024-01-02T00:00:00Z",
-            "2024-01-02T01:00:00Z",
-            Some(true),
-        );
-        insert_legacy_browser_session(
-            &connection,
-            "legacy-session-bob",
-            "bob",
-            "2024-01-03T00:00:00Z",
-            "2024-01-03T01:00:00Z",
-        );
+        insert_legacy_browser_sessions_fixture(&connection, &[("legacy-session-bob", "bob")]);
         drop(connection);
 
         let repository =
@@ -2822,14 +2968,8 @@ mod tests {
             .list_local_accounts()
             .await
             .expect("listing migrated accounts should succeed");
-        let alice = accounts
-            .iter()
-            .find(|account| account.username == "alice")
-            .expect("alice should be migrated");
-        let bob = accounts
-            .iter()
-            .find(|account| account.username == "bob")
-            .expect("bob should be migrated");
+        let alice = account_named(&accounts, "alice");
+        let bob = account_named(&accounts, "bob");
         let authenticated = repository
             .authenticate_browser_session("legacy-session-bob")
             .await
@@ -2850,75 +2990,10 @@ mod tests {
 
     #[tokio::test]
     async fn initialization_does_not_overwrite_current_local_accounts_when_legacy_tables_remain() {
-        let (db_path, connection) = legacy_user_db_connection(
-            "mixed-current-and-legacy-local-accounts",
-            "CREATE TABLE users (
-                    user_id TEXT PRIMARY KEY,
-                    principal_kind TEXT NOT NULL,
-                    principal_subject TEXT NOT NULL,
-                    username TEXT,
-                    password_hash TEXT,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    deleted_at TEXT,
-                    UNIQUE(principal_kind, principal_subject)
-                );
-                CREATE TABLE local_accounts (
-                    user_name TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE browser_sessions (
-                    session_token TEXT PRIMARY KEY,
-                    principal_subject TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
-                );",
-        );
-        let current_password_hash =
-            hash_password("password-new").expect("current password hash should build");
-        let now = timestamp(&Utc::now());
-        connection
-            .execute(
-                "INSERT INTO users (
-                    user_id,
-                    principal_kind,
-                    principal_subject,
-                    username,
-                    password_hash,
-                    is_admin,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6, NULL)",
-                params![
-                    "u_current_alice",
-                    LOCAL_ACCOUNT_PRINCIPAL_KIND,
-                    durable_local_account_subject("alice"),
-                    "alice",
-                    current_password_hash,
-                    now,
-                ],
-            )
-            .expect("current local account should insert");
-        insert_legacy_local_account(
-            &connection,
-            "alice",
-            "password-old",
-            "2024-01-01T00:00:00Z",
-            "2024-01-01T01:00:00Z",
-            Some(true),
-        );
-        insert_legacy_browser_session(
-            &connection,
-            "legacy-session-alice",
-            "alice",
-            "2024-01-03T00:00:00Z",
-            "2024-01-03T01:00:00Z",
-        );
+        let (db_path, connection) = mixed_current_and_legacy_local_accounts_db();
+        insert_current_local_account(&connection, "alice", "password-new");
+        insert_legacy_local_accounts_fixture(&connection, &[("alice", "password-old", Some(true))]);
+        insert_legacy_browser_sessions_fixture(&connection, &[("legacy-session-alice", "alice")]);
         drop(connection);
 
         let repository =
@@ -2927,10 +3002,7 @@ mod tests {
             .list_local_accounts()
             .await
             .expect("listing migrated accounts should succeed");
-        let alice = accounts
-            .iter()
-            .find(|account| account.username == "alice")
-            .expect("alice should remain available");
+        let alice = account_named(&accounts, "alice");
         let authenticated = repository
             .authenticate_browser_session("legacy-session-alice")
             .await

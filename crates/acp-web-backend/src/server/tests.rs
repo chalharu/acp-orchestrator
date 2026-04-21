@@ -381,6 +381,53 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
 }
 
 #[tokio::test]
+async fn sign_out_clears_browser_authentication_and_cookies() {
+    let state = auth_test_state();
+    let browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &browser).await;
+
+    let response = sign_out(State(state.clone()), Extension(browser.principal.clone()))
+        .await
+        .expect("sign-out should succeed");
+    let set_cookies = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let after = auth_status(State(state), browser.headers)
+        .await
+        .expect("auth status should load after sign-out");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(set_cookies.iter().any(|cookie| {
+        cookie.starts_with("acp_session=deleted")
+            && cookie.contains("Max-Age=0")
+            && cookie.contains("HttpOnly")
+    }));
+    assert!(set_cookies.iter().any(|cookie| {
+        cookie.starts_with("acp_csrf=deleted")
+            && cookie.contains("Max-Age=0")
+            && !cookie.contains("HttpOnly")
+    }));
+    assert!(!after.0.bootstrap_required);
+    assert!(after.0.account.is_none());
+}
+
+#[tokio::test]
+async fn sign_out_rejects_non_browser_principals() {
+    let error = sign_out(State(auth_test_state()), bearer_principal("developer"))
+        .await
+        .expect_err("sign-out should reject bearer principals");
+
+    assert!(matches!(
+        error,
+        AppError::Forbidden(message) if message == "sign-out requires a browser session"
+    ));
+}
+
+#[tokio::test]
 async fn admin_account_handlers_list_and_update_accounts() {
     let state = auth_test_state();
     let admin_browser = BrowserAuthContext::spawn().await;
@@ -2430,6 +2477,13 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         Err(self.error.clone())
     }
 
+    async fn sign_out_browser_session(
+        &self,
+        _browser_session_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
     async fn list_local_accounts(
         &self,
     ) -> Result<Vec<acp_contracts::LocalAccount>, WorkspaceStoreError> {
@@ -2558,6 +2612,13 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _password: &str,
     ) -> Result<acp_contracts::LocalAccount, WorkspaceStoreError> {
         self.bootstrap_local_account("", "", "").await
+    }
+
+    async fn sign_out_browser_session(
+        &self,
+        _browser_session_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Ok(())
     }
 
     async fn list_local_accounts(

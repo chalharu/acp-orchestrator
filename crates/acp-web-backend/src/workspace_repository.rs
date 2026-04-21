@@ -61,6 +61,11 @@ pub trait WorkspaceRepository: Send + Sync {
         password: &str,
     ) -> Result<LocalAccount, WorkspaceStoreError>;
 
+    async fn sign_out_browser_session(
+        &self,
+        browser_session_id: &str,
+    ) -> Result<(), WorkspaceStoreError>;
+
     async fn list_local_accounts(&self) -> Result<Vec<LocalAccount>, WorkspaceStoreError>;
 
     async fn create_local_account(

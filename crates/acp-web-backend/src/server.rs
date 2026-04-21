@@ -288,6 +288,7 @@ fn read_api_routes() -> Router<AppState> {
 fn write_api_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/auth/sign-in", post(sign_in))
+        .route("/api/v1/auth/sign-out", post(sign_out))
         .route("/api/v1/bootstrap/register", post(bootstrap_register))
         .route("/api/v1/sessions", post(create_session))
         .route("/api/v1/accounts", post(create_account))
@@ -918,6 +919,21 @@ fn build_app_shell_headers(
     response_headers
 }
 
+fn sign_out_response_headers() -> HeaderMap {
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    response_headers.append(
+        SET_COOKIE,
+        build_expired_cookie_header(SESSION_COOKIE_NAME, true),
+    );
+    response_headers.append(
+        SET_COOKIE,
+        build_expired_cookie_header(CSRF_COOKIE_NAME, false),
+    );
+    response_headers
+}
+
 fn append_cookie_if_missing(
     headers: &mut HeaderMap,
     existing: Option<&str>,
@@ -957,8 +973,7 @@ fn app_shell_document(csrf_token: &str) -> Html<String> {
 fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue {
     let http_only = if http_only { "; HttpOnly" } else { "" };
     assert!(
-        name.bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        cookie_name_is_safe(name),
         "web app cookie names must stay header-safe",
     );
     assert!(
@@ -971,6 +986,23 @@ fn build_cookie_header(name: &str, value: &str, http_only: bool) -> HeaderValue 
         "{name}={value}; Path=/; SameSite=Strict; Secure{http_only}"
     ))
     .expect("web app cookies should serialize into response headers")
+}
+
+fn build_expired_cookie_header(name: &str, http_only: bool) -> HeaderValue {
+    let http_only = if http_only { "; HttpOnly" } else { "" };
+    assert!(
+        cookie_name_is_safe(name),
+        "web app cookie names must stay header-safe",
+    );
+    HeaderValue::from_str(&format!(
+        "{name}=deleted; Path=/; Max-Age=0; SameSite=Strict; Secure{http_only}"
+    ))
+    .expect("expired web app cookies should serialize into response headers")
+}
+
+fn cookie_name_is_safe(name: &str) -> bool {
+    name.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn cookie_uuid_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1050,14 +1082,28 @@ async fn sign_in(
         .workspace_repository
         .sign_in_local_account(&principal.id, &request.username, &request.password)
         .await?;
-    let invalidated_sessions = state
-        .store
-        .delete_sessions_for_owners(std::slice::from_ref(&principal.id))
-        .await;
-    for session_id in invalidated_sessions {
-        state.reply_provider.forget_session(&session_id);
-    }
+    forget_live_sessions_for_owners(&state, std::slice::from_ref(&principal.id)).await;
     Ok(Json(SignInResponse { account }))
+}
+
+async fn sign_out(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+) -> Result<Response, AppError> {
+    if !matches!(
+        principal.kind,
+        crate::auth::AuthenticatedPrincipalKind::BrowserSession
+    ) {
+        return Err(AppError::Forbidden(
+            "sign-out requires a browser session".to_string(),
+        ));
+    }
+    state
+        .workspace_repository
+        .sign_out_browser_session(&principal.id)
+        .await?;
+    forget_live_sessions_for_owners(&state, std::slice::from_ref(&principal.id)).await;
+    Ok((StatusCode::NO_CONTENT, sign_out_response_headers()).into_response())
 }
 
 async fn list_accounts(
@@ -1118,14 +1164,15 @@ async fn delete_account(
         .workspace_repository
         .delete_local_account(&user_id, &owner.user.user_id)
         .await?;
-    let invalidated_sessions = state
-        .store
-        .delete_sessions_for_owners(&invalidated_browser_sessions)
-        .await;
+    forget_live_sessions_for_owners(&state, &invalidated_browser_sessions).await;
+    Ok(Json(DeleteAccountResponse { deleted: true }))
+}
+
+async fn forget_live_sessions_for_owners(state: &AppState, owner_ids: &[String]) {
+    let invalidated_sessions = state.store.delete_sessions_for_owners(owner_ids).await;
     for session_id in invalidated_sessions {
         state.reply_provider.forget_session(&session_id);
     }
-    Ok(Json(DeleteAccountResponse { deleted: true }))
 }
 
 fn user_record_to_local_account(user: &UserRecord) -> Result<LocalAccount, AppError> {

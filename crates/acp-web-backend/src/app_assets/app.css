@@ -281,7 +281,22 @@ a:hover {
 }
 
 .session-sidebar__secondary-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
   font-size: 0.875rem;
+}
+
+button.session-sidebar__secondary-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+}
+
+button.session-sidebar__secondary-link:hover:not(:disabled) {
+  background: transparent;
+  color: #8d4f30;
 }
 
 .session-sidebar__dismiss {
@@ -930,7 +945,15 @@ textarea:focus-visible {
   margin: 0;
 }
 
-.account-panel__header a {
+.account-panel__header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.account-panel__header-actions a,
+.account-panel__header-actions button {
   display: inline-flex;
   align-items: center;
   min-height: 2.25rem;

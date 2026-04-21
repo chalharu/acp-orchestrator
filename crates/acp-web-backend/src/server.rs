@@ -927,59 +927,81 @@ async fn sign_up_browser_session(
     let user_name = normalize_sign_in_user_name(&request.user_name)?;
     let password = normalize_registration_password(&request.password)?;
     if current_session.bootstrap_registration_open {
-        let next_session_token = Uuid::new_v4().to_string();
-        match state
-            .workspace_repository
-            .register_local_user_and_rotate_browser_session(
-                &session_token,
-                &next_session_token,
-                &user_name,
-                &password,
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(WorkspaceStoreError::Conflict(_)) => {
-                return Err(AppError::BadRequest("unable to create account".to_string()));
-            }
-            Err(error) => return Err(error.into()),
-        }
-
-        state.browser_session_registry.revoke(&session_token);
-        let _ = state.browser_session_registry.activate(&next_session_token);
-        return Ok(auth_session_response_with_rotated_session_cookie(
-            AuthSessionResponse {
-                authenticated: true,
-                is_admin: true,
-                bootstrap_registration_open: false,
-                user_name: Some(user_name),
-            },
-            &next_session_token,
-        ));
+        return bootstrap_sign_up_browser_session(&state, &session_token, user_name, password)
+            .await;
     }
 
+    let principal = require_admin_registration_principal(current_session)?;
+    admin_sign_up_browser_session(&state, principal, user_name, password).await
+}
+
+async fn bootstrap_sign_up_browser_session(
+    state: &AppState,
+    session_token: &str,
+    user_name: String,
+    password: String,
+) -> Result<Response, AppError> {
+    let next_session_token = Uuid::new_v4().to_string();
+    state
+        .workspace_repository
+        .register_local_user_and_rotate_browser_session(
+            session_token,
+            &next_session_token,
+            &user_name,
+            &password,
+        )
+        .await
+        .map_err(map_registration_error)?;
+    state.browser_session_registry.revoke(session_token);
+    let _ = state.browser_session_registry.activate(&next_session_token);
+    Ok(auth_session_response_with_rotated_session_cookie(
+        AuthSessionResponse {
+            authenticated: true,
+            is_admin: true,
+            bootstrap_registration_open: false,
+            user_name: Some(user_name),
+        },
+        &next_session_token,
+    ))
+}
+
+fn require_admin_registration_principal(
+    current_session: BrowserAuthSessionState,
+) -> Result<AuthenticatedPrincipal, AppError> {
     let Some(principal) = current_session.principal else {
         return Err(AppError::Unauthorized("sign-in required".to_string()));
     };
     if !current_session.is_admin {
         return Err(AppError::Forbidden("admin access required".to_string()));
     }
+    Ok(principal)
+}
 
-    match state
+async fn admin_sign_up_browser_session(
+    state: &AppState,
+    principal: AuthenticatedPrincipal,
+    user_name: String,
+    password: String,
+) -> Result<Response, AppError> {
+    state
         .workspace_repository
         .register_local_user(&user_name, &password)
         .await
-    {
-        Ok(()) => Ok(Json(auth_session_response(&BrowserAuthSessionState {
-            principal: Some(principal),
-            is_admin: true,
-            bootstrap_registration_open: false,
-        }))
-        .into_response()),
-        Err(WorkspaceStoreError::Conflict(_)) => {
-            Err(AppError::BadRequest("unable to create account".to_string()))
+        .map_err(map_registration_error)?;
+    Ok(Json(auth_session_response(&BrowserAuthSessionState {
+        principal: Some(principal),
+        is_admin: true,
+        bootstrap_registration_open: false,
+    }))
+    .into_response())
+}
+
+fn map_registration_error(error: WorkspaceStoreError) -> AppError {
+    match error {
+        WorkspaceStoreError::Conflict(_) => {
+            AppError::BadRequest("unable to create account".to_string())
         }
-        Err(error) => Err(error.into()),
+        error => error.into(),
     }
 }
 

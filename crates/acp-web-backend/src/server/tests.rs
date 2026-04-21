@@ -305,21 +305,6 @@ async fn browser_sign_up_requires_admin_after_bootstrap() {
     )
     .await;
 
-    let unauthenticated = router
-        .clone()
-        .oneshot(browser_sign_up_request(
-            "bob",
-            TEST_LOCAL_PASSWORD,
-            "44444444-4444-4444-8444-444444444444",
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        json_response::<ErrorResponse>(unauthenticated).await.error,
-        "sign-in required"
-    );
-
     register_browser_account_as_admin_for_test(
         router.clone(),
         &admin_session_token,
@@ -339,19 +324,8 @@ async fn browser_sign_up_requires_admin_after_bootstrap() {
     )
     .await;
 
-    let forbidden = router
-        .oneshot(browser_sign_up_request(
-            "charlie",
-            TEST_LOCAL_PASSWORD,
-            &bob_session_token,
-        ))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        json_response::<ErrorResponse>(forbidden).await.error,
-        "admin access required"
-    );
+    assert_unauthenticated_browser_sign_up_is_rejected(router.clone()).await;
+    assert_non_admin_browser_sign_up_is_rejected(router, &bob_session_token).await;
 }
 
 #[tokio::test]
@@ -2115,6 +2089,38 @@ async fn register_browser_account_as_admin_for_test(
         false,
     )
     .await;
+}
+
+async fn assert_unauthenticated_browser_sign_up_is_rejected(router: Router) {
+    let unauthenticated = router
+        .oneshot(browser_sign_up_request(
+            "bob",
+            TEST_LOCAL_PASSWORD,
+            "44444444-4444-4444-8444-444444444444",
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_response::<ErrorResponse>(unauthenticated).await.error,
+        "sign-in required"
+    );
+}
+
+async fn assert_non_admin_browser_sign_up_is_rejected(router: Router, session_token: &str) {
+    let forbidden = router
+        .oneshot(browser_sign_up_request(
+            "charlie",
+            TEST_LOCAL_PASSWORD,
+            session_token,
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_response::<ErrorResponse>(forbidden).await.error,
+        "admin access required"
+    );
 }
 
 async fn sign_in_browser_session_for_test(

@@ -139,12 +139,26 @@ async fn browser_re_sign_in_closes_stale_open_event_streams() -> Result<()> {
 async fn browser_cookie_registration_requires_bootstrap_or_admin_access() -> Result<()> {
     let stack = spawn_browser_test_stack().await?;
     let admin_browser = build_browser_client()?;
-    let app_document = load_browser_app_shell(&admin_browser, &stack.backend_url).await?;
+    bootstrap_admin_browser(&admin_browser, &stack.backend_url).await?;
+    assert_post_bootstrap_public_registration_is_rejected(&stack.backend_url).await?;
+    register_additional_browser_account(
+        &admin_browser,
+        &stack.backend_url,
+        BROWSER_TEST_USER_NAME,
+        BROWSER_SWITCHED_USER_NAME,
+        BROWSER_SWITCHED_PASSWORD,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn bootstrap_admin_browser(browser: &Client, backend_url: &str) -> Result<()> {
+    let app_document = load_browser_app_shell(browser, backend_url).await?;
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
     assert_browser_sign_in(
         register_browser_account(
-            &admin_browser,
-            &stack.backend_url,
+            browser,
+            backend_url,
             &csrf_token,
             BROWSER_TEST_USER_NAME,
             BROWSER_TEST_PASSWORD,
@@ -153,12 +167,15 @@ async fn browser_cookie_registration_requires_bootstrap_or_admin_access() -> Res
         BROWSER_TEST_USER_NAME,
         true,
     );
+    Ok(())
+}
 
+async fn assert_post_bootstrap_public_registration_is_rejected(backend_url: &str) -> Result<()> {
     let unauthenticated_browser = build_browser_client()?;
-    let app_document = load_browser_app_shell(&unauthenticated_browser, &stack.backend_url).await?;
+    let app_document = load_browser_app_shell(&unauthenticated_browser, backend_url).await?;
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
     let response = unauthenticated_browser
-        .post(format!("{}/api/v1/auth/register", stack.backend_url))
+        .post(format!("{backend_url}/api/v1/auth/register"))
         .header("x-csrf-token", &csrf_token)
         .json(&SignUpRequest {
             user_name: "blocked".to_string(),
@@ -168,15 +185,6 @@ async fn browser_cookie_registration_requires_bootstrap_or_admin_access() -> Res
         .await
         .context("submitting an unauthenticated post-bootstrap registration")?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-    register_additional_browser_account(
-        &admin_browser,
-        &stack.backend_url,
-        BROWSER_TEST_USER_NAME,
-        BROWSER_SWITCHED_USER_NAME,
-        BROWSER_SWITCHED_PASSWORD,
-    )
-    .await?;
     Ok(())
 }
 

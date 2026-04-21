@@ -19,6 +19,12 @@ pub(crate) struct AuthSignals {
     pub(crate) password_draft: RwSignal<String>,
 }
 
+struct SignUpSubmission {
+    user_name: String,
+    password: String,
+    was_authenticated_admin: bool,
+}
+
 pub(crate) fn auth_signals() -> AuthSignals {
     AuthSignals {
         session: RwSignal::new(None::<AuthSession>),
@@ -94,51 +100,21 @@ pub(crate) fn submit_sign_in(auth: AuthSignals) {
 }
 
 pub(crate) fn submit_sign_up(auth: AuthSignals) {
-    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
-    let password = auth.password_draft.get_untracked();
-    if user_name.is_empty() {
-        auth.error
-            .set(Some("Enter a user name to continue.".to_string()));
+    let Some(submission) = prepare_sign_up_submission(auth) else {
         return;
-    }
-    if password.chars().count() < 8 {
-        auth.error.set(Some(
-            "Enter a password with at least 8 characters.".to_string(),
-        ));
-        return;
-    }
-    if auth.signing_in.get_untracked() || auth.signing_up.get_untracked() {
-        return;
-    }
-    if !matches!(
-        registration_route_access(
-            auth.session.get_untracked().as_ref(),
-            auth.bootstrap_registration_open.get_untracked(),
-        ),
-        crate::domain::auth::RegistrationRouteAccess::Register
-    ) {
-        auth.error
-            .set(Some("Account creation is not available.".to_string()));
-        return;
-    }
-
-    let was_authenticated_admin = auth
-        .session
-        .get_untracked()
-        .as_ref()
-        .is_some_and(|session| session.is_admin);
+    };
 
     auth.signing_up.set(true);
     auth.error.set(None);
     auth.registration_notice.set(None);
     leptos::task::spawn_local(async move {
-        match api::sign_up(&user_name, &password).await {
+        match api::sign_up(&submission.user_name, &submission.password).await {
             Ok(response) => match apply_auth_session_response(auth, response) {
                 Ok(Some(_)) => {
                     clear_auth_drafts(auth);
-                    if was_authenticated_admin {
+                    if submission.was_authenticated_admin {
                         auth.registration_notice
-                            .set(Some(format!("Created account {user_name}.")));
+                            .set(Some(format!("Created account {}.", submission.user_name)));
                     }
                 }
                 Ok(None) => auth.error.set(Some(
@@ -150,6 +126,50 @@ pub(crate) fn submit_sign_up(auth: AuthSignals) {
         }
         auth.signing_up.set(false);
     });
+}
+
+fn prepare_sign_up_submission(auth: AuthSignals) -> Option<SignUpSubmission> {
+    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
+    let password = auth.password_draft.get_untracked();
+    if user_name.is_empty() {
+        auth.error
+            .set(Some("Enter a user name to continue.".to_string()));
+        return None;
+    }
+    if password.chars().count() < 8 {
+        auth.error.set(Some(
+            "Enter a password with at least 8 characters.".to_string(),
+        ));
+        return None;
+    }
+    if auth.signing_in.get_untracked() || auth.signing_up.get_untracked() {
+        return None;
+    }
+    if !sign_up_is_available(auth) {
+        auth.error
+            .set(Some("Account creation is not available.".to_string()));
+        return None;
+    }
+
+    Some(SignUpSubmission {
+        was_authenticated_admin: auth
+            .session
+            .get_untracked()
+            .as_ref()
+            .is_some_and(|session| session.is_admin),
+        user_name,
+        password,
+    })
+}
+
+fn sign_up_is_available(auth: AuthSignals) -> bool {
+    matches!(
+        registration_route_access(
+            auth.session.get_untracked().as_ref(),
+            auth.bootstrap_registration_open.get_untracked(),
+        ),
+        crate::domain::auth::RegistrationRouteAccess::Register
+    )
 }
 
 pub(crate) fn clear_auth_drafts(auth: AuthSignals) {

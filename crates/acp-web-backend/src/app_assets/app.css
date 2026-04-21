@@ -33,6 +33,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -125,10 +126,45 @@ a:hover {
   flex-wrap: wrap;
 }
 
+.chat-topbar__primary,
 .chat-topbar__badges {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.chat-topbar__primary {
+  align-items: center;
+}
+
+.chat-topbar__auth {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chat-topbar__auth-label {
+  margin: 0;
+  display: grid;
+  gap: 0.08rem;
+  text-align: right;
+}
+
+.chat-topbar__auth-caption {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.chat-topbar__auth-user {
+  font-size: 0.92rem;
+}
+
+.chat-topbar__sign-out {
+  background: var(--surface);
 }
 
 .session-layout {
@@ -412,6 +448,66 @@ a:hover {
 .empty-state,
 .banner {
   padding: 0.9rem 1rem;
+}
+
+.auth-panel {
+  width: min(28rem, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 1rem;
+}
+
+.auth-panel__copy {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.auth-panel__eyebrow,
+.auth-panel__title {
+  margin: 0;
+}
+
+.auth-panel__eyebrow {
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.auth-panel__title {
+  font-size: clamp(1.6rem, 3vw, 2rem);
+  line-height: 1.1;
+}
+
+.auth-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.auth-form__label {
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+}
+
+.auth-form__input {
+  width: 100%;
+  min-height: 2.9rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--page-bg);
+  color: var(--ink);
+}
+
+.auth-form__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.auth-form__submit {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff9f3;
 }
 
 .muted,
@@ -762,6 +858,7 @@ button:hover:not(:disabled) {
 }
 
 textarea:disabled,
+input:disabled,
 button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
@@ -800,6 +897,7 @@ button:disabled {
 
 a:focus-visible,
 button:focus-visible,
+input:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -821,6 +919,7 @@ textarea:focus-visible {
 @media (forced-colors: active) {
   a:focus-visible,
   button:focus-visible,
+  input:focus-visible,
   textarea:focus-visible {
     outline-color: CanvasText;
   }
@@ -930,9 +1029,26 @@ textarea:focus-visible {
   .pending-list__actions,
   .pending-panel__footer,
   .composer__footer,
-  .composer__actions {
+  .composer__actions,
+  .chat-topbar__auth {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .chat-topbar__auth-label {
+    text-align: left;
+  }
+
+  .auth-panel {
+    width: 100%;
+  }
+
+  .auth-form__actions {
+    justify-content: stretch;
+  }
+
+  .auth-form__submit {
+    width: 100%;
   }
 
   .composer__slash-item {

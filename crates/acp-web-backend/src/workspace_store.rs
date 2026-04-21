@@ -27,6 +27,16 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE(principal_kind, principal_subject)
 );
 
+CREATE TABLE IF NOT EXISTS browser_sessions (
+    session_token TEXT PRIMARY KEY,
+    principal_subject TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS browser_sessions_principal_subject_idx
+    ON browser_sessions(principal_subject);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     workspace_id TEXT PRIMARY KEY,
     owner_user_id TEXT NOT NULL,
@@ -292,6 +302,63 @@ impl SqliteWorkspaceRepository {
         Ok(user)
     }
 
+    fn sign_in_browser_session_sync(
+        &self,
+        session_token: &str,
+        user_name: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let now = Utc::now();
+        tx.execute(
+            "INSERT INTO browser_sessions (session_token, principal_subject, created_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_token) DO UPDATE SET
+                 principal_subject = excluded.principal_subject,
+                 last_seen_at = excluded.last_seen_at",
+            params![session_token, user_name, timestamp(&now), timestamp(&now)],
+        )
+        .map_err(database_error)?;
+        tx.commit().map_err(database_error)?;
+        Ok(())
+    }
+
+    fn browser_session_user_name_sync(
+        &self,
+        session_token: &str,
+    ) -> Result<Option<String>, WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let user_name = load_browser_session_user_name(&tx, session_token)?;
+        if user_name.is_some() {
+            tx.execute(
+                "UPDATE browser_sessions SET last_seen_at = ?1 WHERE session_token = ?2",
+                params![timestamp(&Utc::now()), session_token],
+            )
+            .map_err(database_error)?;
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(user_name)
+    }
+
+    fn sign_out_browser_session_sync(
+        &self,
+        session_token: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        connection
+            .execute(
+                "DELETE FROM browser_sessions WHERE session_token = ?1",
+                params![session_token],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     fn bootstrap_workspace_sync(
         &self,
         owner_user_id: &str,
@@ -364,6 +431,47 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         tokio::task::spawn_blocking(move || repository.materialize_user_sync(&principal))
             .await
             .map_err(join_error)?
+    }
+
+    async fn sign_in_browser_session(
+        &self,
+        session_token: &str,
+        user_name: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let session_token = session_token.to_string();
+        let user_name = user_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.sign_in_browser_session_sync(&session_token, &user_name)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn browser_session_user_name(
+        &self,
+        session_token: &str,
+    ) -> Result<Option<String>, WorkspaceStoreError> {
+        let repository = self.clone();
+        let session_token = session_token.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.browser_session_user_name_sync(&session_token)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn sign_out_browser_session(
+        &self,
+        session_token: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let session_token = session_token.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.sign_out_browser_session_sync(&session_token)
+        })
+        .await
+        .map_err(join_error)?
     }
 
     async fn bootstrap_workspace(
@@ -469,6 +577,20 @@ fn load_bootstrap_workspace(
             LOAD_BOOTSTRAP_WORKSPACE_SQL,
             params![owner_user_id, BOOTSTRAP_WORKSPACE_KIND],
             load_workspace_row,
+        )
+        .optional()
+        .map_err(database_error)
+}
+
+fn load_browser_session_user_name(
+    connection: &Connection,
+    session_token: &str,
+) -> Result<Option<String>, WorkspaceStoreError> {
+    connection
+        .query_row(
+            "SELECT principal_subject FROM browser_sessions WHERE session_token = ?1",
+            params![session_token],
+            |row| row.get(0),
         )
         .optional()
         .map_err(database_error)
@@ -975,6 +1097,48 @@ mod tests {
         assert_eq!(first.principal_kind, "browser_session");
         assert_eq!(first.principal_subject, second.principal_subject);
         assert_ne!(first.principal_subject, principal.subject);
+    }
+
+    #[tokio::test]
+    async fn browser_session_sign_in_round_trip_is_stable() {
+        let repository = test_repository();
+        let session_token = "11111111-1111-4111-8111-111111111111";
+
+        repository
+            .sign_in_browser_session(session_token, "alice")
+            .await
+            .expect("sign-in should succeed");
+        assert_eq!(
+            repository
+                .browser_session_user_name(session_token)
+                .await
+                .expect("browser session lookup should succeed"),
+            Some("alice".to_string())
+        );
+
+        repository
+            .sign_in_browser_session(session_token, "bob")
+            .await
+            .expect("sign-in should update the browser session owner");
+        assert_eq!(
+            repository
+                .browser_session_user_name(session_token)
+                .await
+                .expect("browser session lookup should succeed"),
+            Some("bob".to_string())
+        );
+
+        repository
+            .sign_out_browser_session(session_token)
+            .await
+            .expect("sign-out should succeed");
+        assert_eq!(
+            repository
+                .browser_session_user_name(session_token)
+                .await
+                .expect("browser session lookup should succeed"),
+            None
+        );
     }
 
     #[tokio::test]

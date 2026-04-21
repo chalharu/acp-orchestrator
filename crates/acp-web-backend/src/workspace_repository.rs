@@ -13,6 +13,22 @@ pub trait WorkspaceRepository: Send + Sync {
         principal: &AuthenticatedPrincipal,
     ) -> Result<UserRecord, WorkspaceStoreError>;
 
+    async fn sign_in_browser_session(
+        &self,
+        session_token: &str,
+        user_name: &str,
+    ) -> Result<(), WorkspaceStoreError>;
+
+    async fn browser_session_user_name(
+        &self,
+        session_token: &str,
+    ) -> Result<Option<String>, WorkspaceStoreError>;
+
+    async fn sign_out_browser_session(
+        &self,
+        session_token: &str,
+    ) -> Result<(), WorkspaceStoreError>;
+
     async fn bootstrap_workspace(
         &self,
         owner_user_id: &str,

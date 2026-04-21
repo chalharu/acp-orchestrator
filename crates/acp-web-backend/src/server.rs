@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     convert::Infallible,
     fmt::Display,
     future::Future,
@@ -6,7 +7,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -16,11 +17,11 @@ use acp_app_support::{
     find_frontend_bundle_asset,
 };
 use acp_contracts::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, DeleteSessionResponse,
-    ErrorResponse, HealthResponse, PromptRequest, PromptResponse, RenameSessionRequest,
-    RenameSessionResponse, ResolvePermissionRequest, ResolvePermissionResponse,
-    SessionHistoryResponse, SessionListResponse, SessionResponse, SessionSnapshot,
-    SlashCompletionsResponse, StreamEvent,
+    AuthSessionResponse, CancelTurnResponse, CloseSessionResponse, CreateSessionResponse,
+    DeleteSessionResponse, ErrorResponse, HealthResponse, PromptRequest, PromptResponse,
+    RenameSessionRequest, RenameSessionResponse, ResolvePermissionRequest,
+    ResolvePermissionResponse, SessionHistoryResponse, SessionListResponse, SessionResponse,
+    SessionSnapshot, SignInRequest, SlashCompletionsResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -59,8 +60,8 @@ use crate::sessions::TurnHandle;
 use crate::workspace_store::SqliteWorkspaceRepository;
 use crate::{
     auth::{
-        AuthError, AuthenticatedPrincipal, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME,
-        authorize_request, cookie_value,
+        AuthError, AuthenticatedPrincipal, AuthenticatedPrincipalKind, CSRF_COOKIE_NAME,
+        SESSION_COOKIE_NAME, bearer_principal, browser_session_token, cookie_value, validate_csrf,
     },
     completions::resolve_slash_completions,
     mock_client::{MockClient, MockClientError, ReplyProvider, ReplyResult},
@@ -145,6 +146,7 @@ pub struct AppState {
     store: Arc<SessionStore>,
     workspace_repository: Arc<dyn WorkspaceRepository>,
     reply_provider: Arc<dyn ReplyProvider>,
+    browser_session_registry: Arc<BrowserSessionRegistry>,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
     frontend_dist: Option<Arc<PathBuf>>,
@@ -160,6 +162,43 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+#[derive(Default)]
+struct BrowserSessionRegistry {
+    sessions: Mutex<HashMap<String, watch::Sender<bool>>>,
+}
+
+impl BrowserSessionRegistry {
+    fn activate(&self, session_token: &str) -> watch::Receiver<bool> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("browser session registry should not poison");
+        if let Some(sender) = sessions.get(session_token) {
+            return sender.subscribe();
+        }
+
+        let (sender, receiver) = watch::channel(true);
+        sessions.insert(session_token.to_string(), sender);
+        receiver
+    }
+
+    fn revoke(&self, session_token: &str) {
+        let sender = self
+            .sessions
+            .lock()
+            .expect("browser session registry should not poison")
+            .remove(session_token);
+        if let Some(sender) = sender {
+            let _ = sender.send(false);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AuthenticatedBrowserSession {
+    revocation: watch::Receiver<bool>,
+}
+
 impl AppState {
     pub fn new(
         config: ServerConfig,
@@ -169,6 +208,7 @@ impl AppState {
             store: Arc::new(SessionStore::new(config.session_cap)),
             workspace_repository,
             reply_provider: Arc::new(MockClient::new(config.acp_server)?),
+            browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
             startup_hints: config.startup_hints,
             frontend_dist: config.frontend_dist.map(Arc::new),
         })
@@ -183,6 +223,7 @@ impl AppState {
             store,
             workspace_repository: new_ephemeral_workspace_repository(),
             reply_provider,
+            browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
             startup_hints: false,
             frontend_dist: None,
         }
@@ -198,6 +239,7 @@ impl AppState {
             store,
             workspace_repository,
             reply_provider,
+            browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
             startup_hints: false,
             frontend_dist: None,
         }
@@ -216,6 +258,8 @@ impl AppState {
 }
 
 pub fn app(state: AppState) -> Router {
+    let read_auth_state = state.clone();
+    let write_auth_state = state.clone();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/app", get(redirect_to_app))
@@ -230,8 +274,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
-        .merge(read_api_routes())
-        .merge(write_api_routes())
+        .route(
+            "/api/v1/auth/session",
+            get(get_auth_session)
+                .post(sign_in_browser_session)
+                .delete(sign_out_browser_session),
+        )
+        .merge(read_api_routes(read_auth_state))
+        .merge(write_api_routes(write_auth_state))
         .with_state(state)
 }
 
@@ -241,7 +291,7 @@ struct OwnerContext {
     user: UserRecord,
 }
 
-fn read_api_routes() -> Router<AppState> {
+fn read_api_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions", get(list_sessions))
         .route("/api/v1/sessions/{session_id}", get(get_session))
@@ -254,10 +304,13 @@ fn read_api_routes() -> Router<AppState> {
             get(stream_session_events),
         )
         .route("/api/v1/completions/slash", get(get_slash_completions))
-        .layer(middleware::from_fn(authorize_read_request))
+        .layer(middleware::from_fn_with_state(
+            state,
+            authorize_read_request,
+        ))
 }
 
-fn write_api_routes() -> Router<AppState> {
+fn write_api_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions", post(create_session))
         .route(
@@ -271,24 +324,42 @@ fn write_api_routes() -> Router<AppState> {
             post(resolve_permission),
         )
         .route("/api/v1/sessions/{session_id}/close", post(close_session))
-        .layer(middleware::from_fn(authorize_write_request))
+        .layer(middleware::from_fn_with_state(
+            state,
+            authorize_write_request,
+        ))
 }
 
-async fn authorize_read_request(request: Request, next: Next) -> Result<Response, AppError> {
-    authorize_request_with_principal(request, next, false).await
+async fn authorize_read_request(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    authorize_request_with_principal(state, request, next, false).await
 }
 
-async fn authorize_write_request(request: Request, next: Next) -> Result<Response, AppError> {
-    authorize_request_with_principal(request, next, true).await
+async fn authorize_write_request(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    authorize_request_with_principal(state, request, next, true).await
 }
 
 async fn authorize_request_with_principal(
+    state: AppState,
     mut request: Request,
     next: Next,
     requires_csrf: bool,
 ) -> Result<Response, AppError> {
-    let principal = authorize_request(request.headers(), requires_csrf).map_err(AppError::from)?;
-    request.extensions_mut().insert(principal);
+    let authenticated =
+        strict_authenticated_request(&state, request.headers(), requires_csrf).await?;
+    request
+        .extensions_mut()
+        .insert(authenticated.principal.clone());
+    if let Some(browser_session) = authenticated.browser_session {
+        request.extensions_mut().insert(browser_session);
+    }
     Ok(next.run(request).await)
 }
 
@@ -541,6 +612,100 @@ fn log_connection_result<E: Display>(result: Result<(), E>) {
     }
 }
 
+struct StrictAuthenticatedRequest {
+    principal: AuthenticatedPrincipal,
+    browser_session: Option<AuthenticatedBrowserSession>,
+}
+
+async fn strict_authenticated_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    requires_csrf: bool,
+) -> Result<StrictAuthenticatedRequest, AppError> {
+    if let Some(principal) = bearer_principal(headers).map_err(AppError::from)? {
+        return Ok(StrictAuthenticatedRequest {
+            principal,
+            browser_session: None,
+        });
+    }
+
+    if requires_csrf {
+        validate_csrf(headers).map_err(AppError::from)?;
+    }
+    let session_token = browser_session_token(headers).map_err(AppError::from)?;
+    let principal = resolve_browser_session_principal(state, &session_token)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("sign-in required".to_string()))?;
+    Ok(StrictAuthenticatedRequest {
+        principal,
+        browser_session: Some(AuthenticatedBrowserSession {
+            revocation: state.browser_session_registry.activate(&session_token),
+        }),
+    })
+}
+
+async fn optional_authenticated_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<AuthenticatedPrincipal>, AppError> {
+    if let Some(principal) = bearer_principal(headers).map_err(AppError::from)? {
+        return Ok(Some(principal));
+    }
+
+    let Ok(session_token) = browser_session_token(headers) else {
+        return Ok(None);
+    };
+
+    resolve_browser_session_principal(state, &session_token).await
+}
+
+async fn resolve_browser_session_principal(
+    state: &AppState,
+    session_token: &str,
+) -> Result<Option<AuthenticatedPrincipal>, AppError> {
+    state
+        .workspace_repository
+        .browser_session_user_name(session_token)
+        .await
+        .map(|user_name| user_name.map(browser_user_principal))
+        .map_err(AppError::from)
+}
+
+fn browser_user_principal(user_name: String) -> AuthenticatedPrincipal {
+    AuthenticatedPrincipal {
+        id: user_name.clone(),
+        kind: AuthenticatedPrincipalKind::BrowserSession,
+        subject: user_name,
+    }
+}
+
+fn auth_session_response(principal: Option<&AuthenticatedPrincipal>) -> AuthSessionResponse {
+    AuthSessionResponse {
+        authenticated: principal.is_some(),
+        user_name: principal.map(|principal| principal.subject.clone()),
+    }
+}
+
+fn normalize_sign_in_user_name(user_name: &str) -> Result<String, AppError> {
+    let user_name = user_name.trim();
+    if user_name.is_empty() {
+        return Err(AppError::BadRequest(
+            "user name must not be empty".to_string(),
+        ));
+    }
+    if user_name.chars().count() > 100 {
+        return Err(AppError::BadRequest(
+            "user name must not exceed 100 characters".to_string(),
+        ));
+    }
+    if user_name.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(
+            "user name must not contain control characters".to_string(),
+        ));
+    }
+    Ok(user_name.to_string())
+}
+
 fn spawn_connection_task(
     connections: &mut JoinSet<()>,
     acceptor: TlsAcceptor,
@@ -617,6 +782,48 @@ async fn healthz() -> Json<HealthResponse> {
 
 async fn redirect_to_app() -> Redirect {
     Redirect::permanent("/app/")
+}
+
+async fn get_auth_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthSessionResponse>, AppError> {
+    let principal = optional_authenticated_principal(&state, &headers).await?;
+    Ok(Json(auth_session_response(principal.as_ref())))
+}
+
+async fn sign_in_browser_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SignInRequest>,
+) -> Result<Json<AuthSessionResponse>, AppError> {
+    validate_csrf(&headers).map_err(AppError::from)?;
+    let session_token = browser_session_token(&headers).map_err(AppError::from)?;
+    let user_name = normalize_sign_in_user_name(&request.user_name)?;
+    state.browser_session_registry.revoke(&session_token);
+    state
+        .workspace_repository
+        .sign_in_browser_session(&session_token, &user_name)
+        .await?;
+    let _ = state.browser_session_registry.activate(&session_token);
+    let principal = browser_user_principal(user_name);
+
+    Ok(Json(auth_session_response(Some(&principal))))
+}
+
+async fn sign_out_browser_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthSessionResponse>, AppError> {
+    validate_csrf(&headers).map_err(AppError::from)?;
+    let session_token = browser_session_token(&headers).map_err(AppError::from)?;
+    state
+        .workspace_repository
+        .sign_out_browser_session(&session_token)
+        .await?;
+    state.browser_session_registry.revoke(&session_token);
+
+    Ok(Json(auth_session_response(None)))
 }
 
 async fn app_entrypoint(headers: HeaderMap) -> Response {
@@ -1177,6 +1384,7 @@ async fn stream_session_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
+    browser_session: Option<Extension<AuthenticatedBrowserSession>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     let (snapshot, receiver) = state
         .store
@@ -1188,8 +1396,14 @@ async fn stream_session_events(
     });
     let updates = BroadcastStream::new(receiver)
         .filter_map(|result| async move { result.ok().map(to_sse_event).map(Ok) });
+    let revocation = browser_session.map(|Extension(session)| session.revocation);
 
-    Ok(Sse::new(initial_event.chain(updates)).keep_alive(
+    Ok(Sse::new(
+        initial_event
+            .chain(updates)
+            .take_until(browser_session_revocation(revocation)),
+    )
+    .keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
@@ -1209,6 +1423,26 @@ fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: P
             }
         }
     });
+}
+
+async fn browser_session_revocation(revocation: Option<watch::Receiver<bool>>) {
+    let Some(mut revocation) = revocation else {
+        std::future::pending::<()>().await;
+        return;
+    };
+
+    if !*revocation.borrow() {
+        return;
+    }
+
+    loop {
+        if revocation.changed().await.is_err() {
+            return;
+        }
+        if !*revocation.borrow() {
+            return;
+        }
+    }
 }
 
 fn to_sse_event(event: StreamEvent) -> Event {

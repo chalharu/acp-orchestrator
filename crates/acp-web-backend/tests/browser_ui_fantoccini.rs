@@ -20,6 +20,8 @@ use tokio::process::{Child, Command};
 use support::{ServerConfig, TestStack, test_state_dir};
 
 const APP_PATH: &str = "/app/";
+const SIGN_IN_INPUT_SELECTOR: &str = "#sign-in-user-name";
+const SIGN_IN_BUTTON_SELECTOR: &str = ".auth-form__submit";
 const COMPOSER_SELECTOR: &str = "#composer-input";
 const SUBMIT_SELECTOR: &str = ".composer__submit";
 const SIDEBAR_TOGGLE_SELECTOR: &str = ".session-sidebar__toggle";
@@ -38,6 +40,7 @@ const COMPOSER_DISABLED_SCRIPT: &str =
     "return document.querySelector('#composer-input')?.disabled ?? true;";
 const SUBMIT_DISABLED_SCRIPT: &str =
     "return document.querySelector('.composer__submit')?.disabled ?? true;";
+const AUTH_BOOTSTRAP_READY_SCRIPT: &str = "return Boolean(document.querySelector('#sign-in-user-name')) || Boolean(document.querySelector('#composer-input'));";
 const SESSION_ROUTE_SCRIPT: &str =
     r#"return /\/app\/sessions\/[^/]+$/.test(window.location.pathname);"#;
 const SIDEBAR_VISIBLE_SCRIPT: &str = "const node = document.querySelector('.session-sidebar'); \
@@ -166,6 +169,15 @@ impl BrowserHarness {
             .context("opening the browser app shell")?;
 
         self.wait_for_condition(
+            AUTH_BOOTSTRAP_READY_SCRIPT,
+            Duration::from_secs(30),
+            "auth bootstrap",
+        )
+        .await?;
+        if self.sign_in_required().await? {
+            self.sign_in_as("browser-test").await?;
+        }
+        self.wait_for_condition(
             "return Boolean(document.querySelector('#composer-input'));",
             Duration::from_secs(30),
             "composer bootstrap",
@@ -177,6 +189,31 @@ impl BrowserHarness {
             "browser session route",
         )
         .await
+    }
+
+    async fn sign_in_required(&self) -> Result<bool> {
+        self.evaluate(
+            "return Boolean(document.querySelector('#sign-in-user-name'));",
+            "checking sign-in state",
+        )
+        .await
+    }
+
+    async fn sign_in_as(&self, user_name: &str) -> Result<()> {
+        self.client
+            .find(Locator::Css(SIGN_IN_INPUT_SELECTOR))
+            .await
+            .context("finding the sign-in user-name input")?
+            .send_keys(user_name)
+            .await
+            .with_context(|| format!("typing {user_name:?} into the sign-in form"))?;
+        self.client
+            .find(Locator::Css(SIGN_IN_BUTTON_SELECTOR))
+            .await
+            .context("finding the sign-in submit button")?
+            .click()
+            .await
+            .context("submitting the sign-in form")
     }
 
     async fn ensure_sidebar_visible(&self) -> Result<()> {

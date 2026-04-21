@@ -45,15 +45,18 @@ impl AuthError {
 ///
 /// `requires_csrf` applies only to cookie-authenticated browser requests. Bearer-authenticated
 /// loopback clients rely on the `Authorization` header and intentionally bypass CSRF.
+/// This helper is header-only: it cannot resolve browser cookies into durable signed-in users.
+/// Production web routing must use the stateful resolver in `server.rs` instead of treating the
+/// raw `acp_session` UUID as the browser principal.
 pub fn authorize_request(
     headers: &HeaderMap,
     requires_csrf: bool,
 ) -> Result<AuthenticatedPrincipal, AuthError> {
-    if let Some(principal) = extract_bearer_principal(headers)? {
+    if let Some(principal) = bearer_principal(headers)? {
         return Ok(principal);
     }
 
-    let principal = extract_cookie_principal(headers)?;
+    let principal = browser_principal_from_token(browser_session_token(headers)?);
     if requires_csrf {
         validate_csrf(headers)?;
     }
@@ -73,9 +76,7 @@ pub fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .find(|value| !value.is_empty())
 }
 
-fn extract_bearer_principal(
-    headers: &HeaderMap,
-) -> Result<Option<AuthenticatedPrincipal>, AuthError> {
+pub fn bearer_principal(headers: &HeaderMap) -> Result<Option<AuthenticatedPrincipal>, AuthError> {
     // Slice 0 bearer identity is loopback-only trust, not secret-based authentication.
     // Any future non-loopback exposure must replace this with real token validation.
     let Some(value) = headers.get(AUTHORIZATION) else {
@@ -100,22 +101,24 @@ fn extract_bearer_principal(
     }))
 }
 
-fn extract_cookie_principal(headers: &HeaderMap) -> Result<AuthenticatedPrincipal, AuthError> {
+pub fn browser_session_token(headers: &HeaderMap) -> Result<String, AuthError> {
     let token =
         cookie_value(headers, SESSION_COOKIE_NAME).ok_or(AuthError::MissingAuthentication)?;
-    let token = Uuid::parse_str(token)
+    Ok(Uuid::parse_str(token)
         .map_err(|_| AuthError::InvalidAuthentication)?
         .as_hyphenated()
-        .to_string();
+        .to_string())
+}
 
-    Ok(AuthenticatedPrincipal {
+fn browser_principal_from_token(token: String) -> AuthenticatedPrincipal {
+    AuthenticatedPrincipal {
         id: token.clone(),
         kind: AuthenticatedPrincipalKind::BrowserSession,
         subject: token,
-    })
+    }
 }
 
-fn validate_csrf(headers: &HeaderMap) -> Result<(), AuthError> {
+pub fn validate_csrf(headers: &HeaderMap) -> Result<(), AuthError> {
     let expected = cookie_value(headers, CSRF_COOKIE_NAME)
         .ok_or(AuthError::MissingCsrfToken)
         .and_then(normalize_uuid_token)?;

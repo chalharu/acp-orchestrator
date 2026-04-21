@@ -1,23 +1,28 @@
 use super::*;
+use crate::auth::{CSRF_HEADER_NAME, authorize_request};
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
 use crate::workspace_repository::WorkspaceRepository;
 use crate::workspace_store::{
     SessionMetadataRecord, SqliteWorkspaceRepository, UserRecord, WorkspaceRecord,
 };
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
-use acp_contracts::{SessionSnapshot, SessionStatus};
+use acp_contracts::{AuthSessionResponse, SessionSnapshot, SessionStatus, SignInRequest};
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
     extract::Extension,
     http::{
-        HeaderValue,
+        HeaderValue, Request,
+        header::CONTENT_TYPE,
         header::{COOKIE, SET_COOKIE},
     },
 };
 use std::sync::{Arc as StdArc, Mutex};
 use tokio::time::timeout;
 use tower::ServiceExt;
+
+const TEST_BROWSER_SESSION_TOKEN: &str = "11111111-1111-4111-8111-111111111111";
+const TEST_BROWSER_CSRF_TOKEN: &str = "22222222-2222-4222-8222-222222222222";
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -192,6 +197,103 @@ async fn redirect_to_app_uses_the_canonical_trailing_slash_route() {
 
     assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
     assert_eq!(location.to_str().ok(), Some("/app/"));
+}
+
+#[tokio::test]
+async fn auth_session_route_reports_unauthenticated_browser_state() {
+    let response = test_router()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/session")
+                .body(Body::empty())
+                .expect("request building should succeed"),
+        )
+        .await
+        .expect("router calls should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(response).await,
+        AuthSessionResponse {
+            authenticated: false,
+            user_name: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn browser_sign_in_authenticates_and_sign_out_revokes_session_routes() {
+    let router = test_router();
+
+    let unauthorized = router
+        .clone()
+        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_response::<ErrorResponse>(unauthorized).await.error,
+        "sign-in required"
+    );
+
+    let sign_in = router
+        .clone()
+        .oneshot(browser_sign_in_request("alice"))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(sign_in.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(sign_in).await,
+        AuthSessionResponse {
+            authenticated: true,
+            user_name: Some("alice".to_string()),
+        }
+    );
+
+    let signed_in = router
+        .clone()
+        .oneshot(browser_read_request("/api/v1/auth/session"))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(signed_in.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(signed_in).await,
+        AuthSessionResponse {
+            authenticated: true,
+            user_name: Some("alice".to_string()),
+        }
+    );
+
+    let created = router
+        .clone()
+        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let signed_out = router
+        .clone()
+        .oneshot(browser_sign_out_request())
+        .await
+        .expect("router calls should complete");
+    assert_eq!(signed_out.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(signed_out).await,
+        AuthSessionResponse {
+            authenticated: false,
+            user_name: None,
+        }
+    );
+
+    let revoked = router
+        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_response::<ErrorResponse>(revoked).await.error,
+        "sign-in required"
+    );
 }
 
 #[tokio::test]
@@ -389,6 +491,7 @@ fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
         reply_provider: Arc::new(StaticReplyProvider {
             reply: String::new(),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: Some(Arc::new(dist)),
     }
@@ -852,6 +955,7 @@ async fn create_session_seeds_startup_hints_when_enabled() {
         reply_provider: Arc::new(StartupHintProvider {
             hint: "bundled mock verification ready".to_string(),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -876,6 +980,7 @@ async fn create_session_skips_startup_hints_when_disabled() {
         reply_provider: Arc::new(StartupHintProvider {
             hint: "should stay hidden".to_string(),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -903,6 +1008,7 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         store,
         workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(NoStartupHintProvider),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -924,6 +1030,7 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         reply_provider: Arc::new(FailingStartupHintProvider {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -963,6 +1070,7 @@ async fn create_session_reports_rollback_failures() {
             owner: "alice".to_string(),
             forgotten_sessions: forgotten_sessions.clone(),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -1209,6 +1317,7 @@ async fn create_session_reports_metadata_rollback_failures() {
         reply_provider: Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1239,6 +1348,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         reply_provider: Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
+        browser_session_registry: Arc::new(BrowserSessionRegistry::default()),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1516,6 +1626,53 @@ fn bearer_headers(owner: &str) -> HeaderMap {
     headers
 }
 
+fn browser_cookie_header_value() -> String {
+    format!("acp_session={TEST_BROWSER_SESSION_TOKEN}; acp_csrf={TEST_BROWSER_CSRF_TOKEN}")
+}
+
+fn browser_read_request(uri: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(COOKIE, browser_cookie_header_value())
+        .body(Body::empty())
+        .expect("request building should succeed")
+}
+
+fn browser_write_request(uri: &str, body: Body) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(COOKIE, browser_cookie_header_value())
+        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
+        .body(body)
+        .expect("request building should succeed")
+}
+
+fn browser_sign_in_request(user_name: &str) -> Request<Body> {
+    let payload = serde_json::to_vec(&SignInRequest {
+        user_name: user_name.to_string(),
+    })
+    .expect("sign-in request should serialize");
+    Request::builder()
+        .method("POST")
+        .uri("/api/v1/auth/session")
+        .header(COOKIE, browser_cookie_header_value())
+        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(payload))
+        .expect("request building should succeed")
+}
+
+fn browser_sign_out_request() -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri("/api/v1/auth/session")
+        .header(COOKIE, browser_cookie_header_value())
+        .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
+        .body(Body::empty())
+        .expect("request building should succeed")
+}
+
 fn bearer_principal(owner: &str) -> Extension<AuthenticatedPrincipal> {
     Extension(authorize_request(&bearer_headers(owner), false).expect("headers should authorize"))
 }
@@ -1542,6 +1699,16 @@ async fn load_session_metadata_or_panic(
         .await
         .unwrap_or_else(|_| panic!("{stage} session metadata should load"))
         .unwrap_or_else(|| panic!("{stage} session metadata should exist"))
+}
+
+async fn json_response<T>(response: Response) -> T
+where
+    T: serde::de::DeserializeOwned,
+{
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should be readable");
+    serde_json::from_slice(&body).expect("response body should decode as JSON")
 }
 
 fn failing_workspace_state(store: Arc<SessionStore>) -> AppState {
@@ -1735,6 +1902,28 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         Err(self.error.clone())
     }
 
+    async fn sign_in_browser_session(
+        &self,
+        _session_token: &str,
+        _user_name: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn browser_session_user_name(
+        &self,
+        _session_token: &str,
+    ) -> Result<Option<String>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn sign_out_browser_session(
+        &self,
+        _session_token: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
     async fn bootstrap_workspace(
         &self,
         _owner_user_id: &str,
@@ -1775,6 +1964,28 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _principal: &AuthenticatedPrincipal,
     ) -> Result<UserRecord, WorkspaceStoreError> {
         Ok(self.user.clone())
+    }
+
+    async fn sign_in_browser_session(
+        &self,
+        _session_token: &str,
+        _user_name: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Ok(())
+    }
+
+    async fn browser_session_user_name(
+        &self,
+        _session_token: &str,
+    ) -> Result<Option<String>, WorkspaceStoreError> {
+        Ok(Some(self.live_owner.clone()))
+    }
+
+    async fn sign_out_browser_session(
+        &self,
+        _session_token: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Ok(())
     }
 
     async fn bootstrap_workspace(

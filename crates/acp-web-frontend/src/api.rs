@@ -5,10 +5,10 @@
 //! SSE events.
 
 use acp_contracts::{
-    CancelTurnResponse, CreateSessionResponse, DeleteSessionResponse, ErrorResponse,
-    PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
+    AuthSessionResponse, CancelTurnResponse, CreateSessionResponse, DeleteSessionResponse,
+    ErrorResponse, PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
     ResolvePermissionRequest, SessionListItem, SessionListResponse, SessionResponse,
-    SessionSnapshot, StreamEvent,
+    SessionSnapshot, SignInRequest, StreamEvent,
 };
 use futures_channel::mpsc;
 use gloo_net::http::Request;
@@ -66,6 +66,43 @@ pub async fn create_session() -> Result<String, String> {
     let created: CreateSessionResponse =
         response.json().await.map_err(|error| error.to_string())?;
     Ok(created.session.id)
+}
+
+pub async fn load_auth_session() -> Result<AuthSessionResponse, String> {
+    let response = Request::get("/api/v1/auth/session")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Load auth session failed").await);
+    }
+
+    response.json().await.map_err(|error| error.to_string())
+}
+
+pub async fn sign_in(user_name: &str) -> Result<AuthSessionResponse, String> {
+    let body = serde_json::to_string(&SignInRequest {
+        user_name: user_name.to_string(),
+    })
+    .map_err(|error| error.to_string())?;
+    let response = post_json_with_csrf("/api/v1/auth/session", body).await?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Sign in failed").await);
+    }
+
+    response.json().await.map_err(|error| error.to_string())
+}
+
+pub async fn sign_out() -> Result<AuthSessionResponse, String> {
+    let response = delete_with_csrf("/api/v1/auth/session").await?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Sign out failed").await);
+    }
+
+    response.json().await.map_err(|error| error.to_string())
 }
 
 /// Load the current snapshot for an existing session.
@@ -224,6 +261,15 @@ async fn patch_json_with_csrf(url: &str, body: String) -> Result<gloo_net::http:
         .header("content-type", "application/json")
         .body(body)
         .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn delete_with_csrf(url: &str) -> Result<gloo_net::http::Response, String> {
+    let csrf = csrf_token();
+    Request::delete(url)
+        .header("x-csrf-token", &csrf)
         .send()
         .await
         .map_err(|error| error.to_string())

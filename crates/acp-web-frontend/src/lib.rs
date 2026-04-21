@@ -13,8 +13,9 @@ mod components;
 mod slash;
 
 use acp_contracts::{
-    CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    SessionListItem, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    AuthSessionResponse, CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision,
+    PermissionRequest, SessionListItem, SessionSnapshot, SessionStatus, StreamEvent,
+    StreamEventPayload,
 };
 use futures_util::{
     StreamExt,
@@ -65,30 +66,134 @@ pub fn main() {
 
 #[component]
 fn App() -> impl IntoView {
-    view! {
-        {move || match current_route() {
-            AppRoute::Home => view! { <HomePage /> }.into_any(),
-            AppRoute::Session(session_id) => view! { <SessionView session_id=session_id /> }.into_any(),
-            AppRoute::NotFound => {
-                view! {
-                    <main class="app-shell">
-                        <nav class="shell-nav">
-                            <a href="/app/">"New chat"</a>
-                        </nav>
-                        <section class="panel empty-state">
-                            <p class="muted">"Page not found."</p>
-                        </section>
-                    </main>
-                }
-                    .into_any()
-            }
-        }}
+    let auth = auth_signals();
+    load_auth_session_once(auth);
+
+    match current_route() {
+        AppRoute::Home => view! { <HomeRoute auth=auth /> }.into_any(),
+        AppRoute::Session(session_id) => {
+            view! { <SessionRoute session_id=session_id auth=auth /> }.into_any()
+        }
+        AppRoute::NotFound => view! {
+            <main class="app-shell">
+                <nav class="shell-nav">
+                    <a href="/app/">"New chat"</a>
+                </nav>
+                <section class="panel empty-state">
+                    <p class="muted">"Page not found."</p>
+                </section>
+            </main>
+        }
+        .into_any(),
     }
 }
 
 // ---------------------------------------------------------------------------
 // Home page  –  /app/
 // ---------------------------------------------------------------------------
+
+#[component]
+fn HomeRoute(auth: AuthSignals) -> impl IntoView {
+    view! {
+        {move || {
+            if !auth.checked.get() {
+                return view! { <AuthLoadingPage message="Checking sign-in..." /> }.into_any();
+            }
+
+            if auth.session.get().is_some() {
+                view! { <HomePage /> }.into_any()
+            } else {
+                view! { <SignInPage auth=auth /> }.into_any()
+            }
+        }}
+    }
+}
+
+#[component]
+fn SessionRoute(session_id: String, auth: AuthSignals) -> impl IntoView {
+    view! {
+        {move || {
+            if !auth.checked.get() {
+                return view! { <AuthLoadingPage message="Checking sign-in..." /> }.into_any();
+            }
+
+            match auth.session.get() {
+                Some(_) => view! { <SessionView session_id=session_id.clone() auth=auth /> }
+                    .into_any(),
+                None => view! { <SignInPage auth=auth /> }.into_any(),
+            }
+        }}
+    }
+}
+
+#[component]
+fn AuthLoadingPage(message: &'static str) -> impl IntoView {
+    view! {
+        <main class="app-shell app-shell--home">
+            <section class="panel empty-state">
+                <p class="muted">{message}</p>
+            </section>
+        </main>
+    }
+}
+
+#[component]
+fn SignInPage(auth: AuthSignals) -> impl IntoView {
+    let sign_in_disabled = Signal::derive(move || {
+        auth.signing_in.get() || auth.user_name_draft.get().trim().is_empty()
+    });
+
+    view! {
+        <main class="app-shell app-shell--home">
+            <ErrorBanner message=auth.error />
+            <section class="panel auth-panel">
+                <div class="auth-panel__copy">
+                    <p class="auth-panel__eyebrow">"ACP Web"</p>
+                    <h1 class="auth-panel__title">"Sign in"</h1>
+                    <p class="muted">
+                        "Enter a user name to start or resume your browser workspace session."
+                    </p>
+                </div>
+                <form
+                    class="auth-form"
+                    on:submit=move |ev: web_sys::SubmitEvent| {
+                        ev.prevent_default();
+                        submit_sign_in(auth);
+                    }
+                >
+                    <label class="auth-form__label" for="sign-in-user-name">
+                        "User name"
+                    </label>
+                    <input
+                        id="sign-in-user-name"
+                        class="auth-form__input"
+                        type="text"
+                        autofocus=true
+                        maxlength="100"
+                        prop:value=move || auth.user_name_draft.get()
+                        prop:disabled=move || auth.signing_in.get()
+                        on:input=move |ev| {
+                            auth.user_name_draft.set(event_target_value(&ev));
+                        }
+                    />
+                    <div class="auth-form__actions">
+                        <button
+                            type="submit"
+                            class="auth-form__submit"
+                            prop:disabled=move || sign_in_disabled.get()
+                        >
+                            {move || if auth.signing_in.get() {
+                                "Signing in..."
+                            } else {
+                                "Sign in"
+                            }}
+                        </button>
+                    </div>
+                </form>
+            </section>
+        </main>
+    }
+}
 
 /// Landing page. Prepares a fresh session and immediately redirects to the
 /// live chat route so startup hints appear before the first prompt.
@@ -122,6 +227,108 @@ fn HomePage() -> impl IntoView {
             </section>
         </main>
     }
+}
+
+fn auth_signals() -> AuthSignals {
+    AuthSignals {
+        session: RwSignal::new(None::<AuthSession>),
+        checked: RwSignal::new(false),
+        signing_in: RwSignal::new(false),
+        error: RwSignal::new(None::<String>),
+        user_name_draft: RwSignal::new(String::new()),
+    }
+}
+
+fn load_auth_session_once(auth: AuthSignals) {
+    let started = RwSignal::new(false);
+    Effect::new(move |_| {
+        if started.get() {
+            return;
+        }
+
+        started.set(true);
+        spawn_auth_session_load(auth);
+    });
+}
+
+fn spawn_auth_session_load(auth: AuthSignals) {
+    leptos::task::spawn_local(async move {
+        match api::load_auth_session().await {
+            Ok(response) => {
+                if let Err(message) = apply_auth_session_response(auth, response) {
+                    set_auth_error(auth, message);
+                }
+            }
+            Err(message) => set_auth_error(auth, message),
+        }
+    });
+}
+
+fn submit_sign_in(auth: AuthSignals) {
+    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
+    if user_name.is_empty() {
+        auth.error
+            .set(Some("Enter a user name to continue.".to_string()));
+        return;
+    }
+    if auth.signing_in.get_untracked() {
+        return;
+    }
+
+    auth.signing_in.set(true);
+    auth.error.set(None);
+    leptos::task::spawn_local(async move {
+        match api::sign_in(&user_name).await {
+            Ok(response) => match apply_auth_session_response(auth, response) {
+                Ok(Some(_)) => {
+                    auth.user_name_draft.set(String::new());
+                }
+                Ok(None) => auth.error.set(Some(
+                    "Sign in did not establish an authenticated session.".to_string(),
+                )),
+                Err(message) => set_auth_error(auth, message),
+            },
+            Err(message) => set_auth_error(auth, message),
+        }
+        auth.signing_in.set(false);
+    });
+}
+
+fn set_auth_error(auth: AuthSignals, message: String) {
+    auth.error.set(Some(message));
+    auth.checked.set(true);
+}
+
+fn apply_auth_session_response(
+    auth: AuthSignals,
+    response: AuthSessionResponse,
+) -> Result<Option<AuthSession>, String> {
+    let session = auth_session_from_response(response)?;
+    auth.error.set(None);
+    auth.session.set(session.clone());
+    auth.checked.set(true);
+    Ok(session)
+}
+
+fn current_auth_user_name(auth: AuthSignals) -> Option<String> {
+    auth.session
+        .get_untracked()
+        .map(|session| session.user_name.clone())
+}
+
+fn auth_session_from_response(
+    response: AuthSessionResponse,
+) -> Result<Option<AuthSession>, String> {
+    if !response.authenticated {
+        return Ok(None);
+    }
+
+    let user_name = response
+        .user_name
+        .map(|user_name| user_name.trim().to_string())
+        .filter(|user_name| !user_name.is_empty())
+        .ok_or_else(|| "Authenticated session is missing the user name.".to_string())?;
+    Ok(Some(AuthSession { user_name }))
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +412,20 @@ struct SessionBootstrap {
     session_status: SessionLifecycle,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthSession {
+    user_name: String,
+}
+
+#[derive(Clone, Copy)]
+struct AuthSignals {
+    session: RwSignal<Option<AuthSession>>,
+    checked: RwSignal<bool>,
+    signing_in: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    user_name_draft: RwSignal<String>,
+}
+
 #[derive(Clone, Copy)]
 struct SlashSignals {
     candidates: RwSignal<Vec<CompletionCandidate>>,
@@ -280,6 +501,13 @@ struct SessionMainSignals {
     pending_action_busy: Signal<bool>,
 }
 
+#[derive(Clone)]
+struct SessionAuthControls {
+    user_name: Signal<String>,
+    sign_out_busy: Signal<bool>,
+    on_sign_out: Callback<()>,
+}
+
 #[derive(Clone, Copy)]
 struct SessionSidebarItemSignals {
     is_renaming: Signal<bool>,
@@ -309,21 +537,25 @@ struct SidebarSession {
 }
 
 #[component]
-fn SessionView(session_id: String) -> impl IntoView {
+fn SessionView(session_id: String, auth: AuthSignals) -> impl IntoView {
+    let user_name =
+        current_auth_user_name(auth).expect("SessionView requires an authenticated user");
     let signals = session_signals();
     let sidebar_open = RwSignal::new(default_sidebar_open());
+    let sign_out_busy = RwSignal::new(false);
     let current_session_deleting = current_session_deleting_signal(session_id.clone(), signals);
-    restore_session_draft(&session_id, signals);
-    persist_session_draft(session_id.clone(), signals.draft);
+    restore_session_draft(&user_name, &session_id, signals);
+    persist_session_draft(user_name.clone(), session_id.clone(), signals.draft);
     bind_slash_completion(signals);
-    spawn_session_bootstrap(session_id.clone(), signals);
+    spawn_session_bootstrap(session_id.clone(), auth, signals);
 
     session_view_content(
         session_id.clone(),
         signals,
         session_composer_signals(signals, current_session_deleting),
-        session_view_callbacks(session_id, signals),
+        session_view_callbacks(session_id, user_name, signals),
         sidebar_open,
+        session_auth_controls(auth, sign_out_busy, signals),
     )
 }
 
@@ -331,16 +563,16 @@ fn current_session_deleting_signal(session_id: String, signals: SessionSignals) 
     Signal::derive(move || signals.list.deleting_id.get().as_deref() == Some(session_id.as_str()))
 }
 
-fn restore_session_draft(session_id: &str, signals: SessionSignals) {
-    let stored_draft = load_draft(session_id);
+fn restore_session_draft(user_name: &str, session_id: &str, signals: SessionSignals) {
+    let stored_draft = load_draft(user_name, session_id);
     if !stored_draft.is_empty() {
         signals.draft.set(stored_draft);
     }
 }
 
-fn persist_session_draft(session_id: String, draft: RwSignal<String>) {
+fn persist_session_draft(user_name: String, session_id: String, draft: RwSignal<String>) {
     Effect::new(move |_| {
-        save_draft(&session_id, &draft.get());
+        save_draft(&user_name, &session_id, &draft.get());
     });
 }
 
@@ -384,17 +616,38 @@ fn session_composer_signals(
     }
 }
 
-fn session_view_callbacks(session_id: String, signals: SessionSignals) -> SessionViewCallbacks {
+fn session_view_callbacks(
+    session_id: String,
+    user_name: String,
+    signals: SessionSignals,
+) -> SessionViewCallbacks {
     let (approve, deny, cancel) = session_permission_callbacks(session_id.clone(), signals);
 
     SessionViewCallbacks {
-        submit: session_submit_callback(session_id.clone(), signals),
+        submit: session_submit_callback(session_id.clone(), user_name.clone(), signals),
         approve,
         deny,
         cancel,
         slash: slash_palette_callbacks(signals),
         rename_session: rename_session_callback(signals),
-        delete_session: delete_session_callback(session_id, signals),
+        delete_session: delete_session_callback(session_id, user_name, signals),
+    }
+}
+
+fn session_auth_controls(
+    auth: AuthSignals,
+    sign_out_busy: RwSignal<bool>,
+    signals: SessionSignals,
+) -> SessionAuthControls {
+    SessionAuthControls {
+        user_name: Signal::derive(move || {
+            auth.session
+                .get()
+                .map(|session| session.user_name)
+                .unwrap_or_default()
+        }),
+        sign_out_busy: Signal::derive(move || sign_out_busy.get()),
+        on_sign_out: sign_out_callback(auth, sign_out_busy, signals),
     }
 }
 
@@ -433,6 +686,7 @@ fn session_view_content(
     composer: SessionComposerSignals,
     callbacks: SessionViewCallbacks,
     sidebar_open: RwSignal<bool>,
+    auth_controls: SessionAuthControls,
 ) -> impl IntoView {
     let draft = signals.draft;
     let shell_signals = session_shell_signals(signals);
@@ -449,6 +703,7 @@ fn session_view_content(
                 composer=composer
                 callbacks=callbacks
                 draft=draft
+                auth_controls=auth_controls.clone()
             />
         </main>
     }
@@ -504,6 +759,7 @@ fn SessionShell(
     composer: SessionComposerSignals,
     callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
+    auth_controls: SessionAuthControls,
 ) -> impl IntoView {
     let SessionViewCallbacks {
         rename_session: on_rename_session,
@@ -533,6 +789,7 @@ fn SessionShell(
                 composer=composer
                 callbacks=callbacks
                 draft=draft
+                auth_controls=auth_controls
             />
         </div>
     }
@@ -567,6 +824,7 @@ fn SessionMain(
     composer: SessionComposerSignals,
     callbacks: SessionViewCallbacks,
     draft: RwSignal<String>,
+    auth_controls: SessionAuthControls,
 ) -> impl IntoView {
     view! {
         <section class="session-main">
@@ -575,6 +833,7 @@ fn SessionMain(
                 connection_badge=main_signals.connection_badge
                 worker_badge=main_signals.worker_badge
                 sidebar_open=sidebar_open
+                auth_controls=auth_controls
             />
             <SessionTranscriptPanel
                 entries=main_signals.entries
@@ -635,26 +894,53 @@ fn SessionTopBar(
     #[prop(into)] connection_badge: Signal<StatusBadge>,
     #[prop(into)] worker_badge: Signal<StatusBadge>,
     sidebar_open: RwSignal<bool>,
+    auth_controls: SessionAuthControls,
 ) -> impl IntoView {
+    let SessionAuthControls {
+        user_name,
+        sign_out_busy,
+        on_sign_out,
+    } = auth_controls;
+
     view! {
         <div class="chat-topbar">
             <div class="chat-topbar__controls">
-                <button
-                    class="session-sidebar__toggle"
-                    type="button"
-                    aria-expanded=move || if sidebar_open.get() { "true" } else { "false" }
-                    on:click=move |_| sidebar_open.update(|open| *open = !*open)
-                >
-                    <span class="sidebar-toggle-icon" aria-hidden="true">
-                        {move || if sidebar_open.get() { "←" } else { "☰" }}
-                    </span>
-                    <span class="session-sidebar__toggle-label">
-                        {move || if sidebar_open.get() { "Hide sessions" } else { "Show sessions" }}
-                    </span>
-                </button>
-                <div class="chat-topbar__badges" aria-label="Connection and worker state">
-                    <StatusBadgeView badge=connection_badge />
-                    <StatusBadgeView badge=worker_badge />
+                <div class="chat-topbar__primary">
+                    <button
+                        class="session-sidebar__toggle"
+                        type="button"
+                        aria-expanded=move || if sidebar_open.get() { "true" } else { "false" }
+                        on:click=move |_| sidebar_open.update(|open| *open = !*open)
+                    >
+                        <span class="sidebar-toggle-icon" aria-hidden="true">
+                            {move || if sidebar_open.get() { "←" } else { "☰" }}
+                        </span>
+                        <span class="session-sidebar__toggle-label">
+                            {move || if sidebar_open.get() { "Hide sessions" } else { "Show sessions" }}
+                        </span>
+                    </button>
+                    <div class="chat-topbar__badges" aria-label="Connection and worker state">
+                        <StatusBadgeView badge=connection_badge />
+                        <StatusBadgeView badge=worker_badge />
+                    </div>
+                </div>
+                <div class="chat-topbar__auth">
+                    <p class="chat-topbar__auth-label">
+                        <span class="chat-topbar__auth-caption">"Signed in as"</span>
+                        <span class="chat-topbar__auth-user">{move || user_name.get()}</span>
+                    </p>
+                    <button
+                        type="button"
+                        class="chat-topbar__sign-out"
+                        on:click=move |_| on_sign_out.run(())
+                        prop:disabled=move || sign_out_busy.get()
+                    >
+                        {move || if sign_out_busy.get() {
+                            "Signing out..."
+                        } else {
+                            "Sign out"
+                        }}
+                    </button>
                 </div>
             </div>
             <ErrorBanner message=message />
@@ -955,21 +1241,17 @@ fn session_sidebar_item_callbacks(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_sidebar_item_view(
-    item: SidebarSession,
+    href: String,
+    title: String,
+    activity_label: String,
+    is_current: bool,
+    is_closed: bool,
     rename_draft: RwSignal<String>,
     item_signals: SessionSidebarItemSignals,
     callbacks: SessionSidebarItemCallbacks,
 ) -> impl IntoView {
-    let SidebarSession {
-        href,
-        title,
-        activity_label,
-        is_current,
-        is_closed,
-        ..
-    } = item;
-
     view! {
         <li class=move || session_sidebar_item_class(is_current, is_closed)>
             <Show
@@ -1038,7 +1320,16 @@ fn SessionSidebarItem(
         on_delete_session,
     );
 
-    session_sidebar_item_view(item, rename_draft, item_signals, callbacks)
+    session_sidebar_item_view(
+        item.href,
+        item.title,
+        item.activity_label,
+        item.is_current,
+        item.is_closed,
+        rename_draft,
+        item_signals,
+        callbacks,
+    )
 }
 
 #[component]
@@ -1263,7 +1554,41 @@ fn session_permission_callbacks(
     )
 }
 
-fn spawn_session_bootstrap(session_id: String, signals: SessionSignals) {
+fn sign_out_callback(
+    auth: AuthSignals,
+    sign_out_busy: RwSignal<bool>,
+    signals: SessionSignals,
+) -> Callback<()> {
+    Callback::new(move |()| {
+        if sign_out_busy.get_untracked() {
+            return;
+        }
+
+        sign_out_busy.set(true);
+        signals.action_error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::sign_out().await {
+                Ok(_) => {
+                    auth.session.set(None);
+                    auth.checked.set(true);
+                    auth.error.set(None);
+                    stop_live_stream(signals);
+                    clear_prepared_session_id();
+                    if let Err(message) = navigate_to("/app/") {
+                        signals.action_error.set(Some(message));
+                        sign_out_busy.set(false);
+                    }
+                }
+                Err(message) => {
+                    signals.action_error.set(Some(message));
+                    sign_out_busy.set(false);
+                }
+            }
+        });
+    })
+}
+
+fn spawn_session_bootstrap(session_id: String, auth: AuthSignals, signals: SessionSignals) {
     leptos::task::spawn_local(async move {
         match api::load_session(&session_id).await {
             Ok(session) => {
@@ -1271,7 +1596,7 @@ fn spawn_session_bootstrap(session_id: String, signals: SessionSignals) {
                 apply_loaded_session(session, signals);
                 refresh_session_list(signals).await;
                 if !is_closed {
-                    spawn_session_stream(session_id.clone(), signals);
+                    spawn_session_stream(session_id.clone(), auth, signals);
                 }
             }
             Err(api::SessionLoadError::ResumeUnavailable(message)) => {
@@ -1286,12 +1611,16 @@ fn spawn_session_bootstrap(session_id: String, signals: SessionSignals) {
     });
 }
 
-fn spawn_session_stream(session_id: String, signals: SessionSignals) {
+fn spawn_session_stream(session_id: String, auth: AuthSignals, signals: SessionSignals) {
     stop_live_stream(signals);
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
     signals.stream_abort.set(Some(abort_handle));
     leptos::task::spawn_local(async move {
-        let _ = Abortable::new(subscribe_sse(&session_id, signals), abort_registration).await;
+        let _ = Abortable::new(
+            subscribe_sse(&session_id, auth, signals),
+            abort_registration,
+        )
+        .await;
         close_live_stream(signals);
         signals.stream_abort.set(None);
     });
@@ -1371,7 +1700,7 @@ fn dismiss_slash_palette(signals: SessionSignals) {
     signals.slash.selected_index.set(0);
 }
 
-async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
+async fn subscribe_sse(session_id: &str, auth: AuthSignals, signals: SessionSignals) {
     let (event_source, mut rx) = match api::open_session_event_stream(session_id) {
         Ok(stream) => stream,
         Err(message) => {
@@ -1404,6 +1733,25 @@ async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
                     signals.event_source.set(None);
                     return;
                 }
+                let current_auth_session = auth.session.get_untracked();
+                match api::load_auth_session().await {
+                    Ok(response) => match apply_auth_session_response(auth, response) {
+                        Ok(refreshed_auth_session) => {
+                            if should_reset_session_after_auth_refresh(
+                                current_auth_session.as_ref(),
+                                refreshed_auth_session.as_ref(),
+                            ) {
+                                clear_prepared_session_id();
+                                signals.connection_error.set(None);
+                                event_source.close();
+                                signals.event_source.set(None);
+                                return;
+                            }
+                        }
+                        Err(message) => set_auth_error(auth, message),
+                    },
+                    Err(message) => set_auth_error(auth, message),
+                }
                 signals.connection_error.set(Some(
                     "Event stream disconnected; reconnecting...".to_string(),
                 ));
@@ -1419,6 +1767,13 @@ async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
 
     event_source.close();
     signals.event_source.set(None);
+}
+
+fn should_reset_session_after_auth_refresh(
+    current: Option<&AuthSession>,
+    refreshed: Option<&AuthSession>,
+) -> bool {
+    current != refreshed
 }
 
 fn handle_slash_submit(prompt: &str, signals: SessionSignals) {
@@ -1460,9 +1815,14 @@ fn run_browser_slash_action(action: BrowserSlashAction, signals: SessionSignals)
     }
 }
 
-fn session_submit_callback(session_id: String, signals: SessionSignals) -> Callback<String> {
+fn session_submit_callback(
+    session_id: String,
+    user_name: String,
+    signals: SessionSignals,
+) -> Callback<String> {
     Callback::new(move |prompt: String| {
         let session_id = session_id.clone();
+        let user_name = user_name.clone();
         if prompt.starts_with('/') {
             handle_slash_submit(&prompt, signals);
             return;
@@ -1475,7 +1835,7 @@ fn session_submit_callback(session_id: String, signals: SessionSignals) -> Callb
             match api::send_message(&session_id, &prompt).await {
                 Ok(()) => {
                     clear_prepared_session_id();
-                    clear_draft(&session_id);
+                    clear_draft(&user_name, &session_id);
                     signals.draft.set(String::new());
                     signals.turn_state.set(TurnState::AwaitingReply);
                     refresh_session_list(signals).await;
@@ -1681,6 +2041,7 @@ fn rename_session_callback(signals: SessionSignals) -> Callback<(String, String)
 
 fn delete_session_callback(
     current_session_id: String,
+    user_name: String,
     signals: SessionSignals,
 ) -> Callback<String> {
     Callback::new(move |session_id: String| {
@@ -1691,12 +2052,13 @@ fn delete_session_callback(
         signals.list.deleting_id.set(Some(session_id.clone()));
         signals.list.error.set(None);
         let is_deleting_current = session_id == current_session_id;
+        let user_name = user_name.clone();
 
         leptos::task::spawn_local(async move {
             match api::delete_session(&session_id).await {
                 Ok(_) => {
                     clear_prepared_session_id_if_matches(&session_id);
-                    clear_draft(&session_id);
+                    clear_draft(&user_name, &session_id);
                     signals
                         .list
                         .items
@@ -2295,34 +2657,37 @@ fn session_storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|window| window.session_storage().ok().flatten())
 }
 
-fn draft_storage_key(session_id: &str) -> String {
-    format!("{DRAFT_STORAGE_KEY_PREFIX}{session_id}")
+fn draft_storage_key(user_name: &str, session_id: &str) -> String {
+    format!(
+        "{DRAFT_STORAGE_KEY_PREFIX}{}:{session_id}",
+        api::encode_component(user_name)
+    )
 }
 
-fn load_draft(session_id: &str) -> String {
+fn load_draft(user_name: &str, session_id: &str) -> String {
     session_storage()
         .and_then(|storage| {
             storage
-                .get_item(&draft_storage_key(session_id))
+                .get_item(&draft_storage_key(user_name, session_id))
                 .ok()
                 .flatten()
         })
         .unwrap_or_default()
 }
 
-fn save_draft(session_id: &str, text: &str) {
+fn save_draft(user_name: &str, session_id: &str, text: &str) {
     if let Some(storage) = session_storage() {
         if text.is_empty() {
-            let _ = storage.remove_item(&draft_storage_key(session_id));
+            let _ = storage.remove_item(&draft_storage_key(user_name, session_id));
         } else {
-            let _ = storage.set_item(&draft_storage_key(session_id), text);
+            let _ = storage.set_item(&draft_storage_key(user_name, session_id), text);
         }
     }
 }
 
-fn clear_draft(session_id: &str) {
+fn clear_draft(user_name: &str, session_id: &str) {
     if let Some(storage) = session_storage() {
-        let _ = storage.remove_item(&draft_storage_key(session_id));
+        let _ = storage.remove_item(&draft_storage_key(user_name, session_id));
     }
 }
 
@@ -2473,14 +2838,15 @@ pub(crate) fn turn_state_for_snapshot(pending_permissions: &[PendingPermission])
 #[cfg(test)]
 mod tests {
     use super::{
-        AppRoute, BadgeTone, EntryRole, PendingPermission, SessionLifecycle, SidebarSession,
-        TurnState, app_session_path, connection_badge_state, mark_session_closed,
-        next_session_destination, remove_session_from_list, rename_session_in_list,
-        route_from_pathname, session_action_busy, session_bootstrap_from_snapshot,
-        session_composer_cancel_visible, session_composer_disabled,
-        session_composer_status_message, session_sidebar_status_label,
-        session_sidebar_status_pill_class, should_release_turn_state, sidebar_sessions,
-        turn_state_for_snapshot, worker_badge_state,
+        AppRoute, AuthSession, BadgeTone, EntryRole, PendingPermission, SessionLifecycle,
+        SidebarSession, TurnState, app_session_path, connection_badge_state, draft_storage_key,
+        mark_session_closed, next_session_destination, remove_session_from_list,
+        rename_session_in_list, route_from_pathname, session_action_busy,
+        session_bootstrap_from_snapshot, session_composer_cancel_visible,
+        session_composer_disabled, session_composer_status_message, session_sidebar_status_label,
+        session_sidebar_status_pill_class, should_release_turn_state,
+        should_reset_session_after_auth_refresh, sidebar_sessions, turn_state_for_snapshot,
+        worker_badge_state,
     };
     use acp_contracts::{
         ConversationMessage, MessageRole, PermissionRequest, SessionListItem, SessionResponse,
@@ -2691,6 +3057,52 @@ mod tests {
             AppRoute::Session("s/1".to_string())
         );
         assert_eq!(route_from_pathname("/app/sessions/%ZZ"), AppRoute::NotFound);
+    }
+
+    #[test]
+    fn draft_storage_key_is_user_scoped() {
+        assert_ne!(
+            draft_storage_key("alice", "s_123"),
+            draft_storage_key("bob", "s_123")
+        );
+        assert_eq!(
+            draft_storage_key("alice name", "s_123"),
+            "acp-draft-alice%20name:s_123"
+        );
+    }
+
+    #[test]
+    fn auth_refresh_keeps_the_live_session_when_the_user_is_unchanged() {
+        let current = Some(AuthSession {
+            user_name: "alice".to_string(),
+        });
+        let refreshed = Some(AuthSession {
+            user_name: "alice".to_string(),
+        });
+
+        assert!(!should_reset_session_after_auth_refresh(
+            current.as_ref(),
+            refreshed.as_ref()
+        ));
+    }
+
+    #[test]
+    fn auth_refresh_resets_the_live_session_after_sign_out_or_user_switch() {
+        let current = Some(AuthSession {
+            user_name: "alice".to_string(),
+        });
+        let switched = Some(AuthSession {
+            user_name: "bob".to_string(),
+        });
+
+        assert!(should_reset_session_after_auth_refresh(
+            current.as_ref(),
+            None
+        ));
+        assert!(should_reset_session_after_auth_refresh(
+            current.as_ref(),
+            switched.as_ref()
+        ));
     }
 
     #[test]

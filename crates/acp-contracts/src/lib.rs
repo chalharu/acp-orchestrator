@@ -58,6 +58,18 @@ pub struct SessionResponse {
     pub session: SessionSnapshot,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthSessionResponse {
+    pub authenticated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignInRequest {
+    pub user_name: String,
+}
+
 pub type CreateSessionResponse = SessionResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -37,31 +37,11 @@ async fn slash_prefix_can_be_removed_without_breaking_prompt_submission() -> Res
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
         browser.open_app().await?;
-
-        let composer = browser
-            .client
-            .find(Locator::Css(COMPOSER_SELECTOR))
-            .await
-            .context("finding the composer textarea")?;
-        composer.click().await.context("focusing the composer")?;
+        let composer = browser.focused_composer().await?;
         composer.send_keys("/").await.context("typing slash")?;
 
-        browser
-            .wait_for_condition(
-                "return Boolean(document.querySelector('.composer__slash-palette')) \
-                 && document.querySelectorAll('.composer__slash-item').length > 0;",
-                Duration::from_secs(10),
-                "slash command palette",
-            )
-            .await?;
-
-        let item_texts: Vec<String> = browser
-            .evaluate(
-                "return Array.from(document.querySelectorAll('.composer__slash-item'))\
-                 .map((item) => item.textContent.trim());",
-                "reading slash command labels",
-            )
-            .await?;
+        browser.wait_for_slash_palette().await?;
+        let item_texts = browser.slash_palette_items().await?;
         assert!(item_texts.iter().any(|text| text.contains("/help")));
         assert!(!item_texts.iter().any(|text| text.contains("/cancel")));
         assert!(!item_texts.iter().any(|text| text.contains("/approve")));
@@ -85,20 +65,7 @@ async fn slash_prefix_can_be_removed_without_breaking_prompt_submission() -> Res
             .await
             .context("typing a normal prompt")?;
 
-        let composer_disabled: bool = browser
-            .evaluate(
-                "return document.querySelector('#composer-input')?.disabled ?? true;",
-                "checking composer enabled state",
-            )
-            .await?;
-        let submit_disabled: bool = browser
-            .evaluate(
-                "return document.querySelector('.composer__submit')?.disabled ?? true;",
-                "checking submit enabled state",
-            )
-            .await?;
-        assert!(!composer_disabled);
-        assert!(!submit_disabled);
+        browser.assert_composer_submission_ready().await?;
 
         browser
             .client
@@ -136,30 +103,7 @@ async fn sidebar_shows_activity_metadata_and_closed_state() -> Result<()> {
     let result = async {
         browser.open_app().await?;
         browser.ensure_sidebar_visible().await?;
-
-        browser
-            .wait_for_condition(
-                "return Boolean(document.querySelector('.session-sidebar__session-activity')) \
-                 && Boolean(document.querySelector('.session-sidebar__status-pill'));",
-                Duration::from_secs(10),
-                "sidebar metadata",
-            )
-            .await?;
-
-        let activity_label: String = browser
-            .evaluate(
-                "return document.querySelector('.session-sidebar__session-activity')\
-                 ?.textContent?.trim() ?? '';",
-                "reading session activity label",
-            )
-            .await?;
-        let status_label: String = browser
-            .evaluate(
-                "return document.querySelector('.session-sidebar__status-pill')\
-                 ?.textContent?.trim() ?? '';",
-                "reading session status label",
-            )
-            .await?;
+        let (activity_label, status_label) = browser.session_sidebar_metadata().await?;
 
         assert_eq!(status_label, "active");
         assert!(activity_label.starts_with("Updated "));
@@ -171,43 +115,7 @@ async fn sidebar_shows_activity_metadata_and_closed_state() -> Result<()> {
         NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
             .context("parsing the sidebar activity timestamp")?;
 
-        let close_result = browser
-            .client
-            .execute_async(
-                r#"
-                const callback = arguments[arguments.length - 1];
-                const sessionId = window.location.pathname.split("/").pop();
-                const csrfToken = document
-                    .querySelector("meta[name='acp-csrf-token']")
-                    ?.getAttribute("content") ?? "";
-                fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
-                    method: "POST",
-                    headers: { "x-csrf-token": csrfToken },
-                })
-                    .then(async (response) => {
-                        if (!response.ok) {
-                            callback({
-                                ok: false,
-                                status: response.status,
-                                body: await response.text(),
-                            });
-                            return;
-                        }
-                        callback({ ok: true });
-                    })
-                    .catch((error) => callback({ ok: false, error: String(error) }));
-                "#,
-                Vec::new(),
-            )
-            .await
-            .context("closing the session from the browser")?;
-        let close_payload = close_result
-            .as_object()
-            .context("close response was not an object")?;
-        ensure!(
-            close_payload.get("ok").and_then(Value::as_bool) == Some(true),
-            "browser close request failed: {close_result}"
-        );
+        browser.close_current_session().await?;
 
         browser
             .wait_for_condition(
@@ -354,6 +262,126 @@ impl BrowserHarness {
             "visible session sidebar",
         )
         .await
+    }
+
+    async fn focused_composer(&self) -> Result<fantoccini::elements::Element> {
+        let composer = self
+            .client
+            .find(Locator::Css(COMPOSER_SELECTOR))
+            .await
+            .context("finding the composer textarea")?;
+        composer.click().await.context("focusing the composer")?;
+        Ok(composer)
+    }
+
+    async fn wait_for_slash_palette(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.composer__slash-palette')) \
+             && document.querySelectorAll('.composer__slash-item').length > 0;",
+            Duration::from_secs(10),
+            "slash command palette",
+        )
+        .await
+    }
+
+    async fn slash_palette_items(&self) -> Result<Vec<String>> {
+        self.evaluate(
+            "return Array.from(document.querySelectorAll('.composer__slash-item'))\
+             .map((item) => item.textContent.trim());",
+            "reading slash command labels",
+        )
+        .await
+    }
+
+    async fn assert_composer_submission_ready(&self) -> Result<()> {
+        let composer_disabled: bool = self
+            .evaluate(
+                "return document.querySelector('#composer-input')?.disabled ?? true;",
+                "checking composer enabled state",
+            )
+            .await?;
+        let submit_disabled: bool = self
+            .evaluate(
+                "return document.querySelector('.composer__submit')?.disabled ?? true;",
+                "checking submit enabled state",
+            )
+            .await?;
+        ensure!(
+            !composer_disabled,
+            "composer should stay enabled after removing slash"
+        );
+        ensure!(
+            !submit_disabled,
+            "submit button should stay enabled after removing slash"
+        );
+        Ok(())
+    }
+
+    async fn session_sidebar_metadata(&self) -> Result<(String, String)> {
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.session-sidebar__session-activity')) \
+             && Boolean(document.querySelector('.session-sidebar__status-pill'));",
+            Duration::from_secs(10),
+            "sidebar metadata",
+        )
+        .await?;
+
+        let activity_label = self
+            .evaluate(
+                "return document.querySelector('.session-sidebar__session-activity')\
+                 ?.textContent?.trim() ?? '';",
+                "reading session activity label",
+            )
+            .await?;
+        let status_label = self
+            .evaluate(
+                "return document.querySelector('.session-sidebar__status-pill')\
+                 ?.textContent?.trim() ?? '';",
+                "reading session status label",
+            )
+            .await?;
+        Ok((activity_label, status_label))
+    }
+
+    async fn close_current_session(&self) -> Result<()> {
+        let close_result = self
+            .client
+            .execute_async(
+                r#"
+                const callback = arguments[arguments.length - 1];
+                const sessionId = window.location.pathname.split("/").pop();
+                const csrfToken = document
+                    .querySelector("meta[name='acp-csrf-token']")
+                    ?.getAttribute("content") ?? "";
+                fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
+                    method: "POST",
+                    headers: { "x-csrf-token": csrfToken },
+                })
+                    .then(async (response) => {
+                        if (!response.ok) {
+                            callback({
+                                ok: false,
+                                status: response.status,
+                                body: await response.text(),
+                            });
+                            return;
+                        }
+                        callback({ ok: true });
+                    })
+                    .catch((error) => callback({ ok: false, error: String(error) }));
+                "#,
+                Vec::new(),
+            )
+            .await
+            .context("closing the session from the browser")?;
+        let close_payload = close_result
+            .as_object()
+            .context("close response was not an object")?;
+        ensure!(
+            close_payload.get("ok").and_then(Value::as_bool) == Some(true),
+            "browser close request failed: {close_result}"
+        );
+        Ok(())
     }
 
     async fn wait_for_body_text(&self, needle: &str, timeout: Duration) -> Result<()> {

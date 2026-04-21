@@ -251,60 +251,20 @@ async fn bootstrap_registration_changes_auth_status_for_the_browser_session() {
 
 #[tokio::test]
 async fn sign_in_rebinds_existing_accounts_to_a_new_browser_session() {
-    let state = AppState::with_workspace_repository(
-        Arc::new(SessionStore::new(4)),
-        new_ephemeral_workspace_repository(),
-        Arc::new(StaticReplyProvider {
-            reply: "test reply".to_string(),
-        }),
-    );
-    let shell = app_entrypoint(HeaderMap::new()).await;
-    let headers = browser_cookie_headers(&shell);
-    let body = to_bytes(shell.into_body(), usize::MAX)
-        .await
-        .expect("entrypoint body should be readable");
-    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be utf-8");
-    let csrf_token = extract_meta_content(&body, "acp-csrf-token");
+    let state = auth_test_state();
+    let first_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &first_browser).await;
+    let second_browser = BrowserAuthContext::spawn().await;
 
-    let mut write_headers = headers.clone();
-    write_headers.insert("x-csrf-token", HeaderValue::from_str(&csrf_token).unwrap());
-    let principal =
-        authorize_request(&write_headers, true).expect("browser headers should authorize");
-    let _registered = bootstrap_register(
-        State(state.clone()),
-        Extension(principal),
-        Json(BootstrapRegistrationRequest {
-            username: "admin".to_string(),
-            password: "password123".to_string(),
-        }),
-    )
-    .await
-    .expect("bootstrap registration should succeed");
-
-    let second_shell = app_entrypoint(HeaderMap::new()).await;
-    let second_headers = browser_cookie_headers(&second_shell);
-    let second_body = to_bytes(second_shell.into_body(), usize::MAX)
-        .await
-        .expect("second entrypoint body should be readable");
-    let second_body =
-        String::from_utf8(second_body.to_vec()).expect("second entrypoint body should be utf-8");
-    let second_csrf_token = extract_meta_content(&second_body, "acp-csrf-token");
-    let before = auth_status(State(state.clone()), second_headers.clone())
+    let before = auth_status(State(state.clone()), second_browser.headers.clone())
         .await
         .expect("auth status should load before sign-in");
     assert!(before.0.account.is_none());
     assert!(!before.0.bootstrap_required);
 
-    let mut second_write_headers = second_headers.clone();
-    second_write_headers.insert(
-        "x-csrf-token",
-        HeaderValue::from_str(&second_csrf_token).unwrap(),
-    );
-    let second_principal = authorize_request(&second_write_headers, true)
-        .expect("second browser headers should authorize");
     let signed_in = sign_in(
         State(state.clone()),
-        Extension(second_principal),
+        Extension(second_browser.principal.clone()),
         Json(SignInRequest {
             username: "admin".to_string(),
             password: "password123".to_string(),
@@ -314,7 +274,7 @@ async fn sign_in_rebinds_existing_accounts_to_a_new_browser_session() {
     .expect("sign-in should succeed");
     assert_eq!(signed_in.0.account.username, "admin");
 
-    let after = auth_status(State(state), second_headers)
+    let after = auth_status(State(state), second_browser.headers)
         .await
         .expect("auth status should load after sign-in");
     assert_eq!(after.0.account, Some(signed_in.0.account));
@@ -322,36 +282,10 @@ async fn sign_in_rebinds_existing_accounts_to_a_new_browser_session() {
 
 #[tokio::test]
 async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
-    let state = AppState::with_workspace_repository(
-        Arc::new(SessionStore::new(4)),
-        new_ephemeral_workspace_repository(),
-        Arc::new(StaticReplyProvider {
-            reply: "test reply".to_string(),
-        }),
-    );
-    let shell = app_entrypoint(HeaderMap::new()).await;
-    let headers = browser_cookie_headers(&shell);
-    let body = to_bytes(shell.into_body(), usize::MAX)
-        .await
-        .expect("entrypoint body should be readable");
-    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be utf-8");
-    let csrf_token = extract_meta_content(&body, "acp-csrf-token");
-
-    let mut write_headers = headers.clone();
-    write_headers.insert("x-csrf-token", HeaderValue::from_str(&csrf_token).unwrap());
-    let principal =
-        authorize_request(&write_headers, true).expect("browser headers should authorize");
-    let _registered = bootstrap_register(
-        State(state.clone()),
-        Extension(principal.clone()),
-        Json(BootstrapRegistrationRequest {
-            username: "admin".to_string(),
-            password: "password123".to_string(),
-        }),
-    )
-    .await
-    .expect("bootstrap registration should succeed");
-    let created = create_session(State(state.clone()), Extension(principal.clone()))
+    let state = auth_test_state();
+    let browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &browser).await;
+    let created = create_session(State(state.clone()), Extension(browser.principal.clone()))
         .await
         .expect("session creation should succeed")
         .1
@@ -365,7 +299,7 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
 
     let _signed_in = sign_in(
         State(state.clone()),
-        Extension(principal.clone()),
+        Extension(browser.principal.clone()),
         Json(SignInRequest {
             username: "member".to_string(),
             password: "password123".to_string(),
@@ -376,7 +310,7 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
 
     let snapshot_error = state
         .store
-        .session_snapshot(&principal.id, &created.id)
+        .session_snapshot(&browser.principal.id, &created.id)
         .await
         .expect_err("rebound browser sessions should lose prior live chats");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
@@ -1838,6 +1772,58 @@ fn browser_cookie_headers(response: &Response) -> HeaderMap {
         .join("; ");
     headers.insert(COOKIE, HeaderValue::from_str(&cookie_header).unwrap());
     headers
+}
+
+#[derive(Clone)]
+struct BrowserAuthContext {
+    headers: HeaderMap,
+    principal: AuthenticatedPrincipal,
+}
+
+impl BrowserAuthContext {
+    async fn spawn() -> Self {
+        let shell = app_entrypoint(HeaderMap::new()).await;
+        let headers = browser_cookie_headers(&shell);
+        let body = to_bytes(shell.into_body(), usize::MAX)
+            .await
+            .expect("entrypoint body should be readable");
+        let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be utf-8");
+        let csrf_token = extract_meta_content(&body, "acp-csrf-token");
+
+        Self {
+            principal: authorize_browser_headers(&headers, &csrf_token),
+            headers,
+        }
+    }
+}
+
+fn auth_test_state() -> AppState {
+    AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        new_ephemeral_workspace_repository(),
+        Arc::new(StaticReplyProvider {
+            reply: "test reply".to_string(),
+        }),
+    )
+}
+
+fn authorize_browser_headers(headers: &HeaderMap, csrf_token: &str) -> AuthenticatedPrincipal {
+    let mut write_headers = headers.clone();
+    write_headers.insert("x-csrf-token", HeaderValue::from_str(csrf_token).unwrap());
+    authorize_request(&write_headers, true).expect("browser headers should authorize")
+}
+
+async fn bootstrap_admin_account(state: &AppState, browser: &BrowserAuthContext) {
+    let _registered = bootstrap_register(
+        State(state.clone()),
+        Extension(browser.principal.clone()),
+        Json(BootstrapRegistrationRequest {
+            username: "admin".to_string(),
+            password: "password123".to_string(),
+        }),
+    )
+    .await
+    .expect("bootstrap registration should succeed");
 }
 
 fn extract_meta_content(document: &str, name: &str) -> String {

@@ -301,70 +301,10 @@ impl SqliteWorkspaceRepository {
             .map_err(database_error)?;
         let user = match principal.kind {
             AuthenticatedPrincipalKind::BrowserSession => {
-                authenticate_browser_session_in_transaction(&tx, &principal.id)?.ok_or_else(
-                    || {
-                        WorkspaceStoreError::Unauthorized(
-                            "browser session is not linked to an account".to_string(),
-                        )
-                    },
-                )?
+                materialize_browser_session_user_in_transaction(&tx, &principal.id)?
             }
             AuthenticatedPrincipalKind::Bearer => {
-                let now = Utc::now();
-                let principal_subject = durable_principal_subject(principal);
-                let existing =
-                    load_user_by_principal(&tx, principal.kind.as_str(), &principal_subject)?;
-                if let Some(user) = existing {
-                    if user.deleted_at.is_some() {
-                        return Err(WorkspaceStoreError::Unauthorized(
-                            "account is no longer available".to_string(),
-                        ));
-                    }
-                    tx.execute(
-                        "UPDATE users SET last_seen_at = ?1 WHERE user_id = ?2",
-                        params![timestamp(&now), user.user_id],
-                    )
-                    .map_err(database_error)?;
-                    UserRecord {
-                        last_seen_at: now,
-                        ..user
-                    }
-                } else {
-                    let user = UserRecord {
-                        user_id: format!("u_{}", uuid::Uuid::new_v4().simple()),
-                        principal_kind: principal.kind.as_str().to_string(),
-                        principal_subject,
-                        username: None,
-                        password_hash: None,
-                        is_admin: true,
-                        created_at: now,
-                        last_seen_at: now,
-                        deleted_at: None,
-                    };
-                    tx.execute(
-                        "INSERT INTO users (
-                            user_id,
-                            principal_kind,
-                            principal_subject,
-                            username,
-                            password_hash,
-                            is_admin,
-                            created_at,
-                            last_seen_at,
-                            deleted_at
-                         ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, NULL)",
-                        params![
-                            user.user_id,
-                            user.principal_kind,
-                            user.principal_subject,
-                            1,
-                            timestamp(&user.created_at),
-                            timestamp(&user.last_seen_at)
-                        ],
-                    )
-                    .map_err(database_error)?;
-                    user
-                }
+                materialize_bearer_user_in_transaction(&tx, principal)?
             }
         };
 
@@ -806,13 +746,59 @@ fn load_active_local_account_by_username(
 }
 
 fn load_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+    let identity = load_user_identity_fields(row)?;
+    let credentials = load_user_credential_fields(row)?;
+    let lifecycle = load_user_lifecycle_fields(row)?;
+
     Ok(UserRecord {
+        user_id: identity.user_id,
+        principal_kind: identity.principal_kind,
+        principal_subject: identity.principal_subject,
+        username: credentials.username,
+        password_hash: credentials.password_hash,
+        is_admin: credentials.is_admin,
+        created_at: lifecycle.created_at,
+        last_seen_at: lifecycle.last_seen_at,
+        deleted_at: lifecycle.deleted_at,
+    })
+}
+
+struct UserIdentityFields {
+    user_id: String,
+    principal_kind: String,
+    principal_subject: String,
+}
+
+fn load_user_identity_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserIdentityFields> {
+    Ok(UserIdentityFields {
         user_id: row.get(0)?,
         principal_kind: row.get(1)?,
         principal_subject: row.get(2)?,
+    })
+}
+
+struct UserCredentialFields {
+    username: Option<String>,
+    password_hash: Option<String>,
+    is_admin: bool,
+}
+
+fn load_user_credential_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserCredentialFields> {
+    Ok(UserCredentialFields {
         username: row.get(3)?,
         password_hash: row.get(4)?,
         is_admin: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+struct UserLifecycleFields {
+    created_at: DateTime<Utc>,
+    last_seen_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+fn load_user_lifecycle_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserLifecycleFields> {
+    Ok(UserLifecycleFields {
         created_at: parse_timestamp_for_row(row.get::<_, String>(6)?, 6)?,
         last_seen_at: parse_timestamp_for_row(row.get::<_, String>(7)?, 7)?,
         deleted_at: parse_optional_timestamp_for_row(row.get(8)?, 8)?,
@@ -1135,6 +1121,96 @@ fn authenticate_local_account_in_transaction(
     })
 }
 
+fn materialize_browser_session_user_in_transaction(
+    connection: &Connection,
+    browser_session_id: &str,
+) -> Result<UserRecord, WorkspaceStoreError> {
+    authenticate_browser_session_in_transaction(connection, browser_session_id)?.ok_or_else(|| {
+        WorkspaceStoreError::Unauthorized("browser session is not linked to an account".to_string())
+    })
+}
+
+fn materialize_bearer_user_in_transaction(
+    connection: &Connection,
+    principal: &AuthenticatedPrincipal,
+) -> Result<UserRecord, WorkspaceStoreError> {
+    let now = Utc::now();
+    let principal_subject = durable_principal_subject(principal);
+    let existing = load_user_by_principal(connection, principal.kind.as_str(), &principal_subject)?;
+
+    match existing {
+        Some(user) => touch_existing_bearer_user(connection, user, now),
+        None => insert_bearer_user(connection, principal, principal_subject, now),
+    }
+}
+
+fn touch_existing_bearer_user(
+    connection: &Connection,
+    user: UserRecord,
+    now: DateTime<Utc>,
+) -> Result<UserRecord, WorkspaceStoreError> {
+    if user.deleted_at.is_some() {
+        return Err(WorkspaceStoreError::Unauthorized(
+            "account is no longer available".to_string(),
+        ));
+    }
+
+    connection
+        .execute(
+            "UPDATE users SET last_seen_at = ?1 WHERE user_id = ?2",
+            params![timestamp(&now), user.user_id],
+        )
+        .map_err(database_error)?;
+
+    Ok(UserRecord {
+        last_seen_at: now,
+        ..user
+    })
+}
+
+fn insert_bearer_user(
+    connection: &Connection,
+    principal: &AuthenticatedPrincipal,
+    principal_subject: String,
+    now: DateTime<Utc>,
+) -> Result<UserRecord, WorkspaceStoreError> {
+    let user = UserRecord {
+        user_id: format!("u_{}", uuid::Uuid::new_v4().simple()),
+        principal_kind: principal.kind.as_str().to_string(),
+        principal_subject,
+        username: None,
+        password_hash: None,
+        is_admin: true,
+        created_at: now,
+        last_seen_at: now,
+        deleted_at: None,
+    };
+    connection
+        .execute(
+            "INSERT INTO users (
+                user_id,
+                principal_kind,
+                principal_subject,
+                username,
+                password_hash,
+                is_admin,
+                created_at,
+                last_seen_at,
+                deleted_at
+             ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, NULL)",
+            params![
+                user.user_id,
+                user.principal_kind,
+                user.principal_subject,
+                1,
+                timestamp(&user.created_at),
+                timestamp(&user.last_seen_at)
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(user)
+}
+
 fn insert_local_account(
     connection: &Connection,
     username: &str,
@@ -1240,29 +1316,72 @@ fn update_local_account_in_transaction(
     is_admin: Option<bool>,
 ) -> Result<LocalAccount, WorkspaceStoreError> {
     let target = active_local_account(connection, target_user_id)?;
-    if let Some(make_admin) = is_admin {
-        if target.user_id == current_user_id && !make_admin {
-            return Err(WorkspaceStoreError::Conflict(
-                "signed-in account cannot remove its own admin access".to_string(),
-            ));
-        }
-        if target.is_admin && !make_admin && active_admin_count(connection)? <= 1 {
-            return Err(WorkspaceStoreError::Conflict(
-                "at least one admin account must remain".to_string(),
-            ));
-        }
-    }
-
-    let next_password_hash = match password {
-        Some(password) if !password.trim().is_empty() => Some(hash_password(password)?),
-        Some(_) => {
-            return Err(WorkspaceStoreError::Validation(
-                "password must not be empty".to_string(),
-            ));
-        }
-        None => None,
-    };
+    validate_local_account_admin_change(connection, &target, current_user_id, is_admin)?;
+    let next_password_hash = next_password_hash(password)?;
     let next_is_admin = is_admin.unwrap_or(target.is_admin);
+    persist_local_account_update(
+        connection,
+        target_user_id,
+        next_password_hash,
+        next_is_admin,
+    )?;
+    let updated = active_local_account(connection, target_user_id)?;
+    local_account_from_user(&updated)
+}
+
+fn delete_local_account_in_transaction(
+    connection: &Connection,
+    target_user_id: &str,
+    current_user_id: &str,
+) -> Result<Vec<String>, WorkspaceStoreError> {
+    let target = active_local_account(connection, target_user_id)?;
+    validate_local_account_deletion(connection, &target, current_user_id)?;
+    let browser_session_ids = active_browser_session_ids_for_user(connection, target_user_id)?;
+    let now = Utc::now();
+    soft_delete_browser_sessions(connection, target_user_id, now)?;
+    soft_delete_local_account(connection, target_user_id, now)?;
+    Ok(browser_session_ids)
+}
+
+fn validate_local_account_admin_change(
+    connection: &Connection,
+    target: &UserRecord,
+    current_user_id: &str,
+    is_admin: Option<bool>,
+) -> Result<(), WorkspaceStoreError> {
+    let Some(make_admin) = is_admin else {
+        return Ok(());
+    };
+
+    if target.user_id == current_user_id && !make_admin {
+        return Err(WorkspaceStoreError::Conflict(
+            "signed-in account cannot remove its own admin access".to_string(),
+        ));
+    }
+    if target.is_admin && !make_admin && active_admin_count(connection)? <= 1 {
+        return Err(WorkspaceStoreError::Conflict(
+            "at least one admin account must remain".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn next_password_hash(password: Option<&str>) -> Result<Option<String>, WorkspaceStoreError> {
+    match password {
+        Some(password) if !password.trim().is_empty() => hash_password(password).map(Some),
+        Some(_) => Err(WorkspaceStoreError::Validation(
+            "password must not be empty".to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn persist_local_account_update(
+    connection: &Connection,
+    target_user_id: &str,
+    next_password_hash: Option<String>,
+    next_is_admin: bool,
+) -> Result<(), WorkspaceStoreError> {
     connection
         .execute(
             "UPDATE users
@@ -1276,16 +1395,14 @@ fn update_local_account_in_transaction(
             ],
         )
         .map_err(database_error)?;
-    let updated = active_local_account(connection, target_user_id)?;
-    local_account_from_user(&updated)
+    Ok(())
 }
 
-fn delete_local_account_in_transaction(
+fn validate_local_account_deletion(
     connection: &Connection,
-    target_user_id: &str,
+    target: &UserRecord,
     current_user_id: &str,
-) -> Result<Vec<String>, WorkspaceStoreError> {
-    let target = active_local_account(connection, target_user_id)?;
+) -> Result<(), WorkspaceStoreError> {
     if target.user_id == current_user_id {
         return Err(WorkspaceStoreError::Conflict(
             "signed-in account cannot be deleted".to_string(),
@@ -1296,7 +1413,13 @@ fn delete_local_account_in_transaction(
             "at least one admin account must remain".to_string(),
         ));
     }
+    Ok(())
+}
 
+fn active_browser_session_ids_for_user(
+    connection: &Connection,
+    user_id: &str,
+) -> Result<Vec<String>, WorkspaceStoreError> {
     let mut statement = connection
         .prepare(
             "SELECT browser_session_id
@@ -1304,19 +1427,32 @@ fn delete_local_account_in_transaction(
              WHERE user_id = ?1 AND deleted_at IS NULL",
         )
         .map_err(database_error)?;
-    let browser_session_ids = statement
-        .query_map(params![target_user_id], |row| row.get::<_, String>(0))
+    statement
+        .query_map(params![user_id], |row| row.get::<_, String>(0))
         .map_err(database_error)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(database_error)?;
+        .map_err(database_error)
+}
 
-    let now = Utc::now();
+fn soft_delete_browser_sessions(
+    connection: &Connection,
+    target_user_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), WorkspaceStoreError> {
     connection
         .execute(
             "UPDATE browser_sessions SET deleted_at = ?1 WHERE user_id = ?2 AND deleted_at IS NULL",
             params![timestamp(&now), target_user_id],
         )
         .map_err(database_error)?;
+    Ok(())
+}
+
+fn soft_delete_local_account(
+    connection: &Connection,
+    target_user_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), WorkspaceStoreError> {
     connection
         .execute(
             "UPDATE users
@@ -1332,7 +1468,7 @@ fn delete_local_account_in_transaction(
             ],
         )
         .map_err(database_error)?;
-    Ok(browser_session_ids)
+    Ok(())
 }
 
 fn durable_local_account_subject(username: &str) -> String {
@@ -1883,6 +2019,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleted_bearer_accounts_cannot_be_materialized_again() {
+        let repository = test_repository();
+        let principal = bearer_principal("developer");
+        let user = repository
+            .materialize_user(&principal)
+            .await
+            .expect("initial materialization should succeed");
+
+        repository
+            .open_connection()
+            .expect("opening the test database should succeed")
+            .execute(
+                "UPDATE users SET deleted_at = ?1 WHERE user_id = ?2",
+                params![timestamp(&Utc::now()), user.user_id],
+            )
+            .expect("soft deleting the user should succeed");
+
+        let error = repository
+            .materialize_user(&principal)
+            .await
+            .expect_err("deleted bearer users should not rematerialize");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Unauthorized("account is no longer available".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn initialization_migrates_legacy_users_before_creating_the_username_index() {
         let db_path = std::env::temp_dir()
             .join(format!(
@@ -2090,6 +2255,33 @@ mod tests {
             last_admin_delete,
             WorkspaceStoreError::Conflict(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn updating_an_account_rejects_blank_password_changes() {
+        let repository = test_repository();
+        let admin = repository
+            .bootstrap_local_account(
+                "11111111-1111-4111-8111-111111111111",
+                "admin",
+                "password123",
+            )
+            .await
+            .expect("bootstrap should succeed");
+        let member = repository
+            .create_local_account("member", "password123", false)
+            .await
+            .expect("secondary account creation should succeed");
+
+        let error = repository
+            .update_local_account(&member.user_id, &admin.user_id, Some("   "), None)
+            .await
+            .expect_err("blank password changes should fail");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Validation("password must not be empty".to_string())
+        );
     }
 
     #[tokio::test]

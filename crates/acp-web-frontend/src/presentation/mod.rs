@@ -1,4 +1,5 @@
 mod accounts;
+mod auth_page;
 mod register;
 mod sign_in;
 

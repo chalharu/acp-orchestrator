@@ -262,27 +262,8 @@ impl SqliteWorkspaceRepository {
 
     fn initialize(&self) -> Result<(), WorkspaceStoreError> {
         let mut connection = self.open_connection()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
-        stage_legacy_browser_sessions_table(&tx)?;
-        tx.execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
-            .map_err(database_error)?;
-        ensure_users_column(&tx, "username", "TEXT")?;
-        ensure_users_column(&tx, "password_hash", "TEXT")?;
-        ensure_users_column(&tx, "is_admin", "INTEGER NOT NULL DEFAULT 0")?;
-        ensure_users_column(&tx, "deleted_at", "TEXT")?;
-        promote_legacy_bearer_admins(&tx)?;
-        migrate_legacy_local_accounts(&tx)?;
-        migrate_legacy_browser_sessions(&tx)?;
-        drop_legacy_auth_tables(&tx)?;
-        tx.execute_batch(
-            "DROP INDEX IF EXISTS users_username_idx;
-                 CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx
-                    ON users(username)
-                    WHERE username IS NOT NULL AND deleted_at IS NULL;",
-        )
-        .map_err(database_error)?;
+        let tx = open_immediate_transaction(&mut connection)?;
+        initialize_schema(&tx)?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -958,6 +939,53 @@ fn ensure_users_column(
     Ok(())
 }
 
+fn open_immediate_transaction(
+    connection: &mut Connection,
+) -> Result<rusqlite::Transaction<'_>, WorkspaceStoreError> {
+    connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(database_error)
+}
+
+fn initialize_schema(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    stage_legacy_browser_sessions_table(connection)?;
+    connection
+        .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
+        .map_err(database_error)?;
+    ensure_user_auth_columns(connection)?;
+    migrate_legacy_auth_schema(connection)?;
+    recreate_users_username_index(connection)?;
+    Ok(())
+}
+
+fn ensure_user_auth_columns(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    ensure_users_column(connection, "username", "TEXT")?;
+    ensure_users_column(connection, "password_hash", "TEXT")?;
+    ensure_users_column(connection, "is_admin", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_users_column(connection, "deleted_at", "TEXT")?;
+    Ok(())
+}
+
+fn migrate_legacy_auth_schema(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    promote_legacy_bearer_admins(connection)?;
+    migrate_legacy_local_accounts(connection)?;
+    migrate_legacy_browser_sessions(connection)?;
+    drop_legacy_auth_tables(connection)?;
+    Ok(())
+}
+
+fn recreate_users_username_index(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS users_username_idx;
+                 CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx
+                    ON users(username)
+                    WHERE username IS NOT NULL AND deleted_at IS NULL;",
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
 fn table_exists(connection: &Connection, table_name: &str) -> Result<bool, WorkspaceStoreError> {
     connection
         .query_row(
@@ -1035,31 +1063,46 @@ fn load_legacy_local_accounts(
     }
 
     let has_is_admin = table_has_column(connection, "local_accounts", "is_admin")?;
+    let accounts = query_legacy_local_accounts(connection, has_is_admin)?;
+    Ok(Some((accounts, has_is_admin)))
+}
+
+fn query_legacy_local_accounts(
+    connection: &Connection,
+    has_is_admin: bool,
+) -> Result<Vec<LegacyLocalAccountRecord>, WorkspaceStoreError> {
     let mut statement = connection
-        .prepare(if has_is_admin {
-            "SELECT user_name, password_hash, is_admin, created_at, updated_at
-             FROM local_accounts
-             ORDER BY created_at ASC, user_name ASC"
-        } else {
-            "SELECT user_name, password_hash, 0, created_at, updated_at
-             FROM local_accounts
-             ORDER BY created_at ASC, user_name ASC"
-        })
+        .prepare(legacy_local_accounts_select_sql(has_is_admin))
         .map_err(database_error)?;
-    let accounts = statement
-        .query_map([], |row| {
-            Ok(LegacyLocalAccountRecord {
-                username: row.get(0)?,
-                password_hash: row.get(1)?,
-                is_admin: row.get::<_, i64>(2)? != 0,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })
+    statement
+        .query_map([], legacy_local_account_from_row)
         .map_err(database_error)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(database_error)?;
-    Ok(Some((accounts, has_is_admin)))
+        .map_err(database_error)
+}
+
+fn legacy_local_accounts_select_sql(has_is_admin: bool) -> &'static str {
+    if has_is_admin {
+        "SELECT user_name, password_hash, is_admin, created_at, updated_at
+         FROM local_accounts
+         ORDER BY created_at ASC, user_name ASC"
+    } else {
+        "SELECT user_name, password_hash, 0, created_at, updated_at
+         FROM local_accounts
+         ORDER BY created_at ASC, user_name ASC"
+    }
+}
+
+fn legacy_local_account_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<LegacyLocalAccountRecord, rusqlite::Error> {
+    Ok(LegacyLocalAccountRecord {
+        username: row.get(0)?,
+        password_hash: row.get(1)?,
+        is_admin: row.get::<_, i64>(2)? != 0,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
 }
 
 fn migrate_legacy_local_accounts(connection: &Connection) -> Result<(), WorkspaceStoreError> {
@@ -2898,6 +2941,37 @@ mod tests {
             .expect("materialization should succeed after migration");
 
         assert!(user.is_admin);
+    }
+
+    #[test]
+    fn initialization_rejects_legacy_browser_session_table_name_collisions() {
+        let (db_path, connection) = legacy_user_db_connection(
+            "legacy-browser-session-table-collision",
+            "CREATE TABLE browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
+                CREATE TABLE legacy_browser_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    principal_subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );",
+        );
+        drop(connection);
+
+        let error = SqliteWorkspaceRepository::new(db_path)
+            .expect_err("legacy table name collisions should fail initialization");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Database(
+                "legacy browser sessions table 'legacy_browser_sessions' already exists"
+                    .to_string()
+            )
+        );
     }
 
     #[tokio::test]

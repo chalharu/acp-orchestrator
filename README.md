@@ -101,7 +101,8 @@ verification, use the built-in mock prompts below:
   use the visible **Cancel** button while the turn is pending.
 
 For browser regression coverage, build the frontend bundle first.
-Ensure Chrome and ChromeDriver are available, then run
+Ensure Chrome and ChromeDriver are available.
+Then run:
 `cargo test -p acp-web-backend --test browser_ui_fantoccini -- --ignored --test-threads=1`.
 The suite serves the real `/app/` shell and drives it through Fantoccini.
 Set `ACP_WEB_FRONTEND_DIST`, `ACP_CHROME_BINARY`, or `ACP_CHROMEDRIVER_BIN`

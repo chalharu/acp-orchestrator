@@ -139,59 +139,77 @@ fn AuthLoadingPage(message: &'static str) -> impl IntoView {
 
 #[component]
 fn SignInPage(auth: AuthSignals) -> impl IntoView {
-    let sign_in_disabled = Signal::derive(move || {
-        auth.signing_in.get() || auth.user_name_draft.get().trim().is_empty()
-    });
+    let sign_in_disabled = sign_in_disabled_signal(auth);
 
     view! {
         <main class="app-shell app-shell--home">
             <ErrorBanner message=auth.error />
             <section class="panel auth-panel">
-                <div class="auth-panel__copy">
-                    <p class="auth-panel__eyebrow">"ACP Web"</p>
-                    <h1 class="auth-panel__title">"Sign in"</h1>
-                    <p class="muted">
-                        "Enter a user name to start or resume your browser workspace session."
-                    </p>
-                </div>
-                <form
-                    class="auth-form"
-                    on:submit=move |ev: web_sys::SubmitEvent| {
-                        ev.prevent_default();
-                        submit_sign_in(auth);
-                    }
-                >
-                    <label class="auth-form__label" for="sign-in-user-name">
-                        "User name"
-                    </label>
-                    <input
-                        id="sign-in-user-name"
-                        class="auth-form__input"
-                        type="text"
-                        autofocus=true
-                        maxlength="100"
-                        prop:value=move || auth.user_name_draft.get()
-                        prop:disabled=move || auth.signing_in.get()
-                        on:input=move |ev| {
-                            auth.user_name_draft.set(event_target_value(&ev));
-                        }
-                    />
-                    <div class="auth-form__actions">
-                        <button
-                            type="submit"
-                            class="auth-form__submit"
-                            prop:disabled=move || sign_in_disabled.get()
-                        >
-                            {move || if auth.signing_in.get() {
-                                "Signing in..."
-                            } else {
-                                "Sign in"
-                            }}
-                        </button>
-                    </div>
-                </form>
+                {sign_in_panel_copy()}
+                {sign_in_form(auth, sign_in_disabled)}
             </section>
         </main>
+    }
+}
+
+fn sign_in_disabled_signal(auth: AuthSignals) -> Signal<bool> {
+    Signal::derive(move || auth.signing_in.get() || auth.user_name_draft.get().trim().is_empty())
+}
+
+fn sign_in_panel_copy() -> impl IntoView {
+    view! {
+        <div class="auth-panel__copy">
+            <p class="auth-panel__eyebrow">"ACP Web"</p>
+            <h1 class="auth-panel__title">"Sign in"</h1>
+            <p class="muted">
+                "Enter a user name to start or resume your browser workspace session."
+            </p>
+        </div>
+    }
+}
+
+fn sign_in_form(auth: AuthSignals, sign_in_disabled: Signal<bool>) -> impl IntoView {
+    view! {
+        <form
+            class="auth-form"
+            on:submit=move |ev: web_sys::SubmitEvent| {
+                ev.prevent_default();
+                submit_sign_in(auth);
+            }
+        >
+            <label class="auth-form__label" for="sign-in-user-name">
+                "User name"
+            </label>
+            <input
+                id="sign-in-user-name"
+                class="auth-form__input"
+                type="text"
+                autofocus=true
+                maxlength="100"
+                prop:value=move || auth.user_name_draft.get()
+                prop:disabled=move || auth.signing_in.get()
+                on:input=move |ev| {
+                    auth.user_name_draft.set(event_target_value(&ev));
+                }
+            />
+            <div class="auth-form__actions">
+                <button
+                    type="submit"
+                    class="auth-form__submit"
+                    prop:disabled=move || sign_in_disabled.get()
+                >
+                    {move || sign_in_button_label(auth.signing_in.get())}
+                </button>
+            </div>
+        </form>
+    }
+}
+
+fn sign_in_button_label(signing_in: bool) -> &'static str {
+    if signing_in {
+        "Signing in..."
+    } else {
+        "Sign in"
     }
 }
 
@@ -1701,70 +1719,123 @@ fn dismiss_slash_palette(signals: SessionSignals) {
 }
 
 async fn subscribe_sse(session_id: &str, auth: AuthSignals, signals: SessionSignals) {
-    let (event_source, mut rx) = match api::open_session_event_stream(session_id) {
-        Ok(stream) => stream,
-        Err(message) => {
-            signals.connection_error.set(Some(message));
-            return;
-        }
+    let Ok((event_source, mut rx)) = open_session_stream(session_id, signals) else {
+        return;
     };
-    signals.event_source.set(Some(event_source.clone()));
 
     while let Some(item) = rx.next().await {
-        match item {
-            api::SseItem::Event(event) => {
-                signals.connection_error.set(None);
-                handle_sse_event(event, signals);
-                if matches!(
-                    signals.session_status.get_untracked(),
-                    SessionLifecycle::Closed
-                ) {
-                    event_source.close();
-                    signals.event_source.set(None);
-                    return;
-                }
-            }
-            api::SseItem::Disconnected => {
-                if matches!(
-                    signals.session_status.get_untracked(),
-                    SessionLifecycle::Closed
-                ) {
-                    event_source.close();
-                    signals.event_source.set(None);
-                    return;
-                }
-                let current_auth_session = auth.session.get_untracked();
-                match api::load_auth_session().await {
-                    Ok(response) => match apply_auth_session_response(auth, response) {
-                        Ok(refreshed_auth_session) => {
-                            if should_reset_session_after_auth_refresh(
-                                current_auth_session.as_ref(),
-                                refreshed_auth_session.as_ref(),
-                            ) {
-                                clear_prepared_session_id();
-                                signals.connection_error.set(None);
-                                event_source.close();
-                                signals.event_source.set(None);
-                                return;
-                            }
-                        }
-                        Err(message) => set_auth_error(auth, message),
-                    },
-                    Err(message) => set_auth_error(auth, message),
-                }
-                signals.connection_error.set(Some(
-                    "Event stream disconnected; reconnecting...".to_string(),
-                ));
-            }
-            api::SseItem::ParseError(message) => {
-                signals.connection_error.set(Some(message));
-                event_source.close();
-                signals.event_source.set(None);
-                return;
-            }
+        if handle_sse_item(item, &event_source, auth, signals).await {
+            return;
         }
     }
 
+    close_session_event_source(&event_source, signals);
+}
+
+fn open_session_stream(
+    session_id: &str,
+    signals: SessionSignals,
+) -> Result<
+    (
+        EventSource,
+        futures_channel::mpsc::UnboundedReceiver<api::SseItem>,
+    ),
+    (),
+> {
+    match api::open_session_event_stream(session_id) {
+        Ok((event_source, rx)) => {
+            signals.event_source.set(Some(event_source.clone()));
+            Ok((event_source, rx))
+        }
+        Err(message) => {
+            signals.connection_error.set(Some(message));
+            Err(())
+        }
+    }
+}
+
+async fn handle_sse_item(
+    item: api::SseItem,
+    event_source: &EventSource,
+    auth: AuthSignals,
+    signals: SessionSignals,
+) -> bool {
+    match item {
+        api::SseItem::Event(event) => handle_stream_event(event, event_source, signals),
+        api::SseItem::Disconnected => handle_stream_disconnect(event_source, auth, signals).await,
+        api::SseItem::ParseError(message) => {
+            signals.connection_error.set(Some(message));
+            close_session_event_source(event_source, signals);
+            true
+        }
+    }
+}
+
+fn handle_stream_event(
+    event: StreamEvent,
+    event_source: &EventSource,
+    signals: SessionSignals,
+) -> bool {
+    signals.connection_error.set(None);
+    handle_sse_event(event, signals);
+    stop_stream_if_session_closed(event_source, signals)
+}
+
+async fn handle_stream_disconnect(
+    event_source: &EventSource,
+    auth: AuthSignals,
+    signals: SessionSignals,
+) -> bool {
+    if stop_stream_if_session_closed(event_source, signals) {
+        return true;
+    }
+
+    let current_auth_session = auth.session.get_untracked();
+    let refreshed_auth_session = refresh_auth_session_after_disconnect(auth).await;
+    if should_reset_session_after_auth_refresh(
+        current_auth_session.as_ref(),
+        refreshed_auth_session.as_ref(),
+    ) {
+        clear_prepared_session_id();
+        signals.connection_error.set(None);
+        close_session_event_source(event_source, signals);
+        return true;
+    }
+
+    signals.connection_error.set(Some(
+        "Event stream disconnected; reconnecting...".to_string(),
+    ));
+    false
+}
+
+async fn refresh_auth_session_after_disconnect(auth: AuthSignals) -> Option<AuthSession> {
+    match api::load_auth_session().await {
+        Ok(response) => match apply_auth_session_response(auth, response) {
+            Ok(session) => session,
+            Err(message) => {
+                set_auth_error(auth, message);
+                auth.session.get_untracked()
+            }
+        },
+        Err(message) => {
+            set_auth_error(auth, message);
+            auth.session.get_untracked()
+        }
+    }
+}
+
+fn stop_stream_if_session_closed(event_source: &EventSource, signals: SessionSignals) -> bool {
+    if matches!(
+        signals.session_status.get_untracked(),
+        SessionLifecycle::Closed
+    ) {
+        close_session_event_source(event_source, signals);
+        return true;
+    }
+    false
+}
+
+fn close_session_event_source(event_source: &EventSource, signals: SessionSignals) {
     event_source.close();
     signals.event_source.set(None);
 }

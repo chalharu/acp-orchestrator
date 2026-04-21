@@ -222,78 +222,100 @@ async fn auth_session_route_reports_unauthenticated_browser_state() {
 }
 
 #[tokio::test]
+async fn optional_authenticated_principal_prefers_bearer_auth() {
+    let principal = optional_authenticated_principal(&test_state(), &bearer_headers("alice"))
+        .await
+        .expect("optional bearer auth should succeed");
+
+    assert_eq!(
+        principal.map(|principal| principal.subject),
+        Some("alice".to_string())
+    );
+}
+
+#[tokio::test]
 async fn browser_sign_in_authenticates_and_sign_out_revokes_session_routes() {
     let router = test_router();
 
-    let unauthorized = router
-        .clone()
-        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        json_response::<ErrorResponse>(unauthorized).await.error,
-        "sign-in required"
-    );
+    assert_browser_session_requires_sign_in(router.clone()).await;
+    sign_in_browser_session_for_test(router.clone(), "alice").await;
+    assert_browser_auth_session(router.clone(), Some("alice")).await;
+    assert_browser_session_creation(router.clone(), StatusCode::CREATED).await;
+    sign_out_browser_session_for_test(router.clone()).await;
+    assert_browser_session_requires_sign_in(router).await;
+}
 
-    let sign_in = router
-        .clone()
-        .oneshot(browser_sign_in_request("alice"))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(sign_in.status(), StatusCode::OK);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(sign_in).await,
-        AuthSessionResponse {
-            authenticated: true,
-            user_name: Some("alice".to_string()),
-        }
-    );
+#[test]
+fn sign_in_user_names_must_not_be_empty() {
+    assert!(matches!(
+        normalize_sign_in_user_name(" \t "),
+        Err(AppError::BadRequest(message)) if message == "user name must not be empty"
+    ));
+}
 
-    let signed_in = router
-        .clone()
-        .oneshot(browser_read_request("/api/v1/auth/session"))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(signed_in.status(), StatusCode::OK);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(signed_in).await,
-        AuthSessionResponse {
-            authenticated: true,
-            user_name: Some("alice".to_string()),
-        }
-    );
+#[test]
+fn sign_in_user_names_must_not_be_too_long_or_contain_control_characters() {
+    let too_long = "a".repeat(101);
+    assert!(matches!(
+        normalize_sign_in_user_name(&too_long),
+        Err(AppError::BadRequest(message)) if message == "user name must not exceed 100 characters"
+    ));
+    assert!(matches!(
+        normalize_sign_in_user_name("alice\tbob"),
+        Err(AppError::BadRequest(message)) if message == "user name must not contain control characters"
+    ));
+}
 
-    let created = router
-        .clone()
-        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
-        .await
-        .expect("router calls should complete");
-    assert_eq!(created.status(), StatusCode::CREATED);
+#[tokio::test]
+async fn browser_session_revocation_returns_when_revocation_is_inactive() {
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    timeout(
+        Duration::from_millis(50),
+        browser_session_revocation(Some(rx)),
+    )
+    .await
+    .expect("inactive revocation handles should return immediately");
+}
 
-    let signed_out = router
-        .clone()
-        .oneshot(browser_sign_out_request())
-        .await
-        .expect("router calls should complete");
-    assert_eq!(signed_out.status(), StatusCode::OK);
-    assert_eq!(
-        json_response::<AuthSessionResponse>(signed_out).await,
-        AuthSessionResponse {
-            authenticated: false,
-            user_name: None,
-        }
-    );
+#[tokio::test]
+async fn browser_session_revocation_returns_when_the_channel_closes_or_is_revoked() {
+    let (closed_tx, closed_rx) = tokio::sync::watch::channel(true);
+    drop(closed_tx);
+    timeout(
+        Duration::from_millis(50),
+        browser_session_revocation(Some(closed_rx)),
+    )
+    .await
+    .expect("closed revocation channels should return");
 
-    let revoked = router
-        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
+    let (revoked_tx, revoked_rx) = tokio::sync::watch::channel(true);
+    let revocation = tokio::spawn(browser_session_revocation(Some(revoked_rx)));
+    tokio::task::yield_now().await;
+    revoked_tx
+        .send(false)
+        .expect("revocation updates should notify subscribers");
+    timeout(Duration::from_millis(50), revocation)
         .await
-        .expect("router calls should complete");
-    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        json_response::<ErrorResponse>(revoked).await.error,
-        "sign-in required"
-    );
+        .expect("revoked channels should finish promptly")
+        .expect("revocation task should complete");
+}
+
+#[tokio::test]
+async fn browser_session_revocation_ignores_updates_until_the_session_is_revoked() {
+    let (revoked_tx, revoked_rx) = tokio::sync::watch::channel(true);
+    let revocation = tokio::spawn(browser_session_revocation(Some(revoked_rx)));
+    tokio::task::yield_now().await;
+    revoked_tx
+        .send(true)
+        .expect("non-revoking updates should still wake subscribers");
+    tokio::task::yield_now().await;
+    revoked_tx
+        .send(false)
+        .expect("revocation updates should notify subscribers");
+    timeout(Duration::from_millis(50), revocation)
+        .await
+        .expect("revoked channels should finish promptly")
+        .expect("revocation task should complete");
 }
 
 #[tokio::test]
@@ -1671,6 +1693,71 @@ fn browser_sign_out_request() -> Request<Body> {
         .header(CSRF_HEADER_NAME, TEST_BROWSER_CSRF_TOKEN)
         .body(Body::empty())
         .expect("request building should succeed")
+}
+
+async fn assert_browser_session_requires_sign_in(router: Router) {
+    let unauthorized = router
+        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_response::<ErrorResponse>(unauthorized).await.error,
+        "sign-in required"
+    );
+}
+
+async fn sign_in_browser_session_for_test(router: Router, user_name: &str) {
+    let sign_in = router
+        .oneshot(browser_sign_in_request(user_name))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(sign_in.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(sign_in).await,
+        AuthSessionResponse {
+            authenticated: true,
+            user_name: Some(user_name.to_string()),
+        }
+    );
+}
+
+async fn assert_browser_auth_session(router: Router, expected_user_name: Option<&str>) {
+    let auth_session = router
+        .oneshot(browser_read_request("/api/v1/auth/session"))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(auth_session.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(auth_session).await,
+        AuthSessionResponse {
+            authenticated: expected_user_name.is_some(),
+            user_name: expected_user_name.map(str::to_string),
+        }
+    );
+}
+
+async fn assert_browser_session_creation(router: Router, expected_status: StatusCode) {
+    let created = router
+        .oneshot(browser_write_request("/api/v1/sessions", Body::empty()))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(created.status(), expected_status);
+}
+
+async fn sign_out_browser_session_for_test(router: Router) {
+    let signed_out = router
+        .oneshot(browser_sign_out_request())
+        .await
+        .expect("router calls should complete");
+    assert_eq!(signed_out.status(), StatusCode::OK);
+    assert_eq!(
+        json_response::<AuthSessionResponse>(signed_out).await,
+        AuthSessionResponse {
+            authenticated: false,
+            user_name: None,
+        }
+    );
 }
 
 fn bearer_principal(owner: &str) -> Extension<AuthenticatedPrincipal> {

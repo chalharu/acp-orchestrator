@@ -1426,22 +1426,20 @@ fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: P
 }
 
 async fn browser_session_revocation(revocation: Option<watch::Receiver<bool>>) {
-    let Some(mut revocation) = revocation else {
-        std::future::pending::<()>().await;
-        return;
+    let mut revocation = match revocation {
+        Some(revocation) => revocation,
+        None => match std::future::pending::<std::convert::Infallible>().await {},
     };
 
     if !*revocation.borrow() {
         return;
     }
 
-    loop {
-        if revocation.changed().await.is_err() {
-            return;
+    while revocation.changed().await.is_ok() {
+        if *revocation.borrow() {
+            continue;
         }
-        if !*revocation.borrow() {
-            return;
-        }
+        return;
     }
 }
 

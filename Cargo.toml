@@ -24,6 +24,7 @@ license = "AGPL-3.0-only"
 acp-app-support = { path = "crates/acp-app-support", version = "=0.1.0" }
 acp-contracts = { path = "crates/acp-contracts", version = "=0.1.0" }
 agent-client-protocol = "=0.10.4"
+argon2 = "=0.5.3"
 async-trait = "=0.1.89"
 axum = { version = "=0.8.9", features = ["macros"] }
 chrono = { version = "=0.4.44", features = ["serde"] }

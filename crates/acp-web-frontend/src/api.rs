@@ -8,7 +8,7 @@ use acp_contracts::{
     AuthSessionResponse, CancelTurnResponse, CreateSessionResponse, DeleteSessionResponse,
     ErrorResponse, PermissionDecision, PromptRequest, RenameSessionRequest, RenameSessionResponse,
     ResolvePermissionRequest, SessionListItem, SessionListResponse, SessionResponse,
-    SessionSnapshot, SignInRequest, StreamEvent,
+    SessionSnapshot, SignInRequest, SignUpRequest, StreamEvent,
 };
 use futures_channel::mpsc;
 use gloo_net::http::Request;
@@ -81,15 +81,31 @@ pub async fn load_auth_session() -> Result<AuthSessionResponse, String> {
     response.json().await.map_err(|error| error.to_string())
 }
 
-pub async fn sign_in(user_name: &str) -> Result<AuthSessionResponse, String> {
+pub async fn sign_in(user_name: &str, password: &str) -> Result<AuthSessionResponse, String> {
     let body = serde_json::to_string(&SignInRequest {
         user_name: user_name.to_string(),
+        password: password.to_string(),
     })
     .map_err(|error| error.to_string())?;
     let response = post_json_with_csrf("/api/v1/auth/session", body).await?;
 
     if !response.ok() {
         return Err(response_error_message(response, "Sign in failed").await);
+    }
+
+    response.json().await.map_err(|error| error.to_string())
+}
+
+pub async fn sign_up(user_name: &str, password: &str) -> Result<AuthSessionResponse, String> {
+    let body = serde_json::to_string(&SignUpRequest {
+        user_name: user_name.to_string(),
+        password: password.to_string(),
+    })
+    .map_err(|error| error.to_string())?;
+    let response = post_json_with_csrf("/api/v1/auth/register", body).await?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "Sign up failed").await);
     }
 
     response.json().await.map_err(|error| error.to_string())

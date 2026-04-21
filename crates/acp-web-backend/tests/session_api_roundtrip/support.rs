@@ -4,7 +4,7 @@ use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_c
 use acp_contracts::{
     AuthSessionResponse, CancelTurnResponse, CreateSessionResponse, PromptRequest,
     RenameSessionRequest, RenameSessionResponse, ResolvePermissionRequest,
-    ResolvePermissionResponse, SessionListResponse, SignInRequest,
+    ResolvePermissionResponse, SessionListResponse, SignInRequest, SignUpRequest,
 };
 pub(super) use acp_contracts::{MessageRole, PermissionDecision, StreamEvent, StreamEventPayload};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
@@ -82,12 +82,14 @@ pub(super) async fn sign_in_browser_session(
     backend_url: &str,
     csrf_token: &str,
     user_name: &str,
+    password: &str,
 ) -> Result<AuthSessionResponse> {
     client
         .post(format!("{backend_url}/api/v1/auth/session"))
         .header("x-csrf-token", csrf_token)
         .json(&SignInRequest {
             user_name: user_name.to_string(),
+            password: password.to_string(),
         })
         .send()
         .await
@@ -97,6 +99,30 @@ pub(super) async fn sign_in_browser_session(
         .json()
         .await
         .context("decoding the browser sign-in response")
+}
+
+pub(super) async fn register_browser_account(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+    user_name: &str,
+    password: &str,
+) -> Result<AuthSessionResponse> {
+    client
+        .post(format!("{backend_url}/api/v1/auth/register"))
+        .header("x-csrf-token", csrf_token)
+        .json(&SignUpRequest {
+            user_name: user_name.to_string(),
+            password: password.to_string(),
+        })
+        .send()
+        .await
+        .context("registering a cookie-authenticated browser account")?
+        .error_for_status()
+        .context("cookie-authenticated browser sign-up returned an error")?
+        .json()
+        .await
+        .context("decoding the browser sign-up response")
 }
 
 pub(super) async fn sign_out_browser_session(

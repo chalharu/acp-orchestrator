@@ -65,9 +65,16 @@ pub struct AuthSessionResponse {
     pub user_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignInRequest {
     pub user_name: String,
+    pub password: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignUpRequest {
+    pub user_name: String,
+    pub password: String,
 }
 
 pub type CreateSessionResponse = SessionResponse;

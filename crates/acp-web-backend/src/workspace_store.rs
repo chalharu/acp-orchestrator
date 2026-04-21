@@ -7,6 +7,10 @@ use std::{
 };
 
 use acp_contracts::{SessionSnapshot, SessionStatus};
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -17,6 +21,7 @@ use crate::workspace_repository::WorkspaceRepository;
 const BOOTSTRAP_WORKSPACE_KIND: &str = "legacy-session-routes";
 const BOOTSTRAP_WORKSPACE_NAME: &str = "Default workspace";
 const ACTIVE_WORKSPACE_STATUS: &str = "active";
+const MISSING_USER_PASSWORD_BURN_SALT: &[u8] = b"acp-dummy-salt!";
 const WORKSPACE_STORE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
@@ -25,6 +30,13 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     UNIQUE(principal_kind, principal_subject)
+);
+
+CREATE TABLE IF NOT EXISTS local_accounts (
+    user_name TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS browser_sessions (
@@ -199,12 +211,13 @@ pub struct SessionMetadataRecord {
 pub enum WorkspaceStoreError {
     Io(String),
     Database(String),
+    Conflict(String),
 }
 
 impl WorkspaceStoreError {
     pub fn message(&self) -> &str {
         match self {
-            Self::Io(message) | Self::Database(message) => message,
+            Self::Io(message) | Self::Database(message) | Self::Conflict(message) => message,
         }
     }
 }
@@ -302,6 +315,60 @@ impl SqliteWorkspaceRepository {
         Ok(user)
     }
 
+    fn register_local_user_sync(
+        &self,
+        user_name: &str,
+        password: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let password_hash = hash_password(password)?;
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let now = Utc::now();
+        insert_local_account(&tx, user_name, &password_hash, &now)?;
+        tx.commit().map_err(database_error)?;
+        Ok(())
+    }
+
+    fn register_local_user_and_rotate_browser_session_sync(
+        &self,
+        previous_session_token: &str,
+        next_session_token: &str,
+        user_name: &str,
+        password: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let password_hash = hash_password(password)?;
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let now = Utc::now();
+        insert_local_account(&tx, user_name, &password_hash, &now)?;
+        rotate_browser_session_binding(
+            &tx,
+            previous_session_token,
+            next_session_token,
+            user_name,
+            &now,
+        )?;
+        tx.commit().map_err(database_error)?;
+        Ok(())
+    }
+
+    fn authenticate_local_user_sync(
+        &self,
+        user_name: &str,
+        password: &str,
+    ) -> Result<bool, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        let Some(password_hash) = load_local_account_password_hash(&connection, user_name)? else {
+            burn_password_hash_cost(password)?;
+            return Ok(false);
+        };
+        verify_password_hash(password, &password_hash)
+    }
+
     fn sign_in_browser_session_sync(
         &self,
         session_token: &str,
@@ -312,15 +379,29 @@ impl SqliteWorkspaceRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let now = Utc::now();
-        tx.execute(
-            "INSERT INTO browser_sessions (session_token, principal_subject, created_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(session_token) DO UPDATE SET
-                 principal_subject = excluded.principal_subject,
-                 last_seen_at = excluded.last_seen_at",
-            params![session_token, user_name, timestamp(&now), timestamp(&now)],
-        )
-        .map_err(database_error)?;
+        upsert_browser_session_binding(&tx, session_token, user_name, &now)?;
+        tx.commit().map_err(database_error)?;
+        Ok(())
+    }
+
+    fn rotate_browser_session_sync(
+        &self,
+        previous_session_token: &str,
+        next_session_token: &str,
+        user_name: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let now = Utc::now();
+        rotate_browser_session_binding(
+            &tx,
+            previous_session_token,
+            next_session_token,
+            user_name,
+            &now,
+        )?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -431,6 +512,81 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         tokio::task::spawn_blocking(move || repository.materialize_user_sync(&principal))
             .await
             .map_err(join_error)?
+    }
+
+    async fn register_local_user(
+        &self,
+        user_name: &str,
+        password: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let user_name = user_name.to_string();
+        let password = password.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.register_local_user_sync(&user_name, &password)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn authenticate_local_user(
+        &self,
+        user_name: &str,
+        password: &str,
+    ) -> Result<bool, WorkspaceStoreError> {
+        let repository = self.clone();
+        let user_name = user_name.to_string();
+        let password = password.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.authenticate_local_user_sync(&user_name, &password)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn register_local_user_and_rotate_browser_session(
+        &self,
+        previous_session_token: &str,
+        next_session_token: &str,
+        user_name: &str,
+        password: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let previous_session_token = previous_session_token.to_string();
+        let next_session_token = next_session_token.to_string();
+        let user_name = user_name.to_string();
+        let password = password.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.register_local_user_and_rotate_browser_session_sync(
+                &previous_session_token,
+                &next_session_token,
+                &user_name,
+                &password,
+            )
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn rotate_browser_session(
+        &self,
+        previous_session_token: &str,
+        next_session_token: &str,
+        user_name: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let previous_session_token = previous_session_token.to_string();
+        let next_session_token = next_session_token.to_string();
+        let user_name = user_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.rotate_browser_session_sync(
+                &previous_session_token,
+                &next_session_token,
+                &user_name,
+            )
+        })
+        .await
+        .map_err(join_error)?
     }
 
     async fn sign_in_browser_session(
@@ -590,6 +746,20 @@ fn load_browser_session_user_name(
         .query_row(
             "SELECT principal_subject FROM browser_sessions WHERE session_token = ?1",
             params![session_token],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)
+}
+
+fn load_local_account_password_hash(
+    connection: &Connection,
+    user_name: &str,
+) -> Result<Option<String>, WorkspaceStoreError> {
+    connection
+        .query_row(
+            "SELECT password_hash FROM local_accounts WHERE user_name = ?1",
+            params![user_name],
             |row| row.get(0),
         )
         .optional()
@@ -799,8 +969,92 @@ fn database_error(error: impl fmt::Display) -> WorkspaceStoreError {
     WorkspaceStoreError::Database(error.to_string())
 }
 
+fn insert_local_account(
+    tx: &rusqlite::Transaction<'_>,
+    user_name: &str,
+    password_hash: &str,
+    now: &DateTime<Utc>,
+) -> Result<(), WorkspaceStoreError> {
+    tx.execute(
+        "INSERT INTO local_accounts (user_name, password_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![user_name, password_hash, timestamp(now), timestamp(now)],
+    )
+    .map_err(local_account_insert_error)?;
+    Ok(())
+}
+
+fn upsert_browser_session_binding(
+    tx: &rusqlite::Transaction<'_>,
+    session_token: &str,
+    user_name: &str,
+    now: &DateTime<Utc>,
+) -> Result<(), WorkspaceStoreError> {
+    tx.execute(
+        "INSERT INTO browser_sessions (session_token, principal_subject, created_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_token) DO UPDATE SET
+             principal_subject = excluded.principal_subject,
+             last_seen_at = excluded.last_seen_at",
+        params![session_token, user_name, timestamp(now), timestamp(now)],
+    )
+    .map_err(database_error)?;
+    Ok(())
+}
+
+fn rotate_browser_session_binding(
+    tx: &rusqlite::Transaction<'_>,
+    previous_session_token: &str,
+    next_session_token: &str,
+    user_name: &str,
+    now: &DateTime<Utc>,
+) -> Result<(), WorkspaceStoreError> {
+    if previous_session_token != next_session_token {
+        tx.execute(
+            "DELETE FROM browser_sessions WHERE session_token = ?1",
+            params![previous_session_token],
+        )
+        .map_err(database_error)?;
+    }
+    upsert_browser_session_binding(tx, next_session_token, user_name, now)
+}
+
+fn local_account_insert_error(error: rusqlite::Error) -> WorkspaceStoreError {
+    match error {
+        rusqlite::Error::SqliteFailure(sqlite_error, _)
+            if sqlite_error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            WorkspaceStoreError::Conflict("user name already exists".to_string())
+        }
+        other => database_error(other),
+    }
+}
+
 fn join_error(error: tokio::task::JoinError) -> WorkspaceStoreError {
     WorkspaceStoreError::Database(format!("blocking workspace task failed: {error}"))
+}
+
+fn hash_password(password: &str) -> Result<String, WorkspaceStoreError> {
+    let salt = SaltString::encode_b64(uuid::Uuid::new_v4().as_bytes()).map_err(database_error)?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(database_error)
+}
+
+fn verify_password_hash(password: &str, password_hash: &str) -> Result<bool, WorkspaceStoreError> {
+    let parsed_hash = PasswordHash::new(password_hash).map_err(database_error)?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
+}
+
+fn burn_password_hash_cost(password: &str) -> Result<(), WorkspaceStoreError> {
+    let salt = SaltString::encode_b64(MISSING_USER_PASSWORD_BURN_SALT).map_err(database_error)?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|_| ())
+        .map_err(database_error)
 }
 
 impl AuthenticatedPrincipalKind {
@@ -1142,6 +1396,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_session_rotation_moves_authentication_to_the_new_token() {
+        let repository = test_repository();
+        let previous_session_token = "11111111-1111-4111-8111-111111111111";
+        let next_session_token = "33333333-3333-4333-8333-333333333333";
+
+        repository
+            .sign_in_browser_session(previous_session_token, "alice")
+            .await
+            .expect("initial sign-in should succeed");
+        repository
+            .rotate_browser_session(previous_session_token, next_session_token, "alice")
+            .await
+            .expect("rotation should succeed");
+
+        assert_eq!(
+            repository
+                .browser_session_user_name(previous_session_token)
+                .await
+                .expect("previous browser session lookup should succeed"),
+            None
+        );
+        assert_eq!(
+            repository
+                .browser_session_user_name(next_session_token)
+                .await
+                .expect("next browser session lookup should succeed"),
+            Some("alice".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_accounts_register_and_authenticate_with_passwords() {
+        let repository = test_repository();
+
+        repository
+            .register_local_user("alice", "correct horse battery staple")
+            .await
+            .expect("registration should succeed");
+
+        assert!(
+            repository
+                .authenticate_local_user("alice", "correct horse battery staple")
+                .await
+                .expect("authentication should succeed")
+        );
+        assert!(
+            !repository
+                .authenticate_local_user("alice", "wrong-password")
+                .await
+                .expect("authentication should succeed")
+        );
+        assert!(
+            !repository
+                .authenticate_local_user("missing", "correct horse battery staple")
+                .await
+                .expect("authentication should succeed")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_accounts_reject_duplicate_user_names() {
+        let repository = test_repository();
+
+        repository
+            .register_local_user("alice", "correct horse battery staple")
+            .await
+            .expect("first registration should succeed");
+        let error = repository
+            .register_local_user("alice", "another password")
+            .await
+            .expect_err("duplicate user names should be rejected");
+        assert!(matches!(
+            error,
+            WorkspaceStoreError::Conflict(message) if message == "user name already exists"
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_accounts_can_register_and_rotate_a_browser_session_atomically() {
+        let repository = test_repository();
+        let previous_session_token = "11111111-1111-4111-8111-111111111111";
+        let next_session_token = "33333333-3333-4333-8333-333333333333";
+
+        repository
+            .register_local_user_and_rotate_browser_session(
+                previous_session_token,
+                next_session_token,
+                "alice",
+                "correct horse battery staple",
+            )
+            .await
+            .expect("registration and rotation should succeed");
+
+        assert!(
+            repository
+                .authenticate_local_user("alice", "correct horse battery staple")
+                .await
+                .expect("authentication should succeed")
+        );
+        assert_eq!(
+            repository
+                .browser_session_user_name(previous_session_token)
+                .await
+                .expect("previous browser session lookup should succeed"),
+            None
+        );
+        assert_eq!(
+            repository
+                .browser_session_user_name(next_session_token)
+                .await
+                .expect("next browser session lookup should succeed"),
+            Some("alice".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn session_metadata_can_be_saved_and_loaded_durably() {
         let repository = test_repository();
         let user = repository
@@ -1363,9 +1733,27 @@ mod tests {
     async fn workspace_store_error_helpers_preserve_context() {
         let display_error = WorkspaceStoreError::Database("db unavailable".to_string());
         assert_eq!(display_error.to_string(), "db unavailable");
+        let conflict_error = WorkspaceStoreError::Conflict("already exists".to_string());
+        assert_eq!(conflict_error.to_string(), "already exists");
 
         let mapped_error = database_error("write failed");
         assert_eq!(mapped_error.to_string(), "write failed");
+        let insert_conflict = local_account_insert_error(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("duplicate".to_string()),
+        ));
+        assert!(matches!(
+            insert_conflict,
+            WorkspaceStoreError::Conflict(message) if message == "user name already exists"
+        ));
+        let insert_failure = local_account_insert_error(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("busy".to_string()),
+        ));
+        assert!(matches!(
+            insert_failure,
+            WorkspaceStoreError::Database(message) if message.contains("busy")
+        ));
 
         let parse_error = parse_timestamp("not-a-timestamp".to_string())
             .expect_err("invalid timestamps should fail");

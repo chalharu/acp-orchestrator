@@ -6,7 +6,9 @@ use acp_mock::MANUAL_PERMISSION_TRIGGER;
 use futures_util::StreamExt;
 
 const BROWSER_TEST_USER_NAME: &str = "browser-test";
+const BROWSER_TEST_PASSWORD: &str = "browser-test-password";
 const BROWSER_SWITCHED_USER_NAME: &str = "browser-test-switched";
+const BROWSER_SWITCHED_PASSWORD: &str = "browser-test-switched-password";
 
 #[tokio::test]
 async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Result<()> {
@@ -103,6 +105,14 @@ async fn browser_sign_out_closes_open_event_streams() -> Result<()> {
 async fn browser_re_sign_in_closes_stale_open_event_streams() -> Result<()> {
     let stack = spawn_browser_test_stack().await?;
     let browser = build_browser_client()?;
+    let switched_browser = build_browser_client()?;
+    register_additional_browser_account(
+        &switched_browser,
+        &stack.backend_url,
+        BROWSER_SWITCHED_USER_NAME,
+        BROWSER_SWITCHED_PASSWORD,
+    )
+    .await?;
     let (csrf_token, _session_id, mut events) =
         bootstrap_browser_session(&browser, &stack.backend_url).await?;
 
@@ -112,6 +122,7 @@ async fn browser_re_sign_in_closes_stale_open_event_streams() -> Result<()> {
             &stack.backend_url,
             &csrf_token,
             BROWSER_SWITCHED_USER_NAME,
+            BROWSER_SWITCHED_PASSWORD,
         )
         .await?,
         BROWSER_SWITCHED_USER_NAME,
@@ -141,7 +152,14 @@ async fn bootstrap_browser_session(
 
     let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
     assert_browser_sign_in(
-        sign_in_browser_session(browser, backend_url, &csrf_token, BROWSER_TEST_USER_NAME).await?,
+        register_browser_account(
+            browser,
+            backend_url,
+            &csrf_token,
+            BROWSER_TEST_USER_NAME,
+            BROWSER_TEST_PASSWORD,
+        )
+        .await?,
         BROWSER_TEST_USER_NAME,
     );
     let created: CreateSessionResponse =
@@ -150,6 +168,21 @@ async fn bootstrap_browser_session(
     let mut events = open_cookie_events(browser, backend_url, &session_id).await?;
     assert_snapshot_for_session(expect_next_event(&mut events).await?, &session_id);
     Ok((csrf_token, session_id, events))
+}
+
+async fn register_additional_browser_account(
+    browser: &Client,
+    backend_url: &str,
+    user_name: &str,
+    password: &str,
+) -> Result<()> {
+    let app_document = load_browser_app_shell(browser, backend_url).await?;
+    let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
+    assert_browser_sign_in(
+        register_browser_account(browser, backend_url, &csrf_token, user_name, password).await?,
+        user_name,
+    );
+    Ok(())
 }
 
 fn assert_browser_shell(app_document: &str) {

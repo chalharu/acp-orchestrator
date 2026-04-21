@@ -21,7 +21,7 @@ use acp_contracts::{
     DeleteSessionResponse, ErrorResponse, HealthResponse, PromptRequest, PromptResponse,
     RenameSessionRequest, RenameSessionResponse, ResolvePermissionRequest,
     ResolvePermissionResponse, SessionHistoryResponse, SessionListResponse, SessionResponse,
-    SessionSnapshot, SignInRequest, SlashCompletionsResponse, StreamEvent,
+    SessionSnapshot, SignInRequest, SignUpRequest, SlashCompletionsResponse, StreamEvent,
 };
 use axum::{
     Json, Router,
@@ -264,6 +264,8 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/app", get(redirect_to_app))
         .route("/app/", get(app_entrypoint))
+        .route("/app/register", get(app_register_entrypoint))
+        .route("/app/register/", get(app_register_entrypoint))
         .route("/app/assets/app.css", get(app_stylesheet))
         .route("/app/assets/wasm-init.js", get(wasm_init_script))
         .route(FRONTEND_JAVASCRIPT_ASSET_PATH, get(wasm_glue_javascript))
@@ -280,6 +282,7 @@ pub fn app(state: AppState) -> Router {
                 .post(sign_in_browser_session)
                 .delete(sign_out_browser_session),
         )
+        .route("/api/v1/auth/register", post(sign_up_browser_session))
         .merge(read_api_routes(read_auth_state))
         .merge(write_api_routes(write_auth_state))
         .with_state(state)
@@ -706,6 +709,49 @@ fn normalize_sign_in_user_name(user_name: &str) -> Result<String, AppError> {
     Ok(user_name.to_string())
 }
 
+fn normalize_sign_in_password(password: &str) -> Result<String, AppError> {
+    if password.is_empty() {
+        return Err(AppError::BadRequest(
+            "password must not be empty".to_string(),
+        ));
+    }
+    if password.chars().count() > 200 {
+        return Err(AppError::BadRequest(
+            "password must not exceed 200 characters".to_string(),
+        ));
+    }
+    Ok(password.to_string())
+}
+
+fn normalize_registration_password(password: &str) -> Result<String, AppError> {
+    let password = normalize_sign_in_password(password)?;
+    if password.chars().count() < 8 {
+        return Err(AppError::BadRequest(
+            "password must be at least 8 characters".to_string(),
+        ));
+    }
+    Ok(password)
+}
+
+async fn bind_browser_session_to_user(
+    state: &AppState,
+    session_token: &str,
+    user_name: String,
+) -> Result<Response, AppError> {
+    let next_session_token = Uuid::new_v4().to_string();
+    state
+        .workspace_repository
+        .rotate_browser_session(session_token, &next_session_token, &user_name)
+        .await?;
+    state.browser_session_registry.revoke(session_token);
+    let _ = state.browser_session_registry.activate(&next_session_token);
+    let principal = browser_user_principal(user_name);
+    Ok(auth_session_response_with_rotated_session_cookie(
+        Some(&principal),
+        &next_session_token,
+    ))
+}
+
 fn spawn_connection_task(
     connections: &mut JoinSet<()>,
     acceptor: TlsAcceptor,
@@ -796,19 +842,58 @@ async fn sign_in_browser_session(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<SignInRequest>,
-) -> Result<Json<AuthSessionResponse>, AppError> {
+) -> Result<Response, AppError> {
     validate_csrf(&headers).map_err(AppError::from)?;
     let session_token = browser_session_token(&headers).map_err(AppError::from)?;
     let user_name = normalize_sign_in_user_name(&request.user_name)?;
-    state.browser_session_registry.revoke(&session_token);
-    state
+    let password = normalize_sign_in_password(&request.password)?;
+    let authenticated = state
         .workspace_repository
-        .sign_in_browser_session(&session_token, &user_name)
+        .authenticate_local_user(&user_name, &password)
         .await?;
-    let _ = state.browser_session_registry.activate(&session_token);
-    let principal = browser_user_principal(user_name);
+    if !authenticated {
+        return Err(AppError::Unauthorized(
+            "invalid user name or password".to_string(),
+        ));
+    }
 
-    Ok(Json(auth_session_response(Some(&principal))))
+    bind_browser_session_to_user(&state, &session_token, user_name).await
+}
+
+async fn sign_up_browser_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SignUpRequest>,
+) -> Result<Response, AppError> {
+    validate_csrf(&headers).map_err(AppError::from)?;
+    let session_token = browser_session_token(&headers).map_err(AppError::from)?;
+    let user_name = normalize_sign_in_user_name(&request.user_name)?;
+    let password = normalize_registration_password(&request.password)?;
+    let next_session_token = Uuid::new_v4().to_string();
+    match state
+        .workspace_repository
+        .register_local_user_and_rotate_browser_session(
+            &session_token,
+            &next_session_token,
+            &user_name,
+            &password,
+        )
+        .await
+    {
+        Ok(()) => {}
+        Err(WorkspaceStoreError::Conflict(_)) => {
+            return Err(AppError::BadRequest("unable to create account".to_string()));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    state.browser_session_registry.revoke(&session_token);
+    let _ = state.browser_session_registry.activate(&next_session_token);
+    let principal = browser_user_principal(user_name);
+    Ok(auth_session_response_with_rotated_session_cookie(
+        Some(&principal),
+        &next_session_token,
+    ))
 }
 
 async fn sign_out_browser_session(
@@ -827,6 +912,10 @@ async fn sign_out_browser_session(
 }
 
 async fn app_entrypoint(headers: HeaderMap) -> Response {
+    app_shell_response(&headers)
+}
+
+async fn app_register_entrypoint(headers: HeaderMap) -> Response {
     app_shell_response(&headers)
 }
 
@@ -939,6 +1028,18 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
         app_shell_document(&csrf_token),
     )
         .into_response()
+}
+
+fn auth_session_response_with_rotated_session_cookie(
+    principal: Option<&AuthenticatedPrincipal>,
+    session_token: &str,
+) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        SET_COOKIE,
+        build_cookie_header(SESSION_COOKIE_NAME, session_token, true),
+    );
+    (headers, Json(auth_session_response(principal))).into_response()
 }
 
 fn app_static_text_response(content_type: &'static str, body: &'static str) -> Response {
@@ -1533,8 +1634,16 @@ impl From<SessionStoreError> for AppError {
 
 impl From<WorkspaceStoreError> for AppError {
     fn from(error: WorkspaceStoreError) -> Self {
-        tracing::error!(error = %error.message(), "workspace store operation failed");
-        Self::Internal("internal server error".to_string())
+        match error {
+            WorkspaceStoreError::Conflict(_) => {
+                tracing::warn!(error = %error.message(), "workspace store operation conflicted");
+                Self::Conflict("request conflicts with current state".to_string())
+            }
+            WorkspaceStoreError::Io(_) | WorkspaceStoreError::Database(_) => {
+                tracing::error!(error = %error.message(), "workspace store operation failed");
+                Self::Internal("internal server error".to_string())
+            }
+        }
     }
 }
 

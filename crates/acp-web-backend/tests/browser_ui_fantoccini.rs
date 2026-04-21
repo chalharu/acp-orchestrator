@@ -17,10 +17,16 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
-use support::{ServerConfig, TestStack, test_state_dir};
+use support::{
+    ServerConfig, TestStack, build_browser_client, extract_meta_content, load_browser_app_shell,
+    register_browser_account, test_state_dir,
+};
 
 const APP_PATH: &str = "/app/";
+const BROWSER_TEST_USER_NAME: &str = "browser-test";
+const BROWSER_TEST_PASSWORD: &str = "browser-test-password";
 const SIGN_IN_INPUT_SELECTOR: &str = "#sign-in-user-name";
+const SIGN_IN_PASSWORD_SELECTOR: &str = "#sign-in-password";
 const SIGN_IN_BUTTON_SELECTOR: &str = ".auth-form__submit";
 const COMPOSER_SELECTOR: &str = "#composer-input";
 const SUBMIT_SELECTOR: &str = ".composer__submit";
@@ -145,6 +151,7 @@ impl BrowserHarness {
         })
         .await
         .context("spawning the browser test backend stack")?;
+        provision_browser_account(&stack.backend_url).await?;
 
         let webdriver = WebDriverProcess::spawn().await?;
         let client = match connect_browser(&webdriver.endpoint, viewport).await {
@@ -175,7 +182,8 @@ impl BrowserHarness {
         )
         .await?;
         if self.sign_in_required().await? {
-            self.sign_in_as("browser-test").await?;
+            self.sign_in_as(BROWSER_TEST_USER_NAME, BROWSER_TEST_PASSWORD)
+                .await?;
         }
         self.wait_for_condition(
             "return Boolean(document.querySelector('#composer-input'));",
@@ -199,7 +207,7 @@ impl BrowserHarness {
         .await
     }
 
-    async fn sign_in_as(&self, user_name: &str) -> Result<()> {
+    async fn sign_in_as(&self, user_name: &str, password: &str) -> Result<()> {
         self.client
             .find(Locator::Css(SIGN_IN_INPUT_SELECTOR))
             .await
@@ -207,6 +215,13 @@ impl BrowserHarness {
             .send_keys(user_name)
             .await
             .with_context(|| format!("typing {user_name:?} into the sign-in form"))?;
+        self.client
+            .find(Locator::Css(SIGN_IN_PASSWORD_SELECTOR))
+            .await
+            .context("finding the sign-in password input")?
+            .send_keys(password)
+            .await
+            .context("typing the sign-in password")?;
         self.client
             .find(Locator::Css(SIGN_IN_BUTTON_SELECTOR))
             .await
@@ -415,6 +430,25 @@ impl BrowserHarness {
         let _ = client.close().await;
         webdriver.shutdown().await;
     }
+}
+
+async fn provision_browser_account(backend_url: &str) -> Result<()> {
+    let client = build_browser_client()?;
+    let app_document = load_browser_app_shell(&client, backend_url).await?;
+    let csrf_token = extract_meta_content(&app_document, "acp-csrf-token")?;
+    let response = register_browser_account(
+        &client,
+        backend_url,
+        &csrf_token,
+        BROWSER_TEST_USER_NAME,
+        BROWSER_TEST_PASSWORD,
+    )
+    .await?;
+    ensure!(
+        response.authenticated,
+        "browser test account should be authenticated"
+    );
+    Ok(())
 }
 
 fn assert_slash_palette_contents(item_texts: &[String]) {

@@ -8,6 +8,7 @@ license.workspace = true
 acp-app-support.workspace = true
 acp-contracts.workspace = true
 agent-client-protocol.workspace = true
+argon2.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true

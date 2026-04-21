@@ -1819,6 +1819,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn initializing_existing_databases_keeps_existing_admins() {
+        let root = std::env::temp_dir().join(format!(
+            "acp-workspace-store-existing-admin-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let db_path = root.join("db.sqlite");
+        ensure_parent_dir(&db_path).expect("migration test directory should be created");
+        let connection = Connection::open(&db_path).expect("migration test database should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO local_accounts (user_name, password_hash, is_admin, created_at, updated_at)
+                VALUES
+                    ('alice', 'hash-a', 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+                    ('bob', 'hash-b', 1, '2026-01-02T00:00:00+00:00', '2026-01-02T00:00:00+00:00');
+                "#,
+            )
+            .expect("schema with existing admin should be created");
+        drop(connection);
+
+        let repository = SqliteWorkspaceRepository::new(&db_path)
+            .expect("repository should preserve the existing admin");
+        assert_eq!(
+            repository
+                .load_local_account_sync("alice")
+                .expect("alice lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "alice".to_string(),
+                is_admin: false,
+            })
+        );
+        assert_eq!(
+            repository
+                .load_local_account_sync("bob")
+                .expect("bob lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "bob".to_string(),
+                is_admin: true,
+            })
+        );
+    }
+
     #[tokio::test]
     async fn session_metadata_can_be_saved_and_loaded_durably() {
         let repository = test_repository();

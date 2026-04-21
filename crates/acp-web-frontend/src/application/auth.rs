@@ -118,9 +118,7 @@ mod tests {
                 &[admin.clone(), second_admin, member],
                 &admin,
             ),
-            AccountCapabilities {
-                constraint: None,
-            }
+            AccountCapabilities { constraint: None }
         );
         assert_eq!(
             account_capabilities("other", std::slice::from_ref(&admin), &admin),

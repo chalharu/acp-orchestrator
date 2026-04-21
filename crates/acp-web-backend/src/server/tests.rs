@@ -572,28 +572,40 @@ async fn app_stylesheet_responds_with_css_content_type() {
 
 #[tokio::test]
 async fn app_font_asset_responds_with_font_content_type() {
-    let response = app_font_asset(Path("noto-sans-jp-japanese-400.woff2".to_string())).await;
-    let ct = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .expect("font asset response should include content-type")
-        .to_str()
-        .expect("content-type should be valid UTF-8")
-        .to_string();
-    let cache_control = response
-        .headers()
-        .get(CACHE_CONTROL)
-        .expect("font asset response should include cache-control")
-        .to_str()
-        .expect("cache-control should be valid UTF-8")
-        .to_string();
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("font asset body should be readable");
+    for font_name in [
+        "noto-sans-jp-latin-400.woff2",
+        "noto-sans-jp-japanese-400.woff2",
+        "noto-sans-jp-latin-500.woff2",
+        "noto-sans-jp-japanese-500.woff2",
+        "noto-sans-jp-latin-700.woff2",
+        "noto-sans-jp-japanese-700.woff2",
+    ] {
+        let response = app_font_asset(Path(font_name.to_string())).await;
+        let ct = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .expect("font asset response should include content-type")
+            .to_str()
+            .expect("content-type should be valid UTF-8")
+            .to_string();
+        let cache_control = response
+            .headers()
+            .get(CACHE_CONTROL)
+            .expect("font asset response should include cache-control")
+            .to_str()
+            .expect("cache-control should be valid UTF-8")
+            .to_string();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("font asset body should be readable");
 
-    assert!(ct.starts_with("font/woff2"), "got: {ct}");
-    assert_eq!(cache_control, "public, max-age=31536000, immutable");
-    assert!(!body.is_empty());
+        assert!(ct.starts_with("font/woff2"), "{font_name}: got {ct}");
+        assert_eq!(
+            cache_control, "public, max-age=31536000, immutable",
+            "{font_name}: cache-control mismatch"
+        );
+        assert!(!body.is_empty(), "{font_name}: body should not be empty");
+    }
 }
 
 #[tokio::test]

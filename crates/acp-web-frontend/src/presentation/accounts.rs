@@ -5,7 +5,7 @@ use wasm_bindgen::JsCast;
 use crate::{
     application::auth::{account_capabilities, accounts_route_access},
     components::ErrorBanner,
-    domain::auth::{AccountConstraintReason, AccountsRouteAccess},
+    domain::auth::{AccountCapabilities, AccountConstraintReason, AccountsRouteAccess},
     infrastructure::api,
 };
 
@@ -289,44 +289,22 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
     let admin_checked = RwSignal::new(account.is_admin);
     let saving = RwSignal::new(false);
     let deleting = RwSignal::new(false);
-    let row_dirty_account = account.clone();
-    let row_dirty = Signal::derive(move || {
-        !password.get().trim().is_empty() || admin_checked.get() != row_dirty_account.is_admin
-    });
-    let account_id = account.user_id.clone();
-    let username = account.username.clone();
-    let capabilities_account = account.clone();
-    let capabilities = Signal::derive(move || {
-        account_capabilities(
-            &state.current_user_id.get(),
-            &state.accounts.get(),
-            &capabilities_account,
-        )
-    });
-    let role_account = account.clone();
-    let role_label =
-        Signal::derive(move || account_role_label(&role_account, &state.current_user_id.get()));
-    let role_badge_account = account.clone();
-    let role_badge_class = Signal::derive(move || {
-        format!(
-            "account-role-pill account-role-pill--{}",
-            account_role_badge_modifier(&role_badge_account, &state.current_user_id.get())
-        )
-    });
-    let constraint_label = Signal::derive(move || {
-        account_constraint_label(capabilities.get().constraint).to_string()
-    });
-    let can_modify = Signal::derive(move || capabilities.get().can_modify());
-    let save_account =
-        account_save_handler(account_id.clone(), state, password, admin_checked, saving);
-    let delete_account = account_delete_handler(account_id, state, deleting);
+    let row_dirty = account_row_dirty_signal(&account, password, admin_checked);
+    let capabilities = account_capabilities_signal(&account, state);
+    let role_kind = account_role_kind_signal(&account, state);
+    let role_label = account_role_label_signal(role_kind);
+    let role_badge_class = account_role_badge_class_signal(role_kind);
+    let constraint_label = account_constraint_label_signal(capabilities);
+    let can_modify = account_can_modify_signal(capabilities);
+    let (save_account, delete_account) =
+        account_row_action_handlers(&account, state, password, admin_checked, saving, deleting);
     let created_label = account_created_label(&account);
-    let password_username = username.clone();
+    let username = account.username.clone();
 
     view! {
         <tr class="account-table__row">
             <td>
-                <AccountRowSummary username constraint_label />
+                <AccountRowSummary username=username.clone() constraint_label />
             </td>
             <td>
                 <AccountStateCell role_label role_badge_class />
@@ -335,7 +313,7 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
                 <span>{created_label}</span>
             </td>
             <td>
-                <AccountPasswordField password username=password_username />
+                <AccountPasswordField password username />
             </td>
             <td>
                 <AccountAdminToggle admin_checked can_modify />
@@ -353,6 +331,75 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
             </td>
         </tr>
     }
+}
+
+fn account_row_dirty_signal(
+    account: &LocalAccount,
+    password: RwSignal<String>,
+    admin_checked: RwSignal<bool>,
+) -> Signal<bool> {
+    let row_dirty_account = account.clone();
+    Signal::derive(move || {
+        !password.get().trim().is_empty() || admin_checked.get() != row_dirty_account.is_admin
+    })
+}
+
+fn account_capabilities_signal(
+    account: &LocalAccount,
+    state: AccountsPageState,
+) -> Signal<AccountCapabilities> {
+    let capabilities_account = account.clone();
+    Signal::derive(move || {
+        account_capabilities(
+            &state.current_user_id.get(),
+            &state.accounts.get(),
+            &capabilities_account,
+        )
+    })
+}
+
+fn account_role_kind_signal(
+    account: &LocalAccount,
+    state: AccountsPageState,
+) -> Signal<AccountRoleKind> {
+    let role_account = account.clone();
+    Signal::derive(move || account_role_kind(&role_account, &state.current_user_id.get()))
+}
+
+fn account_role_label_signal(role_kind: Signal<AccountRoleKind>) -> Signal<String> {
+    Signal::derive(move || account_role_label(role_kind.get()).to_string())
+}
+
+fn account_role_badge_class_signal(role_kind: Signal<AccountRoleKind>) -> Signal<String> {
+    Signal::derive(move || {
+        format!(
+            "account-role-pill account-role-pill--{}",
+            account_role_badge_modifier(role_kind.get())
+        )
+    })
+}
+
+fn account_constraint_label_signal(capabilities: Signal<AccountCapabilities>) -> Signal<String> {
+    Signal::derive(move || account_constraint_label(capabilities.get().constraint).to_string())
+}
+
+fn account_can_modify_signal(capabilities: Signal<AccountCapabilities>) -> Signal<bool> {
+    Signal::derive(move || capabilities.get().can_modify())
+}
+
+fn account_row_action_handlers(
+    account: &LocalAccount,
+    state: AccountsPageState,
+    password: RwSignal<String>,
+    admin_checked: RwSignal<bool>,
+    saving: RwSignal<bool>,
+    deleting: RwSignal<bool>,
+) -> (Callback<()>, Callback<web_sys::MouseEvent>) {
+    let account_id = account.user_id.clone();
+    (
+        account_save_handler(account_id.clone(), state, password, admin_checked, saving),
+        account_delete_handler(account_id, state, deleting),
+    )
 }
 
 #[component]
@@ -396,10 +443,7 @@ fn AccountPasswordField(password: RwSignal<String>, username: String) -> impl In
 }
 
 #[component]
-fn AccountAdminToggle(
-    admin_checked: RwSignal<bool>,
-    can_modify: Signal<bool>,
-) -> impl IntoView {
+fn AccountAdminToggle(admin_checked: RwSignal<bool>, can_modify: Signal<bool>) -> impl IntoView {
     view! {
         <label class="account-checkbox account-checkbox--table">
             <input
@@ -423,6 +467,9 @@ fn AccountRowActions(
     delete_account: Callback<web_sys::MouseEvent>,
     constraint_label: Signal<String>,
 ) -> impl IntoView {
+    let hint_text =
+        account_row_hint_signal(saving, deleting, row_dirty, can_modify, constraint_label);
+
     view! {
         <div class="account-row__actions">
             <button
@@ -440,22 +487,46 @@ fn AccountRowActions(
             >
                 {move || delete_button_label(deleting.get())}
             </button>
-            <p class="account-row__hint">
-                {move || {
-                    if saving.get() {
-                        "Saving changes…".to_string()
-                    } else if deleting.get() {
-                        "Removing account…".to_string()
-                    } else if !row_dirty.get() {
-                        "No pending changes".to_string()
-                    } else if !can_modify.get() && !constraint_label.get().is_empty() {
-                        constraint_label.get()
-                    } else {
-                        "Ready to apply".to_string()
-                    }
-                }}
-            </p>
+            <p class="account-row__hint">{move || hint_text.get()}</p>
         </div>
+    }
+}
+
+fn account_row_hint_signal(
+    saving: RwSignal<bool>,
+    deleting: RwSignal<bool>,
+    row_dirty: Signal<bool>,
+    can_modify: Signal<bool>,
+    constraint_label: Signal<String>,
+) -> Signal<String> {
+    Signal::derive(move || {
+        account_row_hint(
+            saving.get(),
+            deleting.get(),
+            row_dirty.get(),
+            can_modify.get(),
+            constraint_label.get(),
+        )
+    })
+}
+
+fn account_row_hint(
+    saving: bool,
+    deleting: bool,
+    row_dirty: bool,
+    can_modify: bool,
+    constraint_label: String,
+) -> String {
+    if saving {
+        "Saving changes…".to_string()
+    } else if deleting {
+        "Removing account…".to_string()
+    } else if !row_dirty {
+        "No pending changes".to_string()
+    } else if !can_modify && !constraint_label.is_empty() {
+        constraint_label
+    } else {
+        "Ready to apply".to_string()
     }
 }
 
@@ -557,16 +628,16 @@ fn account_role_kind(account: &LocalAccount, current_user_id: &str) -> AccountRo
     }
 }
 
-fn account_role_label(account: &LocalAccount, current_user_id: &str) -> String {
-    match account_role_kind(account, current_user_id) {
-        AccountRoleKind::Active => "signed in".to_string(),
-        AccountRoleKind::Admin => "admin".to_string(),
-        AccountRoleKind::Member => "member".to_string(),
+fn account_role_label(role_kind: AccountRoleKind) -> &'static str {
+    match role_kind {
+        AccountRoleKind::Active => "signed in",
+        AccountRoleKind::Admin => "admin",
+        AccountRoleKind::Member => "member",
     }
 }
 
-fn account_role_badge_modifier(account: &LocalAccount, current_user_id: &str) -> &'static str {
-    match account_role_kind(account, current_user_id) {
+fn account_role_badge_modifier(role_kind: AccountRoleKind) -> &'static str {
+    match role_kind {
         AccountRoleKind::Active => "active",
         AccountRoleKind::Admin => "admin",
         AccountRoleKind::Member => "member",
@@ -655,6 +726,8 @@ mod tests {
         assert_eq!(account_role_kind(&admin, "admin"), AccountRoleKind::Active);
         assert_eq!(account_role_kind(&admin, "other"), AccountRoleKind::Admin);
         assert_eq!(account_role_kind(&member, "other"), AccountRoleKind::Member);
+        assert_eq!(account_role_label(AccountRoleKind::Active), "signed in");
+        assert_eq!(account_role_badge_modifier(AccountRoleKind::Admin), "admin");
     }
 
     #[test]
@@ -675,6 +748,28 @@ mod tests {
         assert_eq!(
             account_created_label(&sample_account("member", false)),
             "2026-04-17 01:00 UTC"
+        );
+    }
+
+    #[test]
+    fn account_row_hint_explains_row_state() {
+        assert_eq!(
+            account_row_hint(false, false, false, true, String::new()),
+            "No pending changes"
+        );
+        assert_eq!(
+            account_row_hint(
+                false,
+                false,
+                true,
+                false,
+                "One admin account must remain".to_string()
+            ),
+            "One admin account must remain"
+        );
+        assert_eq!(
+            account_row_hint(false, false, true, true, String::new()),
+            "Ready to apply"
         );
     }
 }

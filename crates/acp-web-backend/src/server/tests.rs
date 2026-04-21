@@ -239,6 +239,8 @@ async fn auth_session_route_reports_unauthenticated_browser_state() {
         json_response::<AuthSessionResponse>(response).await,
         AuthSessionResponse {
             authenticated: false,
+            is_admin: false,
+            bootstrap_registration_open: true,
             user_name: None,
         }
     );
@@ -270,8 +272,86 @@ async fn browser_sign_up_starts_an_authenticated_browser_session() {
     )
     .await;
     assert_ne!(session_token, original_session_token);
-    assert_browser_auth_session(router.clone(), &original_session_token, None).await;
-    assert_browser_auth_session(router, &session_token, Some("alice")).await;
+    assert_browser_auth_session(router.clone(), &original_session_token, None, false, false).await;
+    assert_browser_auth_session(router, &session_token, Some("alice"), true, false).await;
+}
+
+#[tokio::test]
+async fn auth_session_route_reports_bootstrap_open_until_the_first_local_account_exists() {
+    let router = test_router();
+    let mut session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
+
+    assert_browser_auth_session(router.clone(), &session_token, None, false, true).await;
+    register_browser_account_for_test(
+        router.clone(),
+        &mut session_token,
+        "alice",
+        TEST_LOCAL_PASSWORD,
+    )
+    .await;
+    assert_browser_auth_session(router, &session_token, Some("alice"), true, false).await;
+}
+
+#[tokio::test]
+async fn browser_sign_up_requires_admin_after_bootstrap() {
+    let router = test_router();
+    let mut admin_session_token = TEST_BROWSER_SESSION_TOKEN.to_string();
+
+    register_browser_account_for_test(
+        router.clone(),
+        &mut admin_session_token,
+        "alice",
+        TEST_LOCAL_PASSWORD,
+    )
+    .await;
+
+    let unauthenticated = router
+        .clone()
+        .oneshot(browser_sign_up_request(
+            "bob",
+            TEST_LOCAL_PASSWORD,
+            "44444444-4444-4444-8444-444444444444",
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        json_response::<ErrorResponse>(unauthenticated).await.error,
+        "sign-in required"
+    );
+
+    register_browser_account_as_admin_for_test(
+        router.clone(),
+        &admin_session_token,
+        "alice",
+        "bob",
+        TEST_LOCAL_PASSWORD,
+    )
+    .await;
+
+    let mut bob_session_token = "55555555-5555-4555-8555-555555555555".to_string();
+    sign_in_browser_session_for_test(
+        router.clone(),
+        &mut bob_session_token,
+        "bob",
+        TEST_LOCAL_PASSWORD,
+        false,
+    )
+    .await;
+
+    let forbidden = router
+        .oneshot(browser_sign_up_request(
+            "charlie",
+            TEST_LOCAL_PASSWORD,
+            &bob_session_token,
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_response::<ErrorResponse>(forbidden).await.error,
+        "admin access required"
+    );
 }
 
 #[tokio::test]
@@ -294,11 +374,19 @@ async fn browser_sign_in_authenticates_registered_users_and_sign_out_revokes_ses
         &mut session_token,
         "alice",
         TEST_LOCAL_PASSWORD,
+        true,
     )
     .await;
     assert_ne!(session_token, pre_sign_in_session_token);
-    assert_browser_auth_session(router.clone(), &pre_sign_in_session_token, None).await;
-    assert_browser_auth_session(router.clone(), &session_token, Some("alice")).await;
+    assert_browser_auth_session(
+        router.clone(),
+        &pre_sign_in_session_token,
+        None,
+        false,
+        false,
+    )
+    .await;
+    assert_browser_auth_session(router.clone(), &session_token, Some("alice"), true, false).await;
     assert_browser_session_creation(router.clone(), &session_token, StatusCode::CREATED).await;
     sign_out_browser_session_for_test(router.clone(), &session_token).await;
     assert_browser_session_requires_sign_in(router, &session_token).await;
@@ -345,7 +433,6 @@ async fn browser_sign_up_rejects_duplicate_user_names() {
         TEST_LOCAL_PASSWORD,
     )
     .await;
-    sign_out_browser_session_for_test(router.clone(), &session_token).await;
 
     let duplicate = router
         .oneshot(browser_sign_up_request(
@@ -366,7 +453,9 @@ async fn browser_sign_up_rejects_duplicate_user_names() {
 async fn browser_sign_up_scrubs_workspace_store_failures() {
     let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
-        Arc::new(FailingWorkspaceStore::new("registration unavailable")),
+        Arc::new(FailingWorkspaceStore::for_bootstrap_registration(
+            WorkspaceStoreError::Database("registration unavailable".to_string()),
+        )),
         Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
@@ -376,6 +465,63 @@ async fn browser_sign_up_scrubs_workspace_store_failures() {
     let failed = router
         .oneshot(browser_sign_up_request(
             "alice",
+            TEST_LOCAL_PASSWORD,
+            TEST_BROWSER_SESSION_TOKEN,
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        json_response::<ErrorResponse>(failed).await.error,
+        "internal server error"
+    );
+}
+
+#[tokio::test]
+async fn browser_sign_up_scrubs_bootstrap_conflicts() {
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(FailingWorkspaceStore::for_bootstrap_registration(
+            WorkspaceStoreError::Conflict("already exists".to_string()),
+        )),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let router = app(state);
+
+    let failed = router
+        .oneshot(browser_sign_up_request(
+            "alice",
+            TEST_LOCAL_PASSWORD,
+            TEST_BROWSER_SESSION_TOKEN,
+        ))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(failed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_response::<ErrorResponse>(failed).await.error,
+        "unable to create account"
+    );
+}
+
+#[tokio::test]
+async fn admin_browser_sign_up_scrubs_workspace_store_failures() {
+    let state = AppState::with_workspace_repository(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(FailingWorkspaceStore::for_admin_registration(
+            "alice",
+            WorkspaceStoreError::Database("registration unavailable".to_string()),
+        )),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let router = app(state);
+
+    let failed = router
+        .oneshot(browser_sign_up_request(
+            "bob",
             TEST_LOCAL_PASSWORD,
             TEST_BROWSER_SESSION_TOKEN,
         ))
@@ -1923,9 +2069,52 @@ async fn register_browser_account_for_test(
         json_response::<AuthSessionResponse>(sign_up).await,
         AuthSessionResponse {
             authenticated: true,
+            is_admin: true,
+            bootstrap_registration_open: false,
             user_name: Some(user_name.to_string()),
         }
     );
+}
+
+async fn register_browser_account_as_admin_for_test(
+    router: Router,
+    session_token: &str,
+    current_admin_user_name: &str,
+    user_name: &str,
+    password: &str,
+) {
+    let sign_up = router
+        .clone()
+        .oneshot(browser_sign_up_request(user_name, password, session_token))
+        .await
+        .expect("router calls should complete");
+    assert_eq!(sign_up.status(), StatusCode::OK);
+    assert!(
+        sign_up
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .next()
+            .is_none(),
+        "admin account creation must not rotate the current browser session"
+    );
+    assert_eq!(
+        json_response::<AuthSessionResponse>(sign_up).await,
+        AuthSessionResponse {
+            authenticated: true,
+            is_admin: true,
+            bootstrap_registration_open: false,
+            user_name: Some(current_admin_user_name.to_string()),
+        }
+    );
+    assert_browser_auth_session(
+        router,
+        session_token,
+        Some(current_admin_user_name),
+        true,
+        false,
+    )
+    .await;
 }
 
 async fn sign_in_browser_session_for_test(
@@ -1933,6 +2122,7 @@ async fn sign_in_browser_session_for_test(
     session_token: &mut String,
     user_name: &str,
     password: &str,
+    expected_is_admin: bool,
 ) {
     let sign_in = router
         .oneshot(browser_sign_in_request(user_name, password, session_token))
@@ -1944,6 +2134,8 @@ async fn sign_in_browser_session_for_test(
         json_response::<AuthSessionResponse>(sign_in).await,
         AuthSessionResponse {
             authenticated: true,
+            is_admin: expected_is_admin,
+            bootstrap_registration_open: false,
             user_name: Some(user_name.to_string()),
         }
     );
@@ -1953,6 +2145,8 @@ async fn assert_browser_auth_session(
     router: Router,
     session_token: &str,
     expected_user_name: Option<&str>,
+    expected_is_admin: bool,
+    expected_bootstrap_registration_open: bool,
 ) {
     let auth_session = router
         .oneshot(browser_read_request("/api/v1/auth/session", session_token))
@@ -1963,6 +2157,8 @@ async fn assert_browser_auth_session(
         json_response::<AuthSessionResponse>(auth_session).await,
         AuthSessionResponse {
             authenticated: expected_user_name.is_some(),
+            is_admin: expected_is_admin,
+            bootstrap_registration_open: expected_bootstrap_registration_open,
             user_name: expected_user_name.map(str::to_string),
         }
     );
@@ -1994,6 +2190,8 @@ async fn sign_out_browser_session_for_test(router: Router, session_token: &str) 
         json_response::<AuthSessionResponse>(signed_out).await,
         AuthSessionResponse {
             authenticated: false,
+            is_admin: false,
+            bootstrap_registration_open: false,
             user_name: None,
         }
     );
@@ -2183,12 +2381,43 @@ impl ReplyProvider for TrackingReplyProvider {
 #[derive(Debug)]
 struct FailingWorkspaceStore {
     error: WorkspaceStoreError,
+    bootstrap_registration_open: Option<bool>,
+    browser_session_user_name: Option<Option<String>>,
+    local_account: Option<Option<crate::workspace_store::LocalAccountRecord>>,
 }
 
 impl FailingWorkspaceStore {
     fn new(message: &str) -> Self {
+        Self::with_error(WorkspaceStoreError::Database(message.to_string()))
+    }
+
+    fn with_error(error: WorkspaceStoreError) -> Self {
         Self {
-            error: WorkspaceStoreError::Database(message.to_string()),
+            error,
+            bootstrap_registration_open: None,
+            browser_session_user_name: None,
+            local_account: None,
+        }
+    }
+
+    fn for_bootstrap_registration(error: WorkspaceStoreError) -> Self {
+        Self {
+            error,
+            bootstrap_registration_open: Some(true),
+            browser_session_user_name: Some(None),
+            local_account: Some(None),
+        }
+    }
+
+    fn for_admin_registration(current_admin_user_name: &str, error: WorkspaceStoreError) -> Self {
+        Self {
+            error,
+            bootstrap_registration_open: Some(false),
+            browser_session_user_name: Some(Some(current_admin_user_name.to_string())),
+            local_account: Some(Some(crate::workspace_store::LocalAccountRecord {
+                user_name: current_admin_user_name.to_string(),
+                is_admin: true,
+            })),
         }
     }
 }
@@ -2236,6 +2465,18 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         Err(self.error.clone())
     }
 
+    async fn load_local_account(
+        &self,
+        _user_name: &str,
+    ) -> Result<Option<crate::workspace_store::LocalAccountRecord>, WorkspaceStoreError> {
+        self.local_account.clone().ok_or_else(|| self.error.clone())
+    }
+
+    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError> {
+        self.bootstrap_registration_open
+            .ok_or_else(|| self.error.clone())
+    }
+
     async fn authenticate_local_user(
         &self,
         _user_name: &str,
@@ -2275,7 +2516,9 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         &self,
         _session_token: &str,
     ) -> Result<Option<String>, WorkspaceStoreError> {
-        Err(self.error.clone())
+        self.browser_session_user_name
+            .clone()
+            .ok_or_else(|| self.error.clone())
     }
 
     async fn sign_out_browser_session(
@@ -2333,6 +2576,20 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _password: &str,
     ) -> Result<(), WorkspaceStoreError> {
         Ok(())
+    }
+
+    async fn load_local_account(
+        &self,
+        _user_name: &str,
+    ) -> Result<Option<crate::workspace_store::LocalAccountRecord>, WorkspaceStoreError> {
+        Ok(Some(crate::workspace_store::LocalAccountRecord {
+            user_name: self.live_owner.clone(),
+            is_admin: true,
+        }))
+    }
+
+    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError> {
+        Ok(false)
     }
 
     async fn authenticate_local_user(

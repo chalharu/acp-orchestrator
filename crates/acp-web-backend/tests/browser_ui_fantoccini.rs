@@ -133,6 +133,51 @@ async fn sidebar_shows_activity_metadata_and_closed_state() -> Result<()> {
     result
 }
 
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn registration_route_is_public_only_during_bootstrap_and_available_to_admins() -> Result<()>
+{
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser
+            .client
+            .goto(&format!(
+                "{}{}",
+                browser.stack.backend_url, "/app/register/"
+            ))
+            .await
+            .context("opening the registration route")?;
+        browser
+            .wait_for_condition(
+                AUTH_BOOTSTRAP_READY_SCRIPT,
+                Duration::from_secs(30),
+                "registration bootstrap",
+            )
+            .await?;
+        browser
+            .wait_for_body_text("Sign in", Duration::from_secs(30))
+            .await?;
+        browser
+            .sign_in_as(BROWSER_TEST_USER_NAME, BROWSER_TEST_PASSWORD)
+            .await?;
+        browser
+            .wait_for_body_text("Create account", Duration::from_secs(30))
+            .await?;
+        browser
+            .wait_for_body_text(
+                "Admins can create additional local users.",
+                Duration::from_secs(30),
+            )
+            .await?;
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
 struct BrowserHarness {
     client: Client,
     stack: TestStack,

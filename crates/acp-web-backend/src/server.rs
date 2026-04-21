@@ -199,6 +199,13 @@ struct AuthenticatedBrowserSession {
     revocation: watch::Receiver<bool>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrowserAuthSessionState {
+    principal: Option<AuthenticatedPrincipal>,
+    is_admin: bool,
+    bootstrap_registration_open: bool,
+}
+
 impl AppState {
     pub fn new(
         config: ServerConfig,
@@ -674,6 +681,38 @@ async fn resolve_browser_session_principal(
         .map_err(AppError::from)
 }
 
+async fn load_browser_auth_session_state(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<BrowserAuthSessionState, AppError> {
+    let principal = optional_authenticated_principal(state, headers).await?;
+    browser_auth_session_state(state, principal).await
+}
+
+async fn browser_auth_session_state(
+    state: &AppState,
+    principal: Option<AuthenticatedPrincipal>,
+) -> Result<BrowserAuthSessionState, AppError> {
+    let bootstrap_registration_open = state
+        .workspace_repository
+        .bootstrap_registration_open()
+        .await?;
+    let is_admin = match principal.as_ref() {
+        Some(principal) => state
+            .workspace_repository
+            .load_local_account(&principal.subject)
+            .await?
+            .is_some_and(|account| account.is_admin),
+        None => false,
+    };
+
+    Ok(BrowserAuthSessionState {
+        principal,
+        is_admin,
+        bootstrap_registration_open,
+    })
+}
+
 fn browser_user_principal(user_name: String) -> AuthenticatedPrincipal {
     AuthenticatedPrincipal {
         id: user_name.clone(),
@@ -682,10 +721,15 @@ fn browser_user_principal(user_name: String) -> AuthenticatedPrincipal {
     }
 }
 
-fn auth_session_response(principal: Option<&AuthenticatedPrincipal>) -> AuthSessionResponse {
+fn auth_session_response(session: &BrowserAuthSessionState) -> AuthSessionResponse {
     AuthSessionResponse {
-        authenticated: principal.is_some(),
-        user_name: principal.map(|principal| principal.subject.clone()),
+        authenticated: session.principal.is_some(),
+        is_admin: session.is_admin,
+        bootstrap_registration_open: session.bootstrap_registration_open,
+        user_name: session
+            .principal
+            .as_ref()
+            .map(|principal| principal.subject.clone()),
     }
 }
 
@@ -737,6 +781,8 @@ async fn bind_browser_session_to_user(
     state: &AppState,
     session_token: &str,
     user_name: String,
+    is_admin: bool,
+    bootstrap_registration_open: bool,
 ) -> Result<Response, AppError> {
     let next_session_token = Uuid::new_v4().to_string();
     state
@@ -745,9 +791,13 @@ async fn bind_browser_session_to_user(
         .await?;
     state.browser_session_registry.revoke(session_token);
     let _ = state.browser_session_registry.activate(&next_session_token);
-    let principal = browser_user_principal(user_name);
+    let session = BrowserAuthSessionState {
+        principal: Some(browser_user_principal(user_name)),
+        is_admin,
+        bootstrap_registration_open,
+    };
     Ok(auth_session_response_with_rotated_session_cookie(
-        Some(&principal),
+        auth_session_response(&session),
         &next_session_token,
     ))
 }
@@ -834,8 +884,8 @@ async fn get_auth_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<AuthSessionResponse>, AppError> {
-    let principal = optional_authenticated_principal(&state, &headers).await?;
-    Ok(Json(auth_session_response(principal.as_ref())))
+    let session = load_browser_auth_session_state(&state, &headers).await?;
+    Ok(Json(auth_session_response(&session)))
 }
 
 async fn sign_in_browser_session(
@@ -857,7 +907,13 @@ async fn sign_in_browser_session(
         ));
     }
 
-    bind_browser_session_to_user(&state, &session_token, user_name).await
+    let account = state
+        .workspace_repository
+        .load_local_account(&user_name)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("invalid user name or password".to_string()))?;
+
+    bind_browser_session_to_user(&state, &session_token, user_name, account.is_admin, false).await
 }
 
 async fn sign_up_browser_session(
@@ -867,33 +923,64 @@ async fn sign_up_browser_session(
 ) -> Result<Response, AppError> {
     validate_csrf(&headers).map_err(AppError::from)?;
     let session_token = browser_session_token(&headers).map_err(AppError::from)?;
+    let current_session = load_browser_auth_session_state(&state, &headers).await?;
     let user_name = normalize_sign_in_user_name(&request.user_name)?;
     let password = normalize_registration_password(&request.password)?;
-    let next_session_token = Uuid::new_v4().to_string();
-    match state
-        .workspace_repository
-        .register_local_user_and_rotate_browser_session(
-            &session_token,
-            &next_session_token,
-            &user_name,
-            &password,
-        )
-        .await
-    {
-        Ok(()) => {}
-        Err(WorkspaceStoreError::Conflict(_)) => {
-            return Err(AppError::BadRequest("unable to create account".to_string()));
+    if current_session.bootstrap_registration_open {
+        let next_session_token = Uuid::new_v4().to_string();
+        match state
+            .workspace_repository
+            .register_local_user_and_rotate_browser_session(
+                &session_token,
+                &next_session_token,
+                &user_name,
+                &password,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(WorkspaceStoreError::Conflict(_)) => {
+                return Err(AppError::BadRequest("unable to create account".to_string()));
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => return Err(error.into()),
+
+        state.browser_session_registry.revoke(&session_token);
+        let _ = state.browser_session_registry.activate(&next_session_token);
+        return Ok(auth_session_response_with_rotated_session_cookie(
+            AuthSessionResponse {
+                authenticated: true,
+                is_admin: true,
+                bootstrap_registration_open: false,
+                user_name: Some(user_name),
+            },
+            &next_session_token,
+        ));
     }
 
-    state.browser_session_registry.revoke(&session_token);
-    let _ = state.browser_session_registry.activate(&next_session_token);
-    let principal = browser_user_principal(user_name);
-    Ok(auth_session_response_with_rotated_session_cookie(
-        Some(&principal),
-        &next_session_token,
-    ))
+    let Some(principal) = current_session.principal else {
+        return Err(AppError::Unauthorized("sign-in required".to_string()));
+    };
+    if !current_session.is_admin {
+        return Err(AppError::Forbidden("admin access required".to_string()));
+    }
+
+    match state
+        .workspace_repository
+        .register_local_user(&user_name, &password)
+        .await
+    {
+        Ok(()) => Ok(Json(auth_session_response(&BrowserAuthSessionState {
+            principal: Some(principal),
+            is_admin: true,
+            bootstrap_registration_open: false,
+        }))
+        .into_response()),
+        Err(WorkspaceStoreError::Conflict(_)) => {
+            Err(AppError::BadRequest("unable to create account".to_string()))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn sign_out_browser_session(
@@ -907,8 +994,17 @@ async fn sign_out_browser_session(
         .sign_out_browser_session(&session_token)
         .await?;
     state.browser_session_registry.revoke(&session_token);
+    let bootstrap_registration_open = state
+        .workspace_repository
+        .bootstrap_registration_open()
+        .await?;
 
-    Ok(Json(auth_session_response(None)))
+    Ok(Json(AuthSessionResponse {
+        authenticated: false,
+        is_admin: false,
+        bootstrap_registration_open,
+        user_name: None,
+    }))
 }
 
 async fn app_entrypoint(headers: HeaderMap) -> Response {
@@ -1031,7 +1127,7 @@ fn app_shell_response(headers: &HeaderMap) -> Response {
 }
 
 fn auth_session_response_with_rotated_session_cookie(
-    principal: Option<&AuthenticatedPrincipal>,
+    auth_session: AuthSessionResponse,
     session_token: &str,
 ) -> Response {
     let mut headers = HeaderMap::new();
@@ -1039,7 +1135,7 @@ fn auth_session_response_with_rotated_session_cookie(
         SET_COOKIE,
         build_cookie_header(SESSION_COOKIE_NAME, session_token, true),
     );
-    (headers, Json(auth_session_response(principal))).into_response()
+    (headers, Json(auth_session)).into_response()
 }
 
 fn app_static_text_response(content_type: &'static str, body: &'static str) -> Response {

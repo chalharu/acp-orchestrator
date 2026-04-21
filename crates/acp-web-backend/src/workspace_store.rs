@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS local_accounts (
     user_name TEXT PRIMARY KEY,
     password_hash TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -178,6 +179,12 @@ pub struct UserRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAccountRecord {
+    pub user_name: String,
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceRecord {
     pub workspace_id: String,
     pub owner_user_id: String,
@@ -252,6 +259,7 @@ impl SqliteWorkspaceRepository {
         connection
             .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
             .map_err(database_error)?;
+        ensure_local_account_admin_schema(&connection)?;
         Ok(())
     }
 
@@ -331,6 +339,19 @@ impl SqliteWorkspaceRepository {
         Ok(())
     }
 
+    fn load_local_account_sync(
+        &self,
+        user_name: &str,
+    ) -> Result<Option<LocalAccountRecord>, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        load_local_account(&connection, user_name)
+    }
+
+    fn bootstrap_registration_open_sync(&self) -> Result<bool, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        bootstrap_registration_open(&connection)
+    }
+
     fn register_local_user_and_rotate_browser_session_sync(
         &self,
         previous_session_token: &str,
@@ -343,6 +364,11 @@ impl SqliteWorkspaceRepository {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
+        if !bootstrap_registration_open(&tx)? {
+            return Err(WorkspaceStoreError::Conflict(
+                "bootstrap registration is closed".to_string(),
+            ));
+        }
         let now = Utc::now();
         let previous = previous_session_token;
         let next = next_session_token;
@@ -519,6 +545,24 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         })
         .await
         .map_err(join_error)?
+    }
+
+    async fn load_local_account(
+        &self,
+        user_name: &str,
+    ) -> Result<Option<LocalAccountRecord>, WorkspaceStoreError> {
+        let repository = self.clone();
+        let user_name = user_name.to_string();
+        tokio::task::spawn_blocking(move || repository.load_local_account_sync(&user_name))
+            .await
+            .map_err(join_error)?
+    }
+
+    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError> {
+        let repository = self.clone();
+        tokio::task::spawn_blocking(move || repository.bootstrap_registration_open_sync())
+            .await
+            .map_err(join_error)?
     }
 
     async fn authenticate_local_user(
@@ -741,6 +785,100 @@ fn load_browser_session_user_name(
             |row| row.get(0),
         )
         .optional()
+        .map_err(database_error)
+}
+
+fn ensure_local_account_admin_schema(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    if !local_accounts_has_is_admin_column(connection)? {
+        connection
+            .execute(
+                "ALTER TABLE local_accounts ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(database_error)?;
+    }
+    ensure_existing_local_account_admin(connection)
+}
+
+fn local_accounts_has_is_admin_column(
+    connection: &Connection,
+) -> Result<bool, WorkspaceStoreError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(local_accounts)")
+        .map_err(database_error)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(database_error)?;
+
+    for column in columns {
+        if column.map_err(database_error)? == "is_admin" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_existing_local_account_admin(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    let has_accounts: bool = connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM local_accounts)", [], |row| {
+            row.get(0)
+        })
+        .map_err(database_error)?;
+    if !has_accounts {
+        return Ok(());
+    }
+
+    let has_admin: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_accounts WHERE is_admin = 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if has_admin {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            "UPDATE local_accounts
+             SET is_admin = 1
+             WHERE user_name = (
+                 SELECT user_name
+                 FROM local_accounts
+                 ORDER BY created_at ASC, user_name ASC
+                 LIMIT 1
+             )",
+            [],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn load_local_account(
+    connection: &Connection,
+    user_name: &str,
+) -> Result<Option<LocalAccountRecord>, WorkspaceStoreError> {
+    connection
+        .query_row(
+            "SELECT user_name, is_admin FROM local_accounts WHERE user_name = ?1",
+            params![user_name],
+            |row| {
+                Ok(LocalAccountRecord {
+                    user_name: row.get(0)?,
+                    is_admin: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(database_error)
+}
+
+fn bootstrap_registration_open(connection: &Connection) -> Result<bool, WorkspaceStoreError> {
+    connection
+        .query_row("SELECT COUNT(*) = 0 FROM local_accounts", [], |row| {
+            row.get(0)
+        })
         .map_err(database_error)
 }
 
@@ -967,10 +1105,17 @@ fn insert_local_account(
     password_hash: &str,
     now: &DateTime<Utc>,
 ) -> Result<(), WorkspaceStoreError> {
+    let is_admin = bootstrap_registration_open(tx)?;
     tx.execute(
-        "INSERT INTO local_accounts (user_name, password_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![user_name, password_hash, timestamp(now), timestamp(now)],
+        "INSERT INTO local_accounts (user_name, password_hash, is_admin, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            user_name,
+            password_hash,
+            is_admin,
+            timestamp(now),
+            timestamp(now)
+        ],
     )
     .map_err(local_account_insert_error)?;
     Ok(())
@@ -1456,11 +1601,33 @@ mod tests {
     async fn local_accounts_register_and_authenticate_with_passwords() {
         let repository = test_repository();
 
+        assert!(
+            repository
+                .bootstrap_registration_open()
+                .await
+                .expect("bootstrap registration lookup should succeed")
+        );
         repository
             .register_local_user("alice", "correct horse battery staple")
             .await
             .expect("registration should succeed");
 
+        assert_eq!(
+            repository
+                .load_local_account("alice")
+                .await
+                .expect("local account lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "alice".to_string(),
+                is_admin: true,
+            })
+        );
+        assert!(
+            !repository
+                .bootstrap_registration_open()
+                .await
+                .expect("bootstrap registration lookup should succeed")
+        );
         assert!(
             repository
                 .authenticate_local_user("alice", "correct horse battery staple")
@@ -1478,6 +1645,41 @@ mod tests {
                 .authenticate_local_user("missing", "correct horse battery staple")
                 .await
                 .expect("authentication should succeed")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_accounts_only_promote_the_first_account_to_admin() {
+        let repository = test_repository();
+
+        repository
+            .register_local_user("alice", "correct horse battery staple")
+            .await
+            .expect("first registration should succeed");
+        repository
+            .register_local_user("bob", "correct horse battery staple")
+            .await
+            .expect("second registration should succeed");
+
+        assert_eq!(
+            repository
+                .load_local_account("alice")
+                .await
+                .expect("alice lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "alice".to_string(),
+                is_admin: true,
+            })
+        );
+        assert_eq!(
+            repository
+                .load_local_account("bob")
+                .await
+                .expect("bob lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "bob".to_string(),
+                is_admin: false,
+            })
         );
     }
 
@@ -1534,6 +1736,86 @@ mod tests {
                 .await
                 .expect("next browser session lookup should succeed"),
             Some("alice".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_only_registration_and_rotation_is_rejected_after_bootstrap_closes() {
+        let repository = test_repository();
+
+        repository
+            .register_local_user("alice", "correct horse battery staple")
+            .await
+            .expect("first registration should succeed");
+        let error = repository
+            .register_local_user_and_rotate_browser_session(
+                "11111111-1111-4111-8111-111111111111",
+                "33333333-3333-4333-8333-333333333333",
+                "bob",
+                "correct horse battery staple",
+            )
+            .await
+            .expect_err("bootstrap-only registration should be rejected after bootstrap closes");
+
+        assert!(matches!(
+            error,
+            WorkspaceStoreError::Conflict(message) if message == "bootstrap registration is closed"
+        ));
+        assert_eq!(
+            repository
+                .load_local_account("bob")
+                .await
+                .expect("bob lookup should succeed"),
+            None
+        );
+    }
+
+    #[test]
+    fn initializing_existing_databases_promotes_the_oldest_local_account_to_admin() {
+        let root = std::env::temp_dir().join(format!(
+            "acp-workspace-store-migration-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let db_path = root.join("db.sqlite");
+        ensure_parent_dir(&db_path).expect("migration test directory should be created");
+        let connection = Connection::open(&db_path).expect("migration test database should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE local_accounts (
+                    user_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO local_accounts (user_name, password_hash, created_at, updated_at)
+                VALUES
+                    ('alice', 'hash-a', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+                    ('bob', 'hash-b', '2026-01-02T00:00:00+00:00', '2026-01-02T00:00:00+00:00');
+                "#,
+            )
+            .expect("legacy schema should be created");
+        drop(connection);
+
+        let repository = SqliteWorkspaceRepository::new(&db_path)
+            .expect("repository should migrate legacy data");
+        assert_eq!(
+            repository
+                .load_local_account_sync("alice")
+                .expect("alice lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "alice".to_string(),
+                is_admin: true,
+            })
+        );
+        assert_eq!(
+            repository
+                .load_local_account_sync("bob")
+                .expect("bob lookup should succeed"),
+            Some(LocalAccountRecord {
+                user_name: "bob".to_string(),
+                is_admin: false,
+            })
         );
     }
 

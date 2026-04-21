@@ -9,13 +9,16 @@
 //! `<meta name="acp-csrf-token">` in the shell document).
 
 mod api;
+mod application;
 mod components;
+mod domain;
+mod infrastructure;
+mod presentation;
 mod slash;
 
 use acp_contracts::{
-    AuthSessionResponse, CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision,
-    PermissionRequest, SessionListItem, SessionSnapshot, SessionStatus, StreamEvent,
-    StreamEventPayload,
+    CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
+    SessionListItem, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
 };
 use futures_util::{
     StreamExt,
@@ -25,9 +28,18 @@ use leptos::{portal::Portal, prelude::*};
 use wasm_bindgen::JsCast;
 use web_sys::EventSource;
 
+use application::auth::{
+    AuthSignals, apply_auth_session_response, auth_signals, current_auth_user_name,
+    load_auth_session_once, set_auth_error,
+};
 use components::{
     ChatActivity, Composer, ComposerSlashCallbacks, ComposerSlashSignals, ErrorBanner, Transcript,
 };
+use domain::{
+    auth::{AuthSession, RegistrationRouteAccess, registration_route_access},
+    routing::{AppRoute, app_session_path, current_route},
+};
+use presentation::auth::{AuthLoadingPage, RegisterPage, RegistrationUnavailablePage, SignInPage};
 use slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
     local_slash_candidates, parse_browser_slash_action, slash_palette_is_visible,
@@ -118,10 +130,15 @@ fn RegisterRoute(auth: AuthSignals) -> impl IntoView {
                 return view! { <AuthLoadingPage message="Checking sign-in..." /> }.into_any();
             }
 
-            if auth.session.get().is_some() {
-                view! { <HomePage /> }.into_any()
-            } else {
-                view! { <RegisterPage auth=auth /> }.into_any()
+            match registration_route_access(
+                auth.session.get().as_ref(),
+                auth.bootstrap_registration_open.get(),
+            ) {
+                RegistrationRouteAccess::Register => view! { <RegisterPage auth=auth /> }.into_any(),
+                RegistrationRouteAccess::SignIn => view! { <SignInPage auth=auth /> }.into_any(),
+                RegistrationRouteAccess::Unavailable => {
+                    view! { <RegistrationUnavailablePage /> }.into_any()
+                }
             }
         }}
     }
@@ -143,234 +160,6 @@ fn SessionRoute(session_id: String, auth: AuthSignals) -> impl IntoView {
         }}
     }
 }
-
-#[component]
-fn AuthLoadingPage(message: &'static str) -> impl IntoView {
-    view! {
-        <main class="app-shell app-shell--home">
-            <section class="panel empty-state">
-                <p class="muted">{message}</p>
-            </section>
-        </main>
-    }
-}
-
-#[component]
-fn SignInPage(auth: AuthSignals) -> impl IntoView {
-    let sign_in_disabled = sign_in_disabled_signal(auth);
-    let auth_busy = auth_request_busy_signal(auth);
-
-    view! {
-        <main class="app-shell app-shell--home">
-            <ErrorBanner message=auth.error />
-            <section class="panel auth-panel">
-                {sign_in_panel_copy()}
-                {sign_in_form(auth, sign_in_disabled, auth_busy)}
-            </section>
-        </main>
-    }
-}
-
-#[component]
-fn RegisterPage(auth: AuthSignals) -> impl IntoView {
-    let sign_up_disabled = sign_up_disabled_signal(auth);
-    let auth_busy = auth_request_busy_signal(auth);
-
-    view! {
-        <main class="app-shell app-shell--home">
-            <ErrorBanner message=auth.error />
-            <section class="panel auth-panel">
-                {register_panel_copy()}
-                {register_form(auth, sign_up_disabled, auth_busy)}
-            </section>
-        </main>
-    }
-}
-
-fn auth_request_busy_signal(auth: AuthSignals) -> Signal<bool> {
-    Signal::derive(move || auth.signing_in.get() || auth.signing_up.get())
-}
-
-fn sign_in_disabled_signal(auth: AuthSignals) -> Signal<bool> {
-    Signal::derive(move || {
-        auth.signing_in.get()
-            || auth.signing_up.get()
-            || auth.user_name_draft.get().trim().is_empty()
-            || auth.password_draft.get().is_empty()
-    })
-}
-
-fn sign_up_disabled_signal(auth: AuthSignals) -> Signal<bool> {
-    Signal::derive(move || {
-        auth.signing_in.get()
-            || auth.signing_up.get()
-            || auth.user_name_draft.get().trim().is_empty()
-            || auth.password_draft.get().chars().count() < 8
-    })
-}
-
-fn sign_in_panel_copy() -> impl IntoView {
-    view! {
-        <div class="auth-panel__copy">
-            <p class="auth-panel__eyebrow">"ACP Web"</p>
-            <h1 class="auth-panel__title">"Sign in"</h1>
-            <p class="muted">
-                "Enter your user name and password to access your browser workspace session."
-            </p>
-            <p class="muted">
-                <a href="/app/register/">"Create an account"</a>
-            </p>
-        </div>
-    }
-}
-
-fn register_panel_copy() -> impl IntoView {
-    view! {
-        <div class="auth-panel__copy">
-            <p class="auth-panel__eyebrow">"ACP Web"</p>
-            <h1 class="auth-panel__title">"Create account"</h1>
-            <p class="muted">
-                "Choose a user name and a password with at least 8 characters."
-            </p>
-            <p class="muted">
-                <a href="/app/">"Back to sign in"</a>
-            </p>
-        </div>
-    }
-}
-
-fn sign_in_form(
-    auth: AuthSignals,
-    sign_in_disabled: Signal<bool>,
-    auth_busy: Signal<bool>,
-) -> impl IntoView {
-    let button_label = Signal::derive(move || sign_in_button_label(auth.signing_in.get()));
-    auth_credentials_form(
-        auth,
-        sign_in_disabled,
-        auth_busy,
-        button_label,
-        "current-password",
-        submit_sign_in,
-    )
-}
-
-fn register_form(
-    auth: AuthSignals,
-    sign_up_disabled: Signal<bool>,
-    auth_busy: Signal<bool>,
-) -> impl IntoView {
-    let button_label = Signal::derive(move || sign_up_button_label(auth.signing_up.get()));
-    auth_credentials_form(
-        auth,
-        sign_up_disabled,
-        auth_busy,
-        button_label,
-        "new-password",
-        submit_sign_up,
-    )
-}
-
-fn auth_credentials_form(
-    auth: AuthSignals,
-    submit_disabled: Signal<bool>,
-    auth_busy: Signal<bool>,
-    button_label: Signal<&'static str>,
-    password_autocomplete: &'static str,
-    on_submit: fn(AuthSignals),
-) -> impl IntoView {
-    view! {
-        <form
-            class="auth-form"
-            on:submit=move |ev: web_sys::SubmitEvent| {
-                ev.prevent_default();
-                on_submit(auth);
-            }
-        >
-            {auth_user_name_field(auth, auth_busy)}
-            {auth_password_field(auth, auth_busy, password_autocomplete)}
-            {auth_submit_button(submit_disabled, button_label)}
-        </form>
-    }
-}
-
-fn auth_user_name_field(auth: AuthSignals, auth_busy: Signal<bool>) -> impl IntoView {
-    view! {
-        <label class="auth-form__label" for="sign-in-user-name">
-            "User name"
-        </label>
-        <input
-            id="sign-in-user-name"
-            class="auth-form__input"
-            type="text"
-            autofocus=true
-            maxlength="100"
-            autocomplete="username"
-            prop:value=move || auth.user_name_draft.get()
-            prop:disabled=move || auth_busy.get()
-            on:input=move |ev| {
-                auth.user_name_draft.set(event_target_value(&ev));
-            }
-        />
-    }
-}
-
-fn auth_password_field(
-    auth: AuthSignals,
-    auth_busy: Signal<bool>,
-    autocomplete: &'static str,
-) -> impl IntoView {
-    view! {
-        <label class="auth-form__label" for="sign-in-password">
-            "Password"
-        </label>
-        <input
-            id="sign-in-password"
-            class="auth-form__input"
-            type="password"
-            autocomplete=autocomplete
-            prop:value=move || auth.password_draft.get()
-            prop:disabled=move || auth_busy.get()
-            on:input=move |ev| {
-                auth.password_draft.set(event_target_value(&ev));
-            }
-        />
-    }
-}
-
-fn auth_submit_button(
-    submit_disabled: Signal<bool>,
-    button_label: Signal<&'static str>,
-) -> impl IntoView {
-    view! {
-        <div class="auth-form__actions">
-            <button
-                type="submit"
-                class="auth-form__submit"
-                prop:disabled=move || submit_disabled.get()
-            >
-                {move || button_label.get()}
-            </button>
-        </div>
-    }
-}
-
-fn sign_in_button_label(signing_in: bool) -> &'static str {
-    if signing_in {
-        "Signing in..."
-    } else {
-        "Sign in"
-    }
-}
-
-fn sign_up_button_label(signing_up: bool) -> &'static str {
-    if signing_up {
-        "Creating account..."
-    } else {
-        "Create account"
-    }
-}
-
 /// Landing page. Prepares a fresh session and immediately redirects to the
 /// live chat route so startup hints appear before the first prompt.
 #[component]
@@ -403,154 +192,6 @@ fn HomePage() -> impl IntoView {
             </section>
         </main>
     }
-}
-
-fn auth_signals() -> AuthSignals {
-    AuthSignals {
-        session: RwSignal::new(None::<AuthSession>),
-        checked: RwSignal::new(false),
-        signing_in: RwSignal::new(false),
-        signing_up: RwSignal::new(false),
-        error: RwSignal::new(None::<String>),
-        user_name_draft: RwSignal::new(String::new()),
-        password_draft: RwSignal::new(String::new()),
-    }
-}
-
-fn load_auth_session_once(auth: AuthSignals) {
-    let started = RwSignal::new(false);
-    Effect::new(move |_| {
-        if started.get() {
-            return;
-        }
-
-        started.set(true);
-        spawn_auth_session_load(auth);
-    });
-}
-
-fn spawn_auth_session_load(auth: AuthSignals) {
-    leptos::task::spawn_local(async move {
-        match api::load_auth_session().await {
-            Ok(response) => {
-                if let Err(message) = apply_auth_session_response(auth, response) {
-                    set_auth_error(auth, message);
-                }
-            }
-            Err(message) => set_auth_error(auth, message),
-        }
-    });
-}
-
-fn submit_sign_in(auth: AuthSignals) {
-    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
-    let password = auth.password_draft.get_untracked();
-    if user_name.is_empty() {
-        auth.error
-            .set(Some("Enter a user name to continue.".to_string()));
-        return;
-    }
-    if password.is_empty() {
-        auth.error
-            .set(Some("Enter a password to continue.".to_string()));
-        return;
-    }
-    if auth.signing_in.get_untracked() || auth.signing_up.get_untracked() {
-        return;
-    }
-
-    auth.signing_in.set(true);
-    auth.error.set(None);
-    leptos::task::spawn_local(async move {
-        match api::sign_in(&user_name, &password).await {
-            Ok(response) => match apply_auth_session_response(auth, response) {
-                Ok(Some(_)) => clear_auth_drafts(auth),
-                Ok(None) => auth.error.set(Some(
-                    "Sign in did not establish an authenticated session.".to_string(),
-                )),
-                Err(message) => set_auth_error(auth, message),
-            },
-            Err(message) => set_auth_error(auth, message),
-        }
-        auth.signing_in.set(false);
-    });
-}
-
-fn submit_sign_up(auth: AuthSignals) {
-    let user_name = auth.user_name_draft.get_untracked().trim().to_string();
-    let password = auth.password_draft.get_untracked();
-    if user_name.is_empty() {
-        auth.error
-            .set(Some("Enter a user name to continue.".to_string()));
-        return;
-    }
-    if password.chars().count() < 8 {
-        auth.error.set(Some(
-            "Enter a password with at least 8 characters.".to_string(),
-        ));
-        return;
-    }
-    if auth.signing_in.get_untracked() || auth.signing_up.get_untracked() {
-        return;
-    }
-
-    auth.signing_up.set(true);
-    auth.error.set(None);
-    leptos::task::spawn_local(async move {
-        match api::sign_up(&user_name, &password).await {
-            Ok(response) => match apply_auth_session_response(auth, response) {
-                Ok(Some(_)) => clear_auth_drafts(auth),
-                Ok(None) => auth.error.set(Some(
-                    "Account creation did not establish an authenticated session.".to_string(),
-                )),
-                Err(message) => set_auth_error(auth, message),
-            },
-            Err(message) => set_auth_error(auth, message),
-        }
-        auth.signing_up.set(false);
-    });
-}
-
-fn clear_auth_drafts(auth: AuthSignals) {
-    auth.user_name_draft.set(String::new());
-    auth.password_draft.set(String::new());
-}
-
-fn set_auth_error(auth: AuthSignals, message: String) {
-    auth.error.set(Some(message));
-    auth.checked.set(true);
-}
-
-fn apply_auth_session_response(
-    auth: AuthSignals,
-    response: AuthSessionResponse,
-) -> Result<Option<AuthSession>, String> {
-    let session = auth_session_from_response(response)?;
-    auth.error.set(None);
-    auth.session.set(session.clone());
-    auth.checked.set(true);
-    Ok(session)
-}
-
-fn current_auth_user_name(auth: AuthSignals) -> Option<String> {
-    auth.session
-        .get_untracked()
-        .map(|session| session.user_name.clone())
-}
-
-fn auth_session_from_response(
-    response: AuthSessionResponse,
-) -> Result<Option<AuthSession>, String> {
-    if !response.authenticated {
-        return Ok(None);
-    }
-
-    let user_name = response
-        .user_name
-        .map(|user_name| user_name.trim().to_string())
-        .filter(|user_name| !user_name.is_empty())
-        .ok_or_else(|| "Authenticated session is missing the user name.".to_string())?;
-    Ok(Some(AuthSession { user_name }))
 }
 
 // ---------------------------------------------------------------------------
@@ -632,22 +273,6 @@ struct SessionBootstrap {
     entries: Vec<TranscriptEntry>,
     pending_permissions: Vec<PendingPermission>,
     session_status: SessionLifecycle,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AuthSession {
-    user_name: String,
-}
-
-#[derive(Clone, Copy)]
-struct AuthSignals {
-    session: RwSignal<Option<AuthSession>>,
-    checked: RwSignal<bool>,
-    signing_in: RwSignal<bool>,
-    signing_up: RwSignal<bool>,
-    error: RwSignal<Option<String>>,
-    user_name_draft: RwSignal<String>,
-    password_draft: RwSignal<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1792,10 +1417,12 @@ fn sign_out_callback(
         signals.action_error.set(None);
         leptos::task::spawn_local(async move {
             match api::sign_out().await {
-                Ok(_) => {
-                    auth.session.set(None);
-                    auth.checked.set(true);
-                    auth.error.set(None);
+                Ok(response) => {
+                    if let Err(message) = apply_auth_session_response(auth, response) {
+                        signals.action_error.set(Some(message));
+                        sign_out_busy.set(false);
+                        return;
+                    }
                     stop_live_stream(signals);
                     clear_prepared_session_id();
                     if let Err(message) = navigate_to("/app/") {
@@ -2817,43 +2444,6 @@ fn status_badge_class(badge: StatusBadge) -> &'static str {
 // Helpers
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum AppRoute {
-    Home,
-    Register,
-    Session(String),
-    NotFound,
-}
-
-fn current_route() -> AppRoute {
-    let Some(pathname) = web_sys::window().and_then(|window| window.location().pathname().ok())
-    else {
-        return AppRoute::NotFound;
-    };
-
-    route_from_pathname(&pathname)
-}
-
-fn route_from_pathname(pathname: &str) -> AppRoute {
-    if pathname == "/app" || pathname == "/app/" {
-        return AppRoute::Home;
-    }
-    if pathname == "/app/register" || pathname == "/app/register/" {
-        return AppRoute::Register;
-    }
-
-    pathname
-        .strip_prefix("/app/sessions/")
-        .filter(|session_id| !session_id.is_empty())
-        .and_then(api::decode_component)
-        .map(AppRoute::Session)
-        .unwrap_or(AppRoute::NotFound)
-}
-
-fn app_session_path(session_id: &str) -> String {
-    format!("/app/sessions/{}", api::encode_component(session_id))
-}
-
 fn default_sidebar_open() -> bool {
     web_sys::window()
         .and_then(|window| window.inner_width().ok())
@@ -3122,13 +2712,14 @@ mod tests {
         AppRoute, AuthSession, BadgeTone, EntryRole, PendingPermission, SessionLifecycle,
         SidebarSession, TurnState, app_session_path, connection_badge_state, draft_storage_key,
         mark_session_closed, next_session_destination, remove_session_from_list,
-        rename_session_in_list, route_from_pathname, session_action_busy,
-        session_bootstrap_from_snapshot, session_composer_cancel_visible,
-        session_composer_disabled, session_composer_status_message, session_sidebar_status_label,
+        rename_session_in_list, session_action_busy, session_bootstrap_from_snapshot,
+        session_composer_cancel_visible, session_composer_disabled,
+        session_composer_status_message, session_sidebar_status_label,
         session_sidebar_status_pill_class, should_release_turn_state,
         should_reset_session_after_auth_refresh, sidebar_sessions, turn_state_for_snapshot,
         worker_badge_state,
     };
+    use crate::domain::routing::route_from_pathname;
     use acp_contracts::{
         ConversationMessage, MessageRole, PermissionRequest, SessionListItem, SessionResponse,
         SessionSnapshot, SessionStatus,
@@ -3358,9 +2949,11 @@ mod tests {
     fn auth_refresh_keeps_the_live_session_when_the_user_is_unchanged() {
         let current = Some(AuthSession {
             user_name: "alice".to_string(),
+            is_admin: true,
         });
         let refreshed = Some(AuthSession {
             user_name: "alice".to_string(),
+            is_admin: true,
         });
 
         assert!(!should_reset_session_after_auth_refresh(
@@ -3373,9 +2966,11 @@ mod tests {
     fn auth_refresh_resets_the_live_session_after_sign_out_or_user_switch() {
         let current = Some(AuthSession {
             user_name: "alice".to_string(),
+            is_admin: true,
         });
         let switched = Some(AuthSession {
             user_name: "bob".to_string(),
+            is_admin: false,
         });
 
         assert!(should_reset_session_after_auth_refresh(

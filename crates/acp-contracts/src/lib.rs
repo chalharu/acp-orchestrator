@@ -61,6 +61,10 @@ pub struct SessionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthSessionResponse {
     pub authenticated: bool,
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub bootstrap_registration_open: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name: Option<String>,
 }

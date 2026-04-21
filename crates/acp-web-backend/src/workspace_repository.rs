@@ -3,7 +3,9 @@ use async_trait::async_trait;
 
 use crate::{
     auth::AuthenticatedPrincipal,
-    workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError},
+    workspace_store::{
+        LocalAccountRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
+    },
 };
 
 #[async_trait]
@@ -18,6 +20,13 @@ pub trait WorkspaceRepository: Send + Sync {
         user_name: &str,
         password: &str,
     ) -> Result<(), WorkspaceStoreError>;
+
+    async fn load_local_account(
+        &self,
+        user_name: &str,
+    ) -> Result<Option<LocalAccountRecord>, WorkspaceStoreError>;
+
+    async fn bootstrap_registration_open(&self) -> Result<bool, WorkspaceStoreError>;
 
     async fn authenticate_local_user(
         &self,

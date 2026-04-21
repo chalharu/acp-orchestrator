@@ -1729,8 +1729,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn workspace_store_error_helpers_preserve_context() {
+    #[test]
+    fn workspace_store_errors_preserve_display_messages() {
         let display_error = WorkspaceStoreError::Database("db unavailable".to_string());
         assert_eq!(display_error.to_string(), "db unavailable");
         let conflict_error = WorkspaceStoreError::Conflict("already exists".to_string());
@@ -1738,6 +1738,10 @@ mod tests {
 
         let mapped_error = database_error("write failed");
         assert_eq!(mapped_error.to_string(), "write failed");
+    }
+
+    #[test]
+    fn local_account_insert_errors_preserve_conflict_context() {
         let insert_conflict = local_account_insert_error(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
             Some("duplicate".to_string()),
@@ -1754,7 +1758,10 @@ mod tests {
             insert_failure,
             WorkspaceStoreError::Database(message) if message.contains("busy")
         ));
+    }
 
+    #[test]
+    fn timestamp_parsing_helpers_preserve_row_context() {
         let parse_error = parse_timestamp("not-a-timestamp".to_string())
             .expect_err("invalid timestamps should fail");
         assert!(parse_error.to_string().contains("invalid timestamp"));
@@ -1770,7 +1777,10 @@ mod tests {
                 .expect_err("invalid optional row timestamps should fail"),
             rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, _)
         ));
+    }
 
+    #[tokio::test]
+    async fn join_error_preserves_blocking_task_context() {
         let join_error_value = tokio::spawn(async move { panic!("boom") })
             .await
             .expect_err("panicking tasks should yield join errors");

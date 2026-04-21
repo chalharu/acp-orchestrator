@@ -244,55 +244,15 @@ fn sign_in_form(
     sign_in_disabled: Signal<bool>,
     auth_busy: Signal<bool>,
 ) -> impl IntoView {
-    view! {
-        <form
-            class="auth-form"
-            on:submit=move |ev: web_sys::SubmitEvent| {
-                ev.prevent_default();
-                submit_sign_in(auth);
-            }
-        >
-            <label class="auth-form__label" for="sign-in-user-name">
-                "User name"
-            </label>
-            <input
-                id="sign-in-user-name"
-                class="auth-form__input"
-                type="text"
-                autofocus=true
-                maxlength="100"
-                autocomplete="username"
-                prop:value=move || auth.user_name_draft.get()
-                prop:disabled=move || auth_busy.get()
-                on:input=move |ev| {
-                    auth.user_name_draft.set(event_target_value(&ev));
-                }
-            />
-            <label class="auth-form__label" for="sign-in-password">
-                "Password"
-            </label>
-            <input
-                id="sign-in-password"
-                class="auth-form__input"
-                type="password"
-                autocomplete="current-password"
-                prop:value=move || auth.password_draft.get()
-                prop:disabled=move || auth_busy.get()
-                on:input=move |ev| {
-                    auth.password_draft.set(event_target_value(&ev));
-                }
-            />
-            <div class="auth-form__actions">
-                <button
-                    type="submit"
-                    class="auth-form__submit"
-                    prop:disabled=move || sign_in_disabled.get()
-                >
-                    {move || sign_in_button_label(auth.signing_in.get())}
-                </button>
-            </div>
-        </form>
-    }
+    let button_label = Signal::derive(move || sign_in_button_label(auth.signing_in.get()));
+    auth_credentials_form(
+        auth,
+        sign_in_disabled,
+        auth_busy,
+        button_label,
+        "current-password",
+        submit_sign_in,
+    )
 }
 
 fn register_form(
@@ -300,54 +260,98 @@ fn register_form(
     sign_up_disabled: Signal<bool>,
     auth_busy: Signal<bool>,
 ) -> impl IntoView {
+    let button_label = Signal::derive(move || sign_up_button_label(auth.signing_up.get()));
+    auth_credentials_form(
+        auth,
+        sign_up_disabled,
+        auth_busy,
+        button_label,
+        "new-password",
+        submit_sign_up,
+    )
+}
+
+fn auth_credentials_form(
+    auth: AuthSignals,
+    submit_disabled: Signal<bool>,
+    auth_busy: Signal<bool>,
+    button_label: Signal<&'static str>,
+    password_autocomplete: &'static str,
+    on_submit: fn(AuthSignals),
+) -> impl IntoView {
     view! {
         <form
             class="auth-form"
             on:submit=move |ev: web_sys::SubmitEvent| {
                 ev.prevent_default();
-                submit_sign_up(auth);
+                on_submit(auth);
             }
         >
-            <label class="auth-form__label" for="sign-in-user-name">
-                "User name"
-            </label>
-            <input
-                id="sign-in-user-name"
-                class="auth-form__input"
-                type="text"
-                autofocus=true
-                maxlength="100"
-                autocomplete="username"
-                prop:value=move || auth.user_name_draft.get()
-                prop:disabled=move || auth_busy.get()
-                on:input=move |ev| {
-                    auth.user_name_draft.set(event_target_value(&ev));
-                }
-            />
-            <label class="auth-form__label" for="sign-in-password">
-                "Password"
-            </label>
-            <input
-                id="sign-in-password"
-                class="auth-form__input"
-                type="password"
-                autocomplete="new-password"
-                prop:value=move || auth.password_draft.get()
-                prop:disabled=move || auth_busy.get()
-                on:input=move |ev| {
-                    auth.password_draft.set(event_target_value(&ev));
-                }
-            />
-            <div class="auth-form__actions">
-                <button
-                    type="submit"
-                    class="auth-form__submit"
-                    prop:disabled=move || sign_up_disabled.get()
-                >
-                    {move || sign_up_button_label(auth.signing_up.get())}
-                </button>
-            </div>
+            {auth_user_name_field(auth, auth_busy)}
+            {auth_password_field(auth, auth_busy, password_autocomplete)}
+            {auth_submit_button(submit_disabled, button_label)}
         </form>
+    }
+}
+
+fn auth_user_name_field(auth: AuthSignals, auth_busy: Signal<bool>) -> impl IntoView {
+    view! {
+        <label class="auth-form__label" for="sign-in-user-name">
+            "User name"
+        </label>
+        <input
+            id="sign-in-user-name"
+            class="auth-form__input"
+            type="text"
+            autofocus=true
+            maxlength="100"
+            autocomplete="username"
+            prop:value=move || auth.user_name_draft.get()
+            prop:disabled=move || auth_busy.get()
+            on:input=move |ev| {
+                auth.user_name_draft.set(event_target_value(&ev));
+            }
+        />
+    }
+}
+
+fn auth_password_field(
+    auth: AuthSignals,
+    auth_busy: Signal<bool>,
+    autocomplete: &'static str,
+) -> impl IntoView {
+    view! {
+        <label class="auth-form__label" for="sign-in-password">
+            "Password"
+        </label>
+        <input
+            id="sign-in-password"
+            class="auth-form__input"
+            type="password"
+            autocomplete=autocomplete
+            prop:value=move || auth.password_draft.get()
+            prop:disabled=move || auth_busy.get()
+            on:input=move |ev| {
+                auth.password_draft.set(event_target_value(&ev));
+            }
+        />
+    }
+}
+
+fn auth_submit_button(
+    submit_disabled: Signal<bool>,
+    button_label: Signal<&'static str>,
+) -> impl IntoView {
+    view! {
+        <div class="auth-form__actions">
+            <button
+                type="submit"
+                class="auth-form__submit"
+                prop:disabled=move || submit_disabled.get()
+            >
+                {move || button_label.get()}
+            </button>
+        </div>
     }
 }
 

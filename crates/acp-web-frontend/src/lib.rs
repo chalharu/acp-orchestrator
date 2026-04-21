@@ -956,15 +956,20 @@ fn session_sidebar_item_callbacks(
 }
 
 fn session_sidebar_item_view(
-    href: String,
-    title: String,
-    activity_label: String,
-    is_current: bool,
-    is_closed: bool,
+    item: SidebarSession,
     rename_draft: RwSignal<String>,
     item_signals: SessionSidebarItemSignals,
     callbacks: SessionSidebarItemCallbacks,
 ) -> impl IntoView {
+    let SidebarSession {
+        href,
+        title,
+        activity_label,
+        is_current,
+        is_closed,
+        ..
+    } = item;
+
     view! {
         <li class=move || session_sidebar_item_class(is_current, is_closed)>
             <Show
@@ -1024,7 +1029,7 @@ fn SessionSidebarItem(
         rename_draft,
     );
     let callbacks = session_sidebar_item_callbacks(
-        item.id,
+        item.id.clone(),
         item.title.clone(),
         rename_draft,
         renaming_session_id,
@@ -1033,16 +1038,7 @@ fn SessionSidebarItem(
         on_delete_session,
     );
 
-    session_sidebar_item_view(
-        item.href,
-        item.title,
-        item.activity_label,
-        item.is_current,
-        item.is_closed,
-        rename_draft,
-        item_signals,
-        callbacks,
-    )
+    session_sidebar_item_view(item, rename_draft, item_signals, callbacks)
 }
 
 #[component]

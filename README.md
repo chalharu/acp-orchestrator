@@ -100,13 +100,13 @@ verification, use the built-in mock prompts below:
   assistant reply arrives and confirm `[status] turn cancelled`. In the browser,
   use the visible **Cancel** button while the turn is pending.
 
-For browser regression coverage, build the frontend bundle, ensure Chrome and
-ChromeDriver are available, then run
+For browser regression coverage, build the frontend bundle first.
+Ensure Chrome and ChromeDriver are available, then run
 `cargo test -p acp-web-backend --test browser_ui_fantoccini -- --ignored --test-threads=1`.
 The suite serves the real `/app/` shell and drives it through Fantoccini.
 Set `ACP_WEB_FRONTEND_DIST`, `ACP_CHROME_BINARY`, or `ACP_CHROMEDRIVER_BIN`
-when your local paths differ from the defaults. GitHub Actions mirrors the same
-flow in `.github/workflows/browser-ui.yaml`.
+when your local paths differ from the defaults.
+GitHub Actions mirrors the same flow in `.github/workflows/browser-ui.yaml`.
 
 The root `cargo run` launcher prints the same hints when it starts the bundled
 mock for `chat`.

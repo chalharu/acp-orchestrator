@@ -240,6 +240,7 @@ pub fn app(state: AppState) -> Router {
         .route("/app/accounts", get(redirect_to_accounts))
         .route("/app/accounts/", get(app_accounts_entrypoint))
         .route("/app/assets/app.css", get(app_stylesheet))
+        .route("/app/assets/fonts/{font_name}", get(app_font_asset))
         .route("/app/assets/wasm-init.js", get(wasm_init_script))
         .route(FRONTEND_JAVASCRIPT_ASSET_PATH, get(wasm_glue_javascript))
         .route(FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
@@ -707,6 +708,30 @@ async fn app_stylesheet() -> Response {
     app_static_text_response("text/css; charset=utf-8", APP_STYLESHEET)
 }
 
+async fn app_font_asset(Path(font_name): Path<String>) -> Response {
+    match font_name.as_str() {
+        "noto-sans-jp-latin-400.woff2" => {
+            app_static_font_response(APP_FONT_NOTO_SANS_JP_LATIN_REGULAR)
+        }
+        "noto-sans-jp-japanese-400.woff2" => {
+            app_static_font_response(APP_FONT_NOTO_SANS_JP_JAPANESE_REGULAR)
+        }
+        "noto-sans-jp-latin-500.woff2" => {
+            app_static_font_response(APP_FONT_NOTO_SANS_JP_LATIN_MEDIUM)
+        }
+        "noto-sans-jp-japanese-500.woff2" => {
+            app_static_font_response(APP_FONT_NOTO_SANS_JP_JAPANESE_MEDIUM)
+        }
+        "noto-sans-jp-latin-700.woff2" => {
+            app_static_font_response(APP_FONT_NOTO_SANS_JP_LATIN_BOLD)
+        }
+        "noto-sans-jp-japanese-700.woff2" => {
+            app_static_font_response(APP_FONT_NOTO_SANS_JP_JAPANESE_BOLD)
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn wasm_init_script() -> Response {
     app_static_text_response("application/javascript; charset=utf-8", WASM_INIT_JS)
 }
@@ -815,15 +840,28 @@ fn app_static_text_response(content_type: &'static str, body: &'static str) -> R
     (response_headers, body).into_response()
 }
 
+fn app_static_font_response(body: &'static [u8]) -> Response {
+    let response_headers =
+        asset_response_headers_with_cache("font/woff2", "public, max-age=31536000, immutable");
+    (response_headers, body).into_response()
+}
+
 fn app_dynamic_text_response(content_type: &'static str, body: String) -> Response {
     let response_headers = asset_response_headers(content_type);
     (response_headers, body).into_response()
 }
 
 fn asset_response_headers(content_type: &'static str) -> HeaderMap {
+    asset_response_headers_with_cache(content_type, "no-store")
+}
+
+fn asset_response_headers_with_cache(
+    content_type: &'static str,
+    cache_control: &'static str,
+) -> HeaderMap {
     let mut response_headers = HeaderMap::new();
     response_headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
     response_headers.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
@@ -894,6 +932,18 @@ fn append_cookie_if_missing(
 
 const APP_SHELL_DOCUMENT_TEMPLATE: &str = include_str!("app_assets/app.html");
 const APP_STYLESHEET: &str = include_str!("app_assets/app.css");
+const APP_FONT_NOTO_SANS_JP_LATIN_REGULAR: &[u8] =
+    include_bytes!("app_assets/fonts/noto-sans-jp-latin-400-normal.woff2");
+const APP_FONT_NOTO_SANS_JP_JAPANESE_REGULAR: &[u8] =
+    include_bytes!("app_assets/fonts/noto-sans-jp-japanese-400-normal.woff2");
+const APP_FONT_NOTO_SANS_JP_LATIN_MEDIUM: &[u8] =
+    include_bytes!("app_assets/fonts/noto-sans-jp-latin-500-normal.woff2");
+const APP_FONT_NOTO_SANS_JP_JAPANESE_MEDIUM: &[u8] =
+    include_bytes!("app_assets/fonts/noto-sans-jp-japanese-500-normal.woff2");
+const APP_FONT_NOTO_SANS_JP_LATIN_BOLD: &[u8] =
+    include_bytes!("app_assets/fonts/noto-sans-jp-latin-700-normal.woff2");
+const APP_FONT_NOTO_SANS_JP_JAPANESE_BOLD: &[u8] =
+    include_bytes!("app_assets/fonts/noto-sans-jp-japanese-700-normal.woff2");
 const WASM_INIT_JS: &str = "import init from \"./acp-web-frontend.js\";\n\nawait init();\n";
 
 fn app_shell_document(csrf_token: &str) -> Html<String> {

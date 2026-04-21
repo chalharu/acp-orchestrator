@@ -1,6 +1,8 @@
 use acp_contracts::{AuthStatusResponse, LocalAccount};
 
-use crate::domain::auth::{AccountCapabilities, AccountsRouteAccess, HomeRouteTarget};
+use crate::domain::auth::{
+    AccountCapabilities, AccountConstraintReason, AccountsRouteAccess, HomeRouteTarget,
+};
 
 pub fn home_route_target(status: &AuthStatusResponse) -> HomeRouteTarget {
     if status.account.is_some() {
@@ -32,11 +34,15 @@ pub fn account_capabilities(
         .count();
     let is_current_user = account.user_id == current_user_id;
     let removing_last_admin = account.is_admin && admin_count <= 1;
+    let constraint = if is_current_user {
+        Some(AccountConstraintReason::CurrentUser)
+    } else if removing_last_admin {
+        Some(AccountConstraintReason::LastAdmin)
+    } else {
+        None
+    };
 
-    AccountCapabilities {
-        can_delete: !is_current_user && !removing_last_admin,
-        can_toggle_admin: !is_current_user && !removing_last_admin,
-    }
+    AccountCapabilities { constraint }
 }
 
 #[cfg(test)]
@@ -103,8 +109,7 @@ mod tests {
         assert_eq!(
             account_capabilities(&admin.user_id, &[admin.clone(), member.clone()], &admin),
             AccountCapabilities {
-                can_delete: false,
-                can_toggle_admin: false,
+                constraint: Some(AccountConstraintReason::CurrentUser),
             }
         );
         assert_eq!(
@@ -114,15 +119,13 @@ mod tests {
                 &admin,
             ),
             AccountCapabilities {
-                can_delete: true,
-                can_toggle_admin: true,
+                constraint: None,
             }
         );
         assert_eq!(
             account_capabilities("other", std::slice::from_ref(&admin), &admin),
             AccountCapabilities {
-                can_delete: false,
-                can_toggle_admin: false,
+                constraint: Some(AccountConstraintReason::LastAdmin),
             }
         );
     }

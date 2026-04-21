@@ -15,8 +15,19 @@ pub enum AccountsRouteAccess {
     Forbidden,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountConstraintReason {
+    CurrentUser,
+    LastAdmin,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountCapabilities {
-    pub can_delete: bool,
-    pub can_toggle_admin: bool,
+    pub constraint: Option<AccountConstraintReason>,
+}
+
+impl AccountCapabilities {
+    pub fn can_modify(&self) -> bool {
+        self.constraint.is_none()
+    }
 }

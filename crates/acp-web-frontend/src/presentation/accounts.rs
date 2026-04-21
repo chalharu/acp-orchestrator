@@ -5,7 +5,7 @@ use wasm_bindgen::JsCast;
 use crate::{
     application::auth::{account_capabilities, accounts_route_access},
     components::ErrorBanner,
-    domain::auth::AccountsRouteAccess,
+    domain::auth::{AccountConstraintReason, AccountsRouteAccess},
     infrastructure::api,
 };
 
@@ -156,8 +156,15 @@ fn CreateAccountSection(state: AccountsPageState) -> impl IntoView {
 
     view! {
         <div class="account-panel__section">
-            <h2>"Create account"</h2>
-            <form class="account-form" on:submit=on_submit>
+            <div class="account-panel__section-heading">
+                <div class="account-panel__section-copy">
+                    <h2>"Create account"</h2>
+                    <p class="muted">
+                        "Provision a browser sign-in with an optional admin grant."
+                    </p>
+                </div>
+            </div>
+            <form class="account-form account-form--create" on:submit=on_submit>
                 <label class="account-form__field">
                     <span>"User name"</span>
                     <input
@@ -230,20 +237,47 @@ fn create_account_submit_handler(
 
 #[component]
 fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView {
+    let account_count = Signal::derive(move || state.accounts.get().len());
+
     view! {
-        <div class="account-panel__section">
-            <h2>"Current accounts"</h2>
+        <div class="account-panel__section account-panel__section--registry">
+            <div class="account-panel__section-heading">
+                <div class="account-panel__section-copy">
+                    <h2>"Account registry"</h2>
+                    <p class="muted">
+                        "User names stay fixed. Adjust passwords and admin access row by row."
+                    </p>
+                </div>
+                <p class="account-panel__summary">
+                    {move || account_count_label(account_count.get())}
+                </p>
+            </div>
             <Show
                 when=move || !state.loading_accounts.get()
                 fallback=|| view! { <p class="muted">"Loading accounts…"</p> }
             >
-                <ul class="account-list">
-                    <For
-                        each=move || state.accounts.get()
-                        key=|account| account.user_id.clone()
-                        children=move |account| view! { <AccountRow account state /> }
-                    />
-                </ul>
+                <div class="account-table-wrap">
+                    <table class="account-table">
+                        <caption class="sr-only">"Local accounts and admin controls"</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">"Account"</th>
+                                <th scope="col">"State"</th>
+                                <th scope="col">"Created"</th>
+                                <th scope="col">"Password reset"</th>
+                                <th scope="col">"Admin access"</th>
+                                <th scope="col">"Actions"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <For
+                                each=move || state.accounts.get()
+                                key=|account| account.user_id.clone()
+                                children=move |account| view! { <AccountRow account state /> }
+                            />
+                        </tbody>
+                    </table>
+                </div>
             </Show>
         </div>
     }
@@ -255,6 +289,10 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
     let admin_checked = RwSignal::new(account.is_admin);
     let saving = RwSignal::new(false);
     let deleting = RwSignal::new(false);
+    let row_dirty_account = account.clone();
+    let row_dirty = Signal::derive(move || {
+        !password.get().trim().is_empty() || admin_checked.get() != row_dirty_account.is_admin
+    });
     let account_id = account.user_id.clone();
     let username = account.username.clone();
     let capabilities_account = account.clone();
@@ -268,41 +306,88 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
     let role_account = account.clone();
     let role_label =
         Signal::derive(move || account_role_label(&role_account, &state.current_user_id.get()));
-    let can_toggle_admin = Signal::derive(move || capabilities.get().can_toggle_admin);
-    let can_delete = Signal::derive(move || capabilities.get().can_delete);
+    let role_badge_account = account.clone();
+    let role_badge_class = Signal::derive(move || {
+        format!(
+            "account-role-pill account-role-pill--{}",
+            account_role_badge_modifier(&role_badge_account, &state.current_user_id.get())
+        )
+    });
+    let constraint_label = Signal::derive(move || {
+        account_constraint_label(capabilities.get().constraint).to_string()
+    });
+    let can_modify = Signal::derive(move || capabilities.get().can_modify());
     let save_account =
         account_save_handler(account_id.clone(), state, password, admin_checked, saving);
     let delete_account = account_delete_handler(account_id, state, deleting);
+    let created_label = account_created_label(&account);
+    let password_username = username.clone();
 
     view! {
-        <li class="account-list__item">
-            <form class="account-row" on:submit=move |event| save_account.run(event)>
-                <AccountRowSummary username role_label />
-                <AccountPasswordField password />
-                <AccountAdminToggle admin_checked can_toggle_admin />
-                <AccountRowActions saving deleting can_delete delete_account />
-            </form>
-        </li>
+        <tr class="account-table__row">
+            <td>
+                <AccountRowSummary username constraint_label />
+            </td>
+            <td>
+                <AccountStateCell role_label role_badge_class />
+            </td>
+            <td class="account-table__created">
+                <span>{created_label}</span>
+            </td>
+            <td>
+                <AccountPasswordField password username=password_username />
+            </td>
+            <td>
+                <AccountAdminToggle admin_checked can_modify />
+            </td>
+            <td>
+                <AccountRowActions
+                    saving
+                    deleting
+                    row_dirty
+                    can_modify
+                    save_account
+                    delete_account
+                    constraint_label
+                />
+            </td>
+        </tr>
     }
 }
 
 #[component]
-fn AccountRowSummary(username: String, role_label: Signal<String>) -> impl IntoView {
+fn AccountRowSummary(username: String, constraint_label: Signal<String>) -> impl IntoView {
     view! {
         <div class="account-row__summary">
-            <strong>{username}</strong>
-            <span class="muted">{move || role_label.get()}</span>
+            <strong class="account-row__name">{username}</strong>
+            <Show when=move || !constraint_label.get().is_empty()>
+                <span class="account-row__note">{move || constraint_label.get()}</span>
+            </Show>
         </div>
     }
 }
 
 #[component]
-fn AccountPasswordField(password: RwSignal<String>) -> impl IntoView {
+fn AccountStateCell(role_label: Signal<String>, role_badge_class: Signal<String>) -> impl IntoView {
     view! {
-        <label class="account-form__field">
-            <span>"New password"</span>
+        <div class="account-state-cell">
+            <span class=move || role_badge_class.get()>{move || role_label.get()}</span>
+        </div>
+    }
+}
+
+#[component]
+fn AccountPasswordField(password: RwSignal<String>, username: String) -> impl IntoView {
+    let input_label = format!("New password for {username}");
+    let sr_label = input_label.clone();
+
+    view! {
+        <label class="account-form__field account-form__field--compact">
+            <span class="sr-only">{sr_label}</span>
             <input
                 type="password"
+                placeholder="Leave blank to keep current"
+                aria-label=input_label
                 prop:value=move || password.get()
                 on:input=move |event| password.set(event_target_value(&event))
             />
@@ -313,17 +398,17 @@ fn AccountPasswordField(password: RwSignal<String>) -> impl IntoView {
 #[component]
 fn AccountAdminToggle(
     admin_checked: RwSignal<bool>,
-    can_toggle_admin: Signal<bool>,
+    can_modify: Signal<bool>,
 ) -> impl IntoView {
     view! {
-        <label class="account-checkbox">
+        <label class="account-checkbox account-checkbox--table">
             <input
                 type="checkbox"
                 prop:checked=move || admin_checked.get()
-                prop:disabled=move || !can_toggle_admin.get()
+                prop:disabled=move || !can_modify.get()
                 on:change=move |event| admin_checked.set(event_target_checked(&event))
             />
-            <span>"Admin"</span>
+            <span>{move || admin_access_label(admin_checked.get())}</span>
         </label>
     }
 }
@@ -332,22 +417,44 @@ fn AccountAdminToggle(
 fn AccountRowActions(
     saving: RwSignal<bool>,
     deleting: RwSignal<bool>,
-    can_delete: Signal<bool>,
+    row_dirty: Signal<bool>,
+    can_modify: Signal<bool>,
+    save_account: Callback<()>,
     delete_account: Callback<web_sys::MouseEvent>,
+    constraint_label: Signal<String>,
 ) -> impl IntoView {
     view! {
         <div class="account-row__actions">
-            <button type="submit" prop:disabled=move || saving.get()>
+            <button
+                type="button"
+                prop:disabled=move || saving.get() || !row_dirty.get()
+                on:click=move |_| save_account.run(())
+            >
                 {move || save_button_label(saving.get())}
             </button>
             <button
                 type="button"
                 class="account-row__delete"
-                prop:disabled=move || deleting.get() || !can_delete.get()
+                prop:disabled=move || deleting.get() || !can_modify.get()
                 on:click=move |event| delete_account.run(event)
             >
                 {move || delete_button_label(deleting.get())}
             </button>
+            <p class="account-row__hint">
+                {move || {
+                    if saving.get() {
+                        "Saving changes…".to_string()
+                    } else if deleting.get() {
+                        "Removing account…".to_string()
+                    } else if !row_dirty.get() {
+                        "No pending changes".to_string()
+                    } else if !can_modify.get() && !constraint_label.get().is_empty() {
+                        constraint_label.get()
+                    } else {
+                        "Ready to apply".to_string()
+                    }
+                }}
+            </p>
         </div>
     }
 }
@@ -358,9 +465,8 @@ fn account_save_handler(
     password: RwSignal<String>,
     admin_checked: RwSignal<bool>,
     saving: RwSignal<bool>,
-) -> Callback<web_sys::SubmitEvent> {
-    Callback::new(move |event: web_sys::SubmitEvent| {
-        event.prevent_default();
+) -> Callback<()> {
+    Callback::new(move |_| {
         if saving.get_untracked() {
             return;
         }
@@ -434,14 +540,61 @@ fn delete_button_label(deleting: bool) -> &'static str {
     if deleting { "Deleting…" } else { "Delete" }
 }
 
-fn account_role_label(account: &LocalAccount, current_user_id: &str) -> String {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountRoleKind {
+    Active,
+    Admin,
+    Member,
+}
+
+fn account_role_kind(account: &LocalAccount, current_user_id: &str) -> AccountRoleKind {
     if account.user_id == current_user_id {
-        "signed in".to_string()
+        AccountRoleKind::Active
     } else if account.is_admin {
-        "admin".to_string()
+        AccountRoleKind::Admin
     } else {
-        "member".to_string()
+        AccountRoleKind::Member
     }
+}
+
+fn account_role_label(account: &LocalAccount, current_user_id: &str) -> String {
+    match account_role_kind(account, current_user_id) {
+        AccountRoleKind::Active => "signed in".to_string(),
+        AccountRoleKind::Admin => "admin".to_string(),
+        AccountRoleKind::Member => "member".to_string(),
+    }
+}
+
+fn account_role_badge_modifier(account: &LocalAccount, current_user_id: &str) -> &'static str {
+    match account_role_kind(account, current_user_id) {
+        AccountRoleKind::Active => "active",
+        AccountRoleKind::Admin => "admin",
+        AccountRoleKind::Member => "member",
+    }
+}
+
+fn account_constraint_label(reason: Option<AccountConstraintReason>) -> &'static str {
+    match reason {
+        Some(AccountConstraintReason::CurrentUser) => "Signed in on this browser",
+        Some(AccountConstraintReason::LastAdmin) => "One admin account must remain",
+        None => "",
+    }
+}
+
+fn account_created_label(account: &LocalAccount) -> String {
+    account.created_at.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+fn account_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 account".to_string()
+    } else {
+        format!("{count} accounts")
+    }
+}
+
+fn admin_access_label(is_admin: bool) -> &'static str {
+    if is_admin { "Enabled" } else { "Standard" }
 }
 
 fn event_target_checked(event: &web_sys::Event) -> bool {
@@ -495,12 +648,33 @@ mod tests {
     }
 
     #[test]
-    fn account_role_label_prefers_signed_in_over_admin() {
+    fn account_role_kind_prefers_signed_in_over_admin() {
         let admin = sample_account("admin", true);
         let member = sample_account("member", false);
 
-        assert_eq!(account_role_label(&admin, "admin"), "signed in");
-        assert_eq!(account_role_label(&admin, "other"), "admin");
-        assert_eq!(account_role_label(&member, "other"), "member");
+        assert_eq!(account_role_kind(&admin, "admin"), AccountRoleKind::Active);
+        assert_eq!(account_role_kind(&admin, "other"), AccountRoleKind::Admin);
+        assert_eq!(account_role_kind(&member, "other"), AccountRoleKind::Member);
+    }
+
+    #[test]
+    fn account_constraint_label_explains_protected_rows() {
+        assert_eq!(
+            account_constraint_label(Some(AccountConstraintReason::CurrentUser)),
+            "Signed in on this browser"
+        );
+        assert_eq!(
+            account_constraint_label(Some(AccountConstraintReason::LastAdmin)),
+            "One admin account must remain"
+        );
+        assert_eq!(account_constraint_label(None), "");
+    }
+
+    #[test]
+    fn account_created_label_uses_utc_stamp() {
+        assert_eq!(
+            account_created_label(&sample_account("member", false)),
+            "2026-04-17 01:00 UTC"
+        );
     }
 }

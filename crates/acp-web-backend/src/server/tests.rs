@@ -563,9 +563,43 @@ async fn app_stylesheet_responds_with_css_content_type() {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("app.css body should be readable");
+    let body_text = String::from_utf8(body.to_vec()).expect("app.css should be valid UTF-8");
 
     assert!(ct.starts_with("text/css"), "got: {ct}");
+    assert!(!body_text.is_empty());
+    assert!(body_text.contains("Noto Sans JP"));
+}
+
+#[tokio::test]
+async fn app_font_asset_responds_with_font_content_type() {
+    let response = app_font_asset(Path("noto-sans-jp-japanese-400.woff2".to_string())).await;
+    let ct = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("font asset response should include content-type")
+        .to_str()
+        .expect("content-type should be valid UTF-8")
+        .to_string();
+    let cache_control = response
+        .headers()
+        .get(CACHE_CONTROL)
+        .expect("font asset response should include cache-control")
+        .to_str()
+        .expect("cache-control should be valid UTF-8")
+        .to_string();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("font asset body should be readable");
+
+    assert!(ct.starts_with("font/woff2"), "got: {ct}");
+    assert_eq!(cache_control, "public, max-age=31536000, immutable");
     assert!(!body.is_empty());
+}
+
+#[tokio::test]
+async fn app_font_asset_returns_not_found_for_unknown_names() {
+    let response = app_font_asset(Path("missing.ttf".to_string())).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

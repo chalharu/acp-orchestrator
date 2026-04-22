@@ -1,28 +1,38 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+
 use acp_contracts::{
     CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    SessionSnapshot, StreamEvent, StreamEventPayload,
 };
-use futures_util::{
-    StreamExt,
-    future::{AbortHandle, Abortable},
-};
+use core::future::Future;
+use futures_util::future::AbortHandle;
+#[cfg(target_family = "wasm")]
+use futures_util::{future::Abortable, StreamExt};
 use leptos::prelude::*;
 
+#[cfg(target_family = "wasm")]
 use crate::application::auth::{self, HomeRouteTarget};
+use crate::browser::clear_prepared_session_id;
+#[cfg(target_family = "wasm")]
 use crate::browser::{
-    clear_draft, clear_prepared_session_id, clear_prepared_session_id_if_matches, navigate_to,
-    prepared_session_id, store_prepared_session_id,
+    clear_draft, clear_prepared_session_id_if_matches, navigate_to, prepared_session_id,
+    store_prepared_session_id,
 };
 use crate::components::composer::ComposerSlashCallbacks;
+#[cfg(target_family = "wasm")]
 use crate::domain::routing::app_session_path;
 use crate::domain::session::{
     PendingPermission, SessionLifecycle, TurnState, mark_session_closed, message_to_entry,
-    next_session_destination, remove_session_from_list, rename_session_in_list,
     session_action_busy, session_bootstrap_from_snapshot, session_end_message,
     should_apply_snapshot_turn_state, should_release_turn_state, tool_activity_text,
     turn_state_for_snapshot,
 };
+#[cfg(target_family = "wasm")]
+use crate::domain::session::{
+    next_session_destination, remove_session_from_list, rename_session_in_list,
+};
 use crate::domain::transcript::{EntryRole, TranscriptEntry};
+#[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 use crate::slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
@@ -31,8 +41,22 @@ use crate::slash::{
 
 use super::state::SessionSignals;
 
+#[cfg(target_family = "wasm")]
+fn spawn_browser_task(task: impl Future<Output = ()> + 'static) {
+    leptos::task::spawn_local(task);
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[allow(dead_code)]
+fn spawn_browser_task<Task>(_task: Task)
+where
+    Task: Future<Output = ()> + 'static,
+{
+}
+
+#[cfg(target_family = "wasm")]
 pub(super) fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: RwSignal<bool>) {
-    leptos::task::spawn_local(async move {
+    spawn_browser_task(async move {
         let result = match api::auth_status().await {
             Ok(status) => navigate_home_target(auth::home_route_target(&status)).await,
             Err(message) => Err(message),
@@ -44,8 +68,12 @@ pub(super) fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: Rw
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn spawn_home_redirect(_error: RwSignal<Option<String>>, _preparing: RwSignal<bool>) {}
+
+#[cfg(target_family = "wasm")]
 pub(super) fn spawn_session_bootstrap(session_id: String, signals: SessionSignals) {
-    leptos::task::spawn_local(async move {
+    spawn_browser_task(async move {
         match api::load_session(&session_id).await {
             Ok(session) => {
                 let is_closed = session.status == SessionStatus::Closed;
@@ -67,17 +95,30 @@ pub(super) fn spawn_session_bootstrap(session_id: String, signals: SessionSignal
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn spawn_session_bootstrap(_session_id: String, _signals: SessionSignals) {}
+
+fn update_slash_completion(signals: SessionSignals, draft: &str) {
+    let candidates = local_slash_candidates(draft);
+    if candidates.is_empty() {
+        dismiss_slash_palette(signals);
+    } else {
+        signals.slash.candidates.set(candidates);
+        signals.slash.selected_index.set(0);
+    }
+}
+
+#[cfg(target_family = "wasm")]
 pub(super) fn bind_slash_completion(signals: SessionSignals) {
     Effect::new(move |_| {
         let draft = signals.draft.get();
-        let candidates = local_slash_candidates(&draft);
-        if candidates.is_empty() {
-            dismiss_slash_palette(signals);
-        } else {
-            signals.slash.candidates.set(candidates);
-            signals.slash.selected_index.set(0);
-        }
+        update_slash_completion(signals, &draft);
     });
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn bind_slash_completion(signals: SessionSignals) {
+    update_slash_completion(signals, &signals.draft.get_untracked());
 }
 
 pub(super) fn slash_palette_callbacks(signals: SessionSignals) -> ComposerSlashCallbacks {
@@ -115,6 +156,7 @@ pub(super) fn session_permission_callbacks(
     )
 }
 
+#[cfg(target_family = "wasm")]
 pub(super) fn session_submit_callback(
     session_id: String,
     signals: SessionSignals,
@@ -129,7 +171,7 @@ pub(super) fn session_submit_callback(
         signals.turn_state.set(TurnState::Submitting);
         signals.action_error.set(None);
         dismiss_slash_palette(signals);
-        leptos::task::spawn_local(async move {
+        spawn_browser_task(async move {
             match api::send_message(&session_id, &prompt).await {
                 Ok(()) => {
                     clear_prepared_session_id();
@@ -147,6 +189,24 @@ pub(super) fn session_submit_callback(
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn session_submit_callback(
+    _session_id: String,
+    signals: SessionSignals,
+) -> Callback<String> {
+    Callback::new(move |prompt: String| {
+        if prompt.starts_with('/') {
+            handle_slash_submit(&prompt, signals);
+            return;
+        }
+
+        signals.turn_state.set(TurnState::Submitting);
+        signals.action_error.set(None);
+        dismiss_slash_palette(signals);
+    })
+}
+
+#[cfg(target_family = "wasm")]
 pub(super) fn rename_session_callback(signals: SessionSignals) -> Callback<(String, String)> {
     Callback::new(move |(session_id, new_title): (String, String)| {
         let new_title = new_title.trim().to_string();
@@ -157,7 +217,7 @@ pub(super) fn rename_session_callback(signals: SessionSignals) -> Callback<(Stri
         }
         signals.list.error.set(None);
         signals.list.saving_rename_id.set(Some(session_id.clone()));
-        leptos::task::spawn_local(async move {
+        spawn_browser_task(async move {
             match api::rename_session(&session_id, &new_title).await {
                 Ok(session) => {
                     signals.list.items.update(|list| {
@@ -177,6 +237,21 @@ pub(super) fn rename_session_callback(signals: SessionSignals) -> Callback<(Stri
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn rename_session_callback(signals: SessionSignals) -> Callback<(String, String)> {
+    Callback::new(move |(session_id, new_title): (String, String)| {
+        let new_title = new_title.trim().to_string();
+        if new_title.is_empty() {
+            signals.list.rename_draft.set(String::new());
+            signals.list.renaming_id.set(None);
+            return;
+        }
+        signals.list.error.set(None);
+        signals.list.saving_rename_id.set(Some(session_id));
+    })
+}
+
+#[cfg(target_family = "wasm")]
 pub(super) fn delete_session_callback(
     current_session_id: String,
     signals: SessionSignals,
@@ -190,7 +265,7 @@ pub(super) fn delete_session_callback(
         signals.list.error.set(None);
         let is_deleting_current = session_id == current_session_id;
 
-        leptos::task::spawn_local(async move {
+        spawn_browser_task(async move {
             match api::delete_session(&session_id).await {
                 Ok(_) => {
                     clear_prepared_session_id_if_matches(&session_id);
@@ -211,6 +286,22 @@ pub(super) fn delete_session_callback(
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn delete_session_callback(
+    current_session_id: String,
+    signals: SessionSignals,
+) -> Callback<String> {
+    Callback::new(move |session_id: String| {
+        if delete_session_is_blocked(&session_id, &current_session_id, signals) {
+            return;
+        }
+
+        signals.list.deleting_id.set(Some(session_id));
+        signals.list.error.set(None);
+    })
+}
+
+#[cfg(target_family = "wasm")]
 async fn refresh_session_list(signals: SessionSignals) {
     signals.list.error.set(None);
 
@@ -276,17 +367,23 @@ fn run_browser_slash_action(action: BrowserSlashAction, signals: SessionSignals)
                 signals,
                 next_tool_activity_id(signals, "help"),
                 "Available slash commands",
-                if commands.is_empty() {
-                    "No browser slash commands are available.".to_string()
-                } else {
-                    "Use the composer for `/help` and the on-screen controls for cancel or permission actions.".to_string()
-                },
+                available_slash_commands_detail(&commands),
                 commands,
             );
         }
     }
 }
 
+fn available_slash_commands_detail(commands: &[CompletionCandidate]) -> String {
+    if commands.is_empty() {
+        "No browser slash commands are available.".to_string()
+    } else {
+        "Use the composer for `/help` and the on-screen controls for cancel or permission actions."
+            .to_string()
+    }
+}
+
+#[cfg(target_family = "wasm")]
 async fn navigate_home_target(target: HomeRouteTarget) -> Result<(), String> {
     match target {
         HomeRouteTarget::Register => navigate_to("/app/register/"),
@@ -295,6 +392,7 @@ async fn navigate_home_target(target: HomeRouteTarget) -> Result<(), String> {
     }
 }
 
+#[cfg(target_family = "wasm")]
 async fn navigate_prepared_home_session() -> Result<(), String> {
     let session_id = resolve_home_session_id().await?;
     match navigate_to(&app_session_path(&session_id)) {
@@ -315,6 +413,7 @@ fn set_home_redirect_error(
     preparing.set(false);
 }
 
+#[cfg(target_family = "wasm")]
 async fn resolve_home_session_id() -> Result<String, String> {
     if let Some(session_id) = prepared_session_id() {
         Ok(session_id)
@@ -325,33 +424,37 @@ async fn resolve_home_session_id() -> Result<String, String> {
     }
 }
 
+fn should_clear_prepared_session_on_load(
+    session_status: SessionLifecycle,
+    entries: &[crate::domain::transcript::TranscriptEntry],
+) -> bool {
+    matches!(session_status, SessionLifecycle::Closed)
+        || entries
+            .iter()
+            .any(|entry| matches!(entry.role, EntryRole::User))
+}
+
 fn apply_loaded_session(session: SessionSnapshot, signals: SessionSignals) {
     let bootstrap = session_bootstrap_from_snapshot(session);
     let turn_state_for_session = turn_state_for_snapshot(&bootstrap.pending_permissions);
-    let should_clear_prepared_session =
-        matches!(bootstrap.session_status, SessionLifecycle::Closed)
-            || bootstrap
-                .entries
-                .iter()
-                .any(|entry| matches!(entry.role, EntryRole::User));
-
+    let should_clear =
+        should_clear_prepared_session_on_load(bootstrap.session_status, &bootstrap.entries);
     signals.entries.set(bootstrap.entries);
     signals
         .pending_permissions
         .set(bootstrap.pending_permissions);
     signals.session_status.set(bootstrap.session_status);
     signals.turn_state.set(turn_state_for_session);
-    if should_clear_prepared_session {
+    if should_clear {
         clear_prepared_session_id();
     }
 }
 
-fn record_session_bootstrap_failure(
+fn apply_bootstrap_failure_signals(
     message: String,
     session_lifecycle: SessionLifecycle,
     signals: SessionSignals,
 ) {
-    clear_prepared_session_id();
     signals.connection_error.set(Some(message));
     push_tool_activity_entry(
         signals,
@@ -362,6 +465,16 @@ fn record_session_bootstrap_failure(
     );
     signals.session_status.set(session_lifecycle);
     signals.turn_state.set(TurnState::Idle);
+}
+
+#[cfg(target_family = "wasm")]
+fn record_session_bootstrap_failure(
+    message: String,
+    session_lifecycle: SessionLifecycle,
+    signals: SessionSignals,
+) {
+    clear_prepared_session_id();
+    apply_bootstrap_failure_signals(message, session_lifecycle, signals);
 }
 
 fn permission_resolution_turn_state(decision: &PermissionDecision) -> TurnState {
@@ -404,6 +517,7 @@ fn apply_permission_resolution_success(
     );
 }
 
+#[cfg(target_family = "wasm")]
 async fn resolve_permission_action(
     session_id: String,
     request_id: String,
@@ -422,6 +536,7 @@ async fn resolve_permission_action(
     signals.pending_action_busy.set(false);
 }
 
+#[cfg(target_family = "wasm")]
 fn permission_resolution_callback(
     session_id: String,
     decision: PermissionDecision,
@@ -432,20 +547,38 @@ fn permission_resolution_callback(
         let decision = decision.clone();
         signals.pending_action_busy.set(true);
         signals.action_error.set(None);
-        leptos::task::spawn_local(resolve_permission_action(
+        spawn_browser_task(resolve_permission_action(
             session_id, request_id, decision, signals,
         ));
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn permission_resolution_callback(
+    _session_id: String,
+    _decision: PermissionDecision,
+    signals: SessionSignals,
+) -> Callback<String> {
+    Callback::new(move |_request_id: String| {
+        signals.pending_action_busy.set(true);
+        signals.action_error.set(None);
+    })
+}
+
+fn begin_cancel_turn(signals: SessionSignals) -> TurnState {
+    let previous = signals.turn_state.get_untracked();
+    signals.pending_action_busy.set(true);
+    signals.turn_state.set(TurnState::Cancelling);
+    signals.action_error.set(None);
+    previous
+}
+
+#[cfg(target_family = "wasm")]
 fn cancel_turn_callback(session_id: String, signals: SessionSignals) -> Callback<()> {
     Callback::new(move |()| {
         let session_id = session_id.clone();
-        let previous_turn_state = signals.turn_state.get_untracked();
-        signals.pending_action_busy.set(true);
-        signals.turn_state.set(TurnState::Cancelling);
-        signals.action_error.set(None);
-        leptos::task::spawn_local(async move {
+        let previous_turn_state = begin_cancel_turn(signals);
+        spawn_browser_task(async move {
             match api::cancel_turn(&session_id).await {
                 Ok(cancelled) if cancelled.cancelled => {
                     signals.pending_permissions.set(Vec::new());
@@ -479,6 +612,13 @@ fn cancel_turn_callback(session_id: String, signals: SessionSignals) -> Callback
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn cancel_turn_callback(_session_id: String, signals: SessionSignals) -> Callback<()> {
+    Callback::new(move |()| {
+        begin_cancel_turn(signals);
+    })
+}
+
 fn delete_session_is_blocked(
     session_id: &str,
     current_session_id: &str,
@@ -493,6 +633,7 @@ fn delete_session_is_blocked(
             ))
 }
 
+#[cfg(target_family = "wasm")]
 fn finish_current_session_delete(signals: SessionSignals) {
     let next_dest = next_session_destination(&signals.list.items.get_untracked());
 
@@ -502,6 +643,7 @@ fn finish_current_session_delete(signals: SessionSignals) {
     }
 }
 
+#[cfg(target_family = "wasm")]
 async fn finish_other_session_delete(signals: SessionSignals) {
     refresh_session_list(signals).await;
     signals.list.deleting_id.set(None);
@@ -521,17 +663,26 @@ fn handle_delete_session_error(message: String, signals: SessionSignals) {
     signals.list.deleting_id.set(None);
 }
 
+#[cfg(target_family = "wasm")]
 fn spawn_session_stream(session_id: String, signals: SessionSignals) {
     stop_live_stream(signals);
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
     signals.stream_abort.set(Some(abort_handle));
-    leptos::task::spawn_local(async move {
+    spawn_browser_task(async move {
         let _ = Abortable::new(subscribe_sse(&session_id, signals), abort_registration).await;
         close_live_stream(signals);
         signals.stream_abort.set(None);
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn spawn_session_stream(_session_id: String, signals: SessionSignals) {
+    stop_live_stream(signals);
+    let (abort_handle, _abort_registration) = AbortHandle::new_pair();
+    signals.stream_abort.set(Some(abort_handle));
+}
+
+#[cfg(target_family = "wasm")]
 async fn subscribe_sse(session_id: &str, signals: SessionSignals) {
     let (event_source, mut rx) = match api::open_session_event_stream(session_id) {
         Ok(stream) => stream,
@@ -750,11 +901,17 @@ fn stop_live_stream(signals: SessionSignals) {
     close_live_stream(signals);
 }
 
+#[cfg(target_family = "wasm")]
 fn close_live_stream(signals: SessionSignals) {
     if let Some(event_source) = signals.event_source.get_untracked() {
         event_source.close();
         signals.event_source.set(None);
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn close_live_stream(signals: SessionSignals) {
+    signals.event_source.set(None);
 }
 
 #[cfg(test)]
@@ -1599,6 +1756,490 @@ mod tests {
             handle_sse_event(event, signals);
 
             assert_eq!(signals.session_status.get(), SessionLifecycle::Closed);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // should_clear_prepared_session_on_load (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn should_clear_prepared_session_on_load_true_for_closed_session() {
+        use crate::domain::session::session_bootstrap_from_snapshot;
+        let snapshot = empty_snapshot("s1", SessionStatus::Closed);
+        let bootstrap = session_bootstrap_from_snapshot(snapshot);
+        assert!(should_clear_prepared_session_on_load(
+            bootstrap.session_status,
+            &bootstrap.entries
+        ));
+    }
+
+    #[test]
+    fn should_clear_prepared_session_on_load_true_when_user_message_present() {
+        use crate::domain::session::session_bootstrap_from_snapshot;
+        let mut snapshot = empty_snapshot("s1", SessionStatus::Active);
+        snapshot.messages.push(user_message("msg-u1"));
+        let bootstrap = session_bootstrap_from_snapshot(snapshot);
+        assert!(should_clear_prepared_session_on_load(
+            bootstrap.session_status,
+            &bootstrap.entries
+        ));
+    }
+
+    #[test]
+    fn should_clear_prepared_session_on_load_false_for_active_with_no_user_messages() {
+        use crate::domain::session::session_bootstrap_from_snapshot;
+        let mut snapshot = empty_snapshot("s1", SessionStatus::Active);
+        snapshot.messages.push(assistant_message("msg-a1"));
+        let bootstrap = session_bootstrap_from_snapshot(snapshot);
+        assert!(!should_clear_prepared_session_on_load(
+            bootstrap.session_status,
+            &bootstrap.entries
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_bootstrap_failure_signals (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_bootstrap_failure_signals_sets_connection_error_and_resets_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+
+            apply_bootstrap_failure_signals(
+                "Connection lost".to_string(),
+                SessionLifecycle::Error,
+                signals,
+            );
+
+            assert_eq!(
+                signals.connection_error.get(),
+                Some("Connection lost".to_string())
+            );
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Error);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert!(!signals.entries.get().is_empty());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // set_home_redirect_error (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_home_redirect_error_sets_error_and_clears_preparing_flag() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let error: RwSignal<Option<String>> = RwSignal::new(None);
+            let preparing = RwSignal::new(true);
+
+            set_home_redirect_error(error, preparing, "Auth failed".to_string());
+
+            assert_eq!(error.get(), Some("Auth failed".to_string()));
+            assert!(!preparing.get());
+        });
+    }
+
+    #[test]
+    fn host_spawn_helpers_are_safe_noops() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let home_error: RwSignal<Option<String>> = RwSignal::new(None);
+            let home_preparing = RwSignal::new(true);
+            spawn_home_redirect(home_error, home_preparing);
+            assert!(home_error.get().is_none());
+            assert!(home_preparing.get());
+
+            let signals = session_signals();
+            spawn_session_bootstrap("session-1".to_string(), signals);
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Loading);
+            assert!(signals.list.items.get().is_empty());
+            assert!(signals.stream_abort.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // stop_live_stream / close_live_stream (signal-based, no-op paths)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stop_and_close_live_stream_are_noops_when_no_stream_or_source_set() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            stop_live_stream(signals);
+            close_live_stream(signals);
+            assert!(signals.stream_abort.get().is_none());
+            assert!(signals.event_source.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // rename_session_callback – empty title early return (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rename_session_callback_clears_draft_and_renaming_id_for_blank_title() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.rename_draft.set("old draft".to_string());
+            signals.list.renaming_id.set(Some("s1".to_string()));
+
+            let callback = rename_session_callback(signals);
+            callback.run(("s1".to_string(), "  ".to_string()));
+
+            assert!(signals.list.rename_draft.get().is_empty());
+            assert!(signals.list.renaming_id.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // delete_session_callback – blocked early return (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delete_session_callback_does_not_start_delete_when_blocked() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.deleting_id.set(Some("other".to_string()));
+
+            let callback = delete_session_callback("current".to_string(), signals);
+            callback.run("s1".to_string());
+
+            assert_eq!(signals.list.deleting_id.get(), Some("other".to_string()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_submit_callback – slash-command synchronous path (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_submit_callback_handles_slash_commands_without_async() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let callback = session_submit_callback("s1".to_string(), signals);
+            callback.run("/help".to_string());
+
+            assert!(signals.draft.get().is_empty());
+            assert!(!signals.entries.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn session_submit_callback_updates_host_state_before_async_work() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/help".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(2);
+
+            let callback = session_submit_callback("s1".to_string(), signals);
+            callback.run("hello".to_string());
+
+            assert_eq!(signals.turn_state.get(), TurnState::Submitting);
+            assert!(signals.action_error.get().is_none());
+            assert!(signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn rename_session_callback_marks_host_save_state_before_async_work() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.error.set(Some("old".to_string()));
+
+            let callback = rename_session_callback(signals);
+            callback.run(("s1".to_string(), "Renamed".to_string()));
+
+            assert!(signals.list.error.get().is_none());
+            assert_eq!(signals.list.saving_rename_id.get(), Some("s1".to_string()));
+        });
+    }
+
+    #[test]
+    fn delete_session_callback_marks_host_delete_state_before_async_work() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.error.set(Some("old".to_string()));
+
+            let callback = delete_session_callback("current".to_string(), signals);
+            callback.run("other".to_string());
+
+            assert_eq!(signals.list.deleting_id.get(), Some("other".to_string()));
+            assert!(signals.list.error.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_permission_callbacks – construction (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_permission_callbacks_constructs_three_callbacks() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let (approve_cb, deny_cb, cancel_cb) =
+                session_permission_callbacks("s1".to_string(), signals);
+            let _ = (approve_cb, deny_cb, cancel_cb);
+        });
+    }
+
+    #[test]
+    fn permission_resolution_callback_marks_busy_before_async_work() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.action_error.set(Some("old".to_string()));
+
+            let approve = permission_resolution_callback(
+                "s1".to_string(),
+                PermissionDecision::Approve,
+                signals,
+            );
+            approve.run("req-1".to_string());
+
+            assert!(signals.pending_action_busy.get());
+            assert!(signals.action_error.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // begin_cancel_turn (synchronous helper extracted from cancel_turn_callback)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn begin_cancel_turn_sets_cancelling_state_and_busy_and_returns_previous() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+            signals.action_error.set(Some("prior".to_string()));
+
+            let previous = begin_cancel_turn(signals);
+
+            assert_eq!(previous, TurnState::AwaitingReply);
+            assert_eq!(signals.turn_state.get(), TurnState::Cancelling);
+            assert!(signals.pending_action_busy.get());
+            assert!(signals.action_error.get().is_none());
+        });
+    }
+
+    #[test]
+    fn cancel_turn_callback_marks_host_state_before_async_work() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+            signals.action_error.set(Some("old".to_string()));
+
+            let cancel = cancel_turn_callback("s1".to_string(), signals);
+            cancel.run(());
+
+            assert_eq!(signals.turn_state.get(), TurnState::Cancelling);
+            assert!(signals.pending_action_busy.get());
+            assert!(signals.action_error.get().is_none());
+        });
+    }
+
+    #[test]
+    fn spawn_session_stream_sets_abort_handle_before_async_work() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            spawn_session_stream("s1".to_string(), signals);
+
+            assert!(signals.stream_abort.get().is_some());
+            assert!(signals.event_source.get().is_none());
+
+            stop_live_stream(signals);
+            assert!(signals.stream_abort.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // cancel_turn_callback – construction only (no executor needed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cancel_turn_callback_construction_succeeds() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let _cb = cancel_turn_callback("s1".to_string(), signals);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_conversation_message – additional branches (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_conversation_message_user_message_does_not_release_awaiting_reply() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+
+            apply_conversation_message(user_message("msg-u1"), signals);
+
+            assert_eq!(signals.entries.get().len(), 1);
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingReply);
+        });
+    }
+
+    #[test]
+    fn apply_conversation_message_assistant_message_no_release_when_already_idle() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::Idle);
+
+            apply_conversation_message(assistant_message("msg-a1"), signals);
+
+            assert_eq!(signals.entries.get().len(), 1);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_status_update – non-releasing Idle path (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_status_update_does_not_change_idle_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            apply_status_update(5, "Status message".to_string(), signals);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert_eq!(signals.entries.get().len(), 1);
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_spawn_browser_task_does_not_run_the_future() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let ran = RwSignal::new(false);
+            #[rustfmt::skip]
+            spawn_browser_task(async move { ran.set(true); });
+            assert!(!ran.get());
+        });
+    }
+
+    #[test]
+    fn update_slash_completion_sets_and_clears_candidates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            update_slash_completion(signals, "/");
+            assert!(!signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+
+            update_slash_completion(signals, "plain text");
+            assert!(signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn apply_slash_candidate_at_applies_help_completion_directly() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+
+            apply_slash_candidate_at(signals, 0);
+
+            assert_eq!(signals.draft.get(), "/help");
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn run_browser_slash_action_help_pushes_available_commands_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            run_browser_slash_action(BrowserSlashAction::Help, signals);
+
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].text.contains("Available slash commands"));
+        });
+    }
+
+    #[test]
+    fn apply_loaded_session_sets_turn_state_from_pending_permissions() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let mut session = empty_snapshot("session-1", SessionStatus::Active);
+            session.pending_permissions = vec![PermissionRequest {
+                request_id: "perm-1".to_string(),
+                summary: "Read file".to_string(),
+            }];
+
+            apply_loaded_session(session, signals);
+
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
+            assert_eq!(signals.pending_permissions.get().len(), 1);
+        });
+    }
+
+    #[test]
+    fn apply_slash_candidate_at_returns_when_completion_does_not_apply() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("plain text".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(2);
+
+            apply_slash_candidate_at(signals, 0);
+
+            assert_eq!(signals.draft.get(), "plain text");
+            assert_eq!(signals.slash.selected_index.get(), 2);
+        });
+    }
+
+    #[test]
+    fn available_slash_commands_detail_covers_empty_and_non_empty_lists() {
+        assert_eq!(
+            available_slash_commands_detail(&[]),
+            "No browser slash commands are available."
+        );
+        assert!(available_slash_commands_detail(&[help_candidate()]).contains("/help"));
+    }
+
+    #[test]
+    fn apply_loaded_session_clears_prepared_state_for_closed_sessions() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let session = empty_snapshot("session-1", SessionStatus::Closed);
+
+            apply_loaded_session(session, signals);
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Closed);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
         });
     }
 }

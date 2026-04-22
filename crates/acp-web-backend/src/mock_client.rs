@@ -323,11 +323,12 @@ async fn prompt_session(
             vec![prompt.to_string().into()],
         ))
         .block_task();
+    let send_cancel = |cancel_request| conn.send_notification(cancel_request);
     await_prompt_reply(
         prompt_future,
         cancel_rx,
         schema::CancelNotification::new(session_id),
-        |cancel_request| conn.send_notification(cancel_request),
+        send_cancel,
         client,
     )
     .await

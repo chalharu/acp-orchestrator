@@ -57,25 +57,22 @@ where
                 log_connection_task_join_result(next);
             }
             accepted = listener.accept() => {
-                let should_break = matches!(
-                    handle_accept_result(
-                        accepted,
-                        &mut consecutive_transient_accept_errors,
-                        AcceptContext {
-                            connections: &mut connections,
-                            tls_acceptor: &tls_acceptor,
-                            app: &app,
-                            shutdown_rx: &shutdown_rx,
-                            shutdown_tx: &shutdown_tx,
-                        },
-                        shutdown.as_mut(),
-                    )
-                    .await?,
-                    AcceptLoopAction::Break
-                );
-                if should_break {
-                    break;
-                }
+                let action = handle_accept_result(
+                    accepted,
+                    &mut consecutive_transient_accept_errors,
+                    AcceptContext {
+                        connections: &mut connections,
+                        tls_acceptor: &tls_acceptor,
+                        app: &app,
+                        shutdown_rx: &shutdown_rx,
+                        shutdown_tx: &shutdown_tx,
+                    },
+                    shutdown.as_mut(),
+                )
+                .await?;
+                let should_finish =
+                    finish_accept_loop_if_requested(action, &shutdown_tx, &mut connections).await;
+                if should_finish { return Ok(()); }
             }
         }
     }
@@ -134,6 +131,19 @@ where
             Err(error)
         }
     }
+}
+
+pub(super) async fn finish_accept_loop_if_requested(
+    action: AcceptLoopAction,
+    shutdown_tx: &watch::Sender<bool>,
+    connections: &mut JoinSet<()>,
+) -> bool {
+    if matches!(action, AcceptLoopAction::Break) {
+        shutdown_connections(shutdown_tx, connections).await;
+        return true;
+    }
+
+    false
 }
 
 async fn wait_for_accept_retry_or_shutdown<F>(shutdown: Pin<&mut F>) -> AcceptLoopAction

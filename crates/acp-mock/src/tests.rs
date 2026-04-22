@@ -99,6 +99,19 @@ async fn mock_agent_supports_control_plane_requests() {
 }
 
 #[tokio::test]
+async fn cancel_notifications_mark_subscribed_sessions_as_cancelled() {
+    let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
+    let session = agent.state.session_state("mock_0");
+    let (mut cancel_rx, generation) = session.subscribe_cancel();
+
+    handle_cancel_notification(agent, schema::CancelNotification::new("mock_0"))
+        .await
+        .expect("cancel notifications should succeed");
+
+    assert!(wait_for_cancel(&mut cancel_rx, generation, Duration::from_secs(1)).await);
+}
+
+#[tokio::test]
 async fn mock_agent_initializes_with_mock_identity() {
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
 
@@ -223,6 +236,64 @@ async fn mock_agent_cancels_prompts_when_permissions_are_cancelled() {
         notifier.call_count.load(Ordering::Relaxed),
         0,
         "cancelled permission requests should not emit reply chunks"
+    );
+}
+
+#[tokio::test]
+async fn mock_agent_cancels_inflight_prompts_after_cancel_notifications() {
+    let requester = StubPermissionRequester {
+        call_count: Arc::new(AtomicUsize::new(0)),
+        response: schema::RequestPermissionResponse::new(
+            schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
+                "allow_once",
+            )),
+        ),
+    };
+    let notifier = StubSessionUpdateNotifier {
+        should_fail: false,
+        call_count: Arc::new(AtomicUsize::new(0)),
+        last_notification: Arc::new(Mutex::new(None)),
+    };
+    let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig {
+        response_delay: Duration::from_millis(50),
+        startup_hints: false,
+    })));
+    let cancel_task = {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            agent
+                .cancel(schema::CancelNotification::new("mock_0"))
+                .await
+                .expect("cancel notifications should succeed");
+        })
+    };
+
+    let response = agent
+        .prompt(
+            schema::PromptRequest::new(
+                "mock_0",
+                vec![schema::ContentBlock::Text(schema::TextContent::new(
+                    "hello",
+                ))],
+            ),
+            &notifier,
+            &requester,
+        )
+        .await
+        .expect("cancelled prompts should resolve");
+
+    cancel_task
+        .await
+        .expect("cancel notifications should finish");
+    assert_eq!(
+        response,
+        schema::PromptResponse::new(schema::StopReason::Cancelled)
+    );
+    assert_eq!(
+        notifier.call_count.load(Ordering::Relaxed),
+        0,
+        "cancelled prompts should not emit reply chunks"
     );
 }
 

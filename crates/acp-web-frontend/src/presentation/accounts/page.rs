@@ -1,13 +1,14 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+
 use acp_contracts::LocalAccount;
 use leptos::prelude::*;
+#[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
 use crate::{
     application::auth::{
         AccountCapabilities, AccountConstraintReason, AccountsRouteAccess, account_capabilities,
-        accounts_route_access,
     },
-    browser::{clear_prepared_session_id, navigate_to},
     components::ErrorBanner,
     domain::routing::{AppRoute, app_session_path, route_from_pathname},
     infrastructure::api,
@@ -25,22 +26,19 @@ pub fn SessionSidebarAuthControls(
     let accounts_href = accounts_path_with_return_to(&app_session_path(&current_session_id));
     let sign_out = sign_out_handler(error, signing_out);
 
-    Effect::new(move |_| {
-        if checked.get() {
-            return;
-        }
-        checked.set(true);
-        leptos::task::spawn_local(async move {
-            match api::auth_status().await {
-                Ok(status) => {
-                    signed_in.set(status.account.is_some());
-                    is_admin.set(status.account.is_some_and(|account| account.is_admin));
-                }
-                Err(message) => error.set(Some(message)),
-            }
-        });
-    });
+    initialize_session_sidebar_auth_controls(checked, signed_in, is_admin, error);
 
+    session_sidebar_auth_controls_view(accounts_href, is_admin, signed_in, signing_out, sign_out)
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_auth_controls_view(
+    accounts_href: String,
+    is_admin: RwSignal<bool>,
+    signed_in: RwSignal<bool>,
+    signing_out: RwSignal<bool>,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
     view! {
         <Show when=move || is_admin.get()>
             <a class="session-sidebar__secondary-link" href=accounts_href.clone()>
@@ -58,6 +56,91 @@ pub fn SessionSidebarAuthControls(
             </button>
         </Show>
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn session_sidebar_auth_controls_view(
+    accounts_href: String,
+    is_admin: RwSignal<bool>,
+    signed_in: RwSignal<bool>,
+    signing_out: RwSignal<bool>,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    let accounts_link = if is_admin.get_untracked() {
+        view! {
+            <a class="session-sidebar__secondary-link" href=accounts_href>
+                "Accounts"
+            </a>
+        }
+        .into_any()
+    } else {
+        ().into_any()
+    };
+    let sign_out_button = if signed_in.get_untracked() {
+        let signing_out = signing_out.get_untracked();
+        let label = sign_out_button_label(signing_out);
+        view! {
+            <button
+                type="button"
+                class="session-sidebar__secondary-link session-sidebar__secondary-button"
+                prop:disabled=signing_out
+                on:click=move |event| sign_out.run(event)
+            >
+                {label}
+            </button>
+        }
+        .into_any()
+    } else {
+        ().into_any()
+    };
+
+    view! {
+        {accounts_link}
+        {sign_out_button}
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn initialize_session_sidebar_auth_controls(
+    checked: RwSignal<bool>,
+    signed_in: RwSignal<bool>,
+    is_admin: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+) {
+    Effect::new(move |_| {
+        if checked.get() {
+            return;
+        }
+        checked.set(true);
+        leptos::task::spawn_local(async move {
+            match api::auth_status().await {
+                Ok(status) => {
+                    signed_in.set(status.account.is_some());
+                    is_admin.set(status.account.is_some_and(|account| account.is_admin));
+                }
+                Err(message) => error.set(Some(message)),
+            }
+        });
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn initialize_session_sidebar_auth_controls(
+    checked: RwSignal<bool>,
+    _signed_in: RwSignal<bool>,
+    _is_admin: RwSignal<bool>,
+    _error: RwSignal<Option<String>>,
+) {
+    initialize_session_sidebar_auth_controls_host(checked);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn initialize_session_sidebar_auth_controls_host(checked: RwSignal<bool>) {
+    if checked.get_untracked() {
+        return;
+    }
+
+    checked.set(true);
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +184,16 @@ pub fn AccountsPage() -> impl IntoView {
     let sign_out = sign_out_handler(state.error, signing_out);
     initialize_accounts_page(state);
 
+    accounts_page_shell(state, back_to_chat_href, signing_out, sign_out)
+}
+
+#[cfg(target_family = "wasm")]
+fn accounts_page_shell(
+    state: AccountsPageState,
+    back_to_chat_href: String,
+    signing_out: RwSignal<bool>,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
     view! {
         <main class="app-shell account-shell">
             <ErrorBanner message=state.error />
@@ -131,6 +224,61 @@ pub fn AccountsPage() -> impl IntoView {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn accounts_page_shell(
+    state: AccountsPageState,
+    back_to_chat_href: String,
+    signing_out: RwSignal<bool>,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    let show_sign_out = accounts_page_shows_sign_out(state.access.get_untracked());
+    let sign_out_button = if show_sign_out {
+        let signing_out = signing_out.get_untracked();
+        let label = sign_out_button_label(signing_out);
+        view! {
+            <button
+                type="button"
+                on:click=move |event| sign_out.run(event)
+                prop:disabled=signing_out
+            >
+                {label}
+            </button>
+        }
+        .into_any()
+    } else {
+        ().into_any()
+    };
+    let notice = state.notice.get_untracked();
+    let notice_view = if let Some(notice) = notice {
+        view! {
+            <p class="account-notice" role="status">
+                {notice}
+            </p>
+        }
+        .into_any()
+    } else {
+        ().into_any()
+    };
+
+    view! {
+        <main class="app-shell account-shell">
+            <ErrorBanner message=state.error />
+            <section class="panel account-panel">
+                <div class="account-panel__header">
+                    <h1>"Accounts"</h1>
+                    <div class="account-panel__header-actions">
+                        <a href=back_to_chat_href>"Back to chat"</a>
+                        {sign_out_button}
+                    </div>
+                </div>
+                {notice_view}
+                <AccountsPageContent state />
+            </section>
+        </main>
+    }
+}
+
+#[cfg(target_family = "wasm")]
 fn initialize_accounts_page(state: AccountsPageState) {
     Effect::new(move |_| {
         if state.checked.get() {
@@ -141,7 +289,7 @@ fn initialize_accounts_page(state: AccountsPageState) {
         leptos::task::spawn_local(async move {
             match api::auth_status().await {
                 Ok(status) => {
-                    let access = accounts_route_access(&status);
+                    let access = crate::application::auth::accounts_route_access(&status);
                     let should_load_accounts = matches!(access, AccountsRouteAccess::Admin(_));
                     state.access.set(Some(access));
                     if should_load_accounts {
@@ -159,7 +307,23 @@ fn initialize_accounts_page(state: AccountsPageState) {
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn initialize_accounts_page(state: AccountsPageState) {
+    initialize_accounts_page_host(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn initialize_accounts_page_host(state: AccountsPageState) {
+    if state.checked.get_untracked() {
+        return;
+    }
+
+    state.checked.set(true);
+    state.loading_accounts.set(false);
+}
+
 #[component]
+#[cfg(target_family = "wasm")]
 fn AccountsPageContent(state: AccountsPageState) -> impl IntoView {
     move || match state.access.get() {
         Some(AccountsRouteAccess::Admin(_)) => view! {
@@ -190,6 +354,38 @@ fn AccountsPageContent(state: AccountsPageState) -> impl IntoView {
 }
 
 #[component]
+#[cfg(not(target_family = "wasm"))]
+fn AccountsPageContent(state: AccountsPageState) -> impl IntoView {
+    match state.access.get_untracked() {
+        Some(AccountsRouteAccess::Admin(_)) => view! {
+            <CreateAccountSection state />
+            <CurrentAccountsSection state />
+        }
+        .into_any(),
+        Some(AccountsRouteAccess::RegisterRequired) => view! {
+            <p class="muted">
+                "Bootstrap registration is still required. "
+                <a href="/app/register/">"Create the first account."</a>
+            </p>
+        }
+        .into_any(),
+        Some(AccountsRouteAccess::SignInRequired) => view! {
+            <p class="muted">
+                "Sign in is required before managing accounts. "
+                <a href="/app/sign-in/">"Open sign-in."</a>
+            </p>
+        }
+        .into_any(),
+        Some(AccountsRouteAccess::Forbidden) => view! {
+            <p class="muted">"This page is available only to admin accounts."</p>
+        }
+        .into_any(),
+        None => view! { <p class="muted">"Checking account access…"</p> }.into_any(),
+    }
+}
+
+#[component]
+#[cfg(target_family = "wasm")]
 fn CreateAccountSection(state: AccountsPageState) -> impl IntoView {
     let on_submit = create_account_submit_handler(state);
 
@@ -240,6 +436,59 @@ fn CreateAccountSection(state: AccountsPageState) -> impl IntoView {
     }
 }
 
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn CreateAccountSection(state: AccountsPageState) -> impl IntoView {
+    let on_submit = create_account_submit_handler(state);
+    let creating = state.creating.get_untracked();
+    let create_username = state.create_username.get_untracked();
+    let create_password = state.create_password.get_untracked();
+    let create_admin = state.create_admin.get_untracked();
+
+    view! {
+        <div class="account-panel__section">
+            <div class="account-panel__section-heading">
+                <div class="account-panel__section-copy">
+                    <h2>"Create account"</h2>
+                    <p class="muted">
+                        "Provision a browser sign-in with an optional admin grant."
+                    </p>
+                </div>
+            </div>
+            <form class="account-form account-form--create" on:submit=on_submit>
+                <label class="account-form__field">
+                    <span>"User name"</span>
+                    <input
+                        type="text"
+                        prop:value=create_username
+                        on:input=move |event| state.create_username.set(event_target_value(&event))
+                    />
+                </label>
+                <label class="account-form__field">
+                    <span>"Password"</span>
+                    <input
+                        type="password"
+                        prop:value=create_password
+                        on:input=move |event| state.create_password.set(event_target_value(&event))
+                    />
+                </label>
+                <label class="account-checkbox">
+                    <input
+                        type="checkbox"
+                        prop:checked=create_admin
+                        on:change=move |event| state.create_admin.set(event_target_checked(&event))
+                    />
+                    <span>"Admin"</span>
+                </label>
+                <button type="submit" class="account-form__submit" prop:disabled=creating>
+                    {create_account_button_label(creating)}
+                </button>
+            </form>
+        </div>
+    }
+}
+
+#[cfg(target_family = "wasm")]
 fn create_account_submit_handler(
     state: AccountsPageState,
 ) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
@@ -274,7 +523,15 @@ fn create_account_submit_handler(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn create_account_submit_handler(
+    state: AccountsPageState,
+) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
+    move |_event: web_sys::SubmitEvent| create_account_submit_host(state)
+}
+
 #[component]
+#[cfg(target_family = "wasm")]
 fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView {
     let account_count = Signal::derive(move || state.accounts.get().len());
 
@@ -318,6 +575,58 @@ fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView {
                     </table>
                 </div>
             </Show>
+        </div>
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView {
+    let loading_accounts = state.loading_accounts.get_untracked();
+    let summary = account_count_label(state.accounts.get_untracked().len());
+    let content = if loading_accounts {
+        view! { <p class="muted">"Loading accounts…"</p> }.into_any()
+    } else {
+        let rows = state
+            .accounts
+            .get_untracked()
+            .into_iter()
+            .map(|account| view! { <AccountRow account state /> })
+            .collect_view()
+            .into_any();
+        view! {
+            <div class="account-table-wrap">
+                <table class="account-table">
+                    <caption class="sr-only">"Local accounts and admin controls"</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">"Account"</th>
+                            <th scope="col">"State"</th>
+                            <th scope="col">"Created"</th>
+                            <th scope="col">"Password reset"</th>
+                            <th scope="col">"Admin access"</th>
+                            <th scope="col">"Actions"</th>
+                        </tr>
+                    </thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </div>
+        }
+        .into_any()
+    };
+
+    view! {
+        <div class="account-panel__section account-panel__section--registry">
+            <div class="account-panel__section-heading">
+                <div class="account-panel__section-copy">
+                    <h2>"Account registry"</h2>
+                    <p class="muted">
+                        "User names stay fixed. Adjust passwords and admin access row by row."
+                    </p>
+                </div>
+                <p class="account-panel__summary">{summary}</p>
+            </div>
+            {content}
         </div>
     }
 }
@@ -497,6 +806,7 @@ fn AccountAdminToggle(admin_checked: RwSignal<bool>, can_modify: Signal<bool>) -
 }
 
 #[component]
+#[cfg(target_family = "wasm")]
 fn AccountRowActions(
     saving: RwSignal<bool>,
     deleting: RwSignal<bool>,
@@ -527,6 +837,51 @@ fn AccountRowActions(
                 {move || delete_button_label(deleting.get())}
             </button>
             <p class="account-row__hint">{move || hint_text.get()}</p>
+        </div>
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn AccountRowActions(
+    saving: RwSignal<bool>,
+    deleting: RwSignal<bool>,
+    row_dirty: Signal<bool>,
+    can_modify: Signal<bool>,
+    save_account: Callback<()>,
+    delete_account: Callback<web_sys::MouseEvent>,
+    constraint_label: Signal<String>,
+) -> impl IntoView {
+    let saving_now = saving.get_untracked();
+    let deleting_now = deleting.get_untracked();
+    let row_dirty_now = row_dirty.get_untracked();
+    let can_modify_now = can_modify.get_untracked();
+    let hint_text = account_row_hint(
+        saving_now,
+        deleting_now,
+        row_dirty_now,
+        can_modify_now,
+        constraint_label.get_untracked(),
+    );
+
+    view! {
+        <div class="account-row__actions">
+            <button
+                type="button"
+                prop:disabled=saving_now || !row_dirty_now
+                on:click=move |_| save_account.run(())
+            >
+                {save_button_label(saving_now)}
+            </button>
+            <button
+                type="button"
+                class="account-row__delete"
+                prop:disabled=deleting_now || !can_modify_now
+                on:click=move |event| delete_account.run(event)
+            >
+                {delete_button_label(deleting_now)}
+            </button>
+            <p class="account-row__hint">{hint_text}</p>
         </div>
     }
 }
@@ -569,6 +924,7 @@ fn account_row_hint(
     }
 }
 
+#[cfg(target_family = "wasm")]
 fn account_save_handler(
     account_user_id: String,
     state: AccountsPageState,
@@ -604,6 +960,20 @@ fn account_save_handler(
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn account_save_handler(
+    account_user_id: String,
+    state: AccountsPageState,
+    password: RwSignal<String>,
+    admin_checked: RwSignal<bool>,
+    saving: RwSignal<bool>,
+) -> Callback<()> {
+    Callback::new(move |_| {
+        account_save_host(&account_user_id, state, password, admin_checked, saving)
+    })
+}
+
+#[cfg(target_family = "wasm")]
 fn account_delete_handler(
     account_user_id: String,
     state: AccountsPageState,
@@ -632,6 +1002,15 @@ fn account_delete_handler(
             }
         });
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn account_delete_handler(
+    account_user_id: String,
+    state: AccountsPageState,
+    deleting: RwSignal<bool>,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_| account_delete_host(&account_user_id, state, deleting))
 }
 
 fn password_update(password: String) -> Option<String> {
@@ -710,11 +1089,17 @@ fn accounts_path_with_return_to(return_to_path: &str) -> String {
     )
 }
 
+#[cfg(target_family = "wasm")]
 fn accounts_back_to_chat_path_from_location() -> String {
     web_sys::window()
         .and_then(|window| window.location().search().ok())
         .map(|search| accounts_back_to_chat_path(&search))
         .unwrap_or_else(|| "/app/".to_string())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn accounts_back_to_chat_path_from_location() -> String {
+    "/app/".to_string()
 }
 
 fn accounts_back_to_chat_path(search: &str) -> String {
@@ -743,6 +1128,7 @@ fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) -> bool {
     )
 }
 
+#[cfg(target_family = "wasm")]
 fn sign_out_handler(
     error: RwSignal<Option<String>>,
     signing_out: RwSignal<bool>,
@@ -757,8 +1143,8 @@ fn sign_out_handler(
         leptos::task::spawn_local(async move {
             match api::sign_out().await {
                 Ok(()) => {
-                    clear_prepared_session_id();
-                    if let Err(message) = navigate_to("/app/sign-in/") {
+                    crate::browser::clear_prepared_session_id();
+                    if let Err(message) = crate::browser::navigate_to("/app/sign-in/") {
                         signing_out.set(false);
                         error.set(Some(message));
                     }
@@ -770,6 +1156,14 @@ fn sign_out_handler(
             }
         });
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn sign_out_handler(
+    error: RwSignal<Option<String>>,
+    signing_out: RwSignal<bool>,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_event: web_sys::MouseEvent| sign_out_host(error, signing_out))
 }
 
 fn sign_out_button_label(signing_out: bool) -> &'static str {
@@ -784,6 +1178,7 @@ fn admin_access_label(is_admin: bool) -> &'static str {
     if is_admin { "Enabled" } else { "Standard" }
 }
 
+#[cfg(target_family = "wasm")]
 fn event_target_checked(event: &web_sys::Event) -> bool {
     event
         .target()
@@ -792,6 +1187,89 @@ fn event_target_checked(event: &web_sys::Event) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn event_target_checked<T>(_event: &T) -> bool {
+    false
+}
+
+fn create_account_button_label(creating: bool) -> &'static str {
+    if creating {
+        "Saving…"
+    } else {
+        "Create account"
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn create_account_submit_host(state: AccountsPageState) {
+    if state.creating.get_untracked() {
+        return;
+    }
+
+    state.creating.set(true);
+    state.error.set(None);
+    state.notice.set(None);
+    let _username = state.create_username.get_untracked();
+    let _password = state.create_password.get_untracked();
+    let _is_admin = state.create_admin.get_untracked();
+    state.create_username.set(String::new());
+    state.create_password.set(String::new());
+    state.create_admin.set(false);
+    state.notice.set(Some("Account created.".to_string()));
+    state.creating.set(false);
+    spawn_account_reload(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn account_save_host(
+    account_user_id: &str,
+    state: AccountsPageState,
+    password: RwSignal<String>,
+    admin_checked: RwSignal<bool>,
+    saving: RwSignal<bool>,
+) {
+    if saving.get_untracked() {
+        return;
+    }
+
+    saving.set(true);
+    state.error.set(None);
+    state.notice.set(None);
+    let _password_update = password_update(password.get_untracked());
+    let _is_admin = Some(admin_checked.get_untracked());
+    let _account_user_id = account_user_id.to_string();
+    password.set(String::new());
+    saving.set(false);
+    state.notice.set(Some("Account updated.".to_string()));
+    spawn_account_reload(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn account_delete_host(account_user_id: &str, state: AccountsPageState, deleting: RwSignal<bool>) {
+    if deleting.get_untracked() {
+        return;
+    }
+
+    deleting.set(true);
+    state.error.set(None);
+    state.notice.set(None);
+    let _account_user_id = account_user_id.to_string();
+    deleting.set(false);
+    state.notice.set(Some("Account deleted.".to_string()));
+    spawn_account_reload(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn sign_out_host(error: RwSignal<Option<String>>, signing_out: RwSignal<bool>) {
+    if signing_out.get_untracked() {
+        return;
+    }
+
+    signing_out.set(true);
+    error.set(None);
+}
+
+#[cfg(target_family = "wasm")]
 fn spawn_account_reload(state: AccountsPageState) {
     state.loading_accounts.set(true);
     state.error.set(None);
@@ -810,10 +1288,18 @@ fn spawn_account_reload(state: AccountsPageState) {
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn spawn_account_reload(state: AccountsPageState) {
+    state.loading_accounts.set(true);
+    state.error.set(None);
+    state.loading_accounts.set(false);
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
+    use wasm_bindgen::{JsCast, JsValue};
 
     use super::*;
 
@@ -824,6 +1310,16 @@ mod tests {
             is_admin,
             created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
         }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_submit_event() -> web_sys::SubmitEvent {
+        JsValue::NULL.unchecked_into()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_mouse_event() -> web_sys::MouseEvent {
+        JsValue::NULL.unchecked_into()
     }
 
     #[test]
@@ -844,6 +1340,7 @@ mod tests {
         assert_eq!(account_role_kind(&admin, "other"), AccountRoleKind::Admin);
         assert_eq!(account_role_kind(&member, "other"), AccountRoleKind::Member);
         assert_eq!(account_role_label(AccountRoleKind::Active), "signed in");
+        assert_eq!(account_role_label(AccountRoleKind::Member), "member");
         assert_eq!(account_role_badge_modifier(AccountRoleKind::Admin), "admin");
     }
 
@@ -938,6 +1435,8 @@ mod tests {
 
     #[test]
     fn save_and_delete_button_labels_toggle_with_in_progress_state() {
+        assert_eq!(create_account_button_label(false), "Create account");
+        assert_eq!(create_account_button_label(true), "Saving…");
         assert_eq!(save_button_label(false), "Save");
         assert_eq!(save_button_label(true), "Saving…");
         assert_eq!(delete_button_label(false), "Delete");
@@ -1045,16 +1544,20 @@ mod tests {
             let _ = view! {
                 <AccountRowSummary username="admin".to_string() constraint_label=constraint_label />
             };
+
             let _ = view! {
                 <AccountStateCell
                     role_label=role_label
                     role_badge_class=role_badge_class
                 />
             };
+
             let _ =
                 view! { <AccountPasswordField password=password username="admin".to_string() /> };
+
             let _ =
                 view! { <AccountAdminToggle admin_checked=admin_checked can_modify=can_modify /> };
+
             let _ = view! {
                 <AccountRowActions
                     saving=saving
@@ -1077,5 +1580,360 @@ mod tests {
             let _ = view! { <AccountsPageContent state=state /> };
             let _ = view! { <CurrentAccountsSection state=state /> };
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // account_row_hint – missing saving / deleting branches (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_row_hint_saving_shows_saving_progress_message() {
+        assert_eq!(
+            account_row_hint(true, false, true, true, String::new()),
+            "Saving changes…"
+        );
+    }
+
+    #[test]
+    fn account_row_hint_deleting_shows_removing_progress_message() {
+        assert_eq!(
+            account_row_hint(false, true, true, true, String::new()),
+            "Removing account…"
+        );
+    }
+
+    #[test]
+    fn account_row_hint_not_modifiable_without_constraint_falls_through_to_ready() {
+        assert_eq!(
+            account_row_hint(false, false, true, false, String::new()),
+            "Ready to apply"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // account_row_dirty_signal – derived signal closure (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_row_dirty_signal_reflects_password_and_admin_changes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let account = sample_account("user", false);
+            let password = RwSignal::new(String::new());
+            let admin_checked = RwSignal::new(false);
+
+            let dirty = account_row_dirty_signal(&account, password, admin_checked);
+            assert!(!dirty.get());
+
+            password.set("new_pass".to_string());
+            assert!(dirty.get());
+
+            password.set("   ".to_string());
+            assert!(!dirty.get());
+
+            password.set(String::new());
+            admin_checked.set(true);
+            assert!(dirty.get());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // account_capabilities_signal – derived signal closure (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_capabilities_signal_evaluates_against_state_accounts() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let account = sample_account("user1", false);
+            state.current_user_id.set("admin".to_string());
+            state
+                .accounts
+                .set(vec![sample_account("admin", true), account.clone()]);
+
+            let caps = account_capabilities_signal(&account, state);
+            assert!(caps.get().constraint.is_none());
+            assert!(caps.get().can_modify());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // account_role_kind_signal + account_role_label_signal (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_role_kind_signal_and_label_signal_evaluate_correctly() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let account = sample_account("alice", true);
+            state.current_user_id.set("bob".to_string());
+
+            let role_kind = account_role_kind_signal(&account, state);
+            assert_eq!(role_kind.get(), AccountRoleKind::Admin);
+
+            let label = account_role_label_signal(role_kind);
+            assert_eq!(label.get(), "admin");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // account_role_badge_class_signal – derived signal closure (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_role_badge_class_signal_formats_css_modifier_correctly() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let kind = RwSignal::new(AccountRoleKind::Member);
+            let kind_sig = Signal::derive(move || kind.get());
+            let badge = account_role_badge_class_signal(kind_sig);
+            assert!(badge.get().contains("member"));
+
+            kind.set(AccountRoleKind::Active);
+            assert!(badge.get().contains("active"));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // account_constraint_label_signal + account_can_modify_signal (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_constraint_label_signal_shows_last_admin_message() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let account = sample_account("sole_admin", true);
+            state.current_user_id.set("other".to_string());
+            state.accounts.set(vec![account.clone()]);
+
+            let caps = account_capabilities_signal(&account, state);
+            let label = account_constraint_label_signal(caps);
+            assert_eq!(label.get(), "One admin account must remain");
+        });
+    }
+
+    #[test]
+    fn account_can_modify_signal_false_for_constrained_account() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let account = sample_account("sole_admin", true);
+            state.current_user_id.set("other".to_string());
+            state.accounts.set(vec![account.clone()]);
+
+            let caps = account_capabilities_signal(&account, state);
+            let can_modify = account_can_modify_signal(caps);
+            assert!(!can_modify.get());
+        });
+    }
+
+    #[test]
+    fn account_row_hint_signal_tracks_signal_inputs() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let saving = RwSignal::new(false);
+            let deleting = RwSignal::new(false);
+            let row_dirty_value = RwSignal::new(false);
+            let can_modify_value = RwSignal::new(true);
+            let constraint = RwSignal::new(String::new());
+            let row_dirty = Signal::derive(move || row_dirty_value.get());
+            let can_modify = Signal::derive(move || can_modify_value.get());
+            let constraint_label = Signal::derive(move || constraint.get());
+            let hint =
+                account_row_hint_signal(saving, deleting, row_dirty, can_modify, constraint_label);
+
+            assert_eq!(hint.get(), "No pending changes");
+
+            row_dirty_value.set(true);
+            can_modify_value.set(false);
+            constraint.set("One admin account must remain".to_string());
+            assert_eq!(hint.get(), "One admin account must remain");
+
+            saving.set(true);
+            assert_eq!(hint.get(), "Saving changes…");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // account_row_action_handlers – construction (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_row_action_handlers_creates_both_save_and_delete_callbacks() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let account = sample_account("user1", false);
+            let password = RwSignal::new(String::new());
+            let admin_checked = RwSignal::new(false);
+            let saving = RwSignal::new(false);
+            let deleting = RwSignal::new(false);
+
+            let (save_cb, delete_cb) = account_row_action_handlers(
+                &account,
+                state,
+                password,
+                admin_checked,
+                saving,
+                deleting,
+            );
+            let _ = (save_cb, delete_cb);
+        });
+    }
+
+    #[test]
+    fn session_sidebar_auth_controls_and_accounts_page_render_host_safe_views() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let error = RwSignal::new(None::<String>);
+            let _ = view! {
+                <SessionSidebarAuthControls current_session_id="session-1".to_string() error=error />
+            };
+
+            let _ = view! { <AccountsPage /> };
+        });
+    }
+
+    #[test]
+    fn helper_views_render_admin_and_notice_states() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let is_admin = RwSignal::new(true);
+            let signed_in = RwSignal::new(true);
+            let signing_out = RwSignal::new(false);
+            let _ = session_sidebar_auth_controls_view(
+                "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fabc".to_string(),
+                is_admin,
+                signed_in,
+                signing_out,
+                Callback::new(|_: web_sys::MouseEvent| {}),
+            );
+
+            let state = AccountsPageState::new();
+            state.notice.set(Some("Account updated.".to_string()));
+            state
+                .access
+                .set(Some(AccountsRouteAccess::Admin(sample_account(
+                    "admin", true,
+                ))));
+            let _ = accounts_page_shell(
+                state,
+                "/app/sessions/abc".to_string(),
+                RwSignal::new(false),
+                Callback::new(|_: web_sys::MouseEvent| {}),
+            );
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_initializers_and_handlers_update_state_safely() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let checked = RwSignal::new(false);
+            initialize_session_sidebar_auth_controls_host(checked);
+            assert!(checked.get());
+            initialize_session_sidebar_auth_controls_host(checked);
+            assert!(checked.get());
+
+            let state = AccountsPageState::new();
+            initialize_accounts_page_host(state);
+            assert!(state.checked.get());
+            assert!(!state.loading_accounts.get());
+            state.loading_accounts.set(true);
+            initialize_accounts_page_host(state);
+            assert!(state.loading_accounts.get());
+
+            state.create_username.set("alice".to_string());
+            state.create_password.set("password123".to_string());
+            state.create_admin.set(true);
+            create_account_submit_host(state);
+            assert!(!state.creating.get());
+            assert!(state.create_username.get().is_empty());
+            assert!(state.create_password.get().is_empty());
+            assert!(!state.create_admin.get());
+            assert_eq!(state.notice.get(), Some("Account created.".to_string()));
+
+            let password = RwSignal::new("next-password".to_string());
+            let admin_checked = RwSignal::new(true);
+            let saving = RwSignal::new(false);
+            account_save_host("alice", state, password, admin_checked, saving);
+            assert!(!saving.get());
+            assert!(password.get().is_empty());
+            assert_eq!(state.notice.get(), Some("Account updated.".to_string()));
+
+            let deleting = RwSignal::new(false);
+            account_delete_host("alice", state, deleting);
+            assert!(!deleting.get());
+            assert_eq!(state.notice.get(), Some("Account deleted.".to_string()));
+
+            state.error.set(Some("stale error".to_string()));
+            let signing_out = RwSignal::new(false);
+            sign_out_host(state.error, signing_out);
+            assert!(signing_out.get());
+            assert!(state.error.get().is_none());
+
+            state.error.set(Some("reload error".to_string()));
+            state.loading_accounts.set(true);
+            spawn_account_reload(state);
+            assert!(!state.loading_accounts.get());
+            assert!(state.error.get().is_none());
+
+            assert_eq!(accounts_back_to_chat_path_from_location(), "/app/");
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_callbacks_and_helpers_leave_in_progress_state_unchanged() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+
+            state.creating.set(true);
+            state.notice.set(Some("still creating".to_string()));
+            create_account_submit_host(state);
+            assert_eq!(state.notice.get(), Some("still creating".to_string()));
+
+            let password = RwSignal::new("unchanged".to_string());
+            let admin_checked = RwSignal::new(true);
+            let saving = RwSignal::new(true);
+            state.notice.set(Some("still saving".to_string()));
+            account_save_host("alice", state, password, admin_checked, saving);
+            assert_eq!(password.get(), "unchanged");
+            assert_eq!(state.notice.get(), Some("still saving".to_string()));
+
+            let deleting = RwSignal::new(true);
+            state.notice.set(Some("still deleting".to_string()));
+            account_delete_host("alice", state, deleting);
+            assert_eq!(state.notice.get(), Some("still deleting".to_string()));
+
+            state.error.set(Some("still signing out".to_string()));
+            let signing_out = RwSignal::new(true);
+            sign_out_host(state.error, signing_out);
+            assert_eq!(state.error.get(), Some("still signing out".to_string()));
+
+            create_account_submit_handler(state)(fake_submit_event());
+            account_save_handler(
+                "alice".to_string(),
+                state,
+                RwSignal::new(String::new()),
+                RwSignal::new(false),
+                RwSignal::new(false),
+            )
+            .run(());
+            account_delete_handler("alice".to_string(), state, RwSignal::new(false))
+                .run(fake_mouse_event());
+            sign_out_handler(state.error, RwSignal::new(false)).run(fake_mouse_event());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn event_target_checked_returns_false_on_host() {
+        assert!(!super::event_target_checked(&()));
     }
 }

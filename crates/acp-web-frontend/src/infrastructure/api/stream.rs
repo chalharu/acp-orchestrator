@@ -1,10 +1,16 @@
+#![cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
+
 use acp_contracts::StreamEvent;
 use futures_channel::mpsc;
+#[cfg(target_family = "wasm")]
 use wasm_bindgen::{JsCast, closure::Closure};
-use web_sys::{Event, EventSource, MessageEvent};
+use web_sys::EventSource;
+#[cfg(target_family = "wasm")]
+use web_sys::{Event, MessageEvent};
 
 use super::paths::session_path;
 
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 pub(crate) enum SseItem {
     Event(StreamEvent),
     ParseError(String),
@@ -19,6 +25,7 @@ const STREAM_EVENT_NAMES: [&str; 5] = [
     "status",
 ];
 
+#[cfg(target_family = "wasm")]
 pub(crate) fn open_session_event_stream(
     session_id: &str,
 ) -> Result<(EventSource, mpsc::UnboundedReceiver<SseItem>), String> {
@@ -32,6 +39,14 @@ pub(crate) fn open_session_event_stream(
     Ok((event_source, rx))
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn open_session_event_stream(
+    session_id: &str,
+) -> Result<(EventSource, mpsc::UnboundedReceiver<SseItem>), String> {
+    Err(non_wasm_stream_error(&session_stream_url(session_id)))
+}
+
+#[cfg(target_family = "wasm")]
 fn register_stream_listeners(
     event_source: &EventSource,
     tx: &mpsc::UnboundedSender<SseItem>,
@@ -43,6 +58,7 @@ fn register_stream_listeners(
     Ok(())
 }
 
+#[cfg(target_family = "wasm")]
 fn register_stream_listener(
     event_source: &EventSource,
     event_name: &str,
@@ -71,6 +87,7 @@ fn register_stream_listener(
     Ok(())
 }
 
+#[cfg(target_family = "wasm")]
 fn register_stream_error_listener(
     event_source: &EventSource,
     error_tx: mpsc::UnboundedSender<SseItem>,
@@ -86,6 +103,11 @@ fn session_stream_url(session_id: &str) -> String {
     format!("{}/events", session_path(session_id))
 }
 
+fn non_wasm_stream_error(url: &str) -> String {
+    format!("Browser event streams are unavailable on non-wasm targets: {url}")
+}
+
+#[cfg(test)]
 fn stream_event_names() -> &'static [&'static str] {
     &STREAM_EVENT_NAMES
 }
@@ -111,5 +133,11 @@ mod tests {
                 "status",
             ]
         );
+    }
+
+    #[test]
+    fn host_event_stream_fallback_returns_descriptive_error() {
+        let error = open_session_event_stream("s/1").expect_err("host stream should fail");
+        assert!(error.contains("/api/v1/sessions/s%2F1/events"));
     }
 }

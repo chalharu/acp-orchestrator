@@ -1,3 +1,6 @@
+#![cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
+
+#[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 
 /// Read the CSRF token injected by the backend into
@@ -21,6 +24,7 @@ pub(crate) fn csrf_token() -> String {
     String::new()
 }
 
+#[cfg(target_family = "wasm")]
 pub(crate) async fn post_json_with_csrf(
     url: &str,
     body: String,
@@ -31,6 +35,16 @@ pub(crate) async fn post_json_with_csrf(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn post_json_with_csrf(
+    url: &str,
+    body: String,
+) -> Result<gloo_net::http::Response, String> {
+    let _ = body;
+    Err(non_wasm_request_error("POST", url))
+}
+
+#[cfg(target_family = "wasm")]
 pub(crate) async fn patch_json_with_csrf(
     url: &str,
     body: String,
@@ -41,6 +55,16 @@ pub(crate) async fn patch_json_with_csrf(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn patch_json_with_csrf(
+    url: &str,
+    body: String,
+) -> Result<gloo_net::http::Response, String> {
+    let _ = body;
+    Err(non_wasm_request_error("PATCH", url))
+}
+
+#[cfg(target_family = "wasm")]
 fn post_json_request(
     url: &str,
     body: String,
@@ -57,6 +81,7 @@ fn post_json_request(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(target_family = "wasm")]
 fn patch_json_request(
     url: &str,
     body: String,
@@ -80,8 +105,14 @@ fn json_request_headers(csrf: &str) -> [(&'static str, String); 2] {
     ]
 }
 
+fn non_wasm_request_error(method: &str, url: &str) -> String {
+    format!("Browser {method} request is unavailable on non-wasm targets: {url}")
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::infrastructure::api::poll_ready;
+
     use super::*;
 
     #[test]
@@ -98,5 +129,18 @@ mod tests {
                 ("content-type", "application/json".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn non_wasm_request_fallbacks_return_descriptive_errors() {
+        let post_error = poll_ready(post_json_with_csrf("/api/v1/messages", "{}".to_string()))
+            .expect_err("host requests should fail");
+        assert!(post_error.contains("POST"));
+        assert!(post_error.contains("/api/v1/messages"));
+
+        let patch_error = poll_ready(patch_json_with_csrf("/api/v1/messages/1", "{}".to_string()))
+            .expect_err("host requests should fail");
+        assert!(patch_error.contains("PATCH"));
+        assert!(patch_error.contains("/api/v1/messages/1"));
     }
 }

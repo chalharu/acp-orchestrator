@@ -5,7 +5,7 @@ use acp_contracts::{PromptRequest, RenameSessionRequest};
 #[cfg(test)]
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::HeaderMap,
 };
 use axum::{

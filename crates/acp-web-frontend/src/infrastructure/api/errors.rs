@@ -1,3 +1,5 @@
+#![cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
+
 use acp_contracts::ErrorResponse;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

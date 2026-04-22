@@ -10,7 +10,7 @@ use acp_contracts::{
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
-    extract::Extension,
+    extract::{Extension, Path},
     http::{
         HeaderValue,
         header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
@@ -378,6 +378,50 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
         .await
         .expect_err("rebound browser sessions should lose prior live chats");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+#[tokio::test]
+async fn list_sessions_returns_owned_sessions_for_the_authenticated_principal() {
+    let state = auth_test_state();
+    let session = state
+        .store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    state
+        .store
+        .create_session("bob")
+        .await
+        .expect("other session creation should succeed");
+
+    let response = list_sessions(State(state), bearer_principal("alice"))
+        .await
+        .expect("listing sessions should succeed");
+
+    assert_eq!(response.0.sessions.len(), 1);
+    assert_eq!(response.0.sessions[0].id, session.id);
+    assert_eq!(response.0.sessions[0].title, session.title);
+    assert_eq!(response.0.sessions[0].status, session.status);
+}
+
+#[tokio::test]
+async fn get_session_returns_the_requested_owned_session() {
+    let state = auth_test_state();
+    let session = state
+        .store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+
+    let response = get_session(
+        State(state),
+        Path(session.id.clone()),
+        bearer_principal("alice"),
+    )
+    .await
+    .expect("reading the session should succeed");
+
+    assert_eq!(response.0.session, session);
 }
 
 #[tokio::test]
@@ -971,6 +1015,37 @@ async fn transient_accept_failures_break_when_shutdown_arrives() {
 
     assert_eq!(action, AcceptLoopAction::Break);
     assert_eq!(failures, 1);
+}
+
+#[tokio::test]
+async fn finish_accept_loop_if_requested_returns_false_for_continue() {
+    let mut connections = tokio::task::JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    assert!(
+        !finish_accept_loop_if_requested(
+            AcceptLoopAction::Continue,
+            &shutdown_tx,
+            &mut connections
+        )
+        .await
+    );
+    assert!(!*shutdown_rx.borrow());
+    assert!(connections.is_empty());
+}
+
+#[tokio::test]
+async fn finish_accept_loop_if_requested_drains_connections_for_break() {
+    let mut connections = tokio::task::JoinSet::new();
+    connections.spawn(async {});
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    assert!(
+        finish_accept_loop_if_requested(AcceptLoopAction::Break, &shutdown_tx, &mut connections)
+            .await
+    );
+    assert!(*shutdown_rx.borrow());
+    assert!(connections.is_empty());
 }
 
 #[tokio::test]

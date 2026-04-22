@@ -55,3 +55,36 @@ fn reuse_cached_session_clears_stale_mappings_after_failed_loads() {
         "stale cached mappings should be removed"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn handle_cancelled_prompt_sends_cancels_and_reports_cancelled_status() {
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let prompt_future = async { Ok(schema::PromptResponse::new(schema::StopReason::EndTurn)) };
+    tokio::pin!(prompt_future);
+    let client = BackendAcpClient::without_turn();
+
+    let reply = handle_cancelled_prompt(
+        true,
+        &mut prompt_future,
+        schema::CancelNotification::new("mock_0"),
+        |cancel_request| {
+            cancel_tx
+                .send(cancel_request)
+                .expect("cancel requests should send");
+            Ok(())
+        },
+        &client,
+    )
+    .await
+    .expect("cancelled prompts should resolve");
+
+    assert_eq!(
+        cancel_rx
+            .await
+            .expect("cancel requests should be received")
+            .session_id
+            .to_string(),
+        "mock_0"
+    );
+    assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
+}

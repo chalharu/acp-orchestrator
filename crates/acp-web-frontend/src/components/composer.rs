@@ -2,6 +2,7 @@
 
 use acp_contracts::CompletionCandidate;
 use leptos::{html as leptos_html, prelude::*};
+#[cfg(target_family = "wasm")]
 use wasm_bindgen::{JsCast, closure::Closure};
 
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
@@ -31,6 +32,7 @@ enum SlashPaletteState {
 
 #[derive(Clone)]
 struct SubmitDraftContext {
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
     form: NodeRef<leptos_html::Form>,
     textarea: NodeRef<leptos_html::Textarea>,
     disabled: Signal<bool>,
@@ -172,13 +174,22 @@ fn update_draft(draft: RwSignal<String>, ev: web_sys::Event) {
 }
 
 fn bind_submit_focus(submit_context: SubmitDraftContext) {
-    bind_focus_restore_cancel(
-        submit_context.form,
-        submit_context.restore_focus_after_submit,
-    );
-    restore_submit_focus_when_ready(submit_context);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = submit_context;
+    }
+
+    #[cfg(target_family = "wasm")]
+    {
+        bind_focus_restore_cancel(
+            submit_context.form,
+            submit_context.restore_focus_after_submit,
+        );
+        restore_submit_focus_when_ready(submit_context);
+    }
 }
 
+#[cfg(target_family = "wasm")]
 fn bind_focus_restore_cancel(form: NodeRef<leptos_html::Form>, restore: RwSignal<bool>) {
     Effect::new(move |_| {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
@@ -193,6 +204,7 @@ fn bind_focus_restore_cancel(form: NodeRef<leptos_html::Form>, restore: RwSignal
     });
 }
 
+#[cfg(target_family = "wasm")]
 fn attach_pointer_restore_cancel_listener(
     document: &web_sys::Document,
     form_node: &web_sys::Node,
@@ -207,6 +219,7 @@ fn attach_pointer_restore_cancel_listener(
     listener.forget();
 }
 
+#[cfg(target_family = "wasm")]
 fn attach_focus_restore_cancel_listener(
     document: &web_sys::Document,
     form_node: &web_sys::Node,
@@ -220,6 +233,7 @@ fn attach_focus_restore_cancel_listener(
     listener.forget();
 }
 
+#[cfg(target_family = "wasm")]
 fn clear_restore_when_target_leaves_form(
     target: Option<web_sys::EventTarget>,
     form_node: &web_sys::Node,
@@ -240,6 +254,7 @@ fn clear_restore_when_target_leaves_form(
     }
 }
 
+#[cfg(target_family = "wasm")]
 fn restore_submit_focus_when_ready(submit_context: SubmitDraftContext) {
     Effect::new(move |_| {
         if !submit_context.restore_focus_after_submit.get() || submit_context.disabled.get() {
@@ -528,9 +543,10 @@ mod tests {
     use leptos::prelude::*;
 
     use super::{
-        ComposerActions, ComposerFooter, ComposerSlashSignals, SlashPalette, SlashPaletteItem,
-        SlashPaletteList, SlashPaletteState, current_submit_value, render_slash_palette_state,
-        should_render_slash_palette, slash_option_id, slash_palette_state, submit_text,
+        Composer, ComposerActions, ComposerFooter, ComposerSlashCallbacks, ComposerSlashSignals,
+        SlashPalette, SlashPaletteItem, SlashPaletteList, SlashPaletteState, current_submit_value,
+        render_slash_palette_state, should_render_slash_palette, slash_option_id,
+        slash_palette_state, submit_text,
     };
 
     fn make_candidate(label: &str) -> CompletionCandidate {
@@ -606,16 +622,12 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let candidates = vec![make_candidate("/help"), make_candidate("/clear")];
-            let signals = make_slash_signals(true, candidates, 0, false);
-            let state = slash_palette_state(signals);
-            match state {
-                SlashPaletteState::Ready(items) => {
-                    assert_eq!(items.len(), 2);
-                    assert_eq!(items[0].0, 0);
-                    assert_eq!(items[1].0, 1);
-                }
-                SlashPaletteState::Empty => panic!("expected Ready"),
-            }
+            let state = slash_palette_state(make_slash_signals(true, candidates, 0, false));
+            assert!(matches!(
+                state,
+                SlashPaletteState::Ready(items)
+                    if items.len() == 2 && items[0].0 == 0 && items[1].0 == 1
+            ));
         });
     }
 
@@ -626,11 +638,8 @@ mod tests {
             let candidates: Vec<_> = (0..10)
                 .map(|i| make_candidate(&format!("/cmd{i}")))
                 .collect();
-            let signals = make_slash_signals(true, candidates, 0, false);
-            match slash_palette_state(signals) {
-                SlashPaletteState::Ready(items) => assert_eq!(items.len(), 5),
-                SlashPaletteState::Empty => panic!("expected Ready"),
-            }
+            let state = slash_palette_state(make_slash_signals(true, candidates, 0, false));
+            assert!(matches!(state, SlashPaletteState::Ready(items) if items.len() == 5));
         });
     }
 
@@ -704,6 +713,65 @@ mod tests {
                     show_cancel=Signal::derive(|| true)
                     cancel_disabled=Signal::derive(|| false)
                     on_cancel=Callback::new(|()| {})
+                />
+            };
+            // Cover the show_cancel=false path (Show fallback).
+            let _ = view! {
+                <ComposerActions
+                    disabled=Signal::derive(|| false)
+                    show_cancel=Signal::derive(|| false)
+                    cancel_disabled=Signal::derive(|| false)
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // current_submit_value – None live value path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn current_submit_value_falls_back_to_draft_when_live_value_is_absent() {
+        assert_eq!(
+            current_submit_value(None, "draft-text".to_string()),
+            "draft-text"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Composer – full component build (covers the constructor function body)
+    // -----------------------------------------------------------------------
+
+    fn make_slash_callbacks() -> ComposerSlashCallbacks {
+        ComposerSlashCallbacks {
+            select_next: Callback::new(|()| {}),
+            select_previous: Callback::new(|()| {}),
+            apply_selected: Callback::new(|()| {}),
+            apply_index: Callback::new(|_: usize| {}),
+            dismiss: Callback::new(|()| {}),
+        }
+    }
+
+    #[test]
+    fn composer_full_component_builds_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let draft = RwSignal::new(String::new());
+            let slash_signals = make_slash_signals(false, vec![], 0, false);
+            let slash_callbacks = make_slash_callbacks();
+
+            let _ = view! {
+                <Composer
+                    disabled=Signal::derive(|| false)
+                    status_text=Signal::derive(String::new)
+                    draft=draft
+                    on_submit=Callback::new(|_: String| {})
+                    show_cancel=Signal::derive(|| false)
+                    cancel_disabled=Signal::derive(|| false)
+                    on_cancel=Callback::new(|()| {})
+                    slash_signals=slash_signals
+                    slash_callbacks=slash_callbacks
                 />
             };
         });

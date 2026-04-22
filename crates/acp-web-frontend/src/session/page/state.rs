@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+
 use acp_contracts::{CompletionCandidate, SessionListItem};
 use futures_util::future::AbortHandle;
 use leptos::prelude::*;
@@ -116,16 +118,27 @@ pub(super) fn current_session_deleting_signal(
 }
 
 pub(super) fn restore_session_draft(session_id: &str, signals: SessionSignals) {
-    let stored_draft = load_draft(session_id);
-    if !stored_draft.is_empty() {
-        signals.draft.set(stored_draft);
-    }
+    apply_restored_session_draft(signals.draft, load_draft(session_id));
 }
 
 pub(super) fn persist_session_draft(session_id: String, draft: RwSignal<String>) {
+    #[cfg(target_family = "wasm")]
     Effect::new(move |_| {
-        save_draft(&session_id, &draft.get());
+        persist_session_draft_text(&session_id, &draft.get());
     });
+
+    #[cfg(not(target_family = "wasm"))]
+    persist_session_draft_text(&session_id, &draft.get_untracked());
+}
+
+fn apply_restored_session_draft(draft: RwSignal<String>, stored_draft: String) {
+    if !stored_draft.is_empty() {
+        draft.set(stored_draft);
+    }
+}
+
+fn persist_session_draft_text(session_id: &str, text: &str) {
+    save_draft(session_id, text);
 }
 
 pub(super) fn session_composer_signals(
@@ -223,10 +236,10 @@ pub(super) fn session_main_signals(signals: SessionSignals) -> SessionMainSignal
         session_status: Signal::derive(move || session_status.get()),
         topbar_message: Signal::derive(move || action_error.get().or(connection_error.get())),
         connection_badge: Signal::derive(move || {
-            connection_badge_state(session_status.get(), connection_error.get().is_some())
+            main_connection_badge(session_status.get(), connection_error.get().is_some())
         }),
         worker_badge: Signal::derive(move || {
-            worker_badge_state(
+            main_worker_badge(
                 session_status.get(),
                 turn_state.get(),
                 !pending_permissions.get().is_empty(),
@@ -236,6 +249,21 @@ pub(super) fn session_main_signals(signals: SessionSignals) -> SessionMainSignal
         pending_permissions: Signal::derive(move || pending_permissions.get()),
         pending_action_busy: Signal::derive(move || pending_action_busy.get()),
     }
+}
+
+fn main_connection_badge(
+    session_status: SessionLifecycle,
+    has_connection_error: bool,
+) -> StatusBadge {
+    connection_badge_state(session_status, has_connection_error)
+}
+
+fn main_worker_badge(
+    session_status: SessionLifecycle,
+    turn_state: TurnState,
+    has_pending_permissions: bool,
+) -> StatusBadge {
+    worker_badge_state(session_status, turn_state, has_pending_permissions)
 }
 
 pub(super) fn session_sidebar_item_signals(
@@ -641,6 +669,33 @@ mod tests {
         });
     }
 
+    #[test]
+    fn restore_session_draft_applies_non_empty_stored_value() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let draft = RwSignal::new(String::new());
+
+            apply_restored_session_draft(draft, "saved draft".to_string());
+
+            assert_eq!(draft.get(), "saved draft");
+        });
+    }
+
+    #[test]
+    fn restore_and_persist_session_draft_are_host_safe() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("existing".to_string());
+
+            restore_session_draft("session-1", signals);
+            assert_eq!(signals.draft.get(), "existing");
+
+            persist_session_draft_text("session-1", "draft");
+            persist_session_draft("session-1".to_string(), signals.draft);
+        });
+    }
+
     // -----------------------------------------------------------------------
     // session_main_signals
     // -----------------------------------------------------------------------
@@ -688,6 +743,31 @@ mod tests {
 
             signals.pending_action_busy.set(true);
             assert!(main.pending_action_busy.get());
+        });
+    }
+
+    #[test]
+    fn main_badge_helpers_reflect_connection_and_worker_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let main = session_main_signals(signals);
+
+            assert_eq!(
+                main_connection_badge(SessionLifecycle::Loading, false),
+                main.connection_badge.get()
+            );
+
+            signals.session_status.set(SessionLifecycle::Active);
+            signals.turn_state.set(TurnState::AwaitingReply);
+            signals
+                .pending_permissions
+                .set(vec![pending_permission("req-1")]);
+
+            assert_eq!(
+                main_worker_badge(SessionLifecycle::Active, TurnState::AwaitingReply, true),
+                main.worker_badge.get()
+            );
         });
     }
 

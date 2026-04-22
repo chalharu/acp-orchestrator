@@ -201,6 +201,34 @@ async fn backend_acp_client_waits_for_permission_decisions() {
     ));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn backend_acp_client_returns_cancelled_outcomes_when_turns_are_cancelled() {
+    let (store, session_id, pending, _receiver) =
+        pending_permission_context("permission please").await;
+    let client = BackendAcpClient::new(pending.turn_handle());
+    let requester = tokio::spawn(async move {
+        client
+            .request_permission(permission_request(Some("read_text_file README.md")))
+            .await
+            .expect("permission request should resolve")
+    });
+
+    tokio::task::yield_now().await;
+    assert!(
+        store
+            .cancel_active_turn("alice", &session_id)
+            .await
+            .expect("cancelling should succeed"),
+        "the active turn should have started"
+    );
+
+    let response = requester.await.expect("permission waiter should complete");
+    assert!(matches!(
+        response.outcome,
+        schema::RequestPermissionOutcome::Cancelled
+    ));
+}
+
 #[test]
 fn permission_option_ids_require_allow_and_deny_choices() {
     let request = schema::RequestPermissionRequest::new(

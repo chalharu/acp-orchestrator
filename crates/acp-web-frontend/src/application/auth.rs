@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+
 use acp_contracts::{AuthStatusResponse, LocalAccount};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

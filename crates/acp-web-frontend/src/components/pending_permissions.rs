@@ -127,7 +127,8 @@ mod tests {
     fn chat_activity_builds_for_pending_permissions() {
         let owner = Owner::new();
         owner.with(|| {
-            let items = Signal::derive(move || vec![permission("req-1")]);
+            let pending = permission("req-1");
+            let items = Signal::derive(move || vec![pending.clone()]);
             let busy = Signal::derive(|| false);
 
             let _ = view! {
@@ -168,6 +169,62 @@ mod tests {
                 <PendingPermissionFooter
                     busy=Signal::derive(|| false)
                     on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // ChatActivity with empty items (covers the Show fallback path)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chat_activity_renders_nothing_when_items_are_empty() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let items = Signal::derive(Vec::<PendingPermission>::new);
+            let busy = Signal::derive(|| false);
+
+            let _ = view! {
+                <ChatActivity
+                    items=items
+                    busy=busy
+                    on_approve=Callback::new(|_: String| {})
+                    on_deny=Callback::new(|_: String| {})
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // PendingPermissionActionButton (direct build)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pending_permission_action_button_builds_for_approve_and_deny() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let busy_false = Signal::derive(|| false);
+            let busy_true = Signal::derive(|| true);
+
+            let _ = view! {
+                <PendingPermissionActionButton
+                    request_id="req-3".to_string()
+                    label="Approve"
+                    button_class="btn--primary"
+                    busy=busy_false
+                    on_click=Callback::new(|_: String| {})
+                />
+            };
+            // Also exercise the disabled (busy=true) variant.
+            let _ = view! {
+                <PendingPermissionActionButton
+                    request_id="req-4".to_string()
+                    label="Deny"
+                    button_class="btn--secondary"
+                    busy=busy_true
+                    on_click=Callback::new(|_: String| {})
                 />
             };
         });

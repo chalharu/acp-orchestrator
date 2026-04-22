@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+
 use acp_contracts::{
     CompletionCandidate, ConversationMessage, MessageRole, PermissionRequest, SessionListItem,
     SessionSnapshot, SessionStatus,

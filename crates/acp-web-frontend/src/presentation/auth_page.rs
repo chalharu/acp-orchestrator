@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
+
 use leptos::prelude::*;
 
 use crate::{
@@ -36,6 +38,7 @@ impl AuthPageState {
     }
 }
 
+#[cfg(target_family = "wasm")]
 pub fn initialize_auth_page(kind: AuthPageKind, state: AuthPageState) {
     Effect::new(move |_| {
         if state.checked.get() {
@@ -55,6 +58,22 @@ pub fn initialize_auth_page(kind: AuthPageKind, state: AuthPageState) {
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub fn initialize_auth_page(_kind: AuthPageKind, state: AuthPageState) {
+    initialize_auth_page_host(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn initialize_auth_page_host(state: AuthPageState) {
+    if state.checked.get_untracked() {
+        return;
+    }
+
+    state.checked.set(true);
+    state.loading.set(false);
+}
+
+#[cfg(target_family = "wasm")]
 pub fn submit_credentials_handler(
     kind: AuthPageKind,
     state: AuthPageState,
@@ -81,6 +100,14 @@ pub fn submit_credentials_handler(
             }
         });
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn submit_credentials_handler(
+    _kind: AuthPageKind,
+    state: AuthPageState,
+) -> Callback<web_sys::SubmitEvent> {
+    Callback::new(move |_| submit_credentials_host(state))
 }
 
 pub fn auth_page_view(
@@ -202,11 +229,27 @@ fn auth_page_route(kind: AuthPageKind, target: HomeRouteTarget) -> AuthPageRoute
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn submit_credentials_host(state: AuthPageState) {
+    if state.submitting.get_untracked() {
+        return;
+    }
+
+    state.submitting.set(true);
+    state.error.set(None);
+}
+
 #[cfg(test)]
 mod tests {
     use leptos::prelude::*;
+    use wasm_bindgen::{JsCast, JsValue};
 
     use super::*;
+
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_submit_event() -> web_sys::SubmitEvent {
+        JsValue::NULL.unchecked_into()
+    }
 
     #[test]
     fn auth_page_route_redirects_to_the_expected_destination() {
@@ -357,6 +400,44 @@ mod tests {
                 sign_in,
                 Callback::new(|_: web_sys::SubmitEvent| {}),
             );
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_auth_helpers_set_flags_once_and_clear_errors() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AuthPageState::new();
+            state.error.set(Some("stale".to_string()));
+
+            initialize_auth_page_host(state);
+            assert!(state.checked.get());
+            assert!(!state.loading.get());
+
+            state.loading.set(true);
+            initialize_auth_page_host(state);
+            assert!(state.loading.get());
+
+            submit_credentials_host(state);
+            assert!(state.submitting.get());
+            assert!(state.error.get().is_none());
+
+            state.error.set(Some("still submitting".to_string()));
+            submit_credentials_host(state);
+            assert_eq!(state.error.get(), Some("still submitting".to_string()));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_submit_credentials_handler_uses_submit_helper() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AuthPageState::new();
+            submit_credentials_handler(AuthPageKind::Register, state).run(fake_submit_event());
+            assert!(state.submitting.get());
+            assert!(state.error.get().is_none());
         });
     }
 }

@@ -51,6 +51,7 @@ pub(crate) fn render_markdown(source: &str) -> String {
     rendered
 }
 
+#[cfg(any(test, target_family = "wasm"))]
 pub(crate) fn tail_scroll_top(scroll_height: i32, client_height: i32) -> i32 {
     (scroll_height - client_height).max(0)
 }

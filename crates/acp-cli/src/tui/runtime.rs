@@ -150,7 +150,11 @@ fn draw_app(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp_contracts::{CreateSessionResponse, PermissionRequest, SessionSnapshot, SessionStatus};
+    use acp_contracts::{
+        ConversationMessage, CreateSessionResponse, MessageRole, PermissionRequest,
+        SessionSnapshot, SessionStatus,
+    };
+    use chrono::Utc;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -168,6 +172,19 @@ mod tests {
             }],
             vec![],
         )
+    }
+
+    fn permissionless_app() -> ChatApp {
+        ChatApp::new("s_test", "http://127.0.0.1:8080", false, &[], &[], vec![])
+    }
+
+    fn conversation_message(id: &str, role: MessageRole, text: &str) -> ConversationMessage {
+        ConversationMessage {
+            id: id.to_string(),
+            role,
+            text: text.to_string(),
+            created_at: Utc::now(),
+        }
     }
 
     fn session_response(pending_permissions: Vec<PermissionRequest>) -> CreateSessionResponse {
@@ -263,6 +280,76 @@ mod tests {
 
         assert!(app.pending_permissions().is_empty());
         assert!(!refresh_state.in_flight);
+    }
+
+    #[test]
+    fn drain_events_marks_the_connection_lost_when_the_stream_ends() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut app = pending_permission_app();
+        let mut refresh_state = PendingPermissionRefreshState::default();
+        event_tx
+            .send(TuiEvent::StreamEnded("event stream ended".to_string()))
+            .expect("stream endings should queue");
+
+        drain_events(&mut event_rx, &mut app, &mut refresh_state);
+
+        assert_eq!(app.connection().label(), "disconnected");
+        assert_eq!(app.connection().detail(), Some("event stream ended"));
+    }
+
+    #[test]
+    fn drain_events_skips_refreshes_when_no_pending_permissions_exist() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut app = permissionless_app();
+        let mut refresh_state = PendingPermissionRefreshState::default();
+        event_tx
+            .send(TuiEvent::Stream(crate::events::StreamUpdate::Status(
+                "assistant finished".to_string(),
+            )))
+            .expect("status updates should queue");
+
+        drain_events(&mut event_rx, &mut app, &mut refresh_state);
+
+        assert!(!refresh_state.queued);
+    }
+
+    #[test]
+    fn drain_events_requests_refresh_after_assistant_messages() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut app = pending_permission_app();
+        let mut refresh_state = PendingPermissionRefreshState::default();
+        event_tx
+            .send(TuiEvent::Stream(
+                crate::events::StreamUpdate::ConversationMessage(conversation_message(
+                    "m_assistant",
+                    MessageRole::Assistant,
+                    "done",
+                )),
+            ))
+            .expect("assistant messages should queue");
+
+        drain_events(&mut event_rx, &mut app, &mut refresh_state);
+
+        assert!(refresh_state.queued);
+    }
+
+    #[test]
+    fn drain_events_does_not_refresh_after_permission_requests() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut app = pending_permission_app();
+        let mut refresh_state = PendingPermissionRefreshState::default();
+        event_tx
+            .send(TuiEvent::Stream(
+                crate::events::StreamUpdate::PermissionRequested(PermissionRequest {
+                    request_id: "req_2".to_string(),
+                    summary: "write_file Cargo.toml".to_string(),
+                }),
+            ))
+            .expect("permission requests should queue");
+
+        drain_events(&mut event_rx, &mut app, &mut refresh_state);
+
+        assert!(!refresh_state.queued);
     }
 
     #[test]

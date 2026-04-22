@@ -113,27 +113,6 @@ pub(crate) fn HomePage() -> impl IntoView {
     }
 }
 
-#[cfg(target_family = "wasm")]
-#[component]
-pub(crate) fn SessionView(session_id: String) -> impl IntoView {
-    let signals = session_signals();
-    let sidebar_open = RwSignal::new(default_sidebar_open());
-    let current_session_deleting = current_session_deleting_signal(session_id.clone(), signals);
-    restore_session_draft(&session_id, signals);
-    persist_session_draft(session_id.clone(), signals.draft);
-    bind_slash_completion(signals);
-    spawn_session_bootstrap(session_id.clone(), signals);
-
-    session_view_content(
-        session_id.clone(),
-        signals,
-        session_composer_signals(signals, current_session_deleting),
-        session_view_callbacks(session_id, signals),
-        sidebar_open,
-    )
-}
-
-#[cfg(not(target_family = "wasm"))]
 #[component]
 pub(crate) fn SessionView(session_id: String) -> impl IntoView {
     let signals = session_signals();
@@ -554,7 +533,19 @@ fn SessionSidebarStatus(
     }
 }
 
-#[cfg(target_family = "wasm")]
+struct SessionSidebarNavArgs {
+    session_items: Signal<Vec<SidebarSession>>,
+    session_list_loaded: Signal<bool>,
+    session_list_error: Signal<Option<String>>,
+    deleting_session_id: Signal<Option<String>>,
+    delete_disabled: Signal<bool>,
+    renaming_session_id: RwSignal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
+    rename_draft: RwSignal<String>,
+    on_rename_session: Callback<(String, String)>,
+    on_delete_session: Callback<String>,
+}
+
 #[component]
 fn SessionSidebarNav(
     #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
@@ -568,6 +559,35 @@ fn SessionSidebarNav(
     on_rename_session: Callback<(String, String)>,
     on_delete_session: Callback<String>,
 ) -> impl IntoView {
+    session_sidebar_nav_view(SessionSidebarNavArgs {
+        session_items,
+        session_list_loaded,
+        session_list_error,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
+    let SessionSidebarNavArgs {
+        session_items,
+        session_list_loaded,
+        session_list_error,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = args;
+
     view! {
         <nav class="session-sidebar__nav" aria-label="Sessions">
             <Show
@@ -603,19 +623,19 @@ fn SessionSidebarNav(
 }
 
 #[cfg(not(target_family = "wasm"))]
-#[component]
-fn SessionSidebarNav(
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-    #[prop(into)] session_list_loaded: Signal<bool>,
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
+fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
+    let SessionSidebarNavArgs {
+        session_items,
+        session_list_loaded,
+        session_list_error,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = args;
     let loaded = session_list_loaded.get_untracked();
     let items = session_items.get_untracked();
     let has_error = session_list_error.get_untracked().is_some();
@@ -657,7 +677,17 @@ fn SessionSidebarNav(
     .into_any()
 }
 
-#[cfg(target_family = "wasm")]
+struct SessionSidebarListArgs {
+    session_items: Signal<Vec<SidebarSession>>,
+    deleting_session_id: Signal<Option<String>>,
+    delete_disabled: Signal<bool>,
+    renaming_session_id: RwSignal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
+    rename_draft: RwSignal<String>,
+    on_rename_session: Callback<(String, String)>,
+    on_delete_session: Callback<String>,
+}
+
 #[component]
 fn SessionSidebarList(
     #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
@@ -669,6 +699,31 @@ fn SessionSidebarList(
     on_rename_session: Callback<(String, String)>,
     on_delete_session: Callback<String>,
 ) -> impl IntoView {
+    session_sidebar_list_view(SessionSidebarListArgs {
+        session_items,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_list_view(args: SessionSidebarListArgs) -> impl IntoView {
+    let SessionSidebarListArgs {
+        session_items,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = args;
+
     view! {
         <ul class="session-sidebar__list">
             <For
@@ -701,17 +756,17 @@ fn SessionSidebarList(
 }
 
 #[cfg(not(target_family = "wasm"))]
-#[component]
-fn SessionSidebarList(
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
+fn session_sidebar_list_view(args: SessionSidebarListArgs) -> impl IntoView {
+    let SessionSidebarListArgs {
+        session_items,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = args;
     let items = session_items.get_untracked();
 
     view! {

@@ -336,40 +336,25 @@ fn initialize_accounts_page_host(state: AccountsPageState) {
 }
 
 #[component]
-#[cfg(target_family = "wasm")]
 fn AccountsPageContent(state: AccountsPageState) -> impl IntoView {
-    move || match state.access.get() {
-        Some(AccountsRouteAccess::Admin(_)) => view! {
-            <CreateAccountSection state />
-            <CurrentAccountsSection state />
-        }
-        .into_any(),
-        Some(AccountsRouteAccess::RegisterRequired) => view! {
-            <p class="muted">
-                "Bootstrap registration is still required. "
-                <a href="/app/register/">"Create the first account."</a>
-            </p>
-        }
-        .into_any(),
-        Some(AccountsRouteAccess::SignInRequired) => view! {
-            <p class="muted">
-                "Sign in is required before managing accounts. "
-                <a href="/app/sign-in/">"Open sign-in."</a>
-            </p>
-        }
-        .into_any(),
-        Some(AccountsRouteAccess::Forbidden) => view! {
-            <p class="muted">"This page is available only to admin accounts."</p>
-        }
-        .into_any(),
-        None => view! { <p class="muted">"Checking account access…"</p> }.into_any(),
-    }
+    accounts_page_content(state)
 }
 
-#[component]
+#[cfg(target_family = "wasm")]
+fn accounts_page_content(state: AccountsPageState) -> impl IntoView {
+    move || accounts_page_content_body(state.access.get(), state)
+}
+
 #[cfg(not(target_family = "wasm"))]
-fn AccountsPageContent(state: AccountsPageState) -> impl IntoView {
-    match state.access.get_untracked() {
+fn accounts_page_content(state: AccountsPageState) -> impl IntoView {
+    accounts_page_content_body(state.access.get_untracked(), state)
+}
+
+fn accounts_page_content_body(
+    access: Option<AccountsRouteAccess>,
+    state: AccountsPageState,
+) -> AnyView {
+    match access {
         Some(AccountsRouteAccess::Admin(_)) => view! {
             <CreateAccountSection state />
             <CurrentAccountsSection state />

@@ -17,7 +17,10 @@ use super::super::super::state::SessionSignals;
 use super::super::shared::spawn_browser_task;
 
 #[cfg(target_family = "wasm")]
-pub(super) fn spawn_session_stream(session_id: String, signals: SessionSignals) {
+pub(in crate::session::page::actions) fn spawn_session_stream(
+    session_id: String,
+    signals: SessionSignals,
+) {
     stop_live_stream(signals);
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
     signals.stream_abort.set(Some(abort_handle));
@@ -29,7 +32,10 @@ pub(super) fn spawn_session_stream(session_id: String, signals: SessionSignals) 
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(super) fn spawn_session_stream(_session_id: String, signals: SessionSignals) {
+pub(in crate::session::page::actions) fn spawn_session_stream(
+    _session_id: String,
+    signals: SessionSignals,
+) {
     stop_live_stream(signals);
     let (abort_handle, _abort_registration) = AbortHandle::new_pair();
     signals.stream_abort.set(Some(abort_handle));

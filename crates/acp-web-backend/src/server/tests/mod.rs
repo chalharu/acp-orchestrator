@@ -92,7 +92,6 @@ fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
     }
 }
 
-#[tokio::test]
 fn metadata_test_workspace_store() -> Arc<SqliteWorkspaceRepository> {
     Arc::new(
         SqliteWorkspaceRepository::new(

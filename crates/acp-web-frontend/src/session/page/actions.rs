@@ -2,7 +2,7 @@
 
 use acp_contracts::{
     CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    SessionSnapshot, StreamEvent, StreamEventPayload,
+    SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
 };
 use core::future::Future;
 use futures_util::future::AbortHandle;

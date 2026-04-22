@@ -2,10 +2,12 @@
 
 use acp_contracts::{
     CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    SessionSnapshot, StreamEvent, StreamEventPayload,
 };
 use core::future::Future;
 use futures_util::future::AbortHandle;
+#[cfg(target_family = "wasm")]
+use acp_contracts::SessionStatus;
 #[cfg(target_family = "wasm")]
 use futures_util::{StreamExt, future::Abortable};
 use leptos::prelude::*;

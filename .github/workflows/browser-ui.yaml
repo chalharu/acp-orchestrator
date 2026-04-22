@@ -33,7 +33,7 @@ jobs:
           cargo install trunk --locked
       - name: Set up Chrome and ChromeDriver
         id: setup-chrome
-        uses: browser-actions/setup-chrome@2dbff04819ebbfd5c974947148805a825b8a07fd # v2.1.0
+        uses: browser-actions/setup-chrome@4f8e94349a351df0f048634f25fec36c3c91eded # v2.1.1
         with:
           chrome-version: stable
           install-chromedriver: true

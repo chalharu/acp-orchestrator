@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_status_messages_cover_running_and_unavailable_states() {
+    fn composer_status_messages_cover_active_running_and_loading_states() {
         assert_composer_status_cases(&[
             (
                 SessionLifecycle::Active,
@@ -738,6 +738,12 @@ mod tests {
                 false,
                 "Connecting...",
             ),
+        ]);
+    }
+
+    #[test]
+    fn composer_status_messages_cover_unavailable_states() {
+        assert_composer_status_cases(&[
             (
                 SessionLifecycle::Unavailable,
                 TurnState::Idle,
@@ -847,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_badges_cover_loading_permission_cancelling_idle_and_unavailable_states() {
+    fn worker_badges_cover_loading_unavailable_and_closed_states() {
         assert_worker_badge_cases(&[
             (
                 SessionLifecycle::Loading,
@@ -867,6 +873,12 @@ mod tests {
                 false,
                 badge("Worker", "stopped", BadgeTone::Neutral),
             ),
+        ]);
+    }
+
+    #[test]
+    fn worker_badges_cover_active_permission_cancelling_and_idle_states() {
+        assert_worker_badge_cases(&[
             (
                 SessionLifecycle::Active,
                 TurnState::Idle,

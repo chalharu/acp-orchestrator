@@ -23,7 +23,9 @@ use super::{
     },
 };
 
-pub(super) fn local_account_count(connection: &Connection) -> Result<i64, WorkspaceStoreError> {
+pub(in crate::workspace_store) fn local_account_count(
+    connection: &Connection,
+) -> Result<i64, WorkspaceStoreError> {
     connection
         .query_row(
             "SELECT COUNT(*) FROM users WHERE username IS NOT NULL AND deleted_at IS NULL",
@@ -44,7 +46,7 @@ fn active_admin_count(connection: &Connection) -> Result<i64, WorkspaceStoreErro
         .map_err(database_error)
 }
 
-pub(super) fn authenticate_browser_session(
+pub(in crate::workspace_store) fn authenticate_browser_session(
     connection: &Connection,
     browser_session_id: &str,
 ) -> Result<Option<UserRecord>, WorkspaceStoreError> {
@@ -72,7 +74,7 @@ pub(super) fn authenticate_browser_session(
         .map_err(database_error)
 }
 
-pub(super) fn authenticate_browser_session_in_transaction(
+pub(in crate::workspace_store) fn authenticate_browser_session_in_transaction(
     connection: &Connection,
     browser_session_id: &str,
 ) -> Result<Option<UserRecord>, WorkspaceStoreError> {
@@ -98,7 +100,7 @@ pub(super) fn authenticate_browser_session_in_transaction(
     }))
 }
 
-pub(super) fn list_local_accounts(
+pub(in crate::workspace_store) fn list_local_accounts(
     connection: &Connection,
 ) -> Result<Vec<LocalAccount>, WorkspaceStoreError> {
     let mut statement = connection
@@ -122,7 +124,9 @@ pub(super) fn list_local_accounts(
     rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
 }
 
-pub(super) fn validate_username(username: &str) -> Result<String, WorkspaceStoreError> {
+pub(in crate::workspace_store) fn validate_username(
+    username: &str,
+) -> Result<String, WorkspaceStoreError> {
     let username = username.trim();
     if username.is_empty() {
         return Err(WorkspaceStoreError::Validation(
@@ -142,7 +146,9 @@ pub(super) fn validate_username(username: &str) -> Result<String, WorkspaceStore
     Ok(username.to_string())
 }
 
-pub(super) fn validate_password(password: &str) -> Result<(), WorkspaceStoreError> {
+pub(in crate::workspace_store) fn validate_password(
+    password: &str,
+) -> Result<(), WorkspaceStoreError> {
     if password.len() < 8 {
         return Err(WorkspaceStoreError::Validation(
             "password must be at least 8 characters".to_string(),
@@ -151,7 +157,9 @@ pub(super) fn validate_password(password: &str) -> Result<(), WorkspaceStoreErro
     Ok(())
 }
 
-pub(super) fn hash_password(password: &str) -> Result<String, WorkspaceStoreError> {
+pub(in crate::workspace_store) fn hash_password(
+    password: &str,
+) -> Result<String, WorkspaceStoreError> {
     validate_password(password)?;
     let salt = encode_password_salt(Uuid::new_v4().as_bytes())?;
     Argon2::default()
@@ -160,12 +168,14 @@ pub(super) fn hash_password(password: &str) -> Result<String, WorkspaceStoreErro
         .map_err(|error| WorkspaceStoreError::Database(format!("failed to hash password: {error}")))
 }
 
-pub(super) fn encode_password_salt(bytes: &[u8]) -> Result<SaltString, WorkspaceStoreError> {
+pub(in crate::workspace_store) fn encode_password_salt(
+    bytes: &[u8],
+) -> Result<SaltString, WorkspaceStoreError> {
     SaltString::encode_b64(bytes)
         .map_err(|error| WorkspaceStoreError::Database(format!("failed to encode salt: {error}")))
 }
 
-pub(super) fn verify_password(
+pub(in crate::workspace_store) fn verify_password(
     password: &str,
     password_hash: &str,
 ) -> Result<bool, WorkspaceStoreError> {
@@ -177,7 +187,7 @@ pub(super) fn verify_password(
         .is_ok())
 }
 
-pub(super) fn authenticate_local_account_in_transaction(
+pub(in crate::workspace_store) fn authenticate_local_account_in_transaction(
     connection: &Connection,
     username: &str,
     password: &str,
@@ -207,7 +217,7 @@ pub(super) fn authenticate_local_account_in_transaction(
     })
 }
 
-pub(super) fn materialize_browser_session_user_in_transaction(
+pub(in crate::workspace_store) fn materialize_browser_session_user_in_transaction(
     connection: &Connection,
     browser_session_id: &str,
 ) -> Result<UserRecord, WorkspaceStoreError> {
@@ -216,7 +226,7 @@ pub(super) fn materialize_browser_session_user_in_transaction(
     })
 }
 
-pub(super) fn materialize_bearer_user_in_transaction(
+pub(in crate::workspace_store) fn materialize_bearer_user_in_transaction(
     connection: &Connection,
     principal: &AuthenticatedPrincipal,
 ) -> Result<UserRecord, WorkspaceStoreError> {
@@ -297,7 +307,7 @@ fn insert_bearer_user(
     Ok(user)
 }
 
-pub(super) fn insert_local_account(
+pub(in crate::workspace_store) fn insert_local_account(
     connection: &Connection,
     username: &str,
     password: &str,
@@ -341,7 +351,7 @@ pub(super) fn insert_local_account(
     })
 }
 
-pub(super) fn bind_browser_session_to_user(
+pub(in crate::workspace_store) fn bind_browser_session_to_user(
     connection: &Connection,
     browser_session_id: &str,
     user_id: &str,
@@ -371,7 +381,7 @@ pub(super) fn bind_browser_session_to_user(
     Ok(())
 }
 
-pub(super) fn soft_delete_browser_session(
+pub(in crate::workspace_store) fn soft_delete_browser_session(
     connection: &Connection,
     browser_session_id: &str,
     now: DateTime<Utc>,
@@ -397,7 +407,7 @@ fn active_local_account(
     Ok(user)
 }
 
-pub(super) fn local_account_from_user(
+pub(in crate::workspace_store) fn local_account_from_user(
     user: &UserRecord,
 ) -> Result<LocalAccount, WorkspaceStoreError> {
     let username = user
@@ -412,7 +422,7 @@ pub(super) fn local_account_from_user(
     })
 }
 
-pub(super) fn update_local_account_in_transaction(
+pub(in crate::workspace_store) fn update_local_account_in_transaction(
     connection: &Connection,
     target_user_id: &str,
     current_user_id: &str,
@@ -428,7 +438,7 @@ pub(super) fn update_local_account_in_transaction(
     local_account_from_user(&updated)
 }
 
-pub(super) fn delete_local_account_in_transaction(
+pub(in crate::workspace_store) fn delete_local_account_in_transaction(
     connection: &Connection,
     target_user_id: &str,
     current_user_id: &str,
@@ -465,7 +475,7 @@ fn validate_local_account_admin_change(
     Ok(())
 }
 
-pub(super) fn next_password_hash(
+pub(in crate::workspace_store) fn next_password_hash(
     password: Option<&str>,
 ) -> Result<Option<String>, WorkspaceStoreError> {
     match password {
@@ -572,7 +582,7 @@ fn soft_delete_local_account(
     Ok(())
 }
 
-pub(super) fn durable_local_account_subject(username: &str) -> String {
+pub(in crate::workspace_store) fn durable_local_account_subject(username: &str) -> String {
     hash_subject(LOCAL_ACCOUNT_PRINCIPAL_KIND, username)
 }
 
@@ -580,7 +590,9 @@ fn deleted_local_account_subject(user_id: &str) -> String {
     format!("deleted-local-account:{user_id}")
 }
 
-pub(super) fn map_account_write_error(error: rusqlite::Error) -> WorkspaceStoreError {
+pub(in crate::workspace_store) fn map_account_write_error(
+    error: rusqlite::Error,
+) -> WorkspaceStoreError {
     match error {
         rusqlite::Error::SqliteFailure(_, Some(message)) => {
             if message.contains("users.username") || message.contains("users.username_idx") {

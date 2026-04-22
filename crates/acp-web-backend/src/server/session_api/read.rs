@@ -9,7 +9,7 @@ use crate::{auth::AuthenticatedPrincipal, completions::resolve_slash_completions
 
 use super::super::{AppError, AppState, assets::SlashCompletionsQuery};
 
-pub(super) async fn list_sessions(
+pub(in crate::server) async fn list_sessions(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionListResponse>, AppError> {
@@ -19,7 +19,7 @@ pub(super) async fn list_sessions(
     Ok(Json(SessionListResponse { sessions }))
 }
 
-pub(super) async fn get_session(
+pub(in crate::server) async fn get_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -33,7 +33,7 @@ pub(super) async fn get_session(
     Ok(Json(SessionResponse { session }))
 }
 
-pub(super) async fn get_session_history(
+pub(in crate::server) async fn get_session_history(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -50,7 +50,7 @@ pub(super) async fn get_session_history(
     }))
 }
 
-pub(super) async fn get_slash_completions(
+pub(in crate::server) async fn get_slash_completions(
     State(state): State<AppState>,
     Query(query): Query<SlashCompletionsQuery>,
     Extension(principal): Extension<AuthenticatedPrincipal>,

@@ -62,7 +62,7 @@ ON CONFLICT(session_id) DO UPDATE SET
     deleted_at = excluded.deleted_at
 "#;
 
-pub(super) fn bootstrap_workspace_in_transaction(
+pub(in crate::workspace_store) fn bootstrap_workspace_in_transaction(
     connection: &Connection,
     owner_user_id: &str,
 ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
@@ -99,7 +99,7 @@ pub(super) fn bootstrap_workspace_in_transaction(
     Ok(workspace)
 }
 
-pub(super) fn upsert_session_metadata(
+pub(in crate::workspace_store) fn upsert_session_metadata(
     connection: &Connection,
     record: &SessionMetadataRecord,
 ) -> Result<(), WorkspaceStoreError> {
@@ -143,7 +143,7 @@ struct SessionLifecycleState {
     deleted_at: Option<DateTime<Utc>>,
 }
 
-pub(super) fn build_session_metadata_record(
+pub(in crate::workspace_store) fn build_session_metadata_record(
     connection: &Connection,
     owner_user_id: &str,
     snapshot: &SessionSnapshot,

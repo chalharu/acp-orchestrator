@@ -11,7 +11,7 @@ use crate::{auth::AuthenticatedPrincipal, contract_stream::StreamEvent};
 
 use super::super::{AppError, AppState};
 
-pub(super) async fn stream_session_events(
+pub(in crate::server) async fn stream_session_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,

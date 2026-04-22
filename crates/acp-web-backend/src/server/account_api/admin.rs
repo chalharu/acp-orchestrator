@@ -15,7 +15,7 @@ use super::super::{
     account_service::{forget_live_sessions_for_owners, require_admin},
 };
 
-pub(super) async fn list_accounts(
+pub(in crate::server) async fn list_accounts(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<AccountListResponse>, AppError> {
@@ -28,7 +28,7 @@ pub(super) async fn list_accounts(
     }))
 }
 
-pub(super) async fn create_account(
+pub(in crate::server) async fn create_account(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<CreateAccountRequest>,
@@ -42,7 +42,7 @@ pub(super) async fn create_account(
     Ok((StatusCode::CREATED, Json(CreateAccountResponse { account })))
 }
 
-pub(super) async fn update_account(
+pub(in crate::server) async fn update_account(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -62,7 +62,7 @@ pub(super) async fn update_account(
     Ok(Json(UpdateAccountResponse { account }))
 }
 
-pub(super) async fn delete_account(
+pub(in crate::server) async fn delete_account(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,

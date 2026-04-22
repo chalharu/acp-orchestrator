@@ -37,7 +37,7 @@ FROM sessions
 WHERE owner_user_id = ?1 AND session_id = ?2
 "#;
 
-pub(super) fn load_user_by_principal(
+pub(in crate::workspace_store) fn load_user_by_principal(
     connection: &Connection,
     principal_kind: &str,
     principal_subject: &str,
@@ -54,7 +54,7 @@ pub(super) fn load_user_by_principal(
         .map_err(database_error)
 }
 
-pub(super) fn load_user_by_id(
+pub(in crate::workspace_store) fn load_user_by_id(
     connection: &Connection,
     user_id: &str,
 ) -> Result<Option<UserRecord>, WorkspaceStoreError> {
@@ -70,7 +70,7 @@ pub(super) fn load_user_by_id(
         .map_err(database_error)
 }
 
-pub(super) fn load_active_local_account_by_username(
+pub(in crate::workspace_store) fn load_active_local_account_by_username(
     connection: &Connection,
     username: &str,
 ) -> Result<Option<UserRecord>, WorkspaceStoreError> {
@@ -86,7 +86,9 @@ pub(super) fn load_active_local_account_by_username(
         .map_err(database_error)
 }
 
-pub(super) fn load_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+pub(in crate::workspace_store) fn load_user_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<UserRecord> {
     let identity = load_user_identity_fields(row)?;
     let credentials = load_user_credential_fields(row)?;
     let lifecycle = load_user_lifecycle_fields(row)?;
@@ -146,7 +148,7 @@ fn load_user_lifecycle_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserL
     })
 }
 
-pub(super) fn load_bootstrap_workspace(
+pub(in crate::workspace_store) fn load_bootstrap_workspace(
     connection: &Connection,
     owner_user_id: &str,
 ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
@@ -209,7 +211,7 @@ fn load_workspace_timestamp_fields(
     })
 }
 
-pub(super) fn load_session_metadata_record(
+pub(in crate::workspace_store) fn load_session_metadata_record(
     connection: &Connection,
     owner_user_id: &str,
     session_id: &str,

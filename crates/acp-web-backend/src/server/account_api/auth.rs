@@ -19,7 +19,7 @@ use super::super::{
     assets::{current_browser_session_id, sign_out_response_headers},
 };
 
-pub(super) async fn auth_status(
+pub(in crate::server) async fn auth_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<AuthStatusResponse>, AppError> {
@@ -36,7 +36,7 @@ pub(super) async fn auth_status(
     }))
 }
 
-pub(super) async fn bootstrap_register(
+pub(in crate::server) async fn bootstrap_register(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<BootstrapRegistrationRequest>,
@@ -55,7 +55,7 @@ pub(super) async fn bootstrap_register(
     ))
 }
 
-pub(super) async fn sign_in(
+pub(in crate::server) async fn sign_in(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<SignInRequest>,
@@ -69,7 +69,7 @@ pub(super) async fn sign_in(
     Ok(Json(SignInResponse { account }))
 }
 
-pub(super) async fn sign_out(
+pub(in crate::server) async fn sign_out(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Response, AppError> {

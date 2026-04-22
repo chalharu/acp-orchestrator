@@ -9,7 +9,9 @@ use crate::{
     workspace_records::WorkspaceStoreError,
 };
 
-pub(super) fn ensure_parent_dir(path: &Path) -> Result<(), WorkspaceStoreError> {
+pub(in crate::workspace_store) fn ensure_parent_dir(
+    path: &Path,
+) -> Result<(), WorkspaceStoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| WorkspaceStoreError::Io(format!("create state directory: {error}")))?;
@@ -17,7 +19,7 @@ pub(super) fn ensure_parent_dir(path: &Path) -> Result<(), WorkspaceStoreError> 
     Ok(())
 }
 
-pub(super) fn open_immediate_transaction(
+pub(in crate::workspace_store) fn open_immediate_transaction(
     connection: &mut Connection,
 ) -> Result<rusqlite::Transaction<'_>, WorkspaceStoreError> {
     connection
@@ -25,11 +27,13 @@ pub(super) fn open_immediate_transaction(
         .map_err(database_error)
 }
 
-pub(super) fn timestamp(value: &DateTime<Utc>) -> String {
+pub(in crate::workspace_store) fn timestamp(value: &DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
 
-pub(super) fn parse_timestamp(value: String) -> Result<DateTime<Utc>, WorkspaceStoreError> {
+pub(in crate::workspace_store) fn parse_timestamp(
+    value: String,
+) -> Result<DateTime<Utc>, WorkspaceStoreError> {
     DateTime::parse_from_rfc3339(&value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(|error| {
@@ -43,7 +47,7 @@ fn parse_optional_timestamp(
     value.map(parse_timestamp).transpose()
 }
 
-pub(super) fn parse_timestamp_for_row(
+pub(in crate::workspace_store) fn parse_timestamp_for_row(
     value: String,
     index: usize,
 ) -> rusqlite::Result<DateTime<Utc>> {
@@ -56,7 +60,7 @@ pub(super) fn parse_timestamp_for_row(
     })
 }
 
-pub(super) fn parse_optional_timestamp_for_row(
+pub(in crate::workspace_store) fn parse_optional_timestamp_for_row(
     value: Option<String>,
     index: usize,
 ) -> rusqlite::Result<Option<DateTime<Utc>>> {
@@ -69,19 +73,21 @@ pub(super) fn parse_optional_timestamp_for_row(
     })
 }
 
-pub(super) fn database_error(error: impl fmt::Display) -> WorkspaceStoreError {
+pub(in crate::workspace_store) fn database_error(error: impl fmt::Display) -> WorkspaceStoreError {
     WorkspaceStoreError::Database(error.to_string())
 }
 
-pub(super) fn join_error(error: tokio::task::JoinError) -> WorkspaceStoreError {
+pub(in crate::workspace_store) fn join_error(error: tokio::task::JoinError) -> WorkspaceStoreError {
     WorkspaceStoreError::Database(format!("blocking workspace task failed: {error}"))
 }
 
-pub(super) fn durable_principal_subject(principal: &AuthenticatedPrincipal) -> String {
+pub(in crate::workspace_store) fn durable_principal_subject(
+    principal: &AuthenticatedPrincipal,
+) -> String {
     hash_subject(principal.kind.as_str(), &principal.subject)
 }
 
-pub(super) fn hash_subject(namespace: &str, subject: &str) -> String {
+pub(in crate::workspace_store) fn hash_subject(namespace: &str, subject: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(namespace.as_bytes());
     digest.update([0]);
@@ -95,7 +101,7 @@ pub(super) fn hash_subject(namespace: &str, subject: &str) -> String {
 }
 
 impl AuthenticatedPrincipalKind {
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(in crate::workspace_store) fn as_str(&self) -> &'static str {
         match self {
             Self::Bearer => "bearer",
             Self::BrowserSession => "browser_session",

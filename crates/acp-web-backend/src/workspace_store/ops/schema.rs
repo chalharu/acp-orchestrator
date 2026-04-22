@@ -1,4 +1,3 @@
-use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
@@ -8,7 +7,7 @@ use super::{
     LEGACY_BROWSER_SESSIONS_TABLE, LOCAL_ACCOUNT_PRINCIPAL_KIND,
     accounts::durable_local_account_subject,
     queries::{load_active_local_account_by_username, load_user_by_principal},
-    shared::{database_error, timestamp},
+    shared::database_error,
 };
 
 const WORKSPACE_STORE_SCHEMA_SQL: &str = r#"
@@ -102,7 +101,9 @@ fn ensure_users_column(
     Ok(())
 }
 
-pub(super) fn initialize_schema(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+pub(in crate::workspace_store) fn initialize_schema(
+    connection: &Connection,
+) -> Result<(), WorkspaceStoreError> {
     stage_legacy_browser_sessions_table(connection)?;
     connection
         .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)

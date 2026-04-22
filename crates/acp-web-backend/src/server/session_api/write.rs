@@ -19,7 +19,7 @@ use super::super::{
     },
 };
 
-pub(super) async fn create_session(
+pub(in crate::server) async fn create_session(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<(axum::http::StatusCode, Json<CreateSessionResponse>), AppError> {
@@ -31,7 +31,7 @@ pub(super) async fn create_session(
     ))
 }
 
-pub(super) async fn rename_session(
+pub(in crate::server) async fn rename_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -42,7 +42,7 @@ pub(super) async fn rename_session(
     Ok(Json(RenameSessionResponse { session }))
 }
 
-pub(super) async fn delete_session(
+pub(in crate::server) async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -52,7 +52,7 @@ pub(super) async fn delete_session(
     Ok(Json(DeleteSessionResponse { deleted: true }))
 }
 
-pub(super) async fn post_message(
+pub(in crate::server) async fn post_message(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -63,7 +63,7 @@ pub(super) async fn post_message(
     Ok(Json(PromptResponse { accepted: true }))
 }
 
-pub(super) async fn close_session(
+pub(in crate::server) async fn close_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -73,7 +73,7 @@ pub(super) async fn close_session(
     Ok(Json(CloseSessionResponse { session }))
 }
 
-pub(super) async fn cancel_turn(
+pub(in crate::server) async fn cancel_turn(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
@@ -87,7 +87,7 @@ pub(super) async fn cancel_turn(
     Ok(Json(CancelTurnResponse { cancelled }))
 }
 
-pub(super) async fn resolve_permission(
+pub(in crate::server) async fn resolve_permission(
     State(state): State<AppState>,
     Path((session_id, request_id)): Path<(String, String)>,
     Extension(principal): Extension<AuthenticatedPrincipal>,

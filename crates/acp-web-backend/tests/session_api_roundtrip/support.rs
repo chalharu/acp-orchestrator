@@ -8,7 +8,7 @@ use acp_web_backend::contract_accounts::{
 pub(super) use acp_web_backend::contract_messages::MessageRole;
 use acp_web_backend::contract_messages::PromptRequest;
 pub(super) use acp_web_backend::contract_permissions::PermissionDecision;
-use acp_web_backend::contract_permissions::ResolvePermissionRequest;
+use acp_web_backend::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
 use acp_web_backend::contract_sessions::{
     CancelTurnResponse, CreateSessionResponse, RenameSessionRequest, RenameSessionResponse,
     SessionListResponse,

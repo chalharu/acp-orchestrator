@@ -1,13 +1,13 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
+#[cfg(target_family = "wasm")]
+use acp_contracts::SessionStatus;
 use acp_contracts::{
     CompletionCandidate, ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
     SessionSnapshot, StreamEvent, StreamEventPayload,
 };
 use core::future::Future;
 use futures_util::future::AbortHandle;
-#[cfg(target_family = "wasm")]
-use acp_contracts::SessionStatus;
 #[cfg(target_family = "wasm")]
 use futures_util::{StreamExt, future::Abortable};
 use leptos::prelude::*;

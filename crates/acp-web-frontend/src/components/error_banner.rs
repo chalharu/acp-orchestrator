@@ -12,3 +12,23 @@ pub(crate) fn ErrorBanner(#[prop(into)] message: Signal<Option<String>>) -> impl
         </Show>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn error_banner_builds_for_present_and_missing_messages() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let message = RwSignal::new(None::<String>);
+            let derived = Signal::derive(move || message.get());
+
+            let _ = view! { <ErrorBanner message=derived /> };
+            message.set(Some("boom".to_string()));
+            let _ = view! { <ErrorBanner message=derived /> };
+        });
+    }
+}

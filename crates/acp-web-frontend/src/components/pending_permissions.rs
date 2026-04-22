@@ -109,3 +109,67 @@ fn PendingPermissionFooter(
         </div>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use super::*;
+
+    fn permission(id: &str) -> PendingPermission {
+        PendingPermission {
+            request_id: id.to_string(),
+            summary: format!("summary for {id}"),
+        }
+    }
+
+    #[test]
+    fn chat_activity_builds_for_pending_permissions() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let items = Signal::derive(move || vec![permission("req-1")]);
+            let busy = Signal::derive(|| false);
+
+            let _ = view! {
+                <ChatActivity
+                    items=items
+                    busy=busy
+                    on_approve=Callback::new(|_: String| {})
+                    on_deny=Callback::new(|_: String| {})
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn pending_permission_item_builds_buttons_for_approve_and_deny() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let busy = Signal::derive(|| true);
+
+            let _ = view! {
+                <PendingPermissionItem
+                    request_id="req-2".to_string()
+                    summary="Need approval".to_string()
+                    busy=busy
+                    on_approve=Callback::new(|_: String| {})
+                    on_deny=Callback::new(|_: String| {})
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn pending_permission_footer_builds_cancel_action() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! {
+                <PendingPermissionFooter
+                    busy=Signal::derive(|| false)
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+}

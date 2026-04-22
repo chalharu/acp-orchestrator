@@ -813,6 +813,7 @@ fn spawn_account_reload(state: AccountsPageState) {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use leptos::prelude::*;
 
     use super::*;
 
@@ -921,5 +922,160 @@ mod tests {
         )));
         assert_eq!(sign_out_button_label(false), "Sign out");
         assert_eq!(sign_out_button_label(true), "Signing out…");
+    }
+
+    #[test]
+    fn accounts_page_shows_sign_out_for_admin_and_none() {
+        let admin = sample_account("admin", true);
+        assert!(accounts_page_shows_sign_out(Some(
+            AccountsRouteAccess::Admin(admin)
+        )));
+        assert!(!accounts_page_shows_sign_out(None));
+        assert!(!accounts_page_shows_sign_out(Some(
+            AccountsRouteAccess::RegisterRequired
+        )));
+    }
+
+    #[test]
+    fn save_and_delete_button_labels_toggle_with_in_progress_state() {
+        assert_eq!(save_button_label(false), "Save");
+        assert_eq!(save_button_label(true), "Saving…");
+        assert_eq!(delete_button_label(false), "Delete");
+        assert_eq!(delete_button_label(true), "Deleting…");
+    }
+
+    #[test]
+    fn admin_access_label_reflects_admin_flag() {
+        assert_eq!(admin_access_label(true), "Enabled");
+        assert_eq!(admin_access_label(false), "Standard");
+    }
+
+    #[test]
+    fn account_count_label_handles_zero_one_and_many() {
+        assert_eq!(account_count_label(0), "0 accounts");
+        assert_eq!(account_count_label(1), "1 account");
+        assert_eq!(account_count_label(5), "5 accounts");
+    }
+
+    #[test]
+    fn query_param_returns_none_for_missing_key_and_empty_search() {
+        assert_eq!(query_param("", "return_to"), None);
+        assert_eq!(query_param("?a=1&b=2", "return_to"), None);
+        assert_eq!(
+            query_param("return_to=%2Fapp%2F", "return_to"),
+            Some("/app/".to_string())
+        );
+    }
+
+    #[test]
+    fn accounts_page_state_starts_with_empty_defaults() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            assert!(state.error.get().is_none());
+            assert!(state.notice.get().is_none());
+            assert!(state.access.get().is_none());
+            assert!(state.current_user_id.get().is_empty());
+            assert!(state.accounts.get().is_empty());
+            assert!(state.loading_accounts.get());
+            assert!(state.create_username.get().is_empty());
+            assert!(state.create_password.get().is_empty());
+            assert!(!state.create_admin.get());
+            assert!(!state.creating.get());
+            assert!(!state.checked.get());
+        });
+    }
+
+    #[test]
+    fn accounts_page_content_builds_for_each_access_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let admin = sample_account("admin", true);
+
+            state.access.set(Some(AccountsRouteAccess::Admin(admin)));
+            let _ = view! { <AccountsPageContent state=state /> };
+
+            state
+                .access
+                .set(Some(AccountsRouteAccess::RegisterRequired));
+            let _ = view! { <AccountsPageContent state=state /> };
+
+            state.access.set(Some(AccountsRouteAccess::SignInRequired));
+            let _ = view! { <AccountsPageContent state=state /> };
+
+            state.access.set(Some(AccountsRouteAccess::Forbidden));
+            let _ = view! { <AccountsPageContent state=state /> };
+        });
+    }
+
+    #[test]
+    fn account_sections_and_rows_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            state.current_user_id.set("admin".to_string());
+            state.accounts.set(vec![
+                sample_account("admin", true),
+                sample_account("member", false),
+            ]);
+            state.loading_accounts.set(false);
+
+            let _ = view! { <CreateAccountSection state=state /> };
+            let _ = view! { <CurrentAccountsSection state=state /> };
+            let _ = view! { <AccountRow account=sample_account("member", false) state=state /> };
+        });
+    }
+
+    #[test]
+    fn account_row_subcomponents_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let password = RwSignal::new(String::new());
+            let admin_checked = RwSignal::new(true);
+            let saving = RwSignal::new(false);
+            let deleting = RwSignal::new(false);
+            let row_dirty = Signal::derive(|| true);
+            let can_modify = Signal::derive(|| true);
+            let role_label = Signal::derive(|| "admin".to_string());
+            let role_badge_class =
+                Signal::derive(|| "account-role-pill account-role-pill--admin".to_string());
+            let constraint_label = Signal::derive(String::new);
+
+            let _ = view! {
+                <AccountRowSummary username="admin".to_string() constraint_label=constraint_label />
+            };
+            let _ = view! {
+                <AccountStateCell
+                    role_label=role_label
+                    role_badge_class=role_badge_class
+                />
+            };
+            let _ =
+                view! { <AccountPasswordField password=password username="admin".to_string() /> };
+            let _ =
+                view! { <AccountAdminToggle admin_checked=admin_checked can_modify=can_modify /> };
+            let _ = view! {
+                <AccountRowActions
+                    saving=saving
+                    deleting=deleting
+                    row_dirty=row_dirty
+                    can_modify=can_modify
+                    save_account=Callback::new(|()| {})
+                    delete_account=Callback::new(|_: web_sys::MouseEvent| {})
+                    constraint_label=constraint_label
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn accounts_page_content_builds_waiting_and_loading_states() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let _ = view! { <AccountsPageContent state=state /> };
+            let _ = view! { <CurrentAccountsSection state=state /> };
+        });
     }
 }

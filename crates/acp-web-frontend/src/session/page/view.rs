@@ -615,6 +615,34 @@ fn SessionSidebarItemDisplay(
     on_delete: Callback<()>,
 ) -> impl IntoView {
     view! {
+        <SessionSidebarSessionLink
+            href=href
+            title=title
+            activity_label=activity_label
+            is_current=is_current
+            is_closed=is_closed
+        />
+        <SessionSidebarRenameButton
+            disabled=rename_action_disabled
+            on_begin_rename=on_begin_rename
+        />
+        <SessionSidebarDeleteButton
+            is_deleting=is_deleting
+            disabled=delete_action_disabled
+            on_delete=on_delete
+        />
+    }
+}
+
+#[component]
+fn SessionSidebarSessionLink(
+    href: String,
+    title: String,
+    activity_label: String,
+    is_current: bool,
+    is_closed: bool,
+) -> impl IntoView {
+    view! {
         <a
             class="session-sidebar__session-link"
             href=href
@@ -630,22 +658,41 @@ fn SessionSidebarItemDisplay(
                 </span>
             </span>
         </a>
+    }
+}
+
+#[component]
+fn SessionSidebarRenameButton(
+    #[prop(into)] disabled: Signal<bool>,
+    on_begin_rename: Callback<()>,
+) -> impl IntoView {
+    view! {
         <button
             type="button"
             class="session-sidebar__action-btn"
             title="Rename"
             on:click=move |_| on_begin_rename.run(())
-            prop:disabled=move || rename_action_disabled.get()
+            prop:disabled=move || disabled.get()
         >
             <span aria-hidden="true">{"✎"}</span>
             <span class="sr-only">"Rename session"</span>
         </button>
+    }
+}
+
+#[component]
+fn SessionSidebarDeleteButton(
+    #[prop(into)] is_deleting: Signal<bool>,
+    #[prop(into)] disabled: Signal<bool>,
+    on_delete: Callback<()>,
+) -> impl IntoView {
+    view! {
         <button
             type="button"
             class="session-sidebar__action-btn session-sidebar__action-btn--danger"
             title="Delete"
             on:click=move |_| on_delete.run(())
-            prop:disabled=move || delete_action_disabled.get()
+            prop:disabled=move || disabled.get()
         >
             <Show
                 when=move || is_deleting.get()
@@ -852,5 +899,380 @@ fn session_sidebar_empty_message(has_error: bool) -> &'static str {
         "Unable to load sessions right now."
     } else {
         "No sessions yet. Start a new one."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use crate::domain::session::{
+        BadgeTone, PendingPermission, SessionLifecycle, SidebarSession, StatusBadge,
+    };
+    use crate::session::page::state::{session_composer_signals, session_signals};
+
+    use super::*;
+
+    fn badge(label: &'static str, value: &'static str, tone: BadgeTone) -> StatusBadge {
+        StatusBadge { label, value, tone }
+    }
+
+    fn sample_sidebar_session() -> SidebarSession {
+        SidebarSession {
+            id: "s1".to_string(),
+            href: "/app/sessions/s1".to_string(),
+            title: "Test session".to_string(),
+            activity_label: "Updated now".to_string(),
+            is_current: true,
+            is_closed: false,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // session_layout_class
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_layout_class_adds_open_modifier_when_sidebar_is_open() {
+        assert_eq!(
+            session_layout_class(true),
+            "session-layout session-layout--sidebar-open"
+        );
+        assert_eq!(session_layout_class(false), "session-layout");
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_class
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_sidebar_class_adds_open_modifier_when_sidebar_is_open() {
+        assert_eq!(
+            session_sidebar_class(true),
+            "session-sidebar session-sidebar--open"
+        );
+        assert_eq!(session_sidebar_class(false), "session-sidebar");
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_class
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_sidebar_item_class_applies_current_and_closed_modifiers() {
+        let both = session_sidebar_item_class(true, true);
+        assert!(both.contains("--current"));
+        assert!(both.contains("--closed"));
+
+        let current_only = session_sidebar_item_class(true, false);
+        assert!(current_only.contains("--current"));
+        assert!(!current_only.contains("--closed"));
+
+        let closed_only = session_sidebar_item_class(false, true);
+        assert!(!closed_only.contains("--current"));
+        assert!(closed_only.contains("--closed"));
+
+        assert_eq!(
+            session_sidebar_item_class(false, false),
+            "session-sidebar__item"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_empty_message
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_sidebar_empty_message_differs_based_on_error_presence() {
+        assert!(session_sidebar_empty_message(true).contains("Unable to load"));
+        assert!(session_sidebar_empty_message(false).contains("No sessions yet"));
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_callbacks – begin_rename
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidebar_item_begin_rename_sets_draft_and_renaming_id() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let rename_draft = RwSignal::new(String::new());
+            let renaming_id = RwSignal::new(None::<String>);
+            let is_saving = Signal::derive(|| false);
+            let on_rename = Callback::new(move |_: (String, String)| {});
+            let on_delete = Callback::new(move |_: String| {});
+
+            let callbacks = session_sidebar_item_callbacks(
+                "s1".to_string(),
+                "My Title".to_string(),
+                rename_draft,
+                renaming_id,
+                is_saving,
+                on_rename,
+                on_delete,
+            );
+
+            callbacks.begin_rename.run(());
+
+            assert_eq!(rename_draft.get(), "My Title");
+            assert_eq!(renaming_id.get(), Some("s1".to_string()));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_callbacks – cancel_rename
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidebar_item_cancel_rename_clears_draft_and_renaming_id() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let rename_draft = RwSignal::new("draft".to_string());
+            let renaming_id = RwSignal::new(Some("s1".to_string()));
+            let is_saving = Signal::derive(|| false);
+            let on_rename = Callback::new(move |_: (String, String)| {});
+            let on_delete = Callback::new(move |_: String| {});
+
+            let callbacks = session_sidebar_item_callbacks(
+                "s1".to_string(),
+                "My Title".to_string(),
+                rename_draft,
+                renaming_id,
+                is_saving,
+                on_rename,
+                on_delete,
+            );
+
+            callbacks.cancel_rename.run(());
+
+            assert!(rename_draft.get().is_empty());
+            assert!(renaming_id.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_callbacks – commit_rename with value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidebar_item_commit_rename_runs_rename_callback_when_draft_non_empty() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let rename_draft = RwSignal::new("New Name".to_string());
+            let renaming_id = RwSignal::new(None::<String>);
+            let is_saving = Signal::derive(|| false);
+            let renamed = RwSignal::new(None::<(String, String)>);
+            let on_rename = Callback::new(move |pair| renamed.set(Some(pair)));
+            let on_delete = Callback::new(move |_: String| {});
+
+            let callbacks = session_sidebar_item_callbacks(
+                "s1".to_string(),
+                "Old".to_string(),
+                rename_draft,
+                renaming_id,
+                is_saving,
+                on_rename,
+                on_delete,
+            );
+
+            callbacks.commit_rename.run(());
+
+            let pair = renamed.get().expect("rename callback should have fired");
+            assert_eq!(pair.0, "s1");
+            assert_eq!(pair.1, "New Name");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_callbacks – commit_rename with blank draft
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidebar_item_commit_rename_clears_renaming_id_when_draft_is_blank() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let rename_draft = RwSignal::new("  ".to_string());
+            let renaming_id = RwSignal::new(Some("s1".to_string()));
+            let is_saving = Signal::derive(|| false);
+            let on_rename = Callback::new(move |_: (String, String)| {});
+            let on_delete = Callback::new(move |_: String| {});
+
+            let callbacks = session_sidebar_item_callbacks(
+                "s1".to_string(),
+                "Old".to_string(),
+                rename_draft,
+                renaming_id,
+                is_saving,
+                on_rename,
+                on_delete,
+            );
+
+            callbacks.commit_rename.run(());
+
+            assert!(renaming_id.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_callbacks – delete_session
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidebar_item_delete_session_forwards_the_session_id() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let rename_draft = RwSignal::new(String::new());
+            let renaming_id = RwSignal::new(None::<String>);
+            let is_saving = Signal::derive(|| false);
+            let deleted_id = RwSignal::new(String::new());
+            let on_rename = Callback::new(move |_: (String, String)| {});
+            let on_delete = Callback::new(move |id: String| deleted_id.set(id));
+
+            let callbacks = session_sidebar_item_callbacks(
+                "s1".to_string(),
+                "My Title".to_string(),
+                rename_draft,
+                renaming_id,
+                is_saving,
+                on_rename,
+                on_delete,
+            );
+
+            callbacks.delete_session.run(());
+
+            assert_eq!(deleted_id.get(), "s1");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // composer_slash_signals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn composer_slash_signals_forward_palette_visibility_and_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let not_deleting = Signal::derive(|| false);
+            let composer = session_composer_signals(signals, not_deleting);
+
+            let slash = composer_slash_signals(composer);
+
+            assert!(!slash.visible.get());
+            assert!(slash.candidates.get().is_empty());
+            assert_eq!(slash.selected_index.get(), 0);
+            assert!(!slash.apply_selected.get());
+
+            signals.draft.set("/".to_string());
+            assert!(slash.visible.get());
+        });
+    }
+
+    #[test]
+    fn sidebar_display_components_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! {
+                <SessionSidebarSessionLink
+                    href="/app/sessions/s1".to_string()
+                    title="Test session".to_string()
+                    activity_label="Updated now".to_string()
+                    is_current=true
+                    is_closed=false
+                />
+            };
+            let _ = view! {
+                <SessionSidebarRenameButton
+                    disabled=Signal::derive(|| false)
+                    on_begin_rename=Callback::new(|()| {})
+                />
+            };
+            let _ = view! {
+                <SessionSidebarDeleteButton
+                    is_deleting=Signal::derive(|| true)
+                    disabled=Signal::derive(|| false)
+                    on_delete=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn transcript_and_badge_components_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! {
+                <SessionTranscriptPanel
+                    entries=Signal::derive(Vec::new)
+                    session_status=Signal::derive(|| SessionLifecycle::Closed)
+                    pending_permissions=Signal::derive(|| {
+                        vec![PendingPermission {
+                            request_id: "perm-1".to_string(),
+                            summary: "Read file".to_string(),
+                        }]
+                    })
+                    pending_action_busy=Signal::derive(|| false)
+                    on_approve=Callback::new(|_: String| {})
+                    on_deny=Callback::new(|_: String| {})
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+            let _ = view! { <SessionClosedNotice session_status=Signal::derive(|| SessionLifecycle::Closed) /> };
+            let _ = view! {
+                <StatusBadgeView
+                    badge=Signal::derive(|| badge("Connection", "live", BadgeTone::Success))
+                />
+            };
+            let _ = view! {
+                <SessionTopBar
+                    message=Signal::derive(|| Some("warning".to_string()))
+                    connection_badge=Signal::derive(|| badge("Connection", "live", BadgeTone::Success))
+                    worker_badge=Signal::derive(|| badge("Worker", "idle", BadgeTone::Neutral))
+                    sidebar_open=RwSignal::new(false)
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn sidebar_navigation_components_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let session_items = Signal::derive(|| vec![sample_sidebar_session()]);
+            let deleting_session_id = Signal::derive(|| None::<String>);
+            let saving_rename_session_id = Signal::derive(|| None::<String>);
+            let rename_draft = RwSignal::new("Draft".to_string());
+            let renaming_session_id = RwSignal::new(None::<String>);
+
+            let _ = view! {
+                <SessionSidebarStatus
+                    session_list_error=Signal::derive(|| Some("temporary".to_string()))
+                    session_items=session_items
+                />
+            };
+            let _ = view! {
+                <SessionSidebarNav
+                    session_items=session_items
+                    session_list_loaded=Signal::derive(|| true)
+                    session_list_error=Signal::derive(|| None::<String>)
+                    deleting_session_id=deleting_session_id
+                    delete_disabled=Signal::derive(|| false)
+                    renaming_session_id=renaming_session_id
+                    saving_rename_session_id=saving_rename_session_id
+                    rename_draft=rename_draft
+                    on_rename_session=Callback::new(|_: (String, String)| {})
+                    on_delete_session=Callback::new(|_: String| {})
+                />
+            };
+            let _ = view! {
+                <SessionSidebarRenameForm
+                    rename_draft=rename_draft
+                    is_saving_rename=Signal::derive(|| false)
+                    save_disabled=Signal::derive(|| false)
+                    on_commit_rename=Callback::new(|()| {})
+                    on_cancel_rename=Callback::new(|()| {})
+                />
+            };
+        });
     }
 }

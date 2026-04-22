@@ -2,7 +2,7 @@ const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
 const DRAFT_STORAGE_KEY_PREFIX: &str = "acp-draft-";
 
 pub(crate) fn navigate_to(path: &str) -> Result<(), String> {
-    web_sys::window()
+    browser_window()
         .ok_or_else(|| "window not available".to_string())?
         .location()
         .set_href(path)
@@ -66,9 +66,52 @@ pub(crate) fn clear_draft(session_id: &str) {
 }
 
 fn session_storage() -> Option<web_sys::Storage> {
-    web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    browser_window().and_then(|window| window.session_storage().ok().flatten())
+}
+
+fn browser_window() -> Option<web_sys::Window> {
+    #[cfg(target_family = "wasm")]
+    {
+        web_sys::window()
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        None
+    }
 }
 
 fn draft_storage_key(session_id: &str) -> String {
     format!("{DRAFT_STORAGE_KEY_PREFIX}{session_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigate_to_returns_an_error_without_a_browser_window() {
+        assert!(navigate_to("/app/").is_err());
+    }
+
+    #[test]
+    fn prepared_session_helpers_fall_back_without_session_storage() {
+        assert_eq!(prepared_session_id(), None);
+        store_prepared_session_id("session-1");
+        clear_prepared_session_id_if_matches("session-1");
+        clear_prepared_session_id();
+        assert_eq!(prepared_session_id(), None);
+    }
+
+    #[test]
+    fn draft_helpers_use_empty_defaults_without_session_storage() {
+        assert_eq!(load_draft("session-1"), "");
+        save_draft("session-1", "draft");
+        save_draft("session-1", "");
+        clear_draft("session-1");
+    }
+
+    #[test]
+    fn draft_storage_key_uses_the_expected_prefix() {
+        assert_eq!(draft_storage_key("session-1"), "acp-draft-session-1");
+    }
 }

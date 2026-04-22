@@ -10,9 +10,11 @@ use super::{
     permission_url, post_json_with_csrf, response_error_message, session_path,
 };
 
+const SESSIONS_URL: &str = "/api/v1/sessions";
+
 pub(crate) async fn create_session() -> Result<String, String> {
     let csrf = csrf_token();
-    let response = Request::post("/api/v1/sessions")
+    let response = Request::post(SESSIONS_URL)
         .header("x-csrf-token", &csrf)
         .send()
         .await
@@ -47,7 +49,7 @@ pub(crate) async fn load_session(session_id: &str) -> Result<SessionSnapshot, Se
 }
 
 pub(crate) async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
-    let response = Request::get("/api/v1/sessions")
+    let response = Request::get(SESSIONS_URL)
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -61,13 +63,8 @@ pub(crate) async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
 }
 
 pub(crate) async fn send_message(session_id: &str, text: &str) -> Result<(), String> {
-    let url = format!("{}/messages", session_path(session_id));
-    let body = serde_json::to_string(&PromptRequest {
-        text: text.to_string(),
-    })
-    .map_err(|error| error.to_string())?;
-
-    let response = post_json_with_csrf(&url, body).await?;
+    let response =
+        post_json_with_csrf(&session_messages_url(session_id), send_message_body(text)?).await?;
 
     if !response.ok() {
         return Err(response_error_message(response, "Send message failed").await);
@@ -81,10 +78,7 @@ pub(crate) async fn resolve_permission(
     decision: PermissionDecision,
 ) -> Result<(), String> {
     let url = permission_url(session_id, request_id);
-    let body = serde_json::to_string(&ResolvePermissionRequest { decision })
-        .map_err(|error| error.to_string())?;
-
-    let response = post_json_with_csrf(&url, body).await?;
+    let response = post_json_with_csrf(&url, resolve_permission_body(decision)?).await?;
 
     if !response.ok() {
         return Err(response_error_message(response, "Resolve permission failed").await);
@@ -95,8 +89,7 @@ pub(crate) async fn resolve_permission(
 
 pub(crate) async fn cancel_turn(session_id: &str) -> Result<CancelTurnResponse, String> {
     let csrf = csrf_token();
-    let url = format!("{}/cancel", session_path(session_id));
-    let response = Request::post(&url)
+    let response = Request::post(&cancel_turn_url(session_id))
         .header("x-csrf-token", &csrf)
         .send()
         .await
@@ -114,12 +107,7 @@ pub(crate) async fn rename_session(
     title: &str,
 ) -> Result<SessionSnapshot, String> {
     let url = session_path(session_id);
-    let body = serde_json::to_string(&RenameSessionRequest {
-        title: title.to_string(),
-    })
-    .map_err(|error| error.to_string())?;
-
-    let response = patch_json_with_csrf(&url, body).await?;
+    let response = patch_json_with_csrf(&url, rename_session_body(title)?).await?;
 
     if !response.ok() {
         return Err(response_error_message(response, "Rename session failed").await);
@@ -144,4 +132,61 @@ pub(crate) async fn delete_session(session_id: &str) -> Result<DeleteSessionResp
     }
 
     response.json().await.map_err(|error| error.to_string())
+}
+
+fn session_messages_url(session_id: &str) -> String {
+    format!("{}/messages", session_path(session_id))
+}
+
+fn cancel_turn_url(session_id: &str) -> String {
+    format!("{}/cancel", session_path(session_id))
+}
+
+fn send_message_body(text: &str) -> Result<String, String> {
+    serde_json::to_string(&PromptRequest {
+        text: text.to_string(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn resolve_permission_body(decision: PermissionDecision) -> Result<String, String> {
+    serde_json::to_string(&ResolvePermissionRequest { decision }).map_err(|error| error.to_string())
+}
+
+fn rename_session_body(title: &str) -> Result<String, String> {
+    serde_json::to_string(&RenameSessionRequest {
+        title: title.to_string(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_request_urls_encode_session_ids() {
+        assert_eq!(SESSIONS_URL, "/api/v1/sessions");
+        assert_eq!(
+            session_messages_url("s/1"),
+            "/api/v1/sessions/s%2F1/messages"
+        );
+        assert_eq!(cancel_turn_url("s/1"), "/api/v1/sessions/s%2F1/cancel");
+    }
+
+    #[test]
+    fn session_request_bodies_serialize_expected_payloads() {
+        assert_eq!(
+            send_message_body("hello").expect("message body"),
+            r#"{"text":"hello"}"#
+        );
+        assert_eq!(
+            resolve_permission_body(PermissionDecision::Approve).expect("permission body"),
+            r#"{"decision":"approve"}"#
+        );
+        assert_eq!(
+            rename_session_body("Rename me").expect("rename body"),
+            r#"{"title":"Rename me"}"#
+        );
+    }
 }

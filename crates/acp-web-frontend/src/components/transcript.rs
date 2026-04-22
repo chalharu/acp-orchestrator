@@ -1,11 +1,14 @@
 //! Conversation transcript component.
 
 use leptos::{html as leptos_html, prelude::*};
-use wasm_bindgen::{JsCast, closure::Closure};
 
+#[cfg(target_family = "wasm")]
+use crate::domain::transcript::tail_scroll_top;
 use crate::domain::transcript::{
-    EntryRole, TranscriptEntry, compute_virtual_window, render_markdown, tail_scroll_top,
+    EntryRole, TranscriptEntry, compute_virtual_window, render_markdown,
 };
+#[cfg(target_family = "wasm")]
+use wasm_bindgen::{JsCast, closure::Closure};
 
 const DEFAULT_VIEWPORT_HEIGHT: f64 = 640.0;
 const BOTTOM_TOLERANCE_PX: f64 = 24.0;
@@ -93,11 +96,15 @@ fn TranscriptMarkdown(markdown: String) -> impl IntoView {
     let container = NodeRef::<leptos_html::Div>::new();
     let rendered_html = Memo::new(move |_| render_markdown(&markdown));
 
+    #[cfg(target_family = "wasm")]
     Effect::new(move |_| {
         if let Some(element) = container.get() {
             element.set_inner_html(&rendered_html.get());
         }
     });
+
+    #[cfg(not(target_family = "wasm"))]
+    let _ = &rendered_html;
 
     view! {
         <div
@@ -125,28 +132,44 @@ fn bind_viewport_effects(
     scroll_top: RwSignal<f64>,
     follow_tail: RwSignal<bool>,
 ) {
-    let viewport_for_metrics = viewport;
-    Effect::new(move |_| {
-        if let Some(element) = viewport_for_metrics.get() {
-            viewport_height.set(measured_viewport_height(&element));
-        }
-    });
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = (
+            &viewport,
+            &entries,
+            &viewport_height,
+            &scroll_top,
+            &follow_tail,
+        );
+    }
 
-    Effect::new(move |_| {
-        if !follow_tail.get() || entries.get().is_empty() {
-            return;
-        }
-        if let Some(element) = viewport.get() {
-            viewport_height.set(measured_viewport_height(&element));
-            schedule_tail_scroll(element, scroll_top);
-        }
-    });
+    #[cfg(target_family = "wasm")]
+    {
+        let viewport_for_metrics = viewport;
+        Effect::new(move |_| {
+            if let Some(element) = viewport_for_metrics.get() {
+                viewport_height.set(measured_viewport_height(&element));
+            }
+        });
+
+        Effect::new(move |_| {
+            if !follow_tail.get() || entries.get().is_empty() {
+                return;
+            }
+            if let Some(element) = viewport.get() {
+                viewport_height.set(measured_viewport_height(&element));
+                schedule_tail_scroll(element, scroll_top);
+            }
+        });
+    }
 }
 
+#[cfg(target_family = "wasm")]
 fn measured_viewport_height(element: &web_sys::HtmlElement) -> f64 {
     f64::from(element.client_height()).max(DEFAULT_VIEWPORT_HEIGHT / 4.0)
 }
 
+#[cfg(target_family = "wasm")]
 fn schedule_tail_scroll(element: web_sys::HtmlElement, scroll_top: RwSignal<f64>) {
     let Some(window) = web_sys::window() else {
         scroll_element_to_tail(&element, scroll_top);
@@ -168,6 +191,7 @@ fn schedule_tail_scroll(element: web_sys::HtmlElement, scroll_top: RwSignal<f64>
     }
 }
 
+#[cfg(target_family = "wasm")]
 fn scroll_element_to_tail(element: &web_sys::HtmlElement, scroll_top: RwSignal<f64>) {
     element.set_scroll_top(tail_scroll_top(
         element.scroll_height(),
@@ -190,4 +214,56 @@ fn update_scroll_metrics(
     scroll_top.set(current_scroll_top.max(0.0));
     viewport_height.set(current_viewport_height.max(DEFAULT_VIEWPORT_HEIGHT / 4.0));
     follow_tail.set(remaining_distance <= BOTTOM_TOLERANCE_PX);
+}
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use super::*;
+
+    fn entry(id: &str, role: EntryRole, text: &str) -> TranscriptEntry {
+        TranscriptEntry {
+            id: id.to_string(),
+            role,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn transcript_builds_for_empty_and_populated_entry_lists() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = RwSignal::new(Vec::<TranscriptEntry>::new());
+            let signal = Signal::derive(move || entries.get());
+
+            let _ = view! { <Transcript entries=signal /> };
+            entries.set(vec![
+                entry("assistant", EntryRole::Assistant, "hello"),
+                entry("status", EntryRole::Status, "done"),
+            ]);
+            let _ = view! { <Transcript entries=signal /> };
+        });
+    }
+
+    #[test]
+    fn transcript_entry_item_builds_status_and_markdown_variants() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ =
+                view! { <TranscriptEntryItem entry=entry("status", EntryRole::Status, "done") /> };
+            let _ = view! {
+                <TranscriptEntryItem entry=entry("assistant", EntryRole::Assistant, "**bold**") />
+            };
+        });
+    }
+
+    #[test]
+    fn transcript_markdown_and_spacer_build_without_dom_nodes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! { <TranscriptMarkdown markdown="**bold**".to_string() /> };
+            let _ = view! { <TranscriptSpacer height=Signal::derive(|| 24.0) /> };
+        });
+    }
 }

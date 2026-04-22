@@ -204,6 +204,8 @@ fn auth_page_route(kind: AuthPageKind, target: HomeRouteTarget) -> AuthPageRoute
 
 #[cfg(test)]
 mod tests {
+    use leptos::prelude::*;
+
     use super::*;
 
     #[test]
@@ -249,5 +251,112 @@ mod tests {
             "Creating account…"
         );
         assert_eq!(submit_button_label(AuthPageKind::SignIn, false), "Sign in");
+    }
+
+    #[test]
+    fn page_title_and_loading_message_differ_by_page_kind() {
+        assert_eq!(
+            page_title(AuthPageKind::Register),
+            "Register bootstrap account"
+        );
+        assert_eq!(page_title(AuthPageKind::SignIn), "Sign in");
+        assert_eq!(
+            loading_message(AuthPageKind::Register),
+            "Checking registration status…"
+        );
+        assert_eq!(
+            loading_message(AuthPageKind::SignIn),
+            "Checking sign-in status…"
+        );
+    }
+
+    #[test]
+    fn submit_button_label_covers_remaining_combinations() {
+        assert_eq!(
+            submit_button_label(AuthPageKind::Register, false),
+            "Create account"
+        );
+        assert_eq!(
+            submit_button_label(AuthPageKind::SignIn, true),
+            "Signing in…"
+        );
+    }
+
+    #[test]
+    fn auth_page_state_starts_with_blank_inputs_and_loading_enabled() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AuthPageState::new();
+            assert!(state.username.get().is_empty());
+            assert!(state.password.get().is_empty());
+            assert!(state.error.get().is_none());
+            assert!(state.loading.get());
+            assert!(!state.submitting.get());
+        });
+    }
+
+    #[test]
+    fn handle_auth_status_updates_ready_and_redirect_routes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let ready_state = AuthPageState::new();
+            handle_auth_status(
+                AuthPageKind::Register,
+                HomeRouteTarget::Register,
+                ready_state,
+            );
+            assert!(!ready_state.loading.get());
+
+            let redirect_state = AuthPageState::new();
+            handle_auth_status(
+                AuthPageKind::SignIn,
+                HomeRouteTarget::PrepareSession,
+                redirect_state,
+            );
+            assert!(redirect_state.loading.get());
+            assert!(redirect_state.error.get().is_none());
+        });
+    }
+
+    #[test]
+    fn auth_page_view_builds_register_and_sign_in_forms() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let register = AuthPageState::new();
+            register.loading.set(false);
+            let sign_in = AuthPageState::new();
+            sign_in.loading.set(false);
+
+            let _ = auth_page_view(
+                AuthPageKind::Register,
+                register,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+            let _ = auth_page_view(
+                AuthPageKind::SignIn,
+                sign_in,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+        });
+    }
+
+    #[test]
+    fn auth_page_view_builds_loading_fallbacks() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let register = AuthPageState::new();
+            let sign_in = AuthPageState::new();
+
+            let _ = auth_page_view(
+                AuthPageKind::Register,
+                register,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+            let _ = auth_page_view(
+                AuthPageKind::SignIn,
+                sign_in,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+        });
     }
 }

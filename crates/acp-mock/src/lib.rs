@@ -19,7 +19,10 @@ use prompt::{
     prompt_requires_permission, prompt_text, reply_for, response_delay_for, wait_for_cancel,
 };
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{
+        TcpListener, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
     sync::watch,
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -472,91 +475,102 @@ async fn handle_cancel_notification(
     agent.cancel(args).await
 }
 
-macro_rules! register_request_handler {
-    ($builder:expr, $agent:expr, $request:ty, $handler:ident) => {
-        $builder.on_receive_request(
-            {
-                let agent = $agent.clone();
-                async move |args: $request, responder, _cx| {
-                    $handler(agent.clone(), args, responder).await
-                }
-            },
-            acp::on_receive_request!(),
-        )
-    };
+fn register_request_handler<Req, HandlerState, Runner, Handler, HandlerFuture>(
+    builder: acp::Builder<acp::Agent, HandlerState, Runner>,
+    agent: MockAgent,
+    handler: Handler,
+) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, Runner>
+where
+    Req: acp::JsonRpcRequest,
+    HandlerState: acp::HandleDispatchFrom<acp::Client>,
+    Handler:
+        Fn(MockAgent, Req, acp::Responder<Req::Response>) -> HandlerFuture + Send + Sync + 'static,
+    HandlerFuture: Future<Output = Result<(), acp::Error>> + Send,
+    Runner: acp::RunWithConnectionTo<acp::Client>,
+{
+    builder.on_receive_request(
+        async move |args: Req, responder, _cx| handler(agent.clone(), args, responder).await,
+        acp::on_receive_request!(),
+    )
 }
 
-macro_rules! register_request_handler_with_connection {
-    ($builder:expr, $agent:expr, $request:ty, $handler:ident) => {
-        $builder.on_receive_request(
-            {
-                let agent = $agent.clone();
-                async move |args: $request, responder, cx| {
-                    $handler(agent.clone(), args, responder, cx).await
-                }
-            },
-            acp::on_receive_request!(),
-        )
-    };
+fn register_request_handler_with_connection<Req, HandlerState, Runner, Handler, HandlerFuture>(
+    builder: acp::Builder<acp::Agent, HandlerState, Runner>,
+    agent: MockAgent,
+    handler: Handler,
+) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, Runner>
+where
+    Req: acp::JsonRpcRequest,
+    HandlerState: acp::HandleDispatchFrom<acp::Client>,
+    Handler: Fn(
+            MockAgent,
+            Req,
+            acp::Responder<Req::Response>,
+            acp::ConnectionTo<acp::Client>,
+        ) -> HandlerFuture
+        + Send
+        + Sync
+        + 'static,
+    HandlerFuture: Future<Output = Result<(), acp::Error>> + Send,
+    Runner: acp::RunWithConnectionTo<acp::Client>,
+{
+    builder.on_receive_request(
+        async move |args: Req, responder, cx| handler(agent.clone(), args, responder, cx).await,
+        acp::on_receive_request!(),
+    )
 }
 
-macro_rules! register_notification_handler {
-    ($builder:expr, $agent:expr, $notification:ty, $handler:ident) => {
-        $builder.on_receive_notification(
-            {
-                let agent = $agent.clone();
-                async move |args: $notification, _cx| $handler(agent.clone(), args).await
-            },
-            acp::on_receive_notification!(),
-        )
-    };
+fn register_notification_handler<Notif, HandlerState, Runner, Handler, HandlerFuture>(
+    builder: acp::Builder<acp::Agent, HandlerState, Runner>,
+    agent: MockAgent,
+    handler: Handler,
+) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, Runner>
+where
+    Notif: acp::JsonRpcNotification,
+    HandlerState: acp::HandleDispatchFrom<acp::Client>,
+    Handler: Fn(MockAgent, Notif) -> HandlerFuture + Send + Sync + 'static,
+    HandlerFuture: Future<Output = Result<(), acp::Error>> + Send,
+    Runner: acp::RunWithConnectionTo<acp::Client>,
+{
+    builder.on_receive_notification(
+        async move |args: Notif, _cx| handler(agent.clone(), args).await,
+        acp::on_receive_notification!(),
+    )
 }
 
-macro_rules! build_mock_agent_handlers {
-    ($builder:expr, $agent:expr) => {{
-        let builder = register_request_handler!(
-            $builder,
-            $agent,
-            schema::InitializeRequest,
-            respond_initialize_request
-        );
-        let builder = register_request_handler!(
-            builder,
-            $agent,
-            schema::AuthenticateRequest,
-            respond_authenticate_request
-        );
-        let builder = register_request_handler_with_connection!(
-            builder,
-            $agent,
-            schema::NewSessionRequest,
-            respond_new_session_request
-        );
-        let builder = register_request_handler!(
-            builder,
-            $agent,
-            schema::LoadSessionRequest,
-            respond_load_session_request
-        );
-        let builder = register_request_handler_with_connection!(
-            builder,
-            $agent,
-            schema::PromptRequest,
-            respond_prompt_request
-        );
-        let builder = register_request_handler!(
-            builder,
-            $agent,
-            schema::SetSessionModeRequest,
-            respond_set_session_mode_request
-        );
-        register_notification_handler!(
-            builder,
-            $agent,
-            schema::CancelNotification,
-            handle_cancel_notification
-        )
-    }};
+fn build_mock_agent_builder(
+    agent: MockAgent,
+) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, acp::NullRun> {
+    let builder = register_request_handler(
+        acp::Agent.builder().name("acp-mock"),
+        agent.clone(),
+        respond_initialize_request,
+    );
+    let builder = register_request_handler(builder, agent.clone(), respond_authenticate_request);
+    let builder = register_request_handler_with_connection(
+        builder,
+        agent.clone(),
+        respond_new_session_request,
+    );
+    let builder = register_request_handler(builder, agent.clone(), respond_load_session_request);
+    let builder =
+        register_request_handler_with_connection(builder, agent.clone(), respond_prompt_request);
+    let builder =
+        register_request_handler(builder, agent.clone(), respond_set_session_mode_request);
+    register_notification_handler(builder, agent, handle_cancel_notification)
+}
+
+async fn connect_mock_agent(
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    agent: MockAgent,
+) -> Result<(), acp::Error> {
+    build_mock_agent_builder(agent)
+        .connect_to(acp::ByteStreams::new(
+            writer.compat_write(),
+            reader.compat(),
+        ))
+        .await
 }
 
 async fn handle_connection(
@@ -564,13 +578,5 @@ async fn handle_connection(
     state: Arc<MockServerState>,
 ) -> Result<(), acp::Error> {
     let (reader, writer) = stream.into_split();
-    let agent = MockAgent::new(state);
-    let builder = build_mock_agent_handlers!(acp::Agent.builder().name("acp-mock"), agent);
-
-    builder
-        .connect_to(acp::ByteStreams::new(
-            writer.compat_write(),
-            reader.compat(),
-        ))
-        .await
+    connect_mock_agent(reader, writer, MockAgent::new(state)).await
 }

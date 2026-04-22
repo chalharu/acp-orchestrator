@@ -524,7 +524,37 @@ fn ComposerActions(
 
 #[cfg(test)]
 mod tests {
-    use super::{current_submit_value, submit_text};
+    use acp_contracts::{CompletionCandidate, CompletionKind};
+    use leptos::prelude::*;
+
+    use super::{
+        ComposerActions, ComposerFooter, ComposerSlashSignals, SlashPalette, SlashPaletteItem,
+        SlashPaletteList, SlashPaletteState, current_submit_value, render_slash_palette_state,
+        should_render_slash_palette, slash_option_id, slash_palette_state, submit_text,
+    };
+
+    fn make_candidate(label: &str) -> CompletionCandidate {
+        CompletionCandidate {
+            label: label.to_string(),
+            insert_text: label.to_string(),
+            detail: "detail".to_string(),
+            kind: CompletionKind::Command,
+        }
+    }
+
+    fn make_slash_signals(
+        visible: bool,
+        candidates: Vec<CompletionCandidate>,
+        selected_index: usize,
+        apply_selected: bool,
+    ) -> ComposerSlashSignals {
+        ComposerSlashSignals {
+            visible: Signal::derive(move || visible),
+            candidates: Signal::derive(move || candidates.clone()),
+            selected_index: Signal::derive(move || selected_index),
+            apply_selected: Signal::derive(move || apply_selected),
+        }
+    }
 
     #[test]
     fn current_submit_value_prefers_the_live_textarea_value() {
@@ -542,5 +572,140 @@ mod tests {
         );
         assert_eq!(submit_text("   ".to_string(), false), None);
         assert_eq!(submit_text("test".to_string(), true), None);
+    }
+
+    #[test]
+    fn slash_option_id_formats_index_as_string() {
+        assert_eq!(slash_option_id(0), "slash-option-0");
+        assert_eq!(slash_option_id(3), "slash-option-3");
+    }
+
+    #[test]
+    fn should_render_slash_palette_follows_visible_signal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = make_slash_signals(true, vec![], 0, false);
+            assert!(should_render_slash_palette(signals));
+
+            let signals_hidden = make_slash_signals(false, vec![], 0, false);
+            assert!(!should_render_slash_palette(signals_hidden));
+        });
+    }
+
+    #[test]
+    fn slash_palette_state_empty_when_no_candidates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = make_slash_signals(true, vec![], 0, false);
+            assert_eq!(slash_palette_state(signals), SlashPaletteState::Empty);
+        });
+    }
+
+    #[test]
+    fn slash_palette_state_ready_with_indexed_candidates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let candidates = vec![make_candidate("/help"), make_candidate("/clear")];
+            let signals = make_slash_signals(true, candidates, 0, false);
+            let state = slash_palette_state(signals);
+            match state {
+                SlashPaletteState::Ready(items) => {
+                    assert_eq!(items.len(), 2);
+                    assert_eq!(items[0].0, 0);
+                    assert_eq!(items[1].0, 1);
+                }
+                SlashPaletteState::Empty => panic!("expected Ready"),
+            }
+        });
+    }
+
+    #[test]
+    fn slash_palette_state_caps_at_max_items() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let candidates: Vec<_> = (0..10)
+                .map(|i| make_candidate(&format!("/cmd{i}")))
+                .collect();
+            let signals = make_slash_signals(true, candidates, 0, false);
+            match slash_palette_state(signals) {
+                SlashPaletteState::Ready(items) => assert_eq!(items.len(), 5),
+                SlashPaletteState::Empty => panic!("expected Ready"),
+            }
+        });
+    }
+
+    #[test]
+    fn render_slash_palette_state_handles_empty_and_ready_states() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = render_slash_palette_state(
+                SlashPaletteState::Empty,
+                0,
+                Callback::new(|_: usize| {}),
+            );
+            let _ = render_slash_palette_state(
+                SlashPaletteState::Ready(vec![(0, make_candidate("/help"))]),
+                0,
+                Callback::new(|_: usize| {}),
+            );
+        });
+    }
+
+    #[test]
+    fn slash_palette_components_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let candidates = vec![make_candidate("/help"), make_candidate("/clear")];
+            let on_apply = Callback::new(|_: usize| {});
+
+            let _ = view! {
+                <SlashPalette
+                    slash_signals=make_slash_signals(true, candidates.clone(), 1, true)
+                    on_apply_index=on_apply
+                />
+            };
+            let _ = view! {
+                <SlashPaletteList
+                    items=vec![
+                        (0, make_candidate("/help")),
+                        (1, make_candidate("/clear")),
+                    ]
+                    selected_index=1
+                    on_apply_index=on_apply
+                />
+            };
+            let _ = view! {
+                <SlashPaletteItem
+                    index=0
+                    candidate=make_candidate("/help")
+                    is_selected=true
+                    on_apply_index=on_apply
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn composer_footer_and_actions_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! {
+                <ComposerFooter
+                    status_text=Signal::derive(|| "Ready".to_string())
+                    disabled=Signal::derive(|| false)
+                    show_cancel=Signal::derive(|| true)
+                    cancel_disabled=Signal::derive(|| false)
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+            let _ = view! {
+                <ComposerActions
+                    disabled=Signal::derive(|| false)
+                    show_cancel=Signal::derive(|| true)
+                    cancel_disabled=Signal::derive(|| false)
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
     }
 }

@@ -756,3 +756,849 @@ fn close_live_stream(signals: SessionSignals) {
         signals.event_source.set(None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts::{
+        CompletionCandidate, CompletionKind, ConversationMessage, MessageRole, PermissionDecision,
+        PermissionRequest, SessionSnapshot, SessionStatus, StreamEvent, StreamEventPayload,
+    };
+    use leptos::prelude::*;
+
+    use crate::domain::session::{PendingPermission, SessionLifecycle, TurnState};
+    use crate::domain::transcript::{EntryRole, TranscriptEntry};
+    use crate::session::page::state::session_signals;
+
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn permission(id: &str) -> PendingPermission {
+        PendingPermission {
+            request_id: id.to_string(),
+            summary: format!("summary for {id}"),
+        }
+    }
+
+    fn help_candidate() -> CompletionCandidate {
+        CompletionCandidate {
+            label: "/help".to_string(),
+            insert_text: "/help".to_string(),
+            detail: "Show available slash commands".to_string(),
+            kind: CompletionKind::Command,
+        }
+    }
+
+    fn empty_snapshot(id: &str, status: SessionStatus) -> SessionSnapshot {
+        SessionSnapshot {
+            id: id.to_string(),
+            title: "Chat".to_string(),
+            status,
+            latest_sequence: 0,
+            messages: vec![],
+            pending_permissions: vec![],
+        }
+    }
+
+    fn user_message(id: &str) -> ConversationMessage {
+        ConversationMessage {
+            id: id.to_string(),
+            role: MessageRole::User,
+            text: "Hello".to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn assistant_message(id: &str) -> ConversationMessage {
+        ConversationMessage {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            text: "Response".to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // permission_resolution_turn_state (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn permission_resolution_turn_state_maps_approve_to_awaiting_reply() {
+        assert_eq!(
+            permission_resolution_turn_state(&PermissionDecision::Approve),
+            TurnState::AwaitingReply
+        );
+    }
+
+    #[test]
+    fn permission_resolution_turn_state_maps_deny_to_idle() {
+        assert_eq!(
+            permission_resolution_turn_state(&PermissionDecision::Deny),
+            TurnState::Idle
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // permission_resolution_detail (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn permission_resolution_detail_formats_approve_correctly() {
+        assert_eq!(
+            permission_resolution_detail("req_1", &PermissionDecision::Approve),
+            "req_1 approved."
+        );
+    }
+
+    #[test]
+    fn permission_resolution_detail_formats_deny_correctly() {
+        assert_eq!(
+            permission_resolution_detail("req_abc", &PermissionDecision::Deny),
+            "req_abc denied."
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // push_status_entry (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_status_entry_adds_entry_with_correct_id_and_role() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries: RwSignal<Vec<TranscriptEntry>> = RwSignal::new(Vec::new());
+            push_status_entry(entries, 42, "Connected".to_string());
+
+            let current = entries.get();
+            assert_eq!(current.len(), 1);
+            assert_eq!(current[0].id, "status-42");
+            assert_eq!(current[0].text, "Connected");
+            assert_eq!(current[0].role, EntryRole::Status);
+        });
+    }
+
+    #[test]
+    fn push_status_entry_skips_blank_messages() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries: RwSignal<Vec<TranscriptEntry>> = RwSignal::new(Vec::new());
+            push_status_entry(entries, 1, "   ".to_string());
+            assert!(entries.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn push_status_entry_skips_duplicate_ids() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries: RwSignal<Vec<TranscriptEntry>> = RwSignal::new(Vec::new());
+            push_status_entry(entries, 5, "First".to_string());
+            push_status_entry(entries, 5, "Duplicate".to_string());
+            assert_eq!(entries.get().len(), 1);
+            assert_eq!(entries.get()[0].text, "First");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // push_activity_entry (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_activity_entry_adds_entry_and_skips_blanks_and_duplicates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries: RwSignal<Vec<TranscriptEntry>> = RwSignal::new(Vec::new());
+
+            // Blank message is ignored
+            push_activity_entry(entries, "act-1".to_string(), "  ".to_string());
+            assert!(entries.get().is_empty());
+
+            push_activity_entry(entries, "act-1".to_string(), "Tool started".to_string());
+            assert_eq!(entries.get().len(), 1);
+            assert_eq!(entries.get()[0].id, "act-1");
+
+            // Duplicate id is ignored
+            push_activity_entry(entries, "act-1".to_string(), "Second".to_string());
+            assert_eq!(entries.get().len(), 1);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // next_tool_activity_id (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn next_tool_activity_id_increments_serial_and_formats_id() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            assert_eq!(signals.tool_activity_serial.get(), 0);
+
+            let id1 = next_tool_activity_id(signals, "slash");
+            assert_eq!(id1, "slash-1");
+            assert_eq!(signals.tool_activity_serial.get(), 1);
+
+            let id2 = next_tool_activity_id(signals, "permission");
+            assert_eq!(id2, "permission-2");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // dismiss_slash_palette (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dismiss_slash_palette_clears_candidates_and_resets_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(1);
+
+            dismiss_slash_palette(signals);
+
+            assert!(signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_slash_candidate_at (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_slash_candidate_at_updates_draft_and_preserves_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/h".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(0);
+
+            apply_slash_candidate_at(signals, 0);
+
+            assert_eq!(signals.draft.get(), "/help");
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn apply_slash_candidate_at_does_nothing_for_out_of_range_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/h".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+
+            apply_slash_candidate_at(signals, 99);
+
+            assert_eq!(signals.draft.get(), "/h");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_permission_resolution_success (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_permission_resolution_success_removes_permission_and_updates_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals
+                .pending_permissions
+                .set(vec![permission("req_1"), permission("req_2")]);
+            signals.turn_state.set(TurnState::AwaitingPermission);
+
+            apply_permission_resolution_success("req_1", &PermissionDecision::Approve, signals);
+
+            let remaining = signals.pending_permissions.get();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].request_id, "req_2");
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingReply);
+
+            // A status entry is pushed into the transcript
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].text.contains("req_1"));
+        });
+    }
+
+    #[test]
+    fn apply_permission_resolution_success_deny_sets_idle_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.pending_permissions.set(vec![permission("req_x")]);
+            signals.turn_state.set(TurnState::AwaitingPermission);
+
+            apply_permission_resolution_success("req_x", &PermissionDecision::Deny, signals);
+
+            assert!(signals.pending_permissions.get().is_empty());
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // delete_session_is_blocked (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delete_session_not_blocked_when_idle_and_no_active_delete() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            assert!(!delete_session_is_blocked("s1", "s2", signals));
+        });
+    }
+
+    #[test]
+    fn delete_session_blocked_when_another_delete_is_in_progress() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.deleting_id.set(Some("s1".to_string()));
+            assert!(delete_session_is_blocked("s2", "s3", signals));
+        });
+    }
+
+    #[test]
+    fn delete_session_blocked_for_current_session_when_turn_is_active() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+            // Deleting the current session is blocked when the turn is active
+            assert!(delete_session_is_blocked("current", "current", signals));
+            // A non-current session is not blocked by this check
+            assert!(!delete_session_is_blocked("other", "current", signals));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_current_session_delete_navigation_error (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn current_session_delete_navigation_error_resets_state_to_unavailable() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+            signals.pending_permissions.set(vec![permission("req_1")]);
+
+            handle_current_session_delete_navigation_error(
+                "Navigation failed".to_string(),
+                signals,
+            );
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Unavailable);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert!(signals.pending_permissions.get().is_empty());
+            assert_eq!(
+                signals.list.error.get(),
+                Some("Navigation failed".to_string())
+            );
+            assert!(signals.list.deleting_id.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_delete_session_error (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn handle_delete_session_error_sets_list_error_and_clears_deleting_id() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.deleting_id.set(Some("s1".to_string()));
+
+            handle_delete_session_error("Delete failed".to_string(), signals);
+
+            assert_eq!(signals.list.error.get(), Some("Delete failed".to_string()));
+            assert!(signals.list.deleting_id.get().is_none());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_status_update + push_status_entry (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_status_update_releases_turn_state_and_pushes_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+
+            apply_status_update(10, "Worker finished".to_string(), signals);
+
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].text, "Worker finished");
+        });
+    }
+
+    #[test]
+    fn apply_status_update_releases_awaiting_and_cancelling_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::Cancelling);
+
+            apply_status_update(1, "A status".to_string(), signals);
+
+            // Cancelling and AwaitingReply are both released to Idle on a status update
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_conversation_message (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_conversation_message_appends_new_messages_and_releases_turn_state() {
+        use acp_contracts::{ConversationMessage, MessageRole};
+
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+
+            let msg = ConversationMessage {
+                id: "msg-1".to_string(),
+                role: MessageRole::Assistant,
+                text: "Hello!".to_string(),
+                created_at: chrono::Utc::now(),
+            };
+            apply_conversation_message(msg, signals);
+
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].text, "Hello!");
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+        });
+    }
+
+    #[test]
+    fn apply_conversation_message_skips_duplicate_ids() {
+        use acp_contracts::{ConversationMessage, MessageRole};
+
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let msg = ConversationMessage {
+                id: "msg-1".to_string(),
+                role: MessageRole::User,
+                text: "Prompt".to_string(),
+                created_at: chrono::Utc::now(),
+            };
+            apply_conversation_message(msg.clone(), signals);
+            apply_conversation_message(msg, signals);
+
+            assert_eq!(signals.entries.get().len(), 1);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_permission_request (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_permission_request_adds_permission_and_sets_awaiting_state() {
+        use acp_contracts::PermissionRequest;
+
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let request = PermissionRequest {
+                request_id: "perm-1".to_string(),
+                summary: "Read file".to_string(),
+            };
+            apply_permission_request(request, signals);
+
+            let perms = signals.pending_permissions.get();
+            assert_eq!(perms.len(), 1);
+            assert_eq!(perms[0].request_id, "perm-1");
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
+
+            // An activity entry is added
+            let entries = signals.entries.get();
+            assert!(!entries.is_empty());
+        });
+    }
+
+    #[test]
+    fn apply_permission_request_skips_duplicate_request_ids() {
+        use acp_contracts::PermissionRequest;
+
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let request = PermissionRequest {
+                request_id: "perm-1".to_string(),
+                summary: "Read file".to_string(),
+            };
+            apply_permission_request(request.clone(), signals);
+            apply_permission_request(request, signals);
+
+            assert_eq!(signals.pending_permissions.get().len(), 1);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_session_closed (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_session_closed_marks_session_closed_and_clears_permissions() {
+        use acp_contracts::SessionListItem;
+
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.pending_permissions.set(vec![permission("req_1")]);
+            signals.turn_state.set(TurnState::AwaitingReply);
+            signals.list.items.set(vec![SessionListItem {
+                id: "s1".to_string(),
+                title: "Chat".to_string(),
+                status: acp_contracts::SessionStatus::Active,
+                last_activity_at: chrono::Utc::now(),
+            }]);
+
+            apply_session_closed(20, "s1".to_string(), String::new(), signals);
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Closed);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert!(signals.pending_permissions.get().is_empty());
+            assert!(!signals.pending_action_busy.get());
+
+            let closed_item = &signals.list.items.get()[0];
+            assert_eq!(closed_item.status, acp_contracts::SessionStatus::Closed);
+
+            let entries = signals.entries.get();
+            assert!(!entries.is_empty());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_session_snapshot (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_session_snapshot_sets_session_status_and_entries() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let snapshot = empty_snapshot("s1", SessionStatus::Active);
+
+            apply_session_snapshot(snapshot, signals);
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Active);
+            assert!(signals.entries.get().is_empty());
+            assert!(signals.pending_permissions.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn apply_session_snapshot_skips_turn_state_update_when_submitting() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::Submitting);
+            let snapshot = empty_snapshot("s1", SessionStatus::Active);
+
+            apply_session_snapshot(snapshot, signals);
+
+            assert_eq!(signals.turn_state.get(), TurnState::Submitting);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_loaded_session (signal-based)
+    // Note: apply_loaded_session calls clear_prepared_session_id() when the
+    // session is Closed or has User messages. Tests use non-user messages and
+    // Active status to avoid triggering browser sessionStorage APIs that are
+    // unavailable in native test builds.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_loaded_session_populates_signals_from_snapshot() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            // Use an assistant message to avoid triggering clear_prepared_session_id
+            // (which requires browser sessionStorage and panics in native tests).
+            let mut snapshot = empty_snapshot("s1", SessionStatus::Active);
+            snapshot.messages.push(assistant_message("msg-1"));
+
+            apply_loaded_session(snapshot, signals);
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Active);
+            assert_eq!(signals.entries.get().len(), 1);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // record_session_bootstrap_failure: skipped in native tests
+    // record_session_bootstrap_failure unconditionally calls
+    // clear_prepared_session_id() which requires browser sessionStorage.
+    // Coverage for this path comes from WASM integration tests.
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // slash_palette_callbacks (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn slash_palette_callbacks_select_next_cycles_forward_through_candidates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals
+                .slash
+                .candidates
+                .set(vec![help_candidate(), help_candidate()]);
+            signals.slash.selected_index.set(0);
+
+            let callbacks = slash_palette_callbacks(signals);
+            callbacks.select_next.run(());
+
+            assert_eq!(signals.slash.selected_index.get(), 1);
+        });
+    }
+
+    #[test]
+    fn slash_palette_callbacks_select_previous_cycles_backward() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals
+                .slash
+                .candidates
+                .set(vec![help_candidate(), help_candidate()]);
+            signals.slash.selected_index.set(1);
+
+            let callbacks = slash_palette_callbacks(signals);
+            callbacks.select_previous.run(());
+
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn slash_palette_callbacks_dismiss_clears_candidates_and_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(0);
+
+            let callbacks = slash_palette_callbacks(signals);
+            callbacks.dismiss.run(());
+
+            assert!(signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn slash_palette_callbacks_apply_index_applies_matching_candidate() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/h".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+
+            let callbacks = slash_palette_callbacks(signals);
+            callbacks.apply_index.run(0);
+
+            assert_eq!(signals.draft.get(), "/help");
+        });
+    }
+
+    #[test]
+    fn slash_palette_callbacks_apply_selected_applies_current_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/h".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(0);
+
+            let callbacks = slash_palette_callbacks(signals);
+            callbacks.apply_selected.run(());
+
+            assert_eq!(signals.draft.get(), "/help");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_selected_slash_candidate (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_selected_slash_candidate_uses_current_selected_index() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/h".to_string());
+            signals.slash.candidates.set(vec![help_candidate()]);
+            signals.slash.selected_index.set(0);
+
+            apply_selected_slash_candidate(signals);
+
+            assert_eq!(signals.draft.get(), "/help");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_slash_submit (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn handle_slash_submit_help_clears_draft_and_adds_activity_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/help".to_string());
+            signals.action_error.set(Some("prior error".to_string()));
+
+            handle_slash_submit("/help", signals);
+
+            assert!(signals.draft.get().is_empty());
+            assert!(signals.action_error.get().is_none());
+            assert!(!signals.entries.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn handle_slash_submit_unknown_command_pushes_error_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            handle_slash_submit("/unknown-command-xyz", signals);
+
+            let entries = signals.entries.get();
+            assert!(!entries.is_empty());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // push_tool_activity_entry (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_tool_activity_entry_adds_formatted_activity_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            push_tool_activity_entry(signals, "test-1".to_string(), "Title", "Detail", vec![]);
+
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, "activity-test-1");
+            assert_eq!(entries[0].role, EntryRole::Status);
+            assert!(entries[0].text.contains("Title"));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_sse_event (signal-based)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn handle_sse_event_session_snapshot_sets_status() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let snapshot = empty_snapshot("s1", SessionStatus::Active);
+            let event = StreamEvent::snapshot(snapshot);
+
+            handle_sse_event(event, signals);
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Active);
+        });
+    }
+
+    #[test]
+    fn handle_sse_event_conversation_message_appends_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let event = StreamEvent {
+                sequence: 1,
+                payload: StreamEventPayload::ConversationMessage {
+                    message: user_message("msg-1"),
+                },
+            };
+
+            handle_sse_event(event, signals);
+
+            assert_eq!(signals.entries.get().len(), 1);
+        });
+    }
+
+    #[test]
+    fn handle_sse_event_permission_requested_adds_permission() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let event = StreamEvent {
+                sequence: 2,
+                payload: StreamEventPayload::PermissionRequested {
+                    request: PermissionRequest {
+                        request_id: "perm-1".to_string(),
+                        summary: "Read file".to_string(),
+                    },
+                },
+            };
+
+            handle_sse_event(event, signals);
+
+            assert_eq!(signals.pending_permissions.get().len(), 1);
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
+        });
+    }
+
+    #[test]
+    fn handle_sse_event_status_message_pushes_status_entry() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let event = StreamEvent::status(3, "Worker finished");
+
+            handle_sse_event(event, signals);
+
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].text.contains("Worker finished"));
+        });
+    }
+
+    #[test]
+    fn handle_sse_event_session_closed_marks_session_as_closed() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let event = StreamEvent {
+                sequence: 10,
+                payload: StreamEventPayload::SessionClosed {
+                    session_id: "s1".to_string(),
+                    reason: "User ended session".to_string(),
+                },
+            };
+
+            handle_sse_event(event, signals);
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Closed);
+        });
+    }
+}

@@ -22,8 +22,7 @@ const STREAM_EVENT_NAMES: [&str; 5] = [
 pub(crate) fn open_session_event_stream(
     session_id: &str,
 ) -> Result<(EventSource, mpsc::UnboundedReceiver<SseItem>), String> {
-    let url = format!("{}/events", session_path(session_id));
-    let event_source = EventSource::new(&url)
+    let event_source = EventSource::new(&session_stream_url(session_id))
         .map_err(|source| format!("Failed to open event stream: {source:?}"))?;
 
     let (tx, rx) = mpsc::unbounded::<SseItem>();
@@ -81,4 +80,36 @@ fn register_stream_error_listener(
     }) as Box<dyn FnMut(Event)>);
     event_source.set_onerror(Some(error_listener.as_ref().unchecked_ref()));
     error_listener.forget();
+}
+
+fn session_stream_url(session_id: &str) -> String {
+    format!("{}/events", session_path(session_id))
+}
+
+fn stream_event_names() -> &'static [&'static str] {
+    &STREAM_EVENT_NAMES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_stream_url_uses_encoded_session_path() {
+        assert_eq!(session_stream_url("s/1"), "/api/v1/sessions/s%2F1/events");
+    }
+
+    #[test]
+    fn stream_event_names_cover_every_supported_event() {
+        assert_eq!(
+            stream_event_names(),
+            &[
+                "session.snapshot",
+                "conversation.message",
+                "tool.permission.requested",
+                "session.closed",
+                "status",
+            ]
+        );
+    }
 }

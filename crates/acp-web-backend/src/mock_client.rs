@@ -10,7 +10,10 @@ use std::{
 
 use agent_client_protocol::{self as acp, schema};
 use snafu::prelude::*;
-use tokio::net::TcpStream;
+use tokio::net::{
+    TcpStream,
+    tcp::{OwnedReadHalf, OwnedWriteHalf},
+};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 mod backend_client;
@@ -431,24 +434,37 @@ where
     .await
 }
 
-macro_rules! build_backend_mock_client {
-    ($request_client:expr, $notification_client:expr) => {
-        acp::Client
-            .builder()
-            .name("acp-web-backend-mock-client")
-            .on_receive_request(
-                async move |args: schema::RequestPermissionRequest, responder, cx| {
-                    respond_permission_request($request_client.clone(), args, responder, cx).await
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_notification(
-                async move |args: schema::SessionNotification, _cx| {
-                    forward_session_notification($notification_client.clone(), args).await
-                },
-                acp::on_receive_notification!(),
-            )
-    };
+async fn connect_backend_mock_client<T, F, Fut>(
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    request_client: BackendAcpClient,
+    notification_client: BackendAcpClient,
+    main_fn: F,
+) -> std::result::Result<T, acp::Error>
+where
+    F: FnOnce(acp::ConnectionTo<acp::Agent>) -> Fut,
+    Fut: Future<Output = std::result::Result<T, acp::Error>>,
+{
+    acp::Client
+        .builder()
+        .name("acp-web-backend-mock-client")
+        .on_receive_request(
+            async move |args: schema::RequestPermissionRequest, responder, cx| {
+                respond_permission_request(request_client.clone(), args, responder, cx).await
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |args: schema::SessionNotification, _cx| {
+                forward_session_notification(notification_client.clone(), args).await
+            },
+            acp::on_receive_notification!(),
+        )
+        .connect_with(
+            acp::ByteStreams::new(writer.compat_write(), reader.compat()),
+            async move |conn| main_fn(conn).await,
+        )
+        .await
 }
 
 fn drive_acp_roundtrip_blocking(
@@ -523,25 +539,27 @@ where
     let request_client = client.clone();
     let notification_client = client.clone();
 
-    build_backend_mock_client!(request_client, notification_client)
-        .connect_with(
-            acp::ByteStreams::new(writer.compat_write(), reader.compat()),
-            async move |conn| {
-                Ok::<_, acp::Error>(
-                    run_connected_operation(
-                        conn,
-                        working_dir,
-                        backend_session_id,
-                        client,
-                        upstream_sessions,
-                        operation,
-                    )
-                    .await,
+    connect_backend_mock_client(
+        reader,
+        writer,
+        request_client,
+        notification_client,
+        async move |conn| {
+            Ok::<_, acp::Error>(
+                run_connected_operation(
+                    conn,
+                    working_dir,
+                    backend_session_id,
+                    client,
+                    upstream_sessions,
+                    operation,
                 )
-            },
-        )
-        .await
-        .context(ConnectionClosedSnafu)?
+                .await,
+            )
+        },
+    )
+    .await
+    .context(ConnectionClosedSnafu)?
 }
 
 async fn initialize_connection(conn: &acp::ConnectionTo<acp::Agent>) -> Result<()> {

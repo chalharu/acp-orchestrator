@@ -367,3 +367,471 @@ fn session_composer_cancel_busy_signal(
             || matches!(turn_state.get(), TurnState::Cancelling)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts::{CompletionCandidate, CompletionKind, SessionListItem};
+
+    use crate::domain::session::{PendingPermission, SessionLifecycle, TurnState};
+
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn list_item(id: &str) -> SessionListItem {
+        SessionListItem {
+            id: id.to_string(),
+            title: id.to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            last_activity_at: chrono::Utc::now(),
+        }
+    }
+
+    fn pending_permission(id: &str) -> PendingPermission {
+        PendingPermission {
+            request_id: id.to_string(),
+            summary: format!("Permission for {id}"),
+        }
+    }
+
+    fn slash_candidate(label: &str) -> CompletionCandidate {
+        CompletionCandidate {
+            label: label.to_string(),
+            insert_text: label.to_string(),
+            detail: "detail".to_string(),
+            kind: CompletionKind::Command,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // session_signals – initial values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_signals_starts_with_empty_loading_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            assert!(signals.entries.get().is_empty());
+            assert!(signals.pending_permissions.get().is_empty());
+            assert!(signals.action_error.get().is_none());
+            assert!(signals.connection_error.get().is_none());
+            assert!(signals.event_source.get().is_none());
+            assert!(signals.stream_abort.get().is_none());
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Loading);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert!(!signals.pending_action_busy.get());
+            assert!(signals.draft.get().is_empty());
+            assert!(signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+            assert!(signals.list.items.get().is_empty());
+            assert!(!signals.list.loaded.get());
+            assert!(signals.list.error.get().is_none());
+            assert!(signals.list.deleting_id.get().is_none());
+            assert!(signals.list.renaming_id.get().is_none());
+            assert!(signals.list.saving_rename_id.get().is_none());
+            assert!(signals.list.rename_draft.get().is_empty());
+            assert_eq!(signals.tool_activity_serial.get(), 0);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // current_session_deleting_signal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn current_session_deleting_signal_tracks_deleting_id() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let is_deleting = current_session_deleting_signal("session1".to_string(), signals);
+
+            assert!(!is_deleting.get(), "no session is being deleted initially");
+
+            signals.list.deleting_id.set(Some("other".to_string()));
+            assert!(!is_deleting.get(), "a different session is being deleted");
+
+            signals.list.deleting_id.set(Some("session1".to_string()));
+            assert!(is_deleting.get(), "the target session is now being deleted");
+
+            signals.list.deleting_id.set(None);
+            assert!(!is_deleting.get(), "delete cleared");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_composer_signals – disabled / status / cancel visibility
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn composer_disabled_reflects_session_status_and_deleting_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let not_deleting = Signal::derive(|| false);
+            let composer = session_composer_signals(signals, not_deleting);
+
+            // Loading → disabled
+            assert!(composer.disabled.get());
+
+            // Active + Idle → enabled
+            signals.session_status.set(SessionLifecycle::Active);
+            assert!(!composer.disabled.get());
+
+            // Active + Submitting → disabled
+            signals.turn_state.set(TurnState::Submitting);
+            assert!(composer.disabled.get());
+
+            signals.turn_state.set(TurnState::Idle);
+        });
+    }
+
+    #[test]
+    fn composer_disabled_when_current_session_is_being_deleted() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.session_status.set(SessionLifecycle::Active);
+            let is_deleting_signal = RwSignal::new(false);
+            let composer =
+                session_composer_signals(signals, Signal::derive(move || is_deleting_signal.get()));
+
+            assert!(!composer.disabled.get());
+            is_deleting_signal.set(true);
+            assert!(composer.disabled.get());
+        });
+    }
+
+    #[test]
+    fn composer_status_message_matches_session_and_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let not_deleting = Signal::derive(|| false);
+            let composer = session_composer_signals(signals, not_deleting);
+
+            // Loading state
+            assert_eq!(composer.status.get(), "Connecting...");
+
+            // Active + Idle → empty
+            signals.session_status.set(SessionLifecycle::Active);
+            assert!(composer.status.get().is_empty());
+
+            // Active + AwaitingReply
+            signals.turn_state.set(TurnState::AwaitingReply);
+            assert_eq!(composer.status.get(), "Waiting for response...");
+        });
+    }
+
+    #[test]
+    fn composer_cancel_visible_only_when_awaiting_reply_or_cancelling() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.session_status.set(SessionLifecycle::Active);
+            let not_deleting = Signal::derive(|| false);
+            let composer = session_composer_signals(signals, not_deleting);
+
+            assert!(!composer.cancel_visible.get());
+
+            signals.turn_state.set(TurnState::AwaitingReply);
+            assert!(composer.cancel_visible.get());
+
+            signals.turn_state.set(TurnState::Cancelling);
+            assert!(composer.cancel_visible.get());
+
+            signals.turn_state.set(TurnState::Idle);
+            assert!(!composer.cancel_visible.get());
+        });
+    }
+
+    #[test]
+    fn composer_cancel_hidden_when_pending_permissions_present() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.session_status.set(SessionLifecycle::Active);
+            signals.turn_state.set(TurnState::AwaitingReply);
+            let not_deleting = Signal::derive(|| false);
+            let composer = session_composer_signals(signals, not_deleting);
+
+            assert!(composer.cancel_visible.get());
+
+            signals
+                .pending_permissions
+                .set(vec![pending_permission("req1")]);
+            assert!(!composer.cancel_visible.get());
+        });
+    }
+
+    #[test]
+    fn composer_cancel_busy_when_action_busy_deleting_or_cancelling() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.session_status.set(SessionLifecycle::Active);
+            let is_deleting_signal = RwSignal::new(false);
+            let composer =
+                session_composer_signals(signals, Signal::derive(move || is_deleting_signal.get()));
+
+            assert!(!composer.cancel_busy.get());
+
+            signals.pending_action_busy.set(true);
+            assert!(composer.cancel_busy.get());
+            signals.pending_action_busy.set(false);
+
+            is_deleting_signal.set(true);
+            assert!(composer.cancel_busy.get());
+            is_deleting_signal.set(false);
+
+            signals.turn_state.set(TurnState::Cancelling);
+            assert!(composer.cancel_busy.get());
+        });
+    }
+
+    #[test]
+    fn composer_slash_palette_signals_forward_draft_and_candidate_values() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let not_deleting = Signal::derive(|| false);
+            let composer = session_composer_signals(signals, not_deleting);
+
+            assert!(!composer.slash_palette_visible.get());
+            assert!(composer.slash_candidates.get().is_empty());
+            assert_eq!(composer.slash_selected_index.get(), 0);
+            assert!(!composer.slash_apply_selected.get());
+
+            // Slash prefix activates palette visibility
+            signals.draft.set("/".to_string());
+            assert!(composer.slash_palette_visible.get());
+
+            signals.slash.candidates.set(vec![slash_candidate("/help")]);
+            signals.slash.selected_index.set(0);
+            assert_eq!(composer.slash_candidates.get().len(), 1);
+            assert_eq!(composer.slash_selected_index.get(), 0);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_shell_signals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shell_signals_reflect_session_list_and_delete_disabled_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let shell = session_shell_signals(signals);
+
+            assert!(shell.sessions.get().is_empty());
+            assert!(!shell.delete_disabled.get());
+
+            signals
+                .list
+                .items
+                .set(vec![list_item("s1"), list_item("s2")]);
+            assert_eq!(shell.sessions.get().len(), 2);
+
+            // Busy turn state disables delete
+            signals.turn_state.set(TurnState::Submitting);
+            assert!(shell.delete_disabled.get());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_main_signals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn main_signals_reflect_session_status_and_topbar_messages() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let main = session_main_signals(signals);
+
+            assert_eq!(main.session_status.get(), SessionLifecycle::Loading);
+            assert!(main.topbar_message.get().is_none());
+
+            signals.action_error.set(Some("Action failed".to_string()));
+            assert_eq!(main.topbar_message.get(), Some("Action failed".to_string()));
+
+            // action_error takes priority over connection_error
+            signals
+                .connection_error
+                .set(Some("Network issue".to_string()));
+            assert_eq!(main.topbar_message.get(), Some("Action failed".to_string()));
+
+            // With action_error cleared, connection_error appears
+            signals.action_error.set(None);
+            assert_eq!(main.topbar_message.get(), Some("Network issue".to_string()));
+        });
+    }
+
+    #[test]
+    fn main_signals_forward_entries_and_permissions() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let main = session_main_signals(signals);
+
+            assert!(main.entries.get().is_empty());
+            assert!(main.pending_permissions.get().is_empty());
+            assert!(!main.pending_action_busy.get());
+
+            signals
+                .pending_permissions
+                .set(vec![pending_permission("req1")]);
+            assert_eq!(main.pending_permissions.get().len(), 1);
+
+            signals.pending_action_busy.set(true);
+            assert!(main.pending_action_busy.get());
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // session_sidebar_item_signals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidebar_item_is_renaming_tracks_renaming_id_rw_signal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let renaming_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let saving_rename: RwSignal<Option<String>> = RwSignal::new(None);
+            let deleting_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let delete_disabled = Signal::derive(|| false);
+
+            let item = session_sidebar_item_signals(
+                "s1".to_string(),
+                false,
+                Signal::derive(move || deleting_id.get()),
+                delete_disabled,
+                renaming_id,
+                Signal::derive(move || saving_rename.get()),
+                RwSignal::new(String::new()),
+            );
+
+            assert!(!item.is_renaming.get());
+            renaming_id.set(Some("s1".to_string()));
+            assert!(item.is_renaming.get());
+            renaming_id.set(Some("other".to_string()));
+            assert!(!item.is_renaming.get());
+        });
+    }
+
+    #[test]
+    fn sidebar_item_is_deleting_tracks_deleting_signal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let renaming_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let saving_rename: RwSignal<Option<String>> = RwSignal::new(None);
+            let deleting_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let delete_disabled = Signal::derive(|| false);
+
+            let item = session_sidebar_item_signals(
+                "s1".to_string(),
+                false,
+                Signal::derive(move || deleting_id.get()),
+                delete_disabled,
+                renaming_id,
+                Signal::derive(move || saving_rename.get()),
+                RwSignal::new(String::new()),
+            );
+
+            assert!(!item.is_deleting.get());
+            deleting_id.set(Some("s1".to_string()));
+            assert!(item.is_deleting.get());
+        });
+    }
+
+    #[test]
+    fn sidebar_item_rename_action_disabled_when_deleting_or_saving_rename() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let renaming_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let saving_rename: RwSignal<Option<String>> = RwSignal::new(None);
+            let deleting_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let delete_disabled = Signal::derive(|| false);
+
+            let item = session_sidebar_item_signals(
+                "s1".to_string(),
+                false,
+                Signal::derive(move || deleting_id.get()),
+                delete_disabled,
+                renaming_id,
+                Signal::derive(move || saving_rename.get()),
+                RwSignal::new(String::new()),
+            );
+
+            assert!(!item.rename_action_disabled.get());
+
+            deleting_id.set(Some("s1".to_string()));
+            assert!(item.rename_action_disabled.get());
+            deleting_id.set(None);
+
+            saving_rename.set(Some("any".to_string()));
+            assert!(item.rename_action_disabled.get());
+        });
+    }
+
+    #[test]
+    fn sidebar_item_delete_action_disabled_for_current_session_when_busy() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let renaming_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let saving_rename: RwSignal<Option<String>> = RwSignal::new(None);
+            let deleting_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let delete_disabled: RwSignal<bool> = RwSignal::new(false);
+
+            // is_current = true means the current session's delete button is affected
+            let item = session_sidebar_item_signals(
+                "s1".to_string(),
+                true,
+                Signal::derive(move || deleting_id.get()),
+                Signal::derive(move || delete_disabled.get()),
+                renaming_id,
+                Signal::derive(move || saving_rename.get()),
+                RwSignal::new(String::new()),
+            );
+
+            assert!(!item.delete_action_disabled.get());
+
+            delete_disabled.set(true);
+            assert!(item.delete_action_disabled.get());
+        });
+    }
+
+    #[test]
+    fn sidebar_item_save_rename_disabled_when_blank_draft_or_saving() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let renaming_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let saving_rename: RwSignal<Option<String>> = RwSignal::new(None);
+            let deleting_id: RwSignal<Option<String>> = RwSignal::new(None);
+            let delete_disabled = Signal::derive(|| false);
+            let rename_draft: RwSignal<String> = RwSignal::new(String::new());
+
+            let item = session_sidebar_item_signals(
+                "s1".to_string(),
+                false,
+                Signal::derive(move || deleting_id.get()),
+                delete_disabled,
+                renaming_id,
+                Signal::derive(move || saving_rename.get()),
+                rename_draft,
+            );
+
+            // Blank draft → disabled
+            assert!(item.save_rename_disabled.get());
+
+            rename_draft.set("New title".to_string());
+            assert!(!item.save_rename_disabled.get());
+
+            saving_rename.set(Some("s1".to_string()));
+            assert!(item.save_rename_disabled.get());
+        });
+    }
+}

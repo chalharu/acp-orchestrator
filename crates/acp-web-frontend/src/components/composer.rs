@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, closure::Closure};
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
 
 #[derive(Clone, Copy)]
-pub struct ComposerSlashSignals {
+pub(crate) struct ComposerSlashSignals {
     pub visible: Signal<bool>,
     pub candidates: Signal<Vec<CompletionCandidate>>,
     pub selected_index: Signal<usize>,
@@ -15,7 +15,7 @@ pub struct ComposerSlashSignals {
 }
 
 #[derive(Clone, Copy)]
-pub struct ComposerSlashCallbacks {
+pub(crate) struct ComposerSlashCallbacks {
     pub select_next: Callback<()>,
     pub select_previous: Callback<()>,
     pub apply_selected: Callback<()>,
@@ -39,7 +39,7 @@ struct SubmitDraftContext {
 }
 
 #[component]
-pub fn Composer(
+pub(crate) fn Composer(
     #[prop(into)] disabled: Signal<bool>,
     #[prop(into)] status_text: Signal<String>,
     draft: RwSignal<String>,

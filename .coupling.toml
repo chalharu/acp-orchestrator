@@ -1,0 +1,36 @@
+[analysis]
+exclude_tests = true
+exclude = [
+  "tests/*",
+  "src/tests.rs",
+  "crates/*/tests/*",
+  "crates/*/src/tests.rs",
+  "crates/*/src/**/tests.rs",
+  "crates/*/src/**/tests/*",
+]
+prelude_modules = [
+  "acp-contracts::acp_contracts",
+  "acp-app-support::acp_app_support",
+  "domain",
+  "acp-web-frontend::domain",
+  "domain::*",
+  "acp-web-frontend::domain::*",
+]
+
+[volatility]
+low = [
+  "acp-contracts::acp_contracts",
+  "acp-app-support::acp_app_support",
+  "domain",
+  "acp-web-frontend::domain",
+  "domain::*",
+  "acp-web-frontend::domain::*",
+  "transcript",
+  "acp-web-frontend::transcript",
+  "components",
+  "acp-web-frontend::components",
+  "components::*",
+  "acp-web-frontend::components::*",
+  "TranscriptEntry",
+  "acp-web-frontend::TranscriptEntry",
+]

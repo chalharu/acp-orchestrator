@@ -1,17 +1,18 @@
 use super::super::backend_client::{BackendAcpClient, content_text, permission_option_ids};
 use super::*;
+use agent_client_protocol::schema;
 
-fn permission_options() -> Vec<acp::PermissionOption> {
+fn permission_options() -> Vec<schema::PermissionOption> {
     vec![
-        acp::PermissionOption::new(
+        schema::PermissionOption::new(
             "allow_once",
             "Allow once",
-            acp::PermissionOptionKind::AllowOnce,
+            schema::PermissionOptionKind::AllowOnce,
         ),
-        acp::PermissionOption::new(
+        schema::PermissionOption::new(
             "reject_once",
             "Reject once",
-            acp::PermissionOptionKind::RejectOnce,
+            schema::PermissionOptionKind::RejectOnce,
         ),
     ]
 }
@@ -47,14 +48,14 @@ async fn pending_permission_context(
     (store, session_id, pending, receiver)
 }
 
-fn permission_request(title: Option<&str>) -> acp::RequestPermissionRequest {
-    let mut fields = acp::ToolCallUpdateFields::new();
+fn permission_request(title: Option<&str>) -> schema::RequestPermissionRequest {
+    let mut fields = schema::ToolCallUpdateFields::new();
     if let Some(title) = title {
         fields = fields.title(title);
     }
-    acp::RequestPermissionRequest::new(
+    schema::RequestPermissionRequest::new(
         "mock_0",
-        acp::ToolCallUpdate::new("tool_0", fields),
+        schema::ToolCallUpdate::new("tool_0", fields),
         permission_options(),
     )
 }
@@ -67,16 +68,16 @@ async fn backend_acp_client_rejects_invalid_permission_requests() {
             .turn_handle(),
     );
     let error = client
-        .request_permission(acp::RequestPermissionRequest::new(
+        .request_permission(schema::RequestPermissionRequest::new(
             "mock_0",
-            acp::ToolCallUpdate::new(
+            schema::ToolCallUpdate::new(
                 "tool_0",
-                acp::ToolCallUpdateFields::new().title("permission prompt"),
+                schema::ToolCallUpdateFields::new().title("permission prompt"),
             ),
-            vec![acp::PermissionOption::new(
+            vec![schema::PermissionOption::new(
                 "allow_once",
                 "Allow once",
-                acp::PermissionOptionKind::AllowOnce,
+                schema::PermissionOptionKind::AllowOnce,
             )],
         ))
         .await
@@ -87,47 +88,43 @@ async fn backend_acp_client_rejects_invalid_permission_requests() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_uses_the_tool_call_id_when_titles_are_missing() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let (store, session_id, pending, mut receiver) =
-                pending_permission_context("permission please").await;
-            let client = BackendAcpClient::new(pending.turn_handle());
-            let requester = tokio::task::spawn_local(async move {
-                client
-                    .request_permission(permission_request(None))
-                    .await
-                    .expect("permission requests should resolve")
-            });
+    let (store, session_id, pending, mut receiver) =
+        pending_permission_context("permission please").await;
+    let client = BackendAcpClient::new(pending.turn_handle());
+    let requester = tokio::spawn(async move {
+        client
+            .request_permission(permission_request(None))
+            .await
+            .expect("permission requests should resolve")
+    });
 
-            let permission_event = receiver
-                .recv()
-                .await
-                .expect("permission event should arrive");
-            assert!(matches!(
-                permission_event.payload,
-                acp_contracts::StreamEventPayload::PermissionRequested { request }
-                    if request.request_id == "req_1" && request.summary == "tool tool_0"
-            ));
+    let permission_event = receiver
+        .recv()
+        .await
+        .expect("permission event should arrive");
+    assert!(matches!(
+        permission_event.payload,
+        acp_contracts::StreamEventPayload::PermissionRequested { request }
+            if request.request_id == "req_1" && request.summary == "tool tool_0"
+    ));
 
-            let resolved = store
-                .resolve_permission(
-                    "alice",
-                    &session_id,
-                    "req_1",
-                    acp_contracts::PermissionDecision::Deny,
-                )
-                .await
-                .expect("permission resolution should succeed");
-            assert_eq!(resolved.request_id, "req_1");
+    let resolved = store
+        .resolve_permission(
+            "alice",
+            &session_id,
+            "req_1",
+            acp_contracts::PermissionDecision::Deny,
+        )
+        .await
+        .expect("permission resolution should succeed");
+    assert_eq!(resolved.request_id, "req_1");
 
-            let response = requester.await.expect("permission waiter should complete");
-            assert!(matches!(
-                response.outcome,
-                acp::RequestPermissionOutcome::Selected(selected)
-                    if selected.option_id.to_string() == "reject_once"
-            ));
-        })
-        .await;
+    let response = requester.await.expect("permission waiter should complete");
+    assert!(matches!(
+        response.outcome,
+        schema::RequestPermissionOutcome::Selected(selected)
+            if selected.option_id.to_string() == "reject_once"
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -160,9 +157,11 @@ async fn backend_acp_client_collects_agent_message_chunks() {
     let client = BackendAcpClient::new(test_pending_prompt("alice", "hello").await.turn_handle());
 
     client
-        .session_notification(acp::SessionNotification::new(
+        .session_notification(schema::SessionNotification::new(
             "mock_0",
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("first chunk".into())),
+            schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                "first chunk".into(),
+            )),
         ))
         .await
         .expect("session updates should succeed");
@@ -172,52 +171,48 @@ async fn backend_acp_client_collects_agent_message_chunks() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_waits_for_permission_decisions() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let (store, session_id, pending, _receiver) =
-                pending_permission_context("permission please").await;
-            let client = BackendAcpClient::new(pending.turn_handle());
-            let requester = tokio::task::spawn_local(async move {
-                client
-                    .request_permission(permission_request(Some("read_text_file README.md")))
-                    .await
-                    .expect("permission request should resolve")
-            });
+    let (store, session_id, pending, _receiver) =
+        pending_permission_context("permission please").await;
+    let client = BackendAcpClient::new(pending.turn_handle());
+    let requester = tokio::spawn(async move {
+        client
+            .request_permission(permission_request(Some("read_text_file README.md")))
+            .await
+            .expect("permission request should resolve")
+    });
 
-            tokio::task::yield_now().await;
-            let resolution = store
-                .resolve_permission(
-                    "alice",
-                    &session_id,
-                    "req_1",
-                    acp_contracts::PermissionDecision::Approve,
-                )
-                .await
-                .expect("permission resolution should succeed");
-            assert_eq!(resolution.request_id, "req_1");
+    tokio::task::yield_now().await;
+    let resolution = store
+        .resolve_permission(
+            "alice",
+            &session_id,
+            "req_1",
+            acp_contracts::PermissionDecision::Approve,
+        )
+        .await
+        .expect("permission resolution should succeed");
+    assert_eq!(resolution.request_id, "req_1");
 
-            let response = requester.await.expect("permission waiter should complete");
-            assert!(matches!(
-                response.outcome,
-                acp::RequestPermissionOutcome::Selected(selected)
-                    if selected.option_id.to_string() == "allow_once"
-            ));
-        })
-        .await;
+    let response = requester.await.expect("permission waiter should complete");
+    assert!(matches!(
+        response.outcome,
+        schema::RequestPermissionOutcome::Selected(selected)
+            if selected.option_id.to_string() == "allow_once"
+    ));
 }
 
 #[test]
 fn permission_option_ids_require_allow_and_deny_choices() {
-    let request = acp::RequestPermissionRequest::new(
+    let request = schema::RequestPermissionRequest::new(
         "mock_0",
-        acp::ToolCallUpdate::new(
+        schema::ToolCallUpdate::new(
             "tool_0",
-            acp::ToolCallUpdateFields::new().title("permission prompt"),
+            schema::ToolCallUpdateFields::new().title("permission prompt"),
         ),
-        vec![acp::PermissionOption::new(
+        vec![schema::PermissionOption::new(
             "allow_once",
             "Allow once",
-            acp::PermissionOptionKind::AllowOnce,
+            schema::PermissionOptionKind::AllowOnce,
         )],
     );
 
@@ -229,22 +224,22 @@ fn permission_option_ids_require_allow_and_deny_choices() {
 
 #[test]
 fn permission_option_ids_reject_persistent_permission_choices() {
-    let request = acp::RequestPermissionRequest::new(
+    let request = schema::RequestPermissionRequest::new(
         "mock_0",
-        acp::ToolCallUpdate::new(
+        schema::ToolCallUpdate::new(
             "tool_0",
-            acp::ToolCallUpdateFields::new().title("permission prompt"),
+            schema::ToolCallUpdateFields::new().title("permission prompt"),
         ),
         vec![
-            acp::PermissionOption::new(
+            schema::PermissionOption::new(
                 "allow_always",
                 "Allow always",
-                acp::PermissionOptionKind::AllowAlways,
+                schema::PermissionOptionKind::AllowAlways,
             ),
-            acp::PermissionOption::new(
+            schema::PermissionOption::new(
                 "reject_once",
                 "Reject once",
-                acp::PermissionOptionKind::RejectOnce,
+                schema::PermissionOptionKind::RejectOnce,
             ),
         ],
     );
@@ -295,27 +290,27 @@ fn default_reply_provider_prime_session_is_a_no_op() {
 
 #[test]
 fn permission_option_ids_reject_duplicate_once_choices() {
-    let request = acp::RequestPermissionRequest::new(
+    let request = schema::RequestPermissionRequest::new(
         "mock_0",
-        acp::ToolCallUpdate::new(
+        schema::ToolCallUpdate::new(
             "tool_0",
-            acp::ToolCallUpdateFields::new().title("permission prompt"),
+            schema::ToolCallUpdateFields::new().title("permission prompt"),
         ),
         vec![
-            acp::PermissionOption::new(
+            schema::PermissionOption::new(
                 "allow_once_1",
                 "Allow once",
-                acp::PermissionOptionKind::AllowOnce,
+                schema::PermissionOptionKind::AllowOnce,
             ),
-            acp::PermissionOption::new(
+            schema::PermissionOption::new(
                 "allow_once_2",
                 "Allow once again",
-                acp::PermissionOptionKind::AllowOnce,
+                schema::PermissionOptionKind::AllowOnce,
             ),
-            acp::PermissionOption::new(
+            schema::PermissionOption::new(
                 "reject_once",
                 "Reject once",
-                acp::PermissionOptionKind::RejectOnce,
+                schema::PermissionOptionKind::RejectOnce,
             ),
         ],
     );
@@ -328,8 +323,8 @@ fn permission_option_ids_reject_duplicate_once_choices() {
 
 #[test]
 fn content_text_formats_embedded_resources() {
-    let resource = acp::ContentBlock::Resource(acp::EmbeddedResource::new(
-        acp::EmbeddedResourceResource::TextResourceContents(acp::TextResourceContents::new(
+    let resource = schema::ContentBlock::Resource(schema::EmbeddedResource::new(
+        schema::EmbeddedResourceResource::TextResourceContents(schema::TextResourceContents::new(
             "hello",
             "file:///embedded.md",
         )),
@@ -341,24 +336,23 @@ fn content_text_formats_embedded_resources() {
 #[test]
 fn content_text_formats_non_text_prompt_blocks() {
     assert_eq!(
-        content_text(acp::ContentBlock::Image(acp::ImageContent::new(
+        content_text(schema::ContentBlock::Image(schema::ImageContent::new(
             "aGVsbG8=",
             "image/png",
         ))),
         "<image>"
     );
     assert_eq!(
-        content_text(acp::ContentBlock::Audio(acp::AudioContent::new(
+        content_text(schema::ContentBlock::Audio(schema::AudioContent::new(
             "aGVsbG8=",
             "audio/wav",
         ))),
         "<audio>"
     );
     assert_eq!(
-        content_text(acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
-            "guide",
-            "file:///guide.md",
-        ))),
+        content_text(schema::ContentBlock::ResourceLink(
+            schema::ResourceLink::new("guide", "file:///guide.md",)
+        )),
         "file:///guide.md"
     );
 }

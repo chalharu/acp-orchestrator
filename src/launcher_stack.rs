@@ -1,30 +1,30 @@
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    io::ErrorKind,
-    io::Write,
-    net::IpAddr,
-    path::{Path, PathBuf},
-    process,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::{env, ffi::OsString, path::Path, time::Duration};
 
-use acp_app_support::{
-    FRONTEND_JAVASCRIPT_ASSET_PATH, build_http_client_for_url, wait_for_health,
-    wait_for_http_success, wait_for_tcp_connect,
-};
-use serde::{Deserialize, Serialize};
-use snafu::prelude::*;
 use tokio::process::Child;
 use uuid::Uuid;
 
 use crate::{
-    CreateLauncherStateDirectorySnafu, LauncherArgs, MissingLauncherStateDirectorySnafu,
-    ParseLauncherStateSnafu, ReadLauncherExecutableMetadataSnafu,
-    ReadLauncherExecutableModifiedTimeSnafu, ReadLauncherStateSnafu, Result,
-    SerializeLauncherStateSnafu, WriteLauncherStateSnafu,
+    LauncherArgs, Result,
     launcher_process::{SpawnedService, spawn_background_role, terminate_child},
+};
+
+mod lock;
+mod state;
+
+#[cfg(test)]
+pub(crate) use self::lock::write_launcher_lock_owner;
+pub(crate) use self::lock::{
+    LauncherLock, clear_stale_launcher_lock, launcher_lock_path_from, try_acquire_launcher_lock,
+};
+use self::state::{
+    LauncherIdentity, LauncherState, create_launcher_state_parent, current_launcher_identity,
+    launcher_state_path, launcher_state_supports_requested_stack, load_launcher_state,
+    managed_stack_is_healthy, persistent_launcher_state, persistent_stack_from_state,
+    save_launcher_state, warn_and_maybe_clear_invalid_launcher_state,
+};
+#[cfg(test)]
+pub(crate) use self::state::{
+    launcher_state_path_from, path_to_string, socket_address_uses_loopback,
 };
 
 const LAUNCHER_STATE_ENV: &str = "ACP_LAUNCHER_STATE_PATH";
@@ -48,40 +48,6 @@ pub(crate) struct LauncherStack {
 struct EphemeralChildren {
     backend: Child,
     mock: Option<Child>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct LauncherState {
-    backend_url: String,
-    #[serde(default)]
-    mock_address: Option<String>,
-    #[serde(default)]
-    frontend_dist: Option<String>,
-    #[serde(default)]
-    startup_hints: bool,
-    auth_token: String,
-    launcher_identity: LauncherIdentity,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct LauncherIdentity {
-    executable_path: String,
-    build_fingerprint: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct LauncherLock {
-    path: PathBuf,
-}
-
-impl Drop for LauncherLock {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != ErrorKind::NotFound
-        {
-            warn_lock_cleanup_failure(&self.path, &error);
-        }
-    }
 }
 
 impl LauncherStack {
@@ -159,68 +125,6 @@ pub(crate) async fn prepare_launcher_stack(
     }
 
     prepare_persistent_bundled_stack(current_executable, frontend_dist).await
-}
-
-pub(crate) fn launcher_state_path_from(
-    explicit_path: Option<OsString>,
-    data_local_dir: Option<PathBuf>,
-    home_dir: Option<PathBuf>,
-) -> Result<PathBuf> {
-    if let Some(path) = explicit_path {
-        return Ok(PathBuf::from(path));
-    }
-
-    if let Some(mut directory) = data_local_dir {
-        directory.push("acp-orchestrator");
-        directory.push("launcher-stack.json");
-        return Ok(directory);
-    }
-
-    if let Some(mut directory) = home_dir {
-        directory.push(".acp-orchestrator");
-        directory.push("launcher-stack.json");
-        return Ok(directory);
-    }
-
-    MissingLauncherStateDirectorySnafu.fail()
-}
-
-pub(crate) fn launcher_lock_path_from(state_path: &Path) -> PathBuf {
-    let mut path = state_path.as_os_str().to_os_string();
-    path.push(".lock");
-    PathBuf::from(path)
-}
-
-fn launcher_state_path() -> Result<PathBuf> {
-    launcher_state_path_from(
-        env::var_os(LAUNCHER_STATE_ENV),
-        dirs::data_local_dir(),
-        dirs::home_dir(),
-    )
-}
-
-fn current_launcher_identity(current_executable: &Path) -> Result<LauncherIdentity> {
-    let metadata =
-        fs::metadata(current_executable).context(ReadLauncherExecutableMetadataSnafu {
-            path: current_executable.to_path_buf(),
-        })?;
-    let modified = metadata
-        .modified()
-        .context(ReadLauncherExecutableModifiedTimeSnafu {
-            path: current_executable.to_path_buf(),
-        })?
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-
-    Ok(LauncherIdentity {
-        executable_path: current_executable.display().to_string(),
-        build_fingerprint: format!(
-            "{}:{}:{}",
-            metadata.len(),
-            modified.as_secs(),
-            modified.subsec_nanos()
-        ),
-    })
 }
 
 async fn spawn_ephemeral_stack(
@@ -366,130 +270,6 @@ async fn reusable_launcher_state(
     }
 }
 
-fn warn_and_maybe_clear_invalid_launcher_state(state_path: &Path, error: &crate::LauncherError) {
-    if launcher_lock_path_from(state_path).exists() {
-        return;
-    }
-
-    warn_invalid_launcher_state(state_path, error);
-    if let Err(remove_error) = fs::remove_file(state_path)
-        && remove_error.kind() != ErrorKind::NotFound
-    {
-        warn_invalid_launcher_state_cleanup_failure(state_path, &remove_error);
-    }
-}
-
-fn warn_lock_cleanup_failure(path: &Path, error: &std::io::Error) {
-    tracing::warn!(path = %path.display(), %error, "failed to remove the launcher lock file");
-}
-
-fn warn_invalid_launcher_state(path: &Path, error: &crate::LauncherError) {
-    tracing::warn!(path = %path.display(), %error, "ignoring invalid launcher state");
-}
-
-fn warn_invalid_launcher_state_cleanup_failure(path: &Path, error: &std::io::Error) {
-    tracing::warn!(path = %path.display(), %error, "failed to remove invalid launcher state");
-}
-
-pub(crate) fn try_acquire_launcher_lock(lock_path: &Path) -> Result<Option<LauncherLock>> {
-    create_launcher_state_parent(lock_path)?;
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(lock_path)
-    {
-        Ok(mut file) => write_launcher_lock_owner(&mut file, lock_path).map(Some),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
-        Err(source) => Err(crate::LauncherError::AcquireLauncherLock {
-            source,
-            path: lock_path.to_path_buf(),
-        }),
-    }
-}
-
-pub(crate) fn clear_stale_launcher_lock(lock_path: &Path, stale_after: Duration) -> Result<bool> {
-    let metadata = match fs::metadata(lock_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(source) => {
-            return Err(crate::LauncherError::ReadLauncherLockMetadata {
-                source,
-                path: lock_path.to_path_buf(),
-            });
-        }
-    };
-    if metadata.is_file()
-        && launcher_lock_owner_pid(lock_path)
-            .is_some_and(|owner_pid| !launcher_lock_owner_is_running(owner_pid))
-    {
-        return remove_launcher_lock(lock_path);
-    }
-
-    let modified = metadata
-        .modified()
-        .context(crate::ReadLauncherLockMetadataSnafu {
-            path: lock_path.to_path_buf(),
-        })?;
-    let is_stale = modified
-        .elapsed()
-        .ok()
-        .is_some_and(|elapsed| elapsed >= stale_after);
-    if !is_stale {
-        return Ok(false);
-    }
-
-    remove_launcher_lock(lock_path)
-}
-
-fn launcher_lock_owner_pid(lock_path: &Path) -> Option<u32> {
-    fs::read_to_string(lock_path)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|owner_pid| *owner_pid != 0)
-}
-
-fn write_launcher_lock_owner<W: Write>(writer: &mut W, lock_path: &Path) -> Result<LauncherLock> {
-    if let Err(source) = writer.write_all(process::id().to_string().as_bytes()) {
-        let _ = fs::remove_file(lock_path);
-        return Err(crate::LauncherError::AcquireLauncherLock {
-            source,
-            path: lock_path.to_path_buf(),
-        });
-    }
-
-    Ok(LauncherLock {
-        path: lock_path.to_path_buf(),
-    })
-}
-
-#[cfg(unix)]
-fn launcher_lock_owner_is_running(owner_pid: u32) -> bool {
-    let result = unsafe { libc::kill(owner_pid as libc::pid_t, 0) };
-    if result == 0 {
-        return true;
-    }
-
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-#[cfg(not(unix))]
-fn launcher_lock_owner_is_running(_owner_pid: u32) -> bool {
-    true
-}
-
-fn remove_launcher_lock(lock_path: &Path) -> Result<bool> {
-    match fs::remove_file(lock_path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(crate::LauncherError::RemoveLauncherLock {
-            source,
-            path: lock_path.to_path_buf(),
-        }),
-    }
-}
-
 async fn spawn_persistent_bundled_backend(
     current_executable: &Path,
     launcher_identity: &LauncherIdentity,
@@ -566,23 +346,6 @@ fn persistent_bundled_backend_role_args(
     )
 }
 
-fn persistent_launcher_state(
-    endpoint: String,
-    mock_address: String,
-    frontend_dist: Option<&Path>,
-    auth_token: String,
-    launcher_identity: &LauncherIdentity,
-) -> LauncherState {
-    LauncherState {
-        backend_url: endpoint,
-        mock_address: Some(mock_address),
-        frontend_dist: frontend_dist.map(path_to_string),
-        startup_hints: BUNDLED_STARTUP_HINTS,
-        auth_token,
-        launcher_identity: launcher_identity.clone(),
-    }
-}
-
 async fn persist_launcher_state_or_shutdown(
     state_path: &Path,
     state: &LauncherState,
@@ -620,10 +383,6 @@ fn backend_role_args(
     args
 }
 
-fn persistent_stack_from_state(state: LauncherState) -> LauncherStack {
-    LauncherStack::persistent(state.backend_url, state.auth_token)
-}
-
 async fn reusable_persistent_stack(
     state_path: &Path,
     launcher_identity: &LauncherIdentity,
@@ -632,22 +391,6 @@ async fn reusable_persistent_stack(
     reusable_launcher_state(state_path, launcher_identity, frontend_dist)
         .await
         .map(|state| state.map(persistent_stack_from_state))
-}
-
-fn launcher_state_supports_requested_stack(
-    state: &LauncherState,
-    requested_frontend_dist: Option<&Path>,
-) -> bool {
-    let frontend_matches = match requested_frontend_dist.map(path_to_string) {
-        Some(requested) => state.frontend_dist.as_deref() == Some(requested.as_str()),
-        None => true,
-    };
-
-    frontend_matches && state.startup_hints == BUNDLED_STARTUP_HINTS
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 fn mock_role_args(startup_hints: bool) -> Vec<OsString> {
@@ -666,158 +409,6 @@ fn append_stack_exit_after_ms(args: &mut Vec<OsString>) {
         args.push("--exit-after-ms".into());
         args.push(value);
     }
-}
-
-fn load_launcher_state(path: &Path) -> Result<Option<LauncherState>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = fs::read_to_string(path).context(ReadLauncherStateSnafu {
-        path: path.to_path_buf(),
-    })?;
-    let state = serde_json::from_str(&raw).context(ParseLauncherStateSnafu {
-        path: path.to_path_buf(),
-    })?;
-    Ok(Some(state))
-}
-
-fn save_launcher_state(path: &Path, state: &LauncherState) -> Result<()> {
-    create_launcher_state_parent(path)?;
-    let serialized = serde_json::to_string_pretty(state).context(SerializeLauncherStateSnafu)?;
-    let mut file = fs::File::create(path).context(WriteLauncherStateSnafu {
-        path: path.to_path_buf(),
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path_buf = path.to_path_buf();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .context(WriteLauncherStateSnafu { path: path_buf })?;
-    }
-    file.write_all(serialized.as_bytes())
-        .context(WriteLauncherStateSnafu {
-            path: path.to_path_buf(),
-        })?;
-    Ok(())
-}
-
-fn create_launcher_state_parent(path: &Path) -> Result<()> {
-    let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(());
-    };
-
-    let parent = parent.to_path_buf();
-    fs::create_dir_all(&parent).context(CreateLauncherStateDirectorySnafu { path: parent })?;
-    let parent = path.parent().expect("validated parent should exist");
-    secure_launcher_state_parent_permissions(parent)?;
-    Ok(())
-}
-
-async fn managed_stack_is_healthy(state: &LauncherState) -> bool {
-    async {
-        if state.auth_token.is_empty() || !launcher_state_endpoints_are_loopback(state) {
-            return Some(false);
-        }
-        let mock_address = state.mock_address.as_deref()?;
-        if wait_for_tcp_connect(mock_address, STACK_READY_ATTEMPTS, STACK_READY_DELAY)
-            .await
-            .is_err()
-        {
-            return Some(false);
-        }
-
-        let timeout = Some(STACK_READY_TIMEOUT);
-        let client = build_http_client_for_url(&state.backend_url, timeout).ok()?;
-        let backend_ready = wait_for_health(
-            &client,
-            &state.backend_url,
-            STACK_READY_ATTEMPTS,
-            STACK_READY_DELAY,
-        )
-        .await
-        .is_ok();
-        let frontend_ready = if state.frontend_dist.is_some() {
-            let frontend_asset_url = format!(
-                "{}{}",
-                state.backend_url.trim_end_matches('/'),
-                FRONTEND_JAVASCRIPT_ASSET_PATH
-            );
-            wait_for_http_success(
-                &client,
-                &frontend_asset_url,
-                STACK_READY_ATTEMPTS,
-                STACK_READY_DELAY,
-                "web frontend asset",
-            )
-            .await
-            .is_ok()
-        } else {
-            true
-        };
-        Some(backend_ready && frontend_ready)
-    }
-    .await
-    .unwrap_or(false)
-}
-
-#[cfg(unix)]
-fn secure_launcher_state_parent_permissions(parent: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if parent
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, "acp-orchestrator" | ".acp-orchestrator"))
-    {
-        let parent_path = parent.to_path_buf();
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .context(CreateLauncherStateDirectorySnafu { path: parent_path })?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn secure_launcher_state_parent_permissions(_parent: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn launcher_state_endpoints_are_loopback(state: &LauncherState) -> bool {
-    let Some(mock_address) = state.mock_address.as_deref() else {
-        return false;
-    };
-
-    socket_address_uses_loopback(mock_address) && backend_url_uses_loopback(&state.backend_url)
-}
-
-fn socket_address_uses_loopback(address: &str) -> bool {
-    let host = if let Some(rest) = address.strip_prefix('[') {
-        rest.split_once(']').map(|(host, _)| host)
-    } else {
-        address.rsplit_once(':').map(|(host, _)| host)
-    };
-    host.is_some_and(host_uses_loopback)
-}
-
-fn backend_url_uses_loopback(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
-        .as_deref()
-        .is_some_and(host_uses_loopback)
-}
-
-fn host_uses_loopback(host: &str) -> bool {
-    let host = host.trim_matches(|character| character == '[' || character == ']');
-
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
 }
 
 #[cfg(test)]

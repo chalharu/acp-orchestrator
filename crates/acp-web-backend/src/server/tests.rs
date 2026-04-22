@@ -1,9 +1,8 @@
-use super::*;
+use super::{assets::*, connection::*, *};
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
+use crate::workspace_records::{SessionMetadataRecord, UserRecord, WorkspaceRecord};
 use crate::workspace_repository::WorkspaceRepository;
-use crate::workspace_store::{
-    SessionMetadataRecord, SqliteWorkspaceRepository, UserRecord, WorkspaceRecord,
-};
+use crate::workspace_store::SqliteWorkspaceRepository;
 use acp_app_support::{FrontendBundleAsset, build_http_client_for_url, frontend_bundle_file_name};
 use acp_contracts::{
     AuthStatusResponse, BootstrapRegistrationRequest, SessionSnapshot, SessionStatus, SignInRequest,
@@ -14,12 +13,13 @@ use axum::{
     extract::Extension,
     http::{
         HeaderValue,
-        header::{COOKIE, SET_COOKIE},
+        header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
     },
     response::Response,
 };
 use std::sync::{Arc as StdArc, Mutex};
 use tokio::time::timeout;
+use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 
 #[test]

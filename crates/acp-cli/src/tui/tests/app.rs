@@ -139,6 +139,11 @@ fn chat_app_formats_user_messages_and_connection_details() {
         &[],
         vec![],
     );
+
+    assert_eq!(app.session_id(), "s_test");
+    assert_eq!(app.server_url(), "http://127.0.0.1:8080");
+    assert_eq!(app.connection().detail(), None);
+
     app.set_connection_lost("stream closed");
 
     assert_eq!(app.transcript()[0], "[user] hello");

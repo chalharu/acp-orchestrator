@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::{
     auth::AuthenticatedPrincipal,
-    workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError},
+    workspace_records::{SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError},
 };
 
 #[async_trait]

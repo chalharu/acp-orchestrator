@@ -1,4 +1,3 @@
-mod notifications;
 mod prompt;
 pub mod runtime;
 
@@ -6,24 +5,25 @@ pub mod runtime;
 mod tests;
 
 use std::{
-    cell::{Cell, RefCell},
     collections::HashMap,
     future::Future,
-    rc::Rc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
-use agent_client_protocol::{self as acp, Client as _};
-use notifications::{drain_permission_requests, drain_session_updates, log_connection_result};
+use agent_client_protocol::{self as acp, schema};
 use prompt::{
     prompt_requires_permission, prompt_text, reply_for, response_delay_for, wait_for_cancel,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, oneshot, watch},
+    sync::watch,
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::info;
+use tracing::{error, info};
 
 pub use prompt::{MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 pub use runtime::{MockAppError, run_with_args};
@@ -46,56 +46,50 @@ impl Default for MockConfig {
 #[derive(Debug)]
 struct MockServerState {
     config: MockConfig,
-    next_session_id: Cell<u64>,
-    next_tool_call_id: Cell<u64>,
-    sessions: RefCell<HashMap<String, Rc<MockSessionState>>>,
+    next_session_id: AtomicU64,
+    next_tool_call_id: AtomicU64,
+    sessions: Mutex<HashMap<String, Arc<MockSessionState>>>,
 }
 
 impl MockServerState {
     fn new(config: MockConfig) -> Self {
         Self {
             config,
-            next_session_id: Cell::new(0),
-            next_tool_call_id: Cell::new(0),
-            sessions: RefCell::new(HashMap::new()),
+            next_session_id: AtomicU64::new(0),
+            next_tool_call_id: AtomicU64::new(0),
+            sessions: Mutex::new(HashMap::new()),
         }
     }
 
     fn next_session_id(&self) -> String {
-        let next = self.next_session_id.get();
-        self.next_session_id.set(next + 1);
+        let next = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("mock_{next}");
         self.sessions
-            .borrow_mut()
+            .lock()
+            .expect("mock sessions mutex should not be poisoned")
             .entry(session_id.clone())
-            .or_insert_with(|| Rc::new(MockSessionState::new()));
+            .or_insert_with(|| Arc::new(MockSessionState::new()));
         session_id
     }
 
     fn next_tool_call_id(&self) -> String {
-        let next = self.next_tool_call_id.get();
-        self.next_tool_call_id.set(next + 1);
+        let next = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         format!("tool_{next}")
     }
 
-    fn session_state(&self, session_id: &str) -> Rc<MockSessionState> {
+    fn session_state(&self, session_id: &str) -> Arc<MockSessionState> {
         self.sessions
-            .borrow_mut()
+            .lock()
+            .expect("mock sessions mutex should not be poisoned")
             .entry(session_id.to_string())
-            .or_insert_with(|| Rc::new(MockSessionState::new()))
+            .or_insert_with(|| Arc::new(MockSessionState::new()))
             .clone()
     }
 }
 
-type QueuedSessionNotification = (acp::SessionNotification, oneshot::Sender<()>);
-type QueuedPermissionRequest = (
-    acp::RequestPermissionRequest,
-    oneshot::Sender<Result<acp::RequestPermissionResponse, acp::Error>>,
-);
-
 #[derive(Debug)]
 struct MockSessionState {
-    cancel_generation: Cell<u64>,
+    cancel_generation: AtomicU64,
     cancel_tx: watch::Sender<u64>,
 }
 
@@ -103,7 +97,7 @@ impl MockSessionState {
     fn new() -> Self {
         let (cancel_tx, _) = watch::channel(0);
         Self {
-            cancel_generation: Cell::new(0),
+            cancel_generation: AtomicU64::new(0),
             cancel_tx,
         }
     }
@@ -115,161 +109,148 @@ impl MockSessionState {
     }
 
     fn cancel(&self) {
-        let next_generation = self.cancel_generation.get() + 1;
-        self.cancel_generation.set(next_generation);
+        let next_generation = self.cancel_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self.cancel_tx.send(next_generation);
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 trait SessionUpdateNotifier {
     async fn send_session_update(
         &self,
-        notification: acp::SessionNotification,
+        notification: schema::SessionNotification,
     ) -> Result<(), acp::Error>;
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 trait PermissionRequester {
     async fn request_permission(
         &self,
-        request: acp::RequestPermissionRequest,
-    ) -> Result<acp::RequestPermissionResponse, acp::Error>;
+        request: schema::RequestPermissionRequest,
+    ) -> Result<schema::RequestPermissionResponse, acp::Error>;
 }
 
+#[derive(Clone)]
+struct ConnectionClientAdapter {
+    connection: acp::ConnectionTo<acp::Client>,
+}
+
+impl ConnectionClientAdapter {
+    fn new(connection: acp::ConnectionTo<acp::Client>) -> Self {
+        Self { connection }
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionUpdateNotifier for ConnectionClientAdapter {
+    async fn send_session_update(
+        &self,
+        notification: schema::SessionNotification,
+    ) -> Result<(), acp::Error> {
+        self.connection.send_notification(notification)
+    }
+}
+
+#[async_trait::async_trait]
+impl PermissionRequester for ConnectionClientAdapter {
+    async fn request_permission(
+        &self,
+        request: schema::RequestPermissionRequest,
+    ) -> Result<schema::RequestPermissionResponse, acp::Error> {
+        self.connection.send_request(request).block_task().await
+    }
+}
+
+#[derive(Clone)]
 struct MockAgent {
-    state: Rc<MockServerState>,
-    session_update_tx: mpsc::UnboundedSender<QueuedSessionNotification>,
-    permission_request_tx: mpsc::UnboundedSender<QueuedPermissionRequest>,
+    state: Arc<MockServerState>,
 }
 
 impl MockAgent {
-    fn new(
-        state: Rc<MockServerState>,
-        session_update_tx: mpsc::UnboundedSender<QueuedSessionNotification>,
-        permission_request_tx: mpsc::UnboundedSender<QueuedPermissionRequest>,
-    ) -> Self {
-        Self {
-            state,
-            session_update_tx,
-            permission_request_tx,
-        }
+    fn new(state: Arc<MockServerState>) -> Self {
+        Self { state }
     }
 
-    async fn send_reply(&self, session_id: String, text: String) -> Result<(), acp::Error> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.session_update_tx
-            .send((
-                acp::SessionNotification::new(
-                    session_id,
-                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(text.into())),
-                ),
-                ack_tx,
-            ))
-            .map_err(|_| acp::Error::internal_error())?;
-        ack_rx.await.map_err(|_| acp::Error::internal_error())
-    }
-
-    async fn request_permission(
-        &self,
-        session_id: String,
-    ) -> Result<acp::RequestPermissionResponse, acp::Error> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.permission_request_tx
-            .send((
-                acp::RequestPermissionRequest::new(
-                    session_id,
-                    acp::ToolCallUpdate::new(
-                        self.state.next_tool_call_id(),
-                        acp::ToolCallUpdateFields::new().title("read_text_file README.md"),
-                    ),
-                    vec![
-                        acp::PermissionOption::new(
-                            "allow_once",
-                            "Allow once",
-                            acp::PermissionOptionKind::AllowOnce,
-                        ),
-                        acp::PermissionOption::new(
-                            "reject_once",
-                            "Reject once",
-                            acp::PermissionOptionKind::RejectOnce,
-                        ),
-                    ],
-                ),
-                ack_tx,
-            ))
-            .map_err(|_| acp::Error::internal_error())?;
-        ack_rx.await.map_err(|_| acp::Error::internal_error())?
-    }
-}
-
-fn startup_hint_message() -> String {
-    format!(
-        "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
-    )
-}
-
-#[async_trait::async_trait(?Send)]
-impl acp::Agent for MockAgent {
     async fn initialize(
         &self,
-        _arguments: acp::InitializeRequest,
-    ) -> Result<acp::InitializeResponse, acp::Error> {
+        _arguments: schema::InitializeRequest,
+    ) -> Result<schema::InitializeResponse, acp::Error> {
         Ok(
-            acp::InitializeResponse::new(acp::ProtocolVersion::V1).agent_info(
-                acp::Implementation::new("acp-mock", env!("CARGO_PKG_VERSION")).title("ACP Mock"),
+            schema::InitializeResponse::new(schema::ProtocolVersion::V1).agent_info(
+                schema::Implementation::new("acp-mock", env!("CARGO_PKG_VERSION"))
+                    .title("ACP Mock"),
             ),
         )
     }
 
     async fn authenticate(
         &self,
-        _arguments: acp::AuthenticateRequest,
-    ) -> Result<acp::AuthenticateResponse, acp::Error> {
-        Ok(acp::AuthenticateResponse::default())
+        _arguments: schema::AuthenticateRequest,
+    ) -> Result<schema::AuthenticateResponse, acp::Error> {
+        Ok(schema::AuthenticateResponse::default())
     }
 
-    async fn new_session(
+    async fn new_session<N: SessionUpdateNotifier + Sync>(
         &self,
-        _arguments: acp::NewSessionRequest,
-    ) -> Result<acp::NewSessionResponse, acp::Error> {
+        _arguments: schema::NewSessionRequest,
+        notifier: &N,
+    ) -> Result<schema::NewSessionResponse, acp::Error> {
         let session_id = self.state.next_session_id();
         if self.state.config.startup_hints {
-            self.send_reply(session_id.clone(), startup_hint_message())
+            notifier
+                .send_session_update(schema::SessionNotification::new(
+                    session_id.clone(),
+                    schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                        startup_hint_message().into(),
+                    )),
+                ))
                 .await?;
         }
-        Ok(acp::NewSessionResponse::new(session_id))
+        Ok(schema::NewSessionResponse::new(session_id))
     }
 
     async fn load_session(
         &self,
-        arguments: acp::LoadSessionRequest,
-    ) -> Result<acp::LoadSessionResponse, acp::Error> {
+        arguments: schema::LoadSessionRequest,
+    ) -> Result<schema::LoadSessionResponse, acp::Error> {
         let _ = self.state.session_state(&arguments.session_id.to_string());
-        Ok(acp::LoadSessionResponse::new())
+        Ok(schema::LoadSessionResponse::new())
     }
 
-    async fn prompt(
+    async fn prompt<N, P>(
         &self,
-        arguments: acp::PromptRequest,
-    ) -> Result<acp::PromptResponse, acp::Error> {
+        arguments: schema::PromptRequest,
+        notifier: &N,
+        requester: &P,
+    ) -> Result<schema::PromptResponse, acp::Error>
+    where
+        N: SessionUpdateNotifier + Sync,
+        P: PermissionRequester + Sync,
+    {
         let prompt = prompt_text(&arguments.prompt);
         let session_id = arguments.session_id.to_string();
         let session_state = self.state.session_state(&session_id);
         let (mut cancel_rx, cancel_generation) = session_state.subscribe_cancel();
 
         if prompt_requires_permission(&prompt) {
-            match self.request_permission(session_id.clone()).await?.outcome {
-                acp::RequestPermissionOutcome::Cancelled => {
-                    return Ok(acp::PromptResponse::new(acp::StopReason::Cancelled));
+            match requester
+                .request_permission(permission_request(
+                    session_id.clone(),
+                    self.state.next_tool_call_id(),
+                ))
+                .await?
+                .outcome
+            {
+                schema::RequestPermissionOutcome::Cancelled => {
+                    return Ok(schema::PromptResponse::new(schema::StopReason::Cancelled));
                 }
-                acp::RequestPermissionOutcome::Selected(selected)
+                schema::RequestPermissionOutcome::Selected(selected)
                     if selected.option_id.to_string() == "reject_once" =>
                 {
-                    return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+                    return Ok(schema::PromptResponse::new(schema::StopReason::EndTurn));
                 }
-                acp::RequestPermissionOutcome::Selected(_) => {}
-                _ => return Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
+                schema::RequestPermissionOutcome::Selected(_) => {}
+                _ => return Ok(schema::PromptResponse::new(schema::StopReason::Cancelled)),
             }
         }
 
@@ -280,14 +261,21 @@ impl acp::Agent for MockAgent {
         )
         .await
         {
-            return Ok(acp::PromptResponse::new(acp::StopReason::Cancelled));
+            return Ok(schema::PromptResponse::new(schema::StopReason::Cancelled));
         }
 
-        self.send_reply(session_id, reply_for(&prompt)).await?;
-        Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+        notifier
+            .send_session_update(schema::SessionNotification::new(
+                session_id,
+                schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                    reply_for(&prompt).into(),
+                )),
+            ))
+            .await?;
+        Ok(schema::PromptResponse::new(schema::StopReason::EndTurn))
     }
 
-    async fn cancel(&self, args: acp::CancelNotification) -> Result<(), acp::Error> {
+    async fn cancel(&self, args: schema::CancelNotification) -> Result<(), acp::Error> {
         self.state
             .session_state(&args.session_id.to_string())
             .cancel();
@@ -296,29 +284,46 @@ impl acp::Agent for MockAgent {
 
     async fn set_session_mode(
         &self,
-        _args: acp::SetSessionModeRequest,
-    ) -> Result<acp::SetSessionModeResponse, acp::Error> {
-        Ok(acp::SetSessionModeResponse::default())
+        _args: schema::SetSessionModeRequest,
+    ) -> Result<schema::SetSessionModeResponse, acp::Error> {
+        Ok(schema::SetSessionModeResponse::default())
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl SessionUpdateNotifier for acp::AgentSideConnection {
-    async fn send_session_update(
-        &self,
-        notification: acp::SessionNotification,
-    ) -> Result<(), acp::Error> {
-        self.session_notification(notification).await
-    }
+fn permission_request(
+    session_id: String,
+    tool_call_id: String,
+) -> schema::RequestPermissionRequest {
+    schema::RequestPermissionRequest::new(
+        session_id,
+        schema::ToolCallUpdate::new(
+            tool_call_id,
+            schema::ToolCallUpdateFields::new().title("read_text_file README.md"),
+        ),
+        vec![
+            schema::PermissionOption::new(
+                "allow_once",
+                "Allow once",
+                schema::PermissionOptionKind::AllowOnce,
+            ),
+            schema::PermissionOption::new(
+                "reject_once",
+                "Reject once",
+                schema::PermissionOptionKind::RejectOnce,
+            ),
+        ],
+    )
 }
 
-#[async_trait::async_trait(?Send)]
-impl PermissionRequester for acp::AgentSideConnection {
-    async fn request_permission(
-        &self,
-        request: acp::RequestPermissionRequest,
-    ) -> Result<acp::RequestPermissionResponse, acp::Error> {
-        acp::Client::request_permission(self, request).await
+fn startup_hint_message() -> String {
+    format!(
+        "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
+    )
+}
+
+fn log_connection_result(result: Result<(), acp::Error>) {
+    if let Err(error) = result {
+        error!("mock ACP connection failed: {error}");
     }
 }
 
@@ -333,26 +338,21 @@ where
     let address = listener.local_addr()?;
     info!("starting acp mock on {address}");
 
-    let state = Rc::new(MockServerState::new(config));
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-        .run_until(async move {
-            tokio::pin!(shutdown);
+    let state = Arc::new(MockServerState::new(config));
+    tokio::pin!(shutdown);
 
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown => return Ok(()),
-                    accepted = listener.accept() => {
-                        let (stream, _) = accepted?;
-                        let state = state.clone();
-                        tokio::task::spawn_local(async move {
-                            log_connection_result(handle_connection(stream, state).await);
-                        });
-                    }
-                }
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let state = state.clone();
+                tokio::spawn(async move {
+                    log_connection_result(handle_connection(stream, state).await);
+                });
             }
-        })
-        .await
+        }
+    }
 }
 
 pub fn spawn_with_shutdown_task<F>(
@@ -373,29 +373,83 @@ where
 
 async fn handle_connection(
     stream: TcpStream,
-    state: Rc<MockServerState>,
+    state: Arc<MockServerState>,
 ) -> Result<(), acp::Error> {
     let (reader, writer) = stream.into_split();
-    let (session_update_tx, session_update_rx) = mpsc::unbounded_channel();
-    let (permission_request_tx, permission_request_rx) = mpsc::unbounded_channel();
-    let (conn, handle_io) = acp::AgentSideConnection::new(
-        MockAgent::new(state, session_update_tx, permission_request_tx),
-        writer.compat_write(),
-        reader.compat(),
-        |future| {
-            tokio::task::spawn_local(future);
-        },
-    );
-    let conn = Rc::new(conn);
-    let session_updates_conn = conn.clone();
-    let permission_requests_conn = conn.clone();
+    let agent = MockAgent::new(state);
 
-    tokio::task::spawn_local(async move {
-        drain_session_updates(&*session_updates_conn, session_update_rx).await;
-    });
-    tokio::task::spawn_local(async move {
-        drain_permission_requests(&*permission_requests_conn, permission_request_rx).await;
-    });
-
-    handle_io.await
+    acp::Agent
+        .builder()
+        .name("acp-mock")
+        .on_receive_request(
+            {
+                let agent = agent.clone();
+                async move |args: schema::InitializeRequest, responder, _cx| {
+                    responder.respond_with_result(agent.initialize(args).await)
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let agent = agent.clone();
+                async move |args: schema::AuthenticateRequest, responder, _cx| {
+                    responder.respond_with_result(agent.authenticate(args).await)
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let agent = agent.clone();
+                async move |args: schema::NewSessionRequest, responder, cx| {
+                    let adapter = ConnectionClientAdapter::new(cx);
+                    responder.respond_with_result(agent.new_session(args, &adapter).await)
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let agent = agent.clone();
+                async move |args: schema::LoadSessionRequest, responder, _cx| {
+                    responder.respond_with_result(agent.load_session(args).await)
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let agent = agent.clone();
+                async move |args: schema::PromptRequest, responder, cx| {
+                    let agent = agent.clone();
+                    let adapter = ConnectionClientAdapter::new(cx.clone());
+                    cx.spawn(async move {
+                        let result = agent.prompt(args, &adapter, &adapter).await;
+                        responder.respond_with_result(result)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let agent = agent.clone();
+                async move |args: schema::SetSessionModeRequest, responder, _cx| {
+                    responder.respond_with_result(agent.set_session_mode(args).await)
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |args: schema::CancelNotification, _cx| agent.cancel(args).await,
+            acp::on_receive_notification!(),
+        )
+        .connect_to(acp::ByteStreams::new(
+            writer.compat_write(),
+            reader.compat(),
+        ))
+        .await
 }

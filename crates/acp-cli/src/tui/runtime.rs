@@ -1,11 +1,6 @@
-use std::{io, time::Duration};
+use std::io;
 
-use acp_contracts::{CompletionCandidate, MessageRole};
-use crossterm::{
-    event::{self, Event},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use acp_contracts::CompletionCandidate;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use reqwest::Client;
 use snafu::ResultExt;
@@ -17,12 +12,14 @@ use super::{
     input::{UiContext, handle_terminal_event as handle_input_event},
     render,
 };
-use crate::{
-    ChatSession, DrawTerminalUiSnafu, PollTerminalInputSnafu, ReadTerminalInputSnafu, Result,
-    SetupTerminalUiSnafu,
-};
+use crate::{ChatSession, DrawTerminalUiSnafu, Result};
 
-const UI_POLL_INTERVAL: Duration = Duration::from_millis(50);
+mod permissions;
+mod terminal;
+
+use permissions::{PendingPermissionRefreshState, drain_events, launch_pending_permission_refresh};
+use terminal::read_terminal_event;
+pub(crate) use terminal::run_terminal_ui;
 
 pub(super) struct UiRunState {
     client: Client,
@@ -61,66 +58,6 @@ impl UiRunState {
             event_rx: events.rx,
         }
     }
-}
-
-#[derive(Default)]
-struct PendingPermissionRefreshState {
-    in_flight: bool,
-    queued: bool,
-}
-
-#[derive(Default)]
-struct TerminalSetupGuard {
-    raw_mode_enabled: bool,
-    alternate_screen_enabled: bool,
-}
-
-impl Drop for TerminalSetupGuard {
-    fn drop(&mut self) {
-        if self.raw_mode_enabled {
-            let _ = disable_raw_mode();
-        }
-        if self.alternate_screen_enabled {
-            let mut stdout = io::stdout();
-            let _ = execute!(stdout, LeaveAlternateScreen);
-        }
-    }
-}
-
-pub(super) fn run_terminal_ui(runtime_handle: Handle, state: UiRunState) -> Result<()> {
-    let (mut terminal, mut setup_guard) = setup_terminal()?;
-    let result = event_loop(&mut terminal, runtime_handle, state);
-    let cleanup_result = restore_terminal(&mut terminal, &mut setup_guard);
-    cleanup_result?;
-    result
-}
-
-fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, TerminalSetupGuard)> {
-    let mut guard = TerminalSetupGuard::default();
-    enable_raw_mode().context(SetupTerminalUiSnafu)?;
-    guard.raw_mode_enabled = true;
-
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context(SetupTerminalUiSnafu)?;
-    guard.alternate_screen_enabled = true;
-
-    let terminal = Terminal::new(CrosstermBackend::new(stdout)).context(SetupTerminalUiSnafu)?;
-    Ok((terminal, guard))
-}
-
-fn restore_terminal(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    guard: &mut TerminalSetupGuard,
-) -> Result<()> {
-    if guard.raw_mode_enabled {
-        disable_raw_mode().context(SetupTerminalUiSnafu)?;
-        guard.raw_mode_enabled = false;
-    }
-    if guard.alternate_screen_enabled {
-        execute!(terminal.backend_mut(), LeaveAlternateScreen).context(SetupTerminalUiSnafu)?;
-        guard.alternate_screen_enabled = false;
-    }
-    terminal.show_cursor().context(SetupTerminalUiSnafu)
 }
 
 fn event_loop(
@@ -208,86 +145,6 @@ fn draw_app(
         .draw(|frame| render::render(frame, app))
         .context(DrawTerminalUiSnafu)?;
     Ok(())
-}
-
-fn read_terminal_event() -> Result<Option<Event>> {
-    if !event::poll(UI_POLL_INTERVAL).context(PollTerminalInputSnafu)? {
-        return Ok(None);
-    }
-    event::read().context(ReadTerminalInputSnafu).map(Some)
-}
-
-fn drain_events(
-    event_rx: &mut mpsc::UnboundedReceiver<TuiEvent>,
-    app: &mut ChatApp,
-    refresh_state: &mut PendingPermissionRefreshState,
-) {
-    let mut queue_pending_permission_refresh = false;
-    loop {
-        match event_rx.try_recv() {
-            Ok(TuiEvent::Stream(update)) => {
-                queue_pending_permission_refresh |=
-                    should_refresh_pending_permissions(app, &update);
-                app.apply_stream_update(update);
-            }
-            Ok(TuiEvent::StreamEnded(message)) => app.set_connection_lost(message),
-            Ok(TuiEvent::PendingPermissionsRefreshed(result)) => {
-                refresh_state.in_flight = false;
-                match result {
-                    Ok(pending_permissions) => app.replace_pending_permissions(pending_permissions),
-                    Err(error) => app.push_status(error),
-                }
-            }
-            Err(mpsc::error::TryRecvError::Empty)
-            | Err(mpsc::error::TryRecvError::Disconnected) => {
-                if queue_pending_permission_refresh {
-                    refresh_state.queued = true;
-                }
-                return;
-            }
-        }
-    }
-}
-
-fn should_refresh_pending_permissions(app: &ChatApp, update: &crate::events::StreamUpdate) -> bool {
-    if app.pending_permissions().is_empty() {
-        return false;
-    }
-
-    match update {
-        crate::events::StreamUpdate::Status(_)
-        | crate::events::StreamUpdate::SessionClosed { .. } => true,
-        crate::events::StreamUpdate::ConversationMessage(message) => {
-            matches!(message.role, MessageRole::Assistant)
-        }
-        crate::events::StreamUpdate::PermissionRequested(_) => false,
-    }
-}
-
-fn launch_pending_permission_refresh(
-    context: &UiContext<'_>,
-    event_tx: &mpsc::UnboundedSender<TuiEvent>,
-    refresh_state: &mut PendingPermissionRefreshState,
-) {
-    if refresh_state.in_flight || !refresh_state.queued {
-        return;
-    }
-
-    refresh_state.in_flight = true;
-    refresh_state.queued = false;
-
-    let client = context.client.clone();
-    let server_url = context.server_url.to_string();
-    let auth_token = context.auth_token.to_string();
-    let session_id = context.session_id.to_string();
-    let event_tx = event_tx.clone();
-    context.runtime_handle.spawn(async move {
-        let result = crate::api::get_session(&client, &server_url, &auth_token, &session_id)
-            .await
-            .map(|session| session.pending_permissions)
-            .map_err(|error| error.to_string());
-        let _ = event_tx.send(TuiEvent::PendingPermissionsRefreshed(result));
-    });
 }
 
 #[cfg(test)]

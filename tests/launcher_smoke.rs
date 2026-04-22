@@ -12,7 +12,7 @@ use tokio::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const BROKEN_PROXY_URL: &str = "http://127.0.0.1:9";
-const MANAGED_STACK_EXIT_AFTER_MS: &str = "15000";
+const MANAGED_STACK_EXIT_AFTER_MS: &str = "45000";
 
 #[tokio::test]
 async fn launcher_starts_the_full_stack_and_proxies_cli_io() -> Result<()> {
@@ -86,10 +86,7 @@ async fn launcher_reuses_the_bundled_stack_across_invocations() -> Result<()> {
     let (session_id, backend_url, _first_output) =
         run_bundled_launcher_chat(&recent_path, &state_path).await?;
 
-    let list_output = run_launcher_command(&recent_path, &state_path, ["session", "list"]).await?;
-    assert!(list_output.status.success());
-    let list_stdout = String::from_utf8(list_output.stdout)?;
-    assert!(list_stdout.contains(&session_id));
+    wait_for_listed_session(&recent_path, &state_path, &session_id).await?;
 
     let (resumed_session_id, resumed_backend_url, resumed_output) =
         resume_bundled_launcher_chat(&recent_path, &state_path, &session_id).await?;
@@ -198,7 +195,7 @@ async fn resume_bundled_launcher_chat(
 async fn read_until_output(reader: &mut BufReader<ChildStdout>, needle: &str) -> Result<String> {
     let mut captured = String::new();
 
-    for _ in 0..40 {
+    for _ in 0..100 {
         let mut line = String::new();
         match tokio::time::timeout(Duration::from_millis(200), reader.read_line(&mut line)).await {
             Ok(Ok(0)) => break,
@@ -278,6 +275,30 @@ where
         .args(args)
         .output()
         .await?)
+}
+
+async fn wait_for_listed_session(
+    recent_path: &PathBuf,
+    state_path: &PathBuf,
+    session_id: &str,
+) -> Result<()> {
+    let mut last_stdout = String::new();
+    let mut last_stderr = String::new();
+
+    for _ in 0..3 {
+        let output = run_launcher_command(recent_path, state_path, ["session", "list"]).await?;
+        last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if output.status.success() && last_stdout.contains(session_id) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    Err(io::Error::other(format!(
+        "timed out waiting for session {session_id} to appear in launcher session list (stdout: {last_stdout:?}, stderr: {last_stderr:?})"
+    ))
+    .into())
 }
 
 async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {

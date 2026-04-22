@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use agent_client_protocol::{self as acp, Agent as _};
+use agent_client_protocol::{self as acp, schema};
 use snafu::prelude::*;
 use tokio::net::TcpStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -28,7 +28,6 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionLock = Arc<tokio::sync::Mutex<()>>;
 type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
-type IoTask = tokio::task::JoinHandle<acp::Result<()>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyResult {
@@ -73,14 +72,14 @@ pub enum MockClientError {
     #[snafu(display("creating an ACP session failed"))]
     CreateSession { source: acp::Error },
 
-    #[snafu(display("loading an ACP session failed"))]
-    LoadSession { source: acp::Error },
-
     #[snafu(display("sending the ACP prompt failed"))]
     SendPrompt { source: acp::Error },
 
     #[snafu(display("sending the ACP cancel notification failed"))]
     SendCancel { source: acp::Error },
+
+    #[snafu(display("driving the ACP connection failed"))]
+    ConnectionClosed { source: acp::Error },
 
     #[snafu(display("building the ACP runtime failed"))]
     BuildRuntime { source: std::io::Error },
@@ -99,13 +98,6 @@ pub enum MockClientError {
 
     #[snafu(display("the agent requested permission options the CLI cannot represent safely"))]
     UnsupportedPermissionOptions,
-}
-
-struct PreparedConnection {
-    conn: acp::ClientSideConnection,
-    client: BackendAcpClient,
-    session_id: String,
-    io_task: Option<IoTask>,
 }
 
 impl MockClient {
@@ -253,16 +245,25 @@ async fn drive_acp_roundtrip(
         backend_session_id,
         upstream_sessions,
         client,
-        move |stream, working_dir, backend_session_id, client, upstream_sessions| async move {
+        move |conn, working_dir, backend_session_id, client, upstream_sessions| async move {
             let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
-            run_roundtrip_on_connection(
-                stream,
-                working_dir,
-                turn,
-                backend_session_id,
+            let session_id = load_or_create_session(
+                &conn,
+                &working_dir,
+                &backend_session_id,
+                &upstream_sessions,
+            )
+            .await?;
+            if *cancel_rx.borrow() {
+                return Ok(ReplyResult::Status("turn cancelled".to_string()));
+            }
+
+            prompt_session(
+                &conn,
+                &client,
                 &mut cancel_rx,
-                client,
-                upstream_sessions,
+                session_id,
+                turn.prompt_text(),
             )
             .await
         },
@@ -282,15 +283,17 @@ async fn drive_acp_session_prime(
         backend_session_id,
         upstream_sessions,
         BackendAcpClient::without_turn(),
-        move |stream, working_dir, backend_session_id, client, upstream_sessions| async move {
-            prime_session_on_connection(
-                stream,
-                working_dir,
-                backend_session_id,
-                client,
-                upstream_sessions,
+        move |conn, working_dir, backend_session_id, client, upstream_sessions| async move {
+            let session_id = load_or_create_session(
+                &conn,
+                &working_dir,
+                &backend_session_id,
+                &upstream_sessions,
             )
-            .await
+            .await?;
+            let _ = session_id;
+            let reply = client.take_reply_text();
+            Ok((!reply.is_empty()).then_some(reply))
         },
     )
     .await
@@ -304,91 +307,39 @@ async fn connect_stream(mock_address: &str) -> Result<TcpStream> {
         })
 }
 
-async fn run_roundtrip_on_connection(
-    stream: TcpStream,
-    working_dir: PathBuf,
-    turn: TurnHandle,
-    backend_session_id: String,
-    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
-    client: BackendAcpClient,
-    upstream_sessions: UpstreamSessions,
-) -> Result<ReplyResult> {
-    let mut prepared = prepare_connection(
-        stream,
-        working_dir,
-        backend_session_id,
-        client,
-        upstream_sessions,
-    )
-    .await?;
-    if let Some(reply) = cancelled_before_prompt_reply(cancel_rx, &mut prepared.io_task).await {
-        return Ok(reply);
-    }
-
-    let reply = prompt_session(
-        &prepared.conn,
-        &prepared.client,
-        cancel_rx,
-        prepared.session_id.clone(),
-        turn.prompt_text(),
-    )
-    .await;
-    stop_io_task(prepared.io_task).await;
-    reply
-}
-
-async fn prime_session_on_connection(
-    stream: TcpStream,
-    working_dir: PathBuf,
-    backend_session_id: String,
-    client: BackendAcpClient,
-    upstream_sessions: UpstreamSessions,
-) -> Result<Option<String>> {
-    let prepared = prepare_connection(
-        stream,
-        working_dir,
-        backend_session_id,
-        client,
-        upstream_sessions,
-    )
-    .await?;
-    let reply = prepared.client.take_reply_text();
-    stop_io_task(prepared.io_task).await;
-    Ok((!reply.is_empty()).then_some(reply))
-}
-
 async fn prompt_session(
-    conn: &acp::ClientSideConnection,
+    conn: &acp::ConnectionTo<acp::Agent>,
     client: &BackendAcpClient,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     session_id: String,
     prompt: &str,
 ) -> Result<ReplyResult> {
-    let prompt_future = conn.prompt(acp::PromptRequest::new(
-        session_id.clone(),
-        vec![prompt.to_string().into()],
-    ));
+    let prompt_future = conn
+        .send_request(schema::PromptRequest::new(
+            session_id.clone(),
+            vec![prompt.to_string().into()],
+        ))
+        .block_task();
     await_prompt_reply(
         prompt_future,
         cancel_rx,
-        acp::CancelNotification::new(session_id),
-        |cancel_request| conn.cancel(cancel_request),
+        schema::CancelNotification::new(session_id),
+        |cancel_request| conn.send_notification(cancel_request),
         client,
     )
     .await
 }
 
-async fn await_prompt_reply<PromptFut, CancelFn, CancelFut>(
+async fn await_prompt_reply<PromptFut, CancelFn>(
     prompt_future: PromptFut,
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
-    cancel_request: acp::CancelNotification,
+    cancel_request: schema::CancelNotification,
     send_cancel: CancelFn,
     client: &BackendAcpClient,
 ) -> Result<ReplyResult>
 where
-    PromptFut: Future<Output = acp::Result<acp::PromptResponse>>,
-    CancelFn: FnOnce(acp::CancelNotification) -> CancelFut,
-    CancelFut: Future<Output = acp::Result<(), acp::Error>>,
+    PromptFut: Future<Output = acp::Result<schema::PromptResponse>>,
+    CancelFn: FnOnce(schema::CancelNotification) -> Result<(), acp::Error>,
 {
     tokio::pin!(prompt_future);
     tokio::select! {
@@ -401,7 +352,7 @@ where
 }
 
 fn reply_from_prompt_response(
-    response: acp::Result<acp::PromptResponse>,
+    response: acp::Result<schema::PromptResponse>,
     client: &BackendAcpClient,
 ) -> Result<ReplyResult> {
     Ok(reply_from_stop_reason(
@@ -410,31 +361,24 @@ fn reply_from_prompt_response(
     ))
 }
 
-async fn handle_cancelled_prompt<PromptFut, CancelFn, CancelFut>(
+async fn handle_cancelled_prompt<PromptFut, CancelFn>(
     cancelled: bool,
     prompt_future: &mut Pin<&mut PromptFut>,
-    cancel_request: acp::CancelNotification,
+    cancel_request: schema::CancelNotification,
     send_cancel: CancelFn,
     client: &BackendAcpClient,
 ) -> Result<ReplyResult>
 where
-    PromptFut: Future<Output = acp::Result<acp::PromptResponse>>,
-    CancelFn: FnOnce(acp::CancelNotification) -> CancelFut,
-    CancelFut: Future<Output = acp::Result<(), acp::Error>>,
+    PromptFut: Future<Output = acp::Result<schema::PromptResponse>>,
+    CancelFn: FnOnce(schema::CancelNotification) -> Result<(), acp::Error>,
 {
     if cancelled {
-        send_cancel(cancel_request).await.context(SendCancelSnafu)?;
+        send_cancel(cancel_request).context(SendCancelSnafu)?;
         let _ = prompt_future.await;
         return Ok(ReplyResult::Status("turn cancelled".to_string()));
     }
 
     reply_from_prompt_response(prompt_future.await, client)
-}
-
-async fn stop_io_task<T>(io_task: Option<tokio::task::JoinHandle<T>>) {
-    let io_task = io_task.expect("io task should be available until prompt handling ends");
-    io_task.abort();
-    let _ = io_task.await;
 }
 
 fn drive_acp_roundtrip_blocking(
@@ -495,63 +439,74 @@ async fn drive_acp_operation<T, F, Fut>(
     operation: F,
 ) -> Result<T>
 where
-    F: FnOnce(TcpStream, PathBuf, String, BackendAcpClient, UpstreamSessions) -> Fut,
+    F: FnOnce(
+        acp::ConnectionTo<acp::Agent>,
+        PathBuf,
+        String,
+        BackendAcpClient,
+        UpstreamSessions,
+    ) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let stream = connect_stream(&mock_address).await?;
-    let local_set = tokio::task::LocalSet::new();
+    let (reader, writer) = stream.into_split();
+    let request_client = client.clone();
+    let notification_client = client.clone();
 
-    local_set
-        .run_until(operation(
-            stream,
-            working_dir,
-            backend_session_id,
-            client,
-            upstream_sessions,
-        ))
+    acp::Client
+        .builder()
+        .name("acp-web-backend-mock-client")
+        .on_receive_request(
+            async move |args: schema::RequestPermissionRequest, responder, cx| {
+                let client = request_client.clone();
+                cx.spawn(async move {
+                    let result = client.request_permission(args).await;
+                    responder.respond_with_result(result)?;
+                    Ok(())
+                })?;
+                Ok(())
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |args: schema::SessionNotification, _cx| {
+                notification_client.session_notification(args).await
+            },
+            acp::on_receive_notification!(),
+        )
+        .connect_with(
+            acp::ByteStreams::new(writer.compat_write(), reader.compat()),
+            async move |conn| {
+                Ok::<_, acp::Error>(match initialize_connection(&conn).await {
+                    Ok(()) => {
+                        operation(
+                            conn,
+                            working_dir,
+                            backend_session_id,
+                            client,
+                            upstream_sessions,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                })
+            },
+        )
         .await
+        .context(ConnectionClosedSnafu)?
 }
 
-async fn initialize_connection(conn: &acp::ClientSideConnection) -> Result<()> {
-    conn.initialize(
-        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-            acp::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
+async fn initialize_connection(conn: &acp::ConnectionTo<acp::Agent>) -> Result<()> {
+    conn.send_request(
+        schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_info(
+            schema::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
                 .title("ACP Web Backend"),
         ),
     )
+    .block_task()
     .await
     .context(InitializeSnafu)?;
     Ok(())
-}
-
-async fn prepare_connection(
-    stream: TcpStream,
-    working_dir: PathBuf,
-    backend_session_id: String,
-    client: BackendAcpClient,
-    upstream_sessions: UpstreamSessions,
-) -> Result<PreparedConnection> {
-    let (reader, writer) = stream.into_split();
-    let (conn, handle_io) = acp::ClientSideConnection::new(
-        client.clone(),
-        writer.compat_write(),
-        reader.compat(),
-        |future| {
-            tokio::task::spawn_local(future);
-        },
-    );
-    let io_task = Some(tokio::task::spawn_local(handle_io));
-    initialize_connection(&conn).await?;
-    let session_id =
-        load_or_create_session(&conn, &working_dir, &backend_session_id, &upstream_sessions)
-            .await?;
-
-    Ok(PreparedConnection {
-        conn,
-        client,
-        session_id,
-        io_task,
-    })
 }
 
 fn session_runtime_error(source: crate::sessions::SessionStoreError) -> MockClientError {
@@ -561,7 +516,7 @@ fn session_runtime_error(source: crate::sessions::SessionStoreError) -> MockClie
 }
 
 async fn load_or_create_session(
-    conn: &acp::ClientSideConnection,
+    conn: &acp::ConnectionTo<acp::Agent>,
     working_dir: &Path,
     backend_session_id: &str,
     upstream_sessions: &UpstreamSessions,
@@ -572,10 +527,11 @@ async fn load_or_create_session(
         .get(backend_session_id)
         .cloned();
     let load_succeeded = if let Some(session_id) = cached_session_id.as_ref() {
-        conn.load_session(acp::LoadSessionRequest::new(
+        conn.send_request(schema::LoadSessionRequest::new(
             session_id.clone(),
             working_dir.to_path_buf(),
         ))
+        .block_task()
         .await
         .is_ok()
     } else {
@@ -593,7 +549,8 @@ async fn load_or_create_session(
     drop(cached_sessions);
 
     let session = conn
-        .new_session(acp::NewSessionRequest::new(working_dir.to_path_buf()))
+        .send_request(schema::NewSessionRequest::new(working_dir.to_path_buf()))
+        .block_task()
         .await
         .context(CreateSessionSnafu)?;
     let session_id = session.session_id.to_string();
@@ -604,32 +561,12 @@ async fn load_or_create_session(
     Ok(session_id)
 }
 
-fn reply_from_stop_reason(stop_reason: acp::StopReason, reply_text: String) -> ReplyResult {
+fn reply_from_stop_reason(stop_reason: schema::StopReason, reply_text: String) -> ReplyResult {
     match stop_reason {
-        acp::StopReason::Cancelled => ReplyResult::Status("turn cancelled".to_string()),
+        schema::StopReason::Cancelled => ReplyResult::Status("turn cancelled".to_string()),
         _ if reply_text.is_empty() => ReplyResult::NoOutput,
         _ => ReplyResult::Reply(reply_text),
     }
-}
-
-async fn cancelled_before_prompt<T>(io_task: tokio::task::JoinHandle<T>) -> ReplyResult {
-    io_task.abort();
-    let _ = io_task.await;
-    ReplyResult::Status("turn cancelled".to_string())
-}
-
-async fn cancelled_before_prompt_reply<T>(
-    cancel_rx: &tokio::sync::watch::Receiver<bool>,
-    io_task: &mut Option<tokio::task::JoinHandle<T>>,
-) -> Option<ReplyResult> {
-    if !*cancel_rx.borrow() {
-        return None;
-    }
-
-    let io_task = io_task
-        .take()
-        .expect("io task should be available while checking cancellation");
-    Some(cancelled_before_prompt(io_task).await)
 }
 
 fn reuse_cached_session(

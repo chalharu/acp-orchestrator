@@ -67,8 +67,10 @@ jobs:
           mkdir -p coverage
           export RUSTFLAGS="${RUSTFLAGS-} -C link-arg=-fuse-ld=mold -C debuginfo=0"
           cargo llvm-cov --workspace -j1 --lcov --output-path coverage/lcov.info -- --test-threads=1
+          cargo llvm-cov --manifest-path crates/acp-web-frontend/Cargo.toml --lib --lcov --output-path coverage/frontend.lcov
           workspace_root="${PWD%/}/"
           sed -i "s#^SF:${workspace_root}#SF:#" coverage/lcov.info
+          sed -i "s#^SF:${workspace_root}#SF:#" coverage/frontend.lcov
       - name: Run SonarCloud scan
         uses: SonarSource/sonarqube-scan-action@299e4b793aaa83bf2aba7c9c14bedbb485688ec4 # v7.1.0
         env:

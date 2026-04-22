@@ -343,6 +343,37 @@ fn print_chat_status_handles_pending_permissions() {
     print_chat_status(&chat_session, true);
 }
 
+#[test]
+fn cli_helpers_cover_missing_urls_closed_sessions_and_not_found_errors() {
+    let closed_session = ChatSession {
+        session: SessionSnapshot {
+            id: "s_closed".to_string(),
+            title: "New chat".to_string(),
+            status: acp_contracts::SessionStatus::Closed,
+            latest_sequence: 1,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+        },
+        resume_history: Vec::new(),
+        resumed: true,
+    };
+
+    assert!(closed_session.is_read_only());
+    assert_eq!(
+        session_status_label(&acp_contracts::SessionStatus::Closed),
+        "closed"
+    );
+    assert!(matches!(
+        require_server_url("chat", None),
+        Err(CliError::MissingServerUrl { command }) if command == "chat"
+    ));
+    assert!(is_session_not_found(&CliError::HttpStatus {
+        action: "load session",
+        status: StatusCode::NOT_FOUND,
+        message: "session not found".to_string(),
+    }));
+}
+
 async fn spawn_raw_http_server(response: &'static str) -> String {
     spawn_raw_http_server_bytes(response.as_bytes().to_vec()).await
 }

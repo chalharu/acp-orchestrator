@@ -2,45 +2,50 @@ use super::{
     InvalidPermissionOptionsSnafu, MockClientError, Result, UnsupportedPermissionOptionsSnafu,
 };
 use crate::sessions::{PermissionResolutionOutcome, TurnHandle};
-use agent_client_protocol as acp;
-use std::{cell::RefCell, rc::Rc};
+use agent_client_protocol::{self as acp, schema};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub(super) struct BackendAcpClient {
     turn: Option<TurnHandle>,
-    collected: Rc<RefCell<String>>,
+    collected: Arc<Mutex<String>>,
 }
 
 impl BackendAcpClient {
     pub(super) fn new(turn: TurnHandle) -> Self {
         Self {
             turn: Some(turn),
-            collected: Rc::new(RefCell::new(String::new())),
+            collected: Arc::new(Mutex::new(String::new())),
         }
     }
 
     pub(super) fn without_turn() -> Self {
         Self {
             turn: None,
-            collected: Rc::new(RefCell::new(String::new())),
+            collected: Arc::new(Mutex::new(String::new())),
         }
     }
 
     pub(super) fn reply_text(&self) -> String {
-        self.collected.borrow().clone()
+        self.collected
+            .lock()
+            .expect("mock reply buffer mutex should not be poisoned")
+            .clone()
     }
 
     pub(super) fn take_reply_text(&self) -> String {
-        std::mem::take(&mut *self.collected.borrow_mut())
+        std::mem::take(
+            &mut *self
+                .collected
+                .lock()
+                .expect("mock reply buffer mutex should not be poisoned"),
+        )
     }
-}
 
-#[async_trait::async_trait(?Send)]
-impl acp::Client for BackendAcpClient {
-    async fn request_permission(
+    pub(super) async fn request_permission(
         &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
+        args: schema::RequestPermissionRequest,
+    ) -> acp::Result<schema::RequestPermissionResponse> {
         let turn = self.turn.clone().ok_or_else(acp::Error::internal_error)?;
         let (approve_option_id, deny_option_id) =
             permission_option_ids(&args).map_err(|_| acp::Error::invalid_params())?;
@@ -57,36 +62,37 @@ impl acp::Client for BackendAcpClient {
 
         match resolution.wait().await {
             PermissionResolutionOutcome::Selected(option_id) => Ok(
-                acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
-                    acp::SelectedPermissionOutcome::new(option_id),
+                schema::RequestPermissionResponse::new(schema::RequestPermissionOutcome::Selected(
+                    schema::SelectedPermissionOutcome::new(option_id),
                 )),
             ),
-            PermissionResolutionOutcome::Cancelled => Ok(acp::RequestPermissionResponse::new(
-                acp::RequestPermissionOutcome::Cancelled,
+            PermissionResolutionOutcome::Cancelled => Ok(schema::RequestPermissionResponse::new(
+                schema::RequestPermissionOutcome::Cancelled,
             )),
         }
     }
 
-    async fn session_notification(
+    pub(super) async fn session_notification(
         &self,
-        args: acp::SessionNotification,
-    ) -> acp::Result<(), acp::Error> {
-        if let acp::SessionUpdate::AgentMessageChunk(chunk) = args.update {
+        args: schema::SessionNotification,
+    ) -> acp::Result<()> {
+        if let schema::SessionUpdate::AgentMessageChunk(chunk) = args.update {
             self.collected
-                .borrow_mut()
+                .lock()
+                .expect("mock reply buffer mutex should not be poisoned")
                 .push_str(&content_text(chunk.content));
         }
         Ok(())
     }
 }
 
-pub(super) fn content_text(content: acp::ContentBlock) -> String {
+pub(super) fn content_text(content: schema::ContentBlock) -> String {
     match content {
-        acp::ContentBlock::Text(text) => text.text,
-        acp::ContentBlock::Image(_) => "<image>".to_string(),
-        acp::ContentBlock::Audio(_) => "<audio>".to_string(),
-        acp::ContentBlock::ResourceLink(link) => link.uri,
-        content => resource_placeholder(matches!(content, acp::ContentBlock::Resource(_))),
+        schema::ContentBlock::Text(text) => text.text,
+        schema::ContentBlock::Image(_) => "<image>".to_string(),
+        schema::ContentBlock::Audio(_) => "<audio>".to_string(),
+        schema::ContentBlock::ResourceLink(link) => link.uri,
+        content => resource_placeholder(matches!(content, schema::ContentBlock::Resource(_))),
     }
 }
 
@@ -95,19 +101,19 @@ fn resource_placeholder(is_resource: bool) -> String {
 }
 
 pub(super) fn permission_option_ids(
-    args: &acp::RequestPermissionRequest,
+    args: &schema::RequestPermissionRequest,
 ) -> Result<(String, String), MockClientError> {
     if args.options.iter().any(|option| {
         matches!(
             option.kind,
-            acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::RejectAlways
+            schema::PermissionOptionKind::AllowAlways | schema::PermissionOptionKind::RejectAlways
         )
     }) {
         return UnsupportedPermissionOptionsSnafu.fail();
     }
 
-    let approve_option_id = unique_option_id(args, acp::PermissionOptionKind::AllowOnce)?;
-    let deny_option_id = unique_option_id(args, acp::PermissionOptionKind::RejectOnce)?;
+    let approve_option_id = unique_option_id(args, schema::PermissionOptionKind::AllowOnce)?;
+    let deny_option_id = unique_option_id(args, schema::PermissionOptionKind::RejectOnce)?;
 
     match (approve_option_id, deny_option_id) {
         (Some(approve_option_id), Some(deny_option_id)) => Ok((approve_option_id, deny_option_id)),
@@ -116,8 +122,8 @@ pub(super) fn permission_option_ids(
 }
 
 fn unique_option_id(
-    args: &acp::RequestPermissionRequest,
-    kind: acp::PermissionOptionKind,
+    args: &schema::RequestPermissionRequest,
+    kind: schema::PermissionOptionKind,
 ) -> Result<Option<String>, MockClientError> {
     let mut matches = args
         .options

@@ -227,3 +227,105 @@ fn initial_snapshot_delta_updates(
     }
     updates
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn created_at() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp should be valid")
+    }
+
+    fn assistant_message(id: &str, text: &str) -> ConversationMessage {
+        ConversationMessage {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            text: text.to_string(),
+            created_at: created_at(),
+        }
+    }
+
+    #[test]
+    fn permission_decision_labels_cover_both_outcomes() {
+        assert_eq!(
+            permission_decision_label(&PermissionDecision::Approve),
+            "approved"
+        );
+        assert_eq!(
+            permission_decision_label(&PermissionDecision::Deny),
+            "denied"
+        );
+    }
+
+    #[test]
+    fn render_resume_state_handles_empty_sessions() {
+        render_resume_state(&[], &[]);
+    }
+
+    #[test]
+    fn stream_event_updates_replay_full_snapshots_without_a_baseline() {
+        let snapshot = SessionSnapshot {
+            id: "s_test".to_string(),
+            title: "New chat".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 1,
+            messages: vec![assistant_message("m_1", "hello")],
+            pending_permissions: vec![PermissionRequest {
+                request_id: "req_1".to_string(),
+                summary: "read_text_file README.md".to_string(),
+            }],
+        };
+
+        let updates = stream_event_updates(StreamEvent::snapshot(snapshot.clone()), &mut None);
+
+        assert_eq!(
+            updates,
+            vec![
+                StreamUpdate::ConversationMessage(snapshot.messages[0].clone()),
+                StreamUpdate::PermissionRequested(snapshot.pending_permissions[0].clone()),
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_snapshot_delta_updates_skip_already_rendered_entries() {
+        let session = SessionSnapshot {
+            id: "s_test".to_string(),
+            title: "New chat".to_string(),
+            status: acp_contracts::SessionStatus::Active,
+            latest_sequence: 2,
+            messages: vec![
+                assistant_message("m_known", "known"),
+                assistant_message("m_new", "new"),
+            ],
+            pending_permissions: vec![
+                PermissionRequest {
+                    request_id: "req_known".to_string(),
+                    summary: "known".to_string(),
+                },
+                PermissionRequest {
+                    request_id: "req_new".to_string(),
+                    summary: "new".to_string(),
+                },
+            ],
+        };
+        let known_snapshot_state = InitialSnapshotState::from_messages_and_permissions(
+            &[assistant_message("m_known", "known")],
+            &[PermissionRequest {
+                request_id: "req_known".to_string(),
+                summary: "known".to_string(),
+            }],
+        );
+
+        assert_eq!(
+            initial_snapshot_delta_updates(&session, &known_snapshot_state),
+            vec![
+                StreamUpdate::ConversationMessage(session.messages[1].clone()),
+                StreamUpdate::PermissionRequested(session.pending_permissions[1].clone()),
+            ]
+        );
+    }
+}

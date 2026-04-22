@@ -473,4 +473,27 @@ mod tests {
         assert!(classify_slash_completion_prefix("/home/alice").is_none());
         assert!(classify_slash_completion_prefix("/quit now").is_none());
     }
+
+    #[test]
+    fn session_snapshots_deserialize_default_titles_and_empty_permissions() {
+        let snapshot: SessionSnapshot = serde_json::from_value(serde_json::json!({
+            "id": "s_test",
+            "status": "active",
+            "latest_sequence": 1,
+            "messages": [],
+        }))
+        .expect("session snapshots should deserialize");
+
+        assert_eq!(snapshot.title, "New chat");
+        assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn slash_command_specs_cover_labels_and_request_id_requirements() {
+        assert_eq!(SlashCommand::Approve.spec().label, "/approve <request-id>");
+        assert_eq!(SlashCommand::Deny.spec().insert_text, "/deny ");
+        assert!(SlashCommand::Approve.takes_request_id());
+        assert!(!SlashCommand::Help.takes_request_id());
+        assert_eq!(parse_slash_command("/cancel"), Some(SlashCommand::Cancel));
+    }
 }

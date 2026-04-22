@@ -74,6 +74,23 @@ fn frontend_bundle_helpers_find_matching_files() {
     std::fs::remove_dir_all(&dist).expect("temp dist directory should be removable");
 }
 
+#[test]
+fn frontend_bundle_helpers_report_missing_assets_and_directories() {
+    let dist = unique_temp_json_path("acp-frontend-dist-missing", "support").with_extension("");
+    std::fs::create_dir_all(&dist).expect("frontend dist directory should be creatable");
+
+    assert!(!frontend_bundle_exists(
+        &dist,
+        FrontendBundleAsset::JavaScript
+    ));
+    let error = find_frontend_bundle_asset(&dist, FrontendBundleAsset::Wasm)
+        .expect_err("missing bundles should fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(error.to_string().contains("frontend wasm bundle"));
+
+    std::fs::remove_dir_all(&dist).expect("temp dist directory should be removable");
+}
+
 #[tokio::test]
 async fn shutdown_signal_resolves_when_a_deadline_is_set() {
     timeout(Duration::from_millis(100), shutdown_signal(Some(5)))

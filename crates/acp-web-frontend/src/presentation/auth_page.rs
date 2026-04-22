@@ -1,8 +1,10 @@
 use leptos::prelude::*;
 
 use crate::{
-    application::auth::home_route_target, components::ErrorBanner, domain::auth::HomeRouteTarget,
-    infrastructure::api, navigate_to,
+    application::auth::{HomeRouteTarget, home_route_target},
+    browser::navigate_to,
+    components::ErrorBanner,
+    infrastructure::api,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

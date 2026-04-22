@@ -115,13 +115,7 @@ pub(crate) fn parse_browser_slash_action(input: &str) -> Result<BrowserSlashActi
         return Err(unsupported_browser_slash_message(command));
     }
 
-    match command {
-        SlashCommand::Help => ensure_no_extra_slash_args(command, parts.next().is_some())
-            .map(|()| BrowserSlashAction::Help),
-        SlashCommand::Quit | SlashCommand::Cancel | SlashCommand::Approve | SlashCommand::Deny => {
-            Err(unsupported_browser_slash_message(command))
-        }
-    }
+    ensure_no_extra_slash_args(command, parts.next().is_some()).map(|()| BrowserSlashAction::Help)
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +194,7 @@ mod tests {
 
         let empty = local_slash_candidates("/z");
         assert!(empty.is_empty());
+        assert!(local_slash_candidates("/approve req_").is_empty());
     }
 
     #[test]
@@ -231,6 +226,10 @@ mod tests {
         assert_eq!(
             apply_slash_completion("/approve req_", &request_candidate).unwrap(),
             "/approve req_1"
+        );
+        assert_eq!(
+            apply_slash_completion("  /he", &local_browser_commands()[0]).unwrap(),
+            "  /help"
         );
     }
 
@@ -267,6 +266,12 @@ mod tests {
             &[partial_candidate],
             0
         ));
+        assert!(!slash_palette_should_apply_selected("/help", &[], 0));
+    }
+
+    #[test]
+    fn cycle_slash_selection_steps_backward_without_wrapping() {
+        assert_eq!(cycle_slash_selection(3, 2, false), 1);
     }
 
     #[test]
@@ -278,9 +283,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_browser_slash_action_rejects_extra_help_args_and_approve() {
+        assert_eq!(
+            parse_browser_slash_action("/help extra").unwrap_err(),
+            "Usage: /help"
+        );
+        assert_eq!(
+            parse_browser_slash_action("/approve req_1").unwrap_err(),
+            "Use the on-screen action buttons in the web UI."
+        );
+    }
+
+    #[test]
     fn parse_browser_slash_action_rejects_unknown_and_non_web_usage() {
         assert_eq!(
             parse_browser_slash_action("/unknown").unwrap_err(),
+            "Unknown slash command. Use `/help`."
+        );
+        assert_eq!(
+            parse_browser_slash_action("   ").unwrap_err(),
             "Unknown slash command. Use `/help`."
         );
         assert_eq!(
@@ -294,6 +315,15 @@ mod tests {
         assert_eq!(
             parse_browser_slash_action("/quit").unwrap_err(),
             "Use the session list to leave or delete chats in the web UI."
+        );
+    }
+
+    #[test]
+    fn browser_only_prefix_and_messages_cover_private_helpers() {
+        assert!(!browser_supports_slash_prefix("/approve req_"));
+        assert_eq!(
+            unsupported_browser_slash_message(SlashCommand::Help),
+            "Unknown slash command. Use `/help`."
         );
     }
 }

@@ -2,10 +2,10 @@
 
 use leptos::prelude::*;
 
-use crate::PendingPermission;
+use crate::domain::session::PendingPermission;
 
 #[component]
-pub fn ChatActivity(
+pub(crate) fn ChatActivity(
     #[prop(into)] items: Signal<Vec<PendingPermission>>,
     #[prop(into)] busy: Signal<bool>,
     on_approve: Callback<String>,

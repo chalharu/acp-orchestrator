@@ -364,6 +364,64 @@ fn record_session_bootstrap_failure(
     signals.turn_state.set(TurnState::Idle);
 }
 
+fn permission_resolution_turn_state(decision: &PermissionDecision) -> TurnState {
+    match decision {
+        PermissionDecision::Approve => TurnState::AwaitingReply,
+        PermissionDecision::Deny => TurnState::Idle,
+    }
+}
+
+fn permission_resolution_detail(request_id: &str, decision: &PermissionDecision) -> String {
+    format!(
+        "{} {}.",
+        request_id,
+        if *decision == PermissionDecision::Approve {
+            "approved"
+        } else {
+            "denied"
+        }
+    )
+}
+
+fn apply_permission_resolution_success(
+    request_id: &str,
+    decision: &PermissionDecision,
+    signals: SessionSignals,
+) {
+    signals.pending_permissions.update(|current_permissions| {
+        current_permissions
+            .retain(|current_permission| current_permission.request_id.as_str() != request_id);
+    });
+    signals
+        .turn_state
+        .set(permission_resolution_turn_state(decision));
+    push_tool_activity_entry(
+        signals,
+        next_tool_activity_id(signals, "permission"),
+        "Permission resolved",
+        permission_resolution_detail(request_id, decision),
+        Vec::new(),
+    );
+}
+
+async fn resolve_permission_action(
+    session_id: String,
+    request_id: String,
+    decision: PermissionDecision,
+    signals: SessionSignals,
+) {
+    match api::resolve_permission(&session_id, &request_id, decision.clone()).await {
+        Ok(_) => {
+            apply_permission_resolution_success(&request_id, &decision, signals);
+            refresh_session_list(signals).await;
+        }
+        Err(message) => {
+            signals.action_error.set(Some(message));
+        }
+    }
+    signals.pending_action_busy.set(false);
+}
+
 fn permission_resolution_callback(
     session_id: String,
     decision: PermissionDecision,
@@ -371,48 +429,12 @@ fn permission_resolution_callback(
 ) -> Callback<String> {
     Callback::new(move |request_id: String| {
         let session_id = session_id.clone();
-        let request_id_for_state = request_id.clone();
-        let request_id_for_api = request_id.clone();
         let decision = decision.clone();
-        let request_decision = decision.clone();
         signals.pending_action_busy.set(true);
         signals.action_error.set(None);
-        leptos::task::spawn_local(async move {
-            match api::resolve_permission(&session_id, &request_id_for_api, request_decision).await
-            {
-                Ok(_) => {
-                    signals.pending_permissions.update(|current_permissions| {
-                        current_permissions.retain(|current_permission| {
-                            current_permission.request_id.as_str() != request_id_for_state.as_str()
-                        });
-                    });
-                    signals.turn_state.set(match decision {
-                        PermissionDecision::Approve => TurnState::AwaitingReply,
-                        PermissionDecision::Deny => TurnState::Idle,
-                    });
-                    push_tool_activity_entry(
-                        signals,
-                        next_tool_activity_id(signals, "permission"),
-                        "Permission resolved",
-                        format!(
-                            "{} {}.",
-                            request_id_for_state,
-                            if decision == PermissionDecision::Approve {
-                                "approved"
-                            } else {
-                                "denied"
-                            }
-                        ),
-                        Vec::new(),
-                    );
-                    refresh_session_list(signals).await;
-                }
-                Err(message) => {
-                    signals.action_error.set(Some(message));
-                }
-            }
-            signals.pending_action_busy.set(false);
-        });
+        leptos::task::spawn_local(resolve_permission_action(
+            session_id, request_id, decision, signals,
+        ));
     })
 }
 

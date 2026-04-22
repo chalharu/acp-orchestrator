@@ -431,6 +431,26 @@ where
     .await
 }
 
+macro_rules! build_backend_mock_client {
+    ($request_client:expr, $notification_client:expr) => {
+        acp::Client
+            .builder()
+            .name("acp-web-backend-mock-client")
+            .on_receive_request(
+                async move |args: schema::RequestPermissionRequest, responder, cx| {
+                    respond_permission_request($request_client.clone(), args, responder, cx).await
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_notification(
+                async move |args: schema::SessionNotification, _cx| {
+                    forward_session_notification($notification_client.clone(), args).await
+                },
+                acp::on_receive_notification!(),
+            )
+    };
+}
+
 fn drive_acp_roundtrip_blocking(
     mock_address: String,
     working_dir: PathBuf,
@@ -503,21 +523,7 @@ where
     let request_client = client.clone();
     let notification_client = client.clone();
 
-    acp::Client
-        .builder()
-        .name("acp-web-backend-mock-client")
-        .on_receive_request(
-            async move |args: schema::RequestPermissionRequest, responder, cx| {
-                respond_permission_request(request_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_notification(
-            async move |args: schema::SessionNotification, _cx| {
-                forward_session_notification(notification_client.clone(), args).await
-            },
-            acp::on_receive_notification!(),
-        )
+    build_backend_mock_client!(request_client, notification_client)
         .connect_with(
             acp::ByteStreams::new(writer.compat_write(), reader.compat()),
             async move |conn| {

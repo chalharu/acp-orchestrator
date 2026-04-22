@@ -19,7 +19,23 @@ use crate::workspace_repository::WorkspaceRepository;
 
 mod ops;
 
-use self::ops::*;
+#[cfg(test)]
+use self::ops::{
+    BOOTSTRAP_WORKSPACE_NAME, LOCAL_ACCOUNT_PRINCIPAL_KIND, durable_local_account_subject,
+    durable_principal_subject, encode_password_salt, hash_password, map_account_write_error,
+    next_password_hash, parse_optional_timestamp_for_row, parse_timestamp, parse_timestamp_for_row,
+    timestamp, validate_password, validate_username, verify_password,
+};
+use self::ops::{
+    authenticate_browser_session, authenticate_browser_session_in_transaction,
+    authenticate_local_account_in_transaction, bind_browser_session_to_user,
+    bootstrap_workspace_in_transaction, build_session_metadata_record, database_error,
+    delete_local_account_in_transaction, ensure_parent_dir, initialize_schema,
+    insert_local_account, join_error, list_local_accounts, load_session_metadata_record,
+    local_account_count, local_account_from_user, materialize_bearer_user_in_transaction,
+    materialize_browser_session_user_in_transaction, open_immediate_transaction,
+    soft_delete_browser_session, update_local_account_in_transaction, upsert_session_metadata,
+};
 
 #[derive(Debug, Clone)]
 pub struct SqliteWorkspaceRepository {

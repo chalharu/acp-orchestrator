@@ -328,11 +328,12 @@ async fn resolve_home_session_id() -> Result<String, String> {
 fn apply_loaded_session(session: SessionSnapshot, signals: SessionSignals) {
     let bootstrap = session_bootstrap_from_snapshot(session);
     let turn_state_for_session = turn_state_for_snapshot(&bootstrap.pending_permissions);
-    let should_clear_prepared_session = matches!(bootstrap.session_status, SessionLifecycle::Closed)
-        || bootstrap
-            .entries
-            .iter()
-            .any(|entry| matches!(entry.role, EntryRole::User));
+    let should_clear_prepared_session =
+        matches!(bootstrap.session_status, SessionLifecycle::Closed)
+            || bootstrap
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.role, EntryRole::User));
 
     signals.entries.set(bootstrap.entries);
     signals
@@ -377,7 +378,8 @@ fn permission_resolution_callback(
         signals.pending_action_busy.set(true);
         signals.action_error.set(None);
         leptos::task::spawn_local(async move {
-            match api::resolve_permission(&session_id, &request_id_for_api, request_decision).await {
+            match api::resolve_permission(&session_id, &request_id_for_api, request_decision).await
+            {
                 Ok(_) => {
                     signals.pending_permissions.update(|current_permissions| {
                         current_permissions.retain(|current_permission| {

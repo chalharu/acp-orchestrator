@@ -381,6 +381,56 @@ where
     reply_from_prompt_response(prompt_future.await, client)
 }
 
+async fn respond_permission_request(
+    client: BackendAcpClient,
+    args: schema::RequestPermissionRequest,
+    responder: acp::Responder<schema::RequestPermissionResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.request_permission(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn forward_session_notification(
+    client: BackendAcpClient,
+    args: schema::SessionNotification,
+) -> std::result::Result<(), acp::Error> {
+    client.session_notification(args).await
+}
+
+async fn run_connected_operation<T, F, Fut>(
+    conn: acp::ConnectionTo<acp::Agent>,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    client: BackendAcpClient,
+    upstream_sessions: UpstreamSessions,
+    operation: F,
+) -> Result<T>
+where
+    F: FnOnce(
+        acp::ConnectionTo<acp::Agent>,
+        PathBuf,
+        String,
+        BackendAcpClient,
+        UpstreamSessions,
+    ) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    initialize_connection(&conn).await?;
+    operation(
+        conn,
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+    )
+    .await
+}
+
 fn drive_acp_roundtrip_blocking(
     mock_address: String,
     working_dir: PathBuf,
@@ -458,38 +508,30 @@ where
         .name("acp-web-backend-mock-client")
         .on_receive_request(
             async move |args: schema::RequestPermissionRequest, responder, cx| {
-                let client = request_client.clone();
-                cx.spawn(async move {
-                    let result = client.request_permission(args).await;
-                    responder.respond_with_result(result)?;
-                    Ok(())
-                })?;
-                Ok(())
+                respond_permission_request(request_client.clone(), args, responder, cx).await
             },
             acp::on_receive_request!(),
         )
         .on_receive_notification(
             async move |args: schema::SessionNotification, _cx| {
-                notification_client.session_notification(args).await
+                forward_session_notification(notification_client.clone(), args).await
             },
             acp::on_receive_notification!(),
         )
         .connect_with(
             acp::ByteStreams::new(writer.compat_write(), reader.compat()),
             async move |conn| {
-                Ok::<_, acp::Error>(match initialize_connection(&conn).await {
-                    Ok(()) => {
-                        operation(
-                            conn,
-                            working_dir,
-                            backend_session_id,
-                            client,
-                            upstream_sessions,
-                        )
-                        .await
-                    }
-                    Err(error) => Err(error),
-                })
+                Ok::<_, acp::Error>(
+                    run_connected_operation(
+                        conn,
+                        working_dir,
+                        backend_session_id,
+                        client,
+                        upstream_sessions,
+                        operation,
+                    )
+                    .await,
+                )
             },
         )
         .await

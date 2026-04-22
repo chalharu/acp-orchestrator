@@ -217,6 +217,43 @@ impl MockAgent {
         Ok(schema::LoadSessionResponse::new())
     }
 
+    async fn prompt_permission_response<P: PermissionRequester + Sync>(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        requester: &P,
+    ) -> Result<Option<schema::PromptResponse>, acp::Error> {
+        if !prompt_requires_permission(prompt) {
+            return Ok(None);
+        }
+
+        let outcome = requester
+            .request_permission(permission_request(
+                session_id.to_string(),
+                self.state.next_tool_call_id(),
+            ))
+            .await?
+            .outcome;
+        Ok(prompt_response_for_permission_outcome(outcome))
+    }
+
+    async fn send_prompt_reply<N: SessionUpdateNotifier + Sync>(
+        &self,
+        notifier: &N,
+        session_id: String,
+        prompt: &str,
+    ) -> Result<schema::PromptResponse, acp::Error> {
+        notifier
+            .send_session_update(schema::SessionNotification::new(
+                session_id,
+                schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                    reply_for(prompt).into(),
+                )),
+            ))
+            .await?;
+        Ok(end_turn_prompt_response())
+    }
+
     async fn prompt<N, P>(
         &self,
         arguments: schema::PromptRequest,
@@ -232,26 +269,11 @@ impl MockAgent {
         let session_state = self.state.session_state(&session_id);
         let (mut cancel_rx, cancel_generation) = session_state.subscribe_cancel();
 
-        if prompt_requires_permission(&prompt) {
-            match requester
-                .request_permission(permission_request(
-                    session_id.clone(),
-                    self.state.next_tool_call_id(),
-                ))
-                .await?
-                .outcome
-            {
-                schema::RequestPermissionOutcome::Cancelled => {
-                    return Ok(schema::PromptResponse::new(schema::StopReason::Cancelled));
-                }
-                schema::RequestPermissionOutcome::Selected(selected)
-                    if selected.option_id.to_string() == "reject_once" =>
-                {
-                    return Ok(schema::PromptResponse::new(schema::StopReason::EndTurn));
-                }
-                schema::RequestPermissionOutcome::Selected(_) => {}
-                _ => return Ok(schema::PromptResponse::new(schema::StopReason::Cancelled)),
-            }
+        if let Some(response) = self
+            .prompt_permission_response(&session_id, &prompt, requester)
+            .await?
+        {
+            return Ok(response);
         }
 
         if wait_for_cancel(
@@ -261,18 +283,10 @@ impl MockAgent {
         )
         .await
         {
-            return Ok(schema::PromptResponse::new(schema::StopReason::Cancelled));
+            return Ok(cancelled_prompt_response());
         }
 
-        notifier
-            .send_session_update(schema::SessionNotification::new(
-                session_id,
-                schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
-                    reply_for(&prompt).into(),
-                )),
-            ))
-            .await?;
-        Ok(schema::PromptResponse::new(schema::StopReason::EndTurn))
+        self.send_prompt_reply(notifier, session_id, &prompt).await
     }
 
     async fn cancel(&self, args: schema::CancelNotification) -> Result<(), acp::Error> {
@@ -319,6 +333,29 @@ fn startup_hint_message() -> String {
     format!(
         "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
     )
+}
+
+fn cancelled_prompt_response() -> schema::PromptResponse {
+    schema::PromptResponse::new(schema::StopReason::Cancelled)
+}
+
+fn end_turn_prompt_response() -> schema::PromptResponse {
+    schema::PromptResponse::new(schema::StopReason::EndTurn)
+}
+
+fn prompt_response_for_permission_outcome(
+    outcome: schema::RequestPermissionOutcome,
+) -> Option<schema::PromptResponse> {
+    match outcome {
+        schema::RequestPermissionOutcome::Cancelled => Some(cancelled_prompt_response()),
+        schema::RequestPermissionOutcome::Selected(selected)
+            if selected.option_id.to_string() == "reject_once" =>
+        {
+            Some(end_turn_prompt_response())
+        }
+        schema::RequestPermissionOutcome::Selected(_) => None,
+        _ => Some(cancelled_prompt_response()),
+    }
 }
 
 fn log_connection_result(result: Result<(), acp::Error>) {
@@ -371,82 +408,166 @@ where
     })
 }
 
+async fn respond_initialize_request(
+    agent: MockAgent,
+    args: schema::InitializeRequest,
+    responder: acp::Responder<schema::InitializeResponse>,
+) -> Result<(), acp::Error> {
+    responder.respond_with_result(agent.initialize(args).await)
+}
+
+async fn respond_authenticate_request(
+    agent: MockAgent,
+    args: schema::AuthenticateRequest,
+    responder: acp::Responder<schema::AuthenticateResponse>,
+) -> Result<(), acp::Error> {
+    responder.respond_with_result(agent.authenticate(args).await)
+}
+
+async fn respond_new_session_request(
+    agent: MockAgent,
+    args: schema::NewSessionRequest,
+    responder: acp::Responder<schema::NewSessionResponse>,
+    connection: acp::ConnectionTo<acp::Client>,
+) -> Result<(), acp::Error> {
+    let adapter = ConnectionClientAdapter::new(connection);
+    responder.respond_with_result(agent.new_session(args, &adapter).await)
+}
+
+async fn respond_load_session_request(
+    agent: MockAgent,
+    args: schema::LoadSessionRequest,
+    responder: acp::Responder<schema::LoadSessionResponse>,
+) -> Result<(), acp::Error> {
+    responder.respond_with_result(agent.load_session(args).await)
+}
+
+async fn respond_prompt_request(
+    agent: MockAgent,
+    args: schema::PromptRequest,
+    responder: acp::Responder<schema::PromptResponse>,
+    connection: acp::ConnectionTo<acp::Client>,
+) -> Result<(), acp::Error> {
+    let adapter = ConnectionClientAdapter::new(connection.clone());
+    connection.spawn(async move {
+        let result = agent.prompt(args, &adapter, &adapter).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_set_session_mode_request(
+    agent: MockAgent,
+    args: schema::SetSessionModeRequest,
+    responder: acp::Responder<schema::SetSessionModeResponse>,
+) -> Result<(), acp::Error> {
+    responder.respond_with_result(agent.set_session_mode(args).await)
+}
+
+async fn handle_cancel_notification(
+    agent: MockAgent,
+    args: schema::CancelNotification,
+) -> Result<(), acp::Error> {
+    agent.cancel(args).await
+}
+
+macro_rules! register_request_handler {
+    ($builder:expr, $agent:expr, $request:ty, $handler:ident) => {
+        $builder.on_receive_request(
+            {
+                let agent = $agent.clone();
+                async move |args: $request, responder, _cx| {
+                    $handler(agent.clone(), args, responder).await
+                }
+            },
+            acp::on_receive_request!(),
+        )
+    };
+}
+
+macro_rules! register_request_handler_with_connection {
+    ($builder:expr, $agent:expr, $request:ty, $handler:ident) => {
+        $builder.on_receive_request(
+            {
+                let agent = $agent.clone();
+                async move |args: $request, responder, cx| {
+                    $handler(agent.clone(), args, responder, cx).await
+                }
+            },
+            acp::on_receive_request!(),
+        )
+    };
+}
+
+macro_rules! register_notification_handler {
+    ($builder:expr, $agent:expr, $notification:ty, $handler:ident) => {
+        $builder.on_receive_notification(
+            {
+                let agent = $agent.clone();
+                async move |args: $notification, _cx| $handler(agent.clone(), args).await
+            },
+            acp::on_receive_notification!(),
+        )
+    };
+}
+
+macro_rules! build_mock_agent_handlers {
+    ($builder:expr, $agent:expr) => {{
+        let builder = register_request_handler!(
+            $builder,
+            $agent,
+            schema::InitializeRequest,
+            respond_initialize_request
+        );
+        let builder = register_request_handler!(
+            builder,
+            $agent,
+            schema::AuthenticateRequest,
+            respond_authenticate_request
+        );
+        let builder = register_request_handler_with_connection!(
+            builder,
+            $agent,
+            schema::NewSessionRequest,
+            respond_new_session_request
+        );
+        let builder = register_request_handler!(
+            builder,
+            $agent,
+            schema::LoadSessionRequest,
+            respond_load_session_request
+        );
+        let builder = register_request_handler_with_connection!(
+            builder,
+            $agent,
+            schema::PromptRequest,
+            respond_prompt_request
+        );
+        let builder = register_request_handler!(
+            builder,
+            $agent,
+            schema::SetSessionModeRequest,
+            respond_set_session_mode_request
+        );
+        register_notification_handler!(
+            builder,
+            $agent,
+            schema::CancelNotification,
+            handle_cancel_notification
+        )
+    }};
+}
+
 async fn handle_connection(
     stream: TcpStream,
     state: Arc<MockServerState>,
 ) -> Result<(), acp::Error> {
     let (reader, writer) = stream.into_split();
     let agent = MockAgent::new(state);
+    let builder = build_mock_agent_handlers!(acp::Agent.builder().name("acp-mock"), agent);
 
-    acp::Agent
-        .builder()
-        .name("acp-mock")
-        .on_receive_request(
-            {
-                let agent = agent.clone();
-                async move |args: schema::InitializeRequest, responder, _cx| {
-                    responder.respond_with_result(agent.initialize(args).await)
-                }
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let agent = agent.clone();
-                async move |args: schema::AuthenticateRequest, responder, _cx| {
-                    responder.respond_with_result(agent.authenticate(args).await)
-                }
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let agent = agent.clone();
-                async move |args: schema::NewSessionRequest, responder, cx| {
-                    let adapter = ConnectionClientAdapter::new(cx);
-                    responder.respond_with_result(agent.new_session(args, &adapter).await)
-                }
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let agent = agent.clone();
-                async move |args: schema::LoadSessionRequest, responder, _cx| {
-                    responder.respond_with_result(agent.load_session(args).await)
-                }
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let agent = agent.clone();
-                async move |args: schema::PromptRequest, responder, cx| {
-                    let agent = agent.clone();
-                    let adapter = ConnectionClientAdapter::new(cx.clone());
-                    cx.spawn(async move {
-                        let result = agent.prompt(args, &adapter, &adapter).await;
-                        responder.respond_with_result(result)?;
-                        Ok(())
-                    })?;
-                    Ok(())
-                }
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let agent = agent.clone();
-                async move |args: schema::SetSessionModeRequest, responder, _cx| {
-                    responder.respond_with_result(agent.set_session_mode(args).await)
-                }
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_notification(
-            async move |args: schema::CancelNotification, _cx| agent.cancel(args).await,
-            acp::on_receive_notification!(),
-        )
+    builder
         .connect_to(acp::ByteStreams::new(
             writer.compat_write(),
             reader.compat(),

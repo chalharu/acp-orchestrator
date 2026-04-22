@@ -53,7 +53,9 @@ fn register_stream_listener(
         if let Some(data) = event.data().as_string() {
             let item = match serde_json::from_str::<StreamEvent>(&data) {
                 Ok(event) => SseItem::Event(event),
-                Err(source) => SseItem::ParseError(format!("Failed to decode stream event: {source}")),
+                Err(source) => {
+                    SseItem::ParseError(format!("Failed to decode stream event: {source}"))
+                }
             };
             let _ = event_tx.unbounded_send(item);
         }

@@ -153,7 +153,9 @@ pub(super) fn session_composer_signals(
             signals.pending_action_busy,
             current_session_deleting,
         ),
-        slash_palette_visible: Signal::derive(move || slash_palette_is_visible(&signals.draft.get())),
+        slash_palette_visible: Signal::derive(move || {
+            slash_palette_is_visible(&signals.draft.get())
+        }),
         slash_candidates: Signal::derive(move || signals.slash.candidates.get()),
         slash_selected_index: Signal::derive(move || signals.slash.selected_index.get()),
         slash_apply_selected: Signal::derive(move || {

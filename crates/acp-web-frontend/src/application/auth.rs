@@ -189,10 +189,12 @@ mod tests {
 
     #[test]
     fn account_capabilities_can_modify_only_without_constraints() {
-        assert!(!AccountCapabilities {
-            constraint: Some(AccountConstraintReason::CurrentUser),
-        }
-        .can_modify());
+        assert!(
+            !AccountCapabilities {
+                constraint: Some(AccountConstraintReason::CurrentUser),
+            }
+            .can_modify()
+        );
         assert!(AccountCapabilities { constraint: None }.can_modify());
     }
 }

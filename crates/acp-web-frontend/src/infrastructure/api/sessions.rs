@@ -22,7 +22,8 @@ pub(crate) async fn create_session() -> Result<String, String> {
         return Err(response_error_message(response, "Create session failed").await);
     }
 
-    let created: CreateSessionResponse = response.json().await.map_err(|error| error.to_string())?;
+    let created: CreateSessionResponse =
+        response.json().await.map_err(|error| error.to_string())?;
     Ok(created.session.id)
 }
 

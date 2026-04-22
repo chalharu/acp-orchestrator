@@ -416,15 +416,15 @@ mod tests {
 
     use super::{
         BadgeTone, CLOSED_SESSION_MESSAGE, EntryRole, PendingPermission, SessionLifecycle,
-        SidebarSession, StatusBadge, TurnState, connection_badge_state, format_tool_activity_command,
-        mark_session_closed, message_role, next_session_destination, pending_permissions_to_items,
-        push_bootstrap_closed_status_entry, remove_session_from_list, rename_session_in_list,
-        session_action_busy, session_bootstrap_from_snapshot, session_composer_cancel_visible,
-        session_composer_disabled, session_composer_status_message, session_end_message,
-        session_sidebar_status_label, session_sidebar_status_pill_class, session_status_label,
-        should_apply_snapshot_turn_state, should_release_turn_state, sidebar_session_activity_label,
-        sidebar_sessions, status_badge_class, tool_activity_text, turn_state_for_snapshot,
-        worker_badge_state,
+        SidebarSession, StatusBadge, TurnState, connection_badge_state,
+        format_tool_activity_command, mark_session_closed, message_role, next_session_destination,
+        pending_permissions_to_items, push_bootstrap_closed_status_entry, remove_session_from_list,
+        rename_session_in_list, session_action_busy, session_bootstrap_from_snapshot,
+        session_composer_cancel_visible, session_composer_disabled,
+        session_composer_status_message, session_end_message, session_sidebar_status_label,
+        session_sidebar_status_pill_class, session_status_label, should_apply_snapshot_turn_state,
+        should_release_turn_state, sidebar_session_activity_label, sidebar_sessions,
+        status_badge_class, tool_activity_text, turn_state_for_snapshot, worker_badge_state,
     };
     use acp_contracts::{
         CompletionCandidate, CompletionKind, ConversationMessage, MessageRole, PermissionRequest,
@@ -460,12 +460,65 @@ mod tests {
         }
     }
 
-    fn sample_list_item(id: &str, title: &str, status: SessionStatus, minute: u32) -> SessionListItem {
+    fn sample_list_item(
+        id: &str,
+        title: &str,
+        status: SessionStatus,
+        minute: u32,
+    ) -> SessionListItem {
         SessionListItem {
             id: id.to_string(),
             title: title.to_string(),
             status,
             last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, minute, 0).unwrap(),
+        }
+    }
+
+    fn assert_composer_status_cases(cases: &[(SessionLifecycle, TurnState, bool, &str)]) {
+        for (session_status, turn_state, current_session_deleting, expected) in cases {
+            assert_eq!(
+                session_composer_status_message(
+                    *session_status,
+                    *turn_state,
+                    *current_session_deleting,
+                ),
+                *expected
+            );
+        }
+    }
+
+    fn assert_cancel_visibility_cases(cases: &[(TurnState, bool, bool, bool)]) {
+        for (turn_state, has_pending_permissions, current_session_deleting, expected) in cases {
+            assert_eq!(
+                session_composer_cancel_visible(
+                    *turn_state,
+                    *has_pending_permissions,
+                    *current_session_deleting,
+                ),
+                *expected
+            );
+        }
+    }
+
+    fn badge(label: &'static str, value: &'static str, tone: BadgeTone) -> StatusBadge {
+        StatusBadge { label, value, tone }
+    }
+
+    fn assert_connection_badge_cases(cases: &[(SessionLifecycle, bool, StatusBadge)]) {
+        for (session_status, has_connection_error, expected) in cases {
+            assert_eq!(
+                connection_badge_state(*session_status, *has_connection_error),
+                *expected
+            );
+        }
+    }
+
+    fn assert_worker_badge_cases(cases: &[(SessionLifecycle, TurnState, bool, StatusBadge)]) {
+        for (session_status, turn_state, has_pending_permissions, expected) in cases {
+            assert_eq!(
+                worker_badge_state(*session_status, *turn_state, *has_pending_permissions),
+                *expected
+            );
         }
     }
 
@@ -522,7 +575,8 @@ mod tests {
 
     #[test]
     fn session_bootstrap_from_snapshot_maps_messages_and_permissions() {
-        let bootstrap = session_bootstrap_from_snapshot(sample_session_bootstrap_response().session);
+        let bootstrap =
+            session_bootstrap_from_snapshot(sample_session_bootstrap_response().session);
 
         assert_eq!(bootstrap.session_status, SessionLifecycle::Closed);
         assert_eq!(bootstrap.entries.len(), 3);
@@ -555,7 +609,10 @@ mod tests {
             }]
         );
 
-        assert_eq!(session_status_label(SessionStatus::Active), SessionLifecycle::Active);
+        assert_eq!(
+            session_status_label(SessionStatus::Active),
+            SessionLifecycle::Active
+        );
         assert_eq!(message_role(MessageRole::User), EntryRole::User);
         assert_eq!(message_role(MessageRole::Assistant), EntryRole::Assistant);
 
@@ -641,73 +698,76 @@ mod tests {
 
         remove_session_from_list(&mut sessions, "s_a");
 
-        assert_eq!(sessions, vec![sample_list_item("s_b", "B", SessionStatus::Active, 1)]);
+        assert_eq!(
+            sessions,
+            vec![sample_list_item("s_b", "B", SessionStatus::Active, 1)]
+        );
     }
 
     #[test]
-    fn composer_status_and_cancel_helpers_cover_all_branches() {
-        assert_eq!(
-            session_composer_status_message(SessionLifecycle::Active, TurnState::Idle, true),
-            "Deleting session..."
-        );
-        assert_eq!(
-            session_composer_status_message(
+    fn composer_status_messages_cover_running_and_unavailable_states() {
+        assert_composer_status_cases(&[
+            (
+                SessionLifecycle::Active,
+                TurnState::Idle,
+                true,
+                "Deleting session...",
+            ),
+            (
                 SessionLifecycle::Active,
                 TurnState::Submitting,
                 false,
+                "Waiting for response...",
             ),
-            "Waiting for response..."
-        );
-        assert_eq!(
-            session_composer_status_message(
+            (
                 SessionLifecycle::Active,
                 TurnState::AwaitingReply,
                 false,
+                "Waiting for response...",
             ),
-            "Waiting for response..."
-        );
-        assert_eq!(
-            session_composer_status_message(SessionLifecycle::Active, TurnState::Cancelling, false),
-            "Cancelling..."
-        );
-        assert_eq!(
-            session_composer_status_message(SessionLifecycle::Active, TurnState::Idle, false),
-            ""
-        );
-        assert_eq!(
-            session_composer_status_message(SessionLifecycle::Loading, TurnState::Idle, false),
-            "Connecting..."
-        );
-        assert_eq!(
-            session_composer_status_message(SessionLifecycle::Unavailable, TurnState::Idle, false),
-            "Session unavailable. Start a fresh chat."
-        );
-        assert_eq!(
-            session_composer_status_message(SessionLifecycle::Error, TurnState::Idle, false),
-            "Session unavailable. Start a fresh chat."
-        );
+            (
+                SessionLifecycle::Active,
+                TurnState::Cancelling,
+                false,
+                "Cancelling...",
+            ),
+            (SessionLifecycle::Active, TurnState::Idle, false, ""),
+            (
+                SessionLifecycle::Loading,
+                TurnState::Idle,
+                false,
+                "Connecting...",
+            ),
+            (
+                SessionLifecycle::Unavailable,
+                TurnState::Idle,
+                false,
+                "Session unavailable. Start a fresh chat.",
+            ),
+            (
+                SessionLifecycle::Error,
+                TurnState::Idle,
+                false,
+                "Session unavailable. Start a fresh chat.",
+            ),
+        ]);
+    }
 
-        assert!(!session_composer_cancel_visible(
-            TurnState::AwaitingReply,
-            true,
-            false,
-        ));
-        assert!(!session_composer_cancel_visible(
-            TurnState::AwaitingReply,
-            false,
-            true,
-        ));
-        assert!(session_composer_cancel_visible(
-            TurnState::Cancelling,
-            false,
-            false,
-        ));
+    #[test]
+    fn composer_cancel_visibility_hides_for_permissions_and_deletes() {
+        assert_cancel_visibility_cases(&[
+            (TurnState::AwaitingReply, true, false, false),
+            (TurnState::AwaitingReply, false, true, false),
+            (TurnState::Cancelling, false, false, true),
+        ]);
     }
 
     #[test]
     fn turn_state_helpers_cover_snapshot_application_and_idle_paths() {
         assert!(should_apply_snapshot_turn_state(TurnState::Idle));
-        assert!(should_apply_snapshot_turn_state(TurnState::AwaitingPermission));
+        assert!(should_apply_snapshot_turn_state(
+            TurnState::AwaitingPermission
+        ));
         assert!(!should_apply_snapshot_turn_state(TurnState::Submitting));
         assert!(!should_release_turn_state(TurnState::Idle));
         assert_eq!(turn_state_for_snapshot(&[]), TurnState::Idle);
@@ -737,10 +797,7 @@ mod tests {
             ),
             "Run command\nInspect repo\nCommands:\n- /help — show commands\n- /quit"
         );
-        assert_eq!(
-            tool_activity_text("   ", "   ", &[]),
-            ""
-        );
+        assert_eq!(tool_activity_text("   ", "   ", &[]), "");
         assert_eq!(
             format_tool_activity_command(&command_without_detail),
             "- /quit"
@@ -764,127 +821,95 @@ mod tests {
     }
 
     #[test]
-    fn badge_helpers_cover_remaining_states_and_css_classes() {
-        assert_eq!(
-            connection_badge_state(SessionLifecycle::Loading, false),
-            StatusBadge {
-                label: "Connection",
-                value: "connecting",
-                tone: BadgeTone::Neutral,
-            }
-        );
-        assert_eq!(
-            connection_badge_state(SessionLifecycle::Active, false),
-            StatusBadge {
-                label: "Connection",
-                value: "live",
-                tone: BadgeTone::Success,
-            }
-        );
-        assert_eq!(
-            connection_badge_state(SessionLifecycle::Closed, false),
-            StatusBadge {
-                label: "Connection",
-                value: "ended",
-                tone: BadgeTone::Neutral,
-            }
-        );
-        assert_eq!(
-            connection_badge_state(SessionLifecycle::Error, false),
-            StatusBadge {
-                label: "Connection",
-                value: "unavailable",
-                tone: BadgeTone::Danger,
-            }
-        );
+    fn connection_badges_cover_loading_live_closed_and_error_states() {
+        assert_connection_badge_cases(&[
+            (
+                SessionLifecycle::Loading,
+                false,
+                badge("Connection", "connecting", BadgeTone::Neutral),
+            ),
+            (
+                SessionLifecycle::Active,
+                false,
+                badge("Connection", "live", BadgeTone::Success),
+            ),
+            (
+                SessionLifecycle::Closed,
+                false,
+                badge("Connection", "ended", BadgeTone::Neutral),
+            ),
+            (
+                SessionLifecycle::Error,
+                false,
+                badge("Connection", "unavailable", BadgeTone::Danger),
+            ),
+        ]);
+    }
 
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Loading, TurnState::Idle, false),
-            StatusBadge {
-                label: "Worker",
-                value: "starting",
-                tone: BadgeTone::Neutral,
-            }
-        );
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Unavailable, TurnState::Idle, false),
-            StatusBadge {
-                label: "Worker",
-                value: "unavailable",
-                tone: BadgeTone::Danger,
-            }
-        );
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Closed, TurnState::Idle, false),
-            StatusBadge {
-                label: "Worker",
-                value: "stopped",
-                tone: BadgeTone::Neutral,
-            }
-        );
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Active, TurnState::Idle, true),
-            StatusBadge {
-                label: "Worker",
-                value: "permission",
-                tone: BadgeTone::Warning,
-            }
-        );
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Active, TurnState::Cancelling, false),
-            StatusBadge {
-                label: "Worker",
-                value: "cancelling",
-                tone: BadgeTone::Warning,
-            }
-        );
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Active, TurnState::AwaitingPermission, false),
-            StatusBadge {
-                label: "Worker",
-                value: "permission",
-                tone: BadgeTone::Warning,
-            }
-        );
-        assert_eq!(
-            worker_badge_state(SessionLifecycle::Active, TurnState::Idle, false),
-            StatusBadge {
-                label: "Worker",
-                value: "idle",
-                tone: BadgeTone::Neutral,
-            }
-        );
+    #[test]
+    fn worker_badges_cover_loading_permission_cancelling_idle_and_unavailable_states() {
+        assert_worker_badge_cases(&[
+            (
+                SessionLifecycle::Loading,
+                TurnState::Idle,
+                false,
+                badge("Worker", "starting", BadgeTone::Neutral),
+            ),
+            (
+                SessionLifecycle::Unavailable,
+                TurnState::Idle,
+                false,
+                badge("Worker", "unavailable", BadgeTone::Danger),
+            ),
+            (
+                SessionLifecycle::Closed,
+                TurnState::Idle,
+                false,
+                badge("Worker", "stopped", BadgeTone::Neutral),
+            ),
+            (
+                SessionLifecycle::Active,
+                TurnState::Idle,
+                true,
+                badge("Worker", "permission", BadgeTone::Warning),
+            ),
+            (
+                SessionLifecycle::Active,
+                TurnState::Cancelling,
+                false,
+                badge("Worker", "cancelling", BadgeTone::Warning),
+            ),
+            (
+                SessionLifecycle::Active,
+                TurnState::AwaitingPermission,
+                false,
+                badge("Worker", "permission", BadgeTone::Warning),
+            ),
+            (
+                SessionLifecycle::Active,
+                TurnState::Idle,
+                false,
+                badge("Worker", "idle", BadgeTone::Neutral),
+            ),
+        ]);
+    }
 
+    #[test]
+    fn status_badge_class_covers_all_tones() {
         assert_eq!(
-            status_badge_class(StatusBadge {
-                label: "x",
-                value: "y",
-                tone: BadgeTone::Neutral,
-            }),
+            status_badge_class(badge("x", "y", BadgeTone::Neutral)),
             "status-badge status-badge--neutral"
         );
         assert_eq!(
-            status_badge_class(StatusBadge {
-                label: "x",
-                value: "y",
-                tone: BadgeTone::Success,
-            }),
+            status_badge_class(badge("x", "y", BadgeTone::Success)),
             "status-badge status-badge--success"
         );
         assert_eq!(
-            status_badge_class(StatusBadge {
-                label: "x",
-                value: "y",
-                tone: BadgeTone::Warning,
-            }),
+            status_badge_class(badge("x", "y", BadgeTone::Warning)),
             "status-badge status-badge--warning"
         );
         assert_eq!(
-            status_badge_class(StatusBadge {
-                label: "x",
-                value: "y",
-                tone: BadgeTone::Danger,
-            }),
+            status_badge_class(badge("x", "y", BadgeTone::Danger)),
             "status-badge status-badge--danger"
         );
     }

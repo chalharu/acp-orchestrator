@@ -39,9 +39,21 @@ mod assets;
 mod connection;
 mod session_api;
 
-use self::assets::*;
+use self::account_api::{
+    auth_status, bootstrap_register, create_account, delete_account, list_accounts, sign_in,
+    sign_out, update_account,
+};
+use self::assets::install_frontend_routes;
 pub use self::connection::serve_with_shutdown;
-use self::{account_api::*, session_api::*};
+use self::session_api::{
+    cancel_turn, close_session, create_session, delete_session, get_session, get_session_history,
+    get_slash_completions, list_sessions, post_message, rename_session, resolve_permission,
+    stream_session_events,
+};
+#[cfg(test)]
+use self::session_api::{
+    persist_prompt_snapshot_best_effort, persist_session_metadata_best_effort,
+};
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const CONNECTION_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_millis(500);

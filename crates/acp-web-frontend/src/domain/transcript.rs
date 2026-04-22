@@ -61,35 +61,61 @@ pub(crate) fn compute_virtual_window(
     viewport_height: f64,
 ) -> VirtualWindow {
     if entries.is_empty() {
-        return VirtualWindow {
-            visible: Vec::new(),
-            top_spacer_height: 0.0,
-            bottom_spacer_height: 0.0,
-        };
+        return empty_virtual_window();
     }
 
     let start_threshold = (scroll_top - OVERSCAN_PX).max(0.0);
     let end_threshold = scroll_top + viewport_height + OVERSCAN_PX;
-    let mut offset = 0.0;
+    let (start_index, top_spacer_height) = find_window_start(entries, start_threshold);
+    let (end_index, rendered_height) =
+        find_window_end(entries, start_index, top_spacer_height, end_threshold);
+
+    let total_height = entries.iter().map(estimated_entry_height).sum::<f64>();
+
+    VirtualWindow {
+        visible: entries[start_index..end_index].to_vec(),
+        top_spacer_height,
+        bottom_spacer_height: (total_height - rendered_height).max(0.0),
+    }
+}
+
+fn empty_virtual_window() -> VirtualWindow {
+    VirtualWindow {
+        visible: Vec::new(),
+        top_spacer_height: 0.0,
+        bottom_spacer_height: 0.0,
+    }
+}
+
+fn find_window_start(entries: &[TranscriptEntry], start_threshold: f64) -> (usize, f64) {
+    let mut top_spacer_height = 0.0;
     let mut start_index = 0;
 
     while start_index < entries.len() {
-        let next_offset = offset + estimated_entry_height(&entries[start_index]);
+        let next_offset = top_spacer_height + estimated_entry_height(&entries[start_index]);
         if next_offset >= start_threshold {
             break;
         }
-        offset = next_offset;
+        top_spacer_height = next_offset;
         start_index += 1;
     }
 
     if start_index == entries.len() {
         start_index = entries.len().saturating_sub(1);
-        offset -= estimated_entry_height(&entries[start_index]);
+        top_spacer_height -= estimated_entry_height(&entries[start_index]);
     }
 
-    let top_spacer_height = offset;
+    (start_index, top_spacer_height)
+}
+
+fn find_window_end(
+    entries: &[TranscriptEntry],
+    start_index: usize,
+    top_spacer_height: f64,
+    end_threshold: f64,
+) -> (usize, f64) {
     let mut end_index = start_index;
-    let mut rendered_height = offset;
+    let mut rendered_height = top_spacer_height;
 
     while end_index < entries.len() {
         rendered_height += estimated_entry_height(&entries[end_index]);
@@ -99,13 +125,7 @@ pub(crate) fn compute_virtual_window(
         }
     }
 
-    let total_height = entries.iter().map(estimated_entry_height).sum::<f64>();
-
-    VirtualWindow {
-        visible: entries[start_index..end_index].to_vec(),
-        top_spacer_height,
-        bottom_spacer_height: (total_height - rendered_height).max(0.0),
-    }
+    (end_index, rendered_height)
 }
 
 fn markdown_options() -> MarkdownOptions {
@@ -197,9 +217,10 @@ fn sanitize_markdown_end<'a>(
     }
 
     match tag_end {
-        TagEnd::HtmlBlock | TagEnd::Image | TagEnd::FootnoteDefinition | TagEnd::MetadataBlock(_) => {
-            None
-        }
+        TagEnd::HtmlBlock
+        | TagEnd::Image
+        | TagEnd::FootnoteDefinition
+        | TagEnd::MetadataBlock(_) => None,
         tag_end => Some(MarkdownEvent::End(tag_end)),
     }
 }
@@ -271,7 +292,10 @@ mod tests {
     #[test]
     fn entry_role_helpers_return_expected_labels_and_classes() {
         assert_eq!(EntryRole::User.css_class(), "transcript-entry--user");
-        assert_eq!(EntryRole::Assistant.css_class(), "transcript-entry--assistant");
+        assert_eq!(
+            EntryRole::Assistant.css_class(),
+            "transcript-entry--assistant"
+        );
         assert_eq!(EntryRole::Status.css_class(), "transcript-entry--status");
         assert_eq!(EntryRole::User.label(), "user");
         assert_eq!(EntryRole::Assistant.label(), "assistant");
@@ -387,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_sanitizers_cover_private_tag_branches() {
+    fn markdown_sanitizers_strip_heading_metadata() {
         let mut ignored_ends = Vec::new();
         let heading = sanitize_markdown_start(
             Tag::Heading {
@@ -406,59 +430,56 @@ mod tests {
                 ..
             }))
         ));
+        assert!(ignored_ends.is_empty());
+    }
 
-        assert!(sanitize_markdown_start(
+    fn assert_start_tag_ignored(tag: Tag<'static>, expected_end: TagEnd) {
+        let mut ignored_ends = Vec::new();
+        assert!(sanitize_markdown_start(tag, &mut ignored_ends).is_none());
+        assert_eq!(ignored_ends.pop(), Some(expected_end));
+    }
+
+    fn assert_end_tag_ignored(tag_end: TagEnd) {
+        assert!(sanitize_markdown_end(tag_end, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn markdown_sanitizers_track_ignored_start_tags() {
+        assert_start_tag_ignored(
             Tag::Link {
                 link_type: LinkType::Inline,
                 dest_url: CowStr::from("javascript:alert(1)"),
                 title: CowStr::from(""),
                 id: CowStr::from(""),
             },
-            &mut ignored_ends,
-        )
-        .is_none());
-        assert_eq!(ignored_ends.pop(), Some(TagEnd::Link));
-
-        assert!(sanitize_markdown_start(
+            TagEnd::Link,
+        );
+        assert_start_tag_ignored(
             Tag::Image {
                 link_type: LinkType::Inline,
                 dest_url: CowStr::from("https://example.com/x.png"),
                 title: CowStr::from("preview"),
                 id: CowStr::from(""),
             },
-            &mut ignored_ends,
-        )
-        .is_none());
-        assert_eq!(ignored_ends.pop(), Some(TagEnd::Image));
-
-        assert!(sanitize_markdown_start(Tag::HtmlBlock, &mut ignored_ends).is_none());
-        assert_eq!(ignored_ends.pop(), Some(TagEnd::HtmlBlock));
-
-        assert!(sanitize_markdown_start(
-            Tag::FootnoteDefinition(CowStr::from("note")),
-            &mut ignored_ends,
-        )
-        .is_none());
-        assert_eq!(ignored_ends.pop(), Some(TagEnd::FootnoteDefinition));
-
-        assert!(sanitize_markdown_start(
-            Tag::MetadataBlock(MetadataBlockKind::YamlStyle),
-            &mut ignored_ends,
-        )
-        .is_none());
-        assert_eq!(
-            ignored_ends.pop(),
-            Some(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle))
+            TagEnd::Image,
         );
-
-        assert!(sanitize_markdown_end(TagEnd::Image, &mut Vec::new()).is_none());
-        assert!(sanitize_markdown_end(TagEnd::HtmlBlock, &mut Vec::new()).is_none());
-        assert!(sanitize_markdown_end(TagEnd::FootnoteDefinition, &mut Vec::new()).is_none());
-        assert!(sanitize_markdown_end(
+        assert_start_tag_ignored(Tag::HtmlBlock, TagEnd::HtmlBlock);
+        assert_start_tag_ignored(
+            Tag::FootnoteDefinition(CowStr::from("note")),
+            TagEnd::FootnoteDefinition,
+        );
+        assert_start_tag_ignored(
+            Tag::MetadataBlock(MetadataBlockKind::YamlStyle),
             TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle),
-            &mut Vec::new(),
-        )
-        .is_none());
+        );
+    }
+
+    #[test]
+    fn markdown_sanitizers_drop_special_end_tags_and_preserve_normal_ones() {
+        assert_end_tag_ignored(TagEnd::Image);
+        assert_end_tag_ignored(TagEnd::HtmlBlock);
+        assert_end_tag_ignored(TagEnd::FootnoteDefinition);
+        assert_end_tag_ignored(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle));
 
         let mut ignored_link_end = vec![TagEnd::Link];
         assert!(sanitize_markdown_end(TagEnd::Link, &mut ignored_link_end).is_none());
@@ -489,9 +510,7 @@ mod tests {
             "mailto:test@example.com"
         ));
         assert!(!is_safe_markdown_link(
-            LinkType::WikiLink {
-                has_pothole: false
-            },
+            LinkType::WikiLink { has_pothole: false },
             "Guide"
         ));
     }
@@ -510,16 +529,16 @@ mod tests {
 
     #[test]
     fn estimated_entry_height_uses_status_layout() {
-        assert_eq!(estimated_entry_height(&entry("status", EntryRole::Status, "")), 58.0);
+        assert_eq!(
+            estimated_entry_height(&entry("status", EntryRole::Status, "")),
+            58.0
+        );
     }
 
     #[test]
     fn estimated_entry_height_uses_chat_layout_and_wraps_long_lines() {
-        let wrapped = estimated_entry_height(&entry(
-            "assistant",
-            EntryRole::Assistant,
-            &"x".repeat(53),
-        ));
+        let wrapped =
+            estimated_entry_height(&entry("assistant", EntryRole::Assistant, &"x".repeat(53)));
 
         assert_eq!(wrapped, 92.0);
     }

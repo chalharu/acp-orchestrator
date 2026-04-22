@@ -8,7 +8,10 @@ use super::errors::{
 pub(crate) async fn classify_session_load_failure(
     response: gloo_net::http::Response,
 ) -> SessionLoadError {
-    classify_session_load_failure_parts(response.status(), read_backend_error_message(response).await)
+    classify_session_load_failure_parts(
+        response.status(),
+        read_backend_error_message(response).await,
+    )
 }
 
 pub(crate) async fn response_error_message(

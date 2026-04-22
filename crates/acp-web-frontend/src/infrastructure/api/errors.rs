@@ -11,9 +11,10 @@ pub(crate) fn classify_session_load_failure_parts(
     backend_message: Option<String>,
 ) -> SessionLoadError {
     match status {
-        401 | 403 | 404 => {
-            SessionLoadError::ResumeUnavailable(session_unavailable_message(status, backend_message))
-        }
+        401 | 403 | 404 => SessionLoadError::ResumeUnavailable(session_unavailable_message(
+            status,
+            backend_message,
+        )),
         _ => SessionLoadError::Other(format_api_failure(
             "Load session failed",
             status,
@@ -39,7 +40,11 @@ pub(crate) fn decode_backend_error_message(body: &str) -> Option<String> {
         .map(|response| response.error)
 }
 
-pub(crate) fn format_api_failure(action: &str, status: u16, backend_message: Option<String>) -> String {
+pub(crate) fn format_api_failure(
+    action: &str,
+    status: u16,
+    backend_message: Option<String>,
+) -> String {
     backend_message
         .map(|message| format!("{action}: {message}"))
         .unwrap_or_else(|| format!("{action}: HTTP {status}"))
@@ -94,8 +99,7 @@ mod tests {
         assert_eq!(
             classify_session_load_failure_parts(404, Some("session not found".to_string())),
             SessionLoadError::ResumeUnavailable(
-                "This session is unavailable (session not found). Start a fresh chat."
-                    .to_string()
+                "This session is unavailable (session not found). Start a fresh chat.".to_string()
             )
         );
     }

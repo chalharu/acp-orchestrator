@@ -564,10 +564,13 @@ async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Re
 
 #[cfg(test)]
 mod coverage_tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     use agent_client_protocol::schema;
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        task::JoinHandle,
+    };
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     use super::{
@@ -615,9 +618,11 @@ mod coverage_tests {
         async fn session_notification(&self, args: schema::SessionNotification) -> acp::Result<()> { if let schema::SessionUpdate::AgentMessageChunk(chunk) = args.update { self.reply.lock().await.push_str(&content_text(chunk.content)); } Ok(()) }
     }
 
-    async fn run_mock_client_roundtrip(
-        prompt: &str,
-    ) -> acp::Result<(schema::LoadSessionResponse, String)> {
+    async fn spawn_roundtrip_server() -> (
+        SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        JoinHandle<std::io::Result<()>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
@@ -636,9 +641,103 @@ mod coverage_tests {
             },
         );
 
-        let stream = TcpStream::connect(address)
+        (address, shutdown_tx, server)
+    }
+
+    async fn connect_roundtrip_stream(address: SocketAddr) -> TcpStream {
+        TcpStream::connect(address)
             .await
-            .expect("test client should connect");
+            .expect("test client should connect")
+    }
+
+    fn roundtrip_initialize_request() -> schema::InitializeRequest {
+        schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_info(
+            schema::Implementation::new("acp-mock-unit-test", env!("CARGO_PKG_VERSION"))
+                .title("ACP Mock Unit Test"),
+        )
+    }
+
+    async fn initialize_roundtrip_connection(
+        connection: &acp::ConnectionTo<acp::Agent>,
+    ) -> acp::Result<()> {
+        connection
+            .send_request(roundtrip_initialize_request())
+            .block_task()
+            .await?;
+        Ok(())
+    }
+
+    async fn finish_roundtrip(
+        shutdown_tx: tokio::sync::oneshot::Sender<()>,
+        server: JoinHandle<std::io::Result<()>>,
+    ) {
+        shutdown_tx
+            .send(())
+            .expect("test shutdown signals should send");
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("test server roundtrips should shut down promptly")
+            .expect("test server tasks should join")
+            .expect("test server roundtrips should succeed");
+    }
+
+    async fn execute_load_session_roundtrip(
+        connection: acp::ConnectionTo<acp::Agent>,
+        working_dir: std::path::PathBuf,
+        prompt: String,
+        reply_client: RoundtripClient,
+    ) -> acp::Result<(schema::LoadSessionResponse, String)> {
+        initialize_roundtrip_connection(&connection).await?;
+        let loaded = connection
+            .send_request(schema::LoadSessionRequest::new("mock_0", working_dir))
+            .block_task()
+            .await?;
+        connection
+            .send_request(schema::PromptRequest::new("mock_0", vec![prompt.into()]))
+            .block_task()
+            .await?;
+        Ok((loaded, reply_client.reply_text().await))
+    }
+
+    async fn execute_new_session_roundtrip(
+        connection: acp::ConnectionTo<acp::Agent>,
+        working_dir: std::path::PathBuf,
+        prompt: String,
+        reply_client: RoundtripClient,
+    ) -> acp::Result<(schema::NewSessionResponse, String)> {
+        initialize_roundtrip_connection(&connection).await?;
+        connection
+            .send_request(schema::AuthenticateRequest::new("local"))
+            .block_task()
+            .await?;
+        let created = connection
+            .send_request(schema::NewSessionRequest::new(working_dir))
+            .block_task()
+            .await?;
+        connection
+            .send_request(schema::PromptRequest::new(
+                created.session_id.clone(),
+                vec![prompt.into()],
+            ))
+            .block_task()
+            .await?;
+        connection
+            .send_request(schema::SetSessionModeRequest::new(
+                created.session_id.clone(),
+                "default",
+            ))
+            .block_task()
+            .await?;
+        #[rustfmt::skip]
+        connection.send_notification(schema::CancelNotification::new(created.session_id.clone()))?;
+        Ok((created, reply_client.reply_text().await))
+    }
+
+    async fn run_mock_client_roundtrip(
+        prompt: &str,
+    ) -> acp::Result<(schema::LoadSessionResponse, String)> {
+        let (address, shutdown_tx, server) = spawn_roundtrip_server().await;
+        let stream = connect_roundtrip_stream(address).await;
         let (reader, writer) = stream.into_split();
         let client = RoundtripClient::new();
         let notification_client = client.clone();
@@ -657,68 +756,21 @@ mod coverage_tests {
             )
             .connect_with(
                 acp::ByteStreams::new(writer.compat_write(), reader.compat()),
-                move |connection: acp::ConnectionTo<acp::Agent>| async move {
-                    connection
-                        .send_request(
-                            schema::InitializeRequest::new(schema::ProtocolVersion::V1)
-                                .client_info(
-                                    schema::Implementation::new(
-                                        "acp-mock-unit-test",
-                                        env!("CARGO_PKG_VERSION"),
-                                    )
-                                    .title("ACP Mock Unit Test"),
-                                ),
-                        )
-                        .block_task()
-                        .await?;
-                    let loaded = connection
-                        .send_request(schema::LoadSessionRequest::new("mock_0", working_dir))
-                        .block_task()
-                        .await?;
-                    connection
-                        .send_request(schema::PromptRequest::new("mock_0", vec![prompt.into()]))
-                        .block_task()
-                        .await?;
-                    Ok::<_, acp::Error>((loaded, reply_client.reply_text().await))
+                move |connection: acp::ConnectionTo<acp::Agent>| {
+                    execute_load_session_roundtrip(connection, working_dir, prompt, reply_client)
                 },
             )
             .await?;
 
-        shutdown_tx
-            .send(())
-            .expect("test shutdown signals should send");
-        tokio::time::timeout(Duration::from_secs(1), server)
-            .await
-            .expect("test server roundtrips should shut down promptly")
-            .expect("test server tasks should join")
-            .expect("test server roundtrips should succeed");
+        finish_roundtrip(shutdown_tx, server).await;
         Ok(result)
     }
 
     async fn run_mock_new_session_roundtrip(
         prompt: &str,
     ) -> acp::Result<(schema::NewSessionResponse, String)> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test listener should bind");
-        let address = listener
-            .local_addr()
-            .expect("test listener should expose a local address");
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let server = spawn_with_shutdown_task(
-            listener,
-            MockConfig {
-                response_delay: Duration::from_millis(1),
-                startup_hints: false,
-            },
-            async move {
-                let _ = shutdown_rx.await;
-            },
-        );
-
-        let stream = TcpStream::connect(address)
-            .await
-            .expect("test client should connect");
+        let (address, shutdown_tx, server) = spawn_roundtrip_server().await;
+        let stream = connect_roundtrip_stream(address).await;
         let (reader, writer) = stream.into_split();
         let client = RoundtripClient::new();
         let request_client = client.clone();
@@ -744,57 +796,13 @@ mod coverage_tests {
             )
             .connect_with(
                 acp::ByteStreams::new(writer.compat_write(), reader.compat()),
-                move |connection: acp::ConnectionTo<acp::Agent>| async move {
-                    connection
-                        .send_request(
-                            schema::InitializeRequest::new(schema::ProtocolVersion::V1)
-                                .client_info(
-                                    schema::Implementation::new(
-                                        "acp-mock-unit-test",
-                                        env!("CARGO_PKG_VERSION"),
-                                    )
-                                    .title("ACP Mock Unit Test"),
-                                ),
-                        )
-                        .block_task()
-                        .await?;
-                    connection
-                        .send_request(schema::AuthenticateRequest::new("local"))
-                        .block_task()
-                        .await?;
-                    let created = connection
-                        .send_request(schema::NewSessionRequest::new(working_dir))
-                        .block_task()
-                        .await?;
-                    connection
-                        .send_request(schema::PromptRequest::new(
-                            created.session_id.clone(),
-                            vec![prompt.into()],
-                        ))
-                        .block_task()
-                        .await?;
-                    connection
-                        .send_request(schema::SetSessionModeRequest::new(
-                            created.session_id.clone(),
-                            "default",
-                        ))
-                        .block_task()
-                        .await?;
-                    #[rustfmt::skip]
-                    connection.send_notification(schema::CancelNotification::new(created.session_id.clone()))?;
-                    Ok::<_, acp::Error>((created, reply_client.reply_text().await))
+                move |connection: acp::ConnectionTo<acp::Agent>| {
+                    execute_new_session_roundtrip(connection, working_dir, prompt, reply_client)
                 },
             )
             .await?;
 
-        shutdown_tx
-            .send(())
-            .expect("test shutdown signals should send");
-        tokio::time::timeout(Duration::from_secs(1), server)
-            .await
-            .expect("test server roundtrips should shut down promptly")
-            .expect("test server tasks should join")
-            .expect("test server roundtrips should succeed");
+        finish_roundtrip(shutdown_tx, server).await;
         Ok(result)
     }
 

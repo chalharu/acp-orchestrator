@@ -7,7 +7,7 @@ use acp_contracts::{
 use core::future::Future;
 use futures_util::future::AbortHandle;
 #[cfg(target_family = "wasm")]
-use futures_util::{future::Abortable, StreamExt};
+use futures_util::{StreamExt, future::Abortable};
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]

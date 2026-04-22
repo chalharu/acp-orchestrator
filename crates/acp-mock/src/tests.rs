@@ -53,6 +53,42 @@ impl SessionUpdateNotifier for StubSessionUpdateNotifier {
     }
 }
 
+fn allow_once_requester() -> StubPermissionRequester {
+    StubPermissionRequester {
+        call_count: Arc::new(AtomicUsize::new(0)),
+        response: schema::RequestPermissionResponse::new(
+            schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
+                "allow_once",
+            )),
+        ),
+    }
+}
+
+fn quiet_notifier() -> StubSessionUpdateNotifier {
+    StubSessionUpdateNotifier {
+        should_fail: false,
+        call_count: Arc::new(AtomicUsize::new(0)),
+        last_notification: Arc::new(Mutex::new(None)),
+    }
+}
+
+fn mock_agent_with_delay(delay: Duration) -> MockAgent {
+    MockAgent::new(Arc::new(MockServerState::new(MockConfig {
+        response_delay: delay,
+        startup_hints: false,
+    })))
+}
+
+fn spawn_cancel_task(agent: MockAgent) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        agent
+            .cancel(schema::CancelNotification::new("mock_0"))
+            .await
+            .expect("cancel notifications should succeed");
+    })
+}
+
 #[tokio::test]
 async fn mock_agent_supports_control_plane_requests() {
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
@@ -241,33 +277,10 @@ async fn mock_agent_cancels_prompts_when_permissions_are_cancelled() {
 
 #[tokio::test]
 async fn mock_agent_cancels_inflight_prompts_after_cancel_notifications() {
-    let requester = StubPermissionRequester {
-        call_count: Arc::new(AtomicUsize::new(0)),
-        response: schema::RequestPermissionResponse::new(
-            schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
-                "allow_once",
-            )),
-        ),
-    };
-    let notifier = StubSessionUpdateNotifier {
-        should_fail: false,
-        call_count: Arc::new(AtomicUsize::new(0)),
-        last_notification: Arc::new(Mutex::new(None)),
-    };
-    let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig {
-        response_delay: Duration::from_millis(50),
-        startup_hints: false,
-    })));
-    let cancel_task = {
-        let agent = agent.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            agent
-                .cancel(schema::CancelNotification::new("mock_0"))
-                .await
-                .expect("cancel notifications should succeed");
-        })
-    };
+    let requester = allow_once_requester();
+    let notifier = quiet_notifier();
+    let agent = mock_agent_with_delay(Duration::from_millis(50));
+    let cancel_task = spawn_cancel_task(agent.clone());
 
     let response = agent
         .prompt(

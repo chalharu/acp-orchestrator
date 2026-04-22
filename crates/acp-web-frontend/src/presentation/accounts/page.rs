@@ -225,15 +225,12 @@ fn accounts_page_shell(
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn accounts_page_shell(
-    state: AccountsPageState,
-    back_to_chat_href: String,
-    signing_out: RwSignal<bool>,
+fn accounts_sign_out_button(
+    show_sign_out: bool,
+    signing_out: bool,
     sign_out: Callback<web_sys::MouseEvent>,
-) -> impl IntoView {
-    let show_sign_out = accounts_page_shows_sign_out(state.access.get_untracked());
-    let sign_out_button = if show_sign_out {
-        let signing_out = signing_out.get_untracked();
+) -> AnyView {
+    if show_sign_out {
         let label = sign_out_button_label(signing_out);
         view! {
             <button
@@ -247,9 +244,12 @@ fn accounts_page_shell(
         .into_any()
     } else {
         ().into_any()
-    };
-    let notice = state.notice.get_untracked();
-    let notice_view = if let Some(notice) = notice {
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn accounts_notice_view(notice: Option<String>) -> AnyView {
+    if let Some(notice) = notice {
         view! {
             <p class="account-notice" role="status">
                 {notice}
@@ -258,7 +258,20 @@ fn accounts_page_shell(
         .into_any()
     } else {
         ().into_any()
-    };
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn accounts_page_shell(
+    state: AccountsPageState,
+    back_to_chat_href: String,
+    signing_out: RwSignal<bool>,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    let show_sign_out = accounts_page_shows_sign_out(state.access.get_untracked());
+    let sign_out_button =
+        accounts_sign_out_button(show_sign_out, signing_out.get_untracked(), sign_out);
+    let notice_view = accounts_notice_view(state.notice.get_untracked());
 
     view! {
         <main class="app-shell account-shell">
@@ -1830,7 +1843,7 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
-    fn host_initializers_and_handlers_update_state_safely() {
+    fn host_initializers_mark_state_once() {
         let owner = Owner::new();
         owner.with(|| {
             let checked = RwSignal::new(false);
@@ -1846,7 +1859,15 @@ mod tests {
             state.loading_accounts.set(true);
             initialize_accounts_page_host(state);
             assert!(state.loading_accounts.get());
+        });
+    }
 
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn create_account_submit_host_resets_form_state_and_sets_notice() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
             state.create_username.set("alice".to_string());
             state.create_password.set("password123".to_string());
             state.create_admin.set(true);
@@ -1856,7 +1877,15 @@ mod tests {
             assert!(state.create_password.get().is_empty());
             assert!(!state.create_admin.get());
             assert_eq!(state.notice.get(), Some("Account created.".to_string()));
+        });
+    }
 
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn account_save_and_delete_host_update_notice() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
             let password = RwSignal::new("next-password".to_string());
             let admin_checked = RwSignal::new(true);
             let saving = RwSignal::new(false);
@@ -1869,7 +1898,15 @@ mod tests {
             account_delete_host("alice", state, deleting);
             assert!(!deleting.get());
             assert_eq!(state.notice.get(), Some("Account deleted.".to_string()));
+        });
+    }
 
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn sign_out_and_reload_host_clear_errors() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
             state.error.set(Some("stale error".to_string()));
             let signing_out = RwSignal::new(false);
             sign_out_host(state.error, signing_out);
@@ -1881,9 +1918,13 @@ mod tests {
             spawn_account_reload(state);
             assert!(!state.loading_accounts.get());
             assert!(state.error.get().is_none());
-
-            assert_eq!(accounts_back_to_chat_path_from_location(), "/app/");
         });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn accounts_back_to_chat_path_defaults_to_app_root() {
+        assert_eq!(accounts_back_to_chat_path_from_location(), "/app/");
     }
 
     #[cfg(not(target_family = "wasm"))]

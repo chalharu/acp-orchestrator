@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_footer_and_actions_build_without_panicking() {
+    fn composer_footer_builds_without_panicking() {
         let owner = Owner::new();
         owner.with(|| {
             let _ = view! {
@@ -707,6 +707,13 @@ mod tests {
                     on_cancel=Callback::new(|()| {})
                 />
             };
+        });
+    }
+
+    #[test]
+    fn composer_actions_build_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
             let _ = view! {
                 <ComposerActions
                     disabled=Signal::derive(|| false)

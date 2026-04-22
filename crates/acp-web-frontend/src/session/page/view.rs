@@ -1,7 +1,7 @@
 use acp_contracts::SessionListItem;
-use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use leptos::portal::Portal;
+use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
@@ -2017,7 +2017,8 @@ mod tests {
                 Callback::new(|_: String| {}),
             );
 
-            let _ = session_sidebar_item_view(item, rename_draft, item_signals, callbacks).into_any();
+            let _ =
+                session_sidebar_item_view(item, rename_draft, item_signals, callbacks).into_any();
         });
     }
 

@@ -23,7 +23,7 @@ async fn pending_permission_context(
     SessionStore,
     String,
     PendingPrompt,
-    tokio::sync::broadcast::Receiver<acp_contracts::StreamEvent>,
+    tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
 ) {
     let store = SessionStore::new(4);
     let session = store
@@ -104,7 +104,7 @@ async fn backend_acp_client_uses_the_tool_call_id_when_titles_are_missing() {
         .expect("permission event should arrive");
     assert!(matches!(
         permission_event.payload,
-        acp_contracts::StreamEventPayload::PermissionRequested { request }
+        crate::contract_stream::StreamEventPayload::PermissionRequested { request }
             if request.request_id == "req_1" && request.summary == "tool tool_0"
     ));
 
@@ -113,7 +113,7 @@ async fn backend_acp_client_uses_the_tool_call_id_when_titles_are_missing() {
             "alice",
             &session_id,
             "req_1",
-            acp_contracts::PermissionDecision::Deny,
+            crate::contract_permissions::PermissionDecision::Deny,
         )
         .await
         .expect("permission resolution should succeed");
@@ -187,7 +187,7 @@ async fn backend_acp_client_waits_for_permission_decisions() {
             "alice",
             &session_id,
             "req_1",
-            acp_contracts::PermissionDecision::Approve,
+            crate::contract_permissions::PermissionDecision::Approve,
         )
         .await
         .expect("permission resolution should succeed");

@@ -1,6 +1,6 @@
 #![cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
 
-use acp_contracts::ErrorResponse;
+use acp_contracts_errors::ErrorResponse;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionLoadError {
@@ -59,7 +59,7 @@ pub(crate) fn session_unavailable_message(status: u16, backend_message: Option<S
 
 #[cfg(test)]
 mod tests {
-    use acp_contracts::ErrorResponse;
+    use acp_contracts_errors::ErrorResponse;
 
     use super::{
         SessionLoadError, classify_session_load_failure_parts, decode_backend_error_message,

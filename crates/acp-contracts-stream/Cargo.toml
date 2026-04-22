@@ -1,0 +1,11 @@
+[package]
+name = "acp-contracts-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+acp-contracts-messages.workspace = true
+acp-contracts-permissions.workspace = true
+acp-contracts-sessions.workspace = true
+serde.workspace = true

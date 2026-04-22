@@ -8,8 +8,23 @@ default-run = "acp"
 [workspace]
 members = [
   "crates/acp-app-support",
+  "crates/acp-app-support-errors",
+  "crates/acp-app-support-frontend",
+  "crates/acp-app-support-http",
+  "crates/acp-app-support-listener",
+  "crates/acp-app-support-runtime",
+  "crates/acp-app-support-service",
+  "crates/acp-app-support-temp",
+  "crates/acp-app-support-tracing",
   "crates/acp-cli",
   "crates/acp-contracts",
+  "crates/acp-contracts-accounts",
+  "crates/acp-contracts-errors",
+  "crates/acp-contracts-messages",
+  "crates/acp-contracts-permissions",
+  "crates/acp-contracts-sessions",
+  "crates/acp-contracts-slash",
+  "crates/acp-contracts-stream",
   "crates/acp-mock",
   "crates/acp-web-backend",
 ]
@@ -21,8 +36,21 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
-acp-app-support = { path = "crates/acp-app-support", version = "=0.1.0" }
-acp-contracts = { path = "crates/acp-contracts", version = "=0.1.0" }
+acp-app-support-errors = { path = "crates/acp-app-support-errors", version = "=0.1.0" }
+acp-app-support-frontend = { path = "crates/acp-app-support-frontend", version = "=0.1.0" }
+acp-app-support-http = { path = "crates/acp-app-support-http", version = "=0.1.0" }
+acp-app-support-listener = { path = "crates/acp-app-support-listener", version = "=0.1.0" }
+acp-app-support-runtime = { path = "crates/acp-app-support-runtime", version = "=0.1.0" }
+acp-app-support-service = { path = "crates/acp-app-support-service", version = "=0.1.0" }
+acp-app-support-temp = { path = "crates/acp-app-support-temp", version = "=0.1.0" }
+acp-app-support-tracing = { path = "crates/acp-app-support-tracing", version = "=0.1.0" }
+acp-contracts-accounts = { path = "crates/acp-contracts-accounts", version = "=0.1.0" }
+acp-contracts-errors = { path = "crates/acp-contracts-errors", version = "=0.1.0" }
+acp-contracts-messages = { path = "crates/acp-contracts-messages", version = "=0.1.0" }
+acp-contracts-permissions = { path = "crates/acp-contracts-permissions", version = "=0.1.0" }
+acp-contracts-sessions = { path = "crates/acp-contracts-sessions", version = "=0.1.0" }
+acp-contracts-slash = { path = "crates/acp-contracts-slash", version = "=0.1.0" }
+acp-contracts-stream = { path = "crates/acp-contracts-stream", version = "=0.1.0" }
 agent-client-protocol = "=0.11.1"
 argon2 = "=0.5.3"
 async-trait = "=0.1.89"
@@ -66,7 +94,11 @@ unicode-width = "=0.2.2"
 uuid = { version = "=1.23.1", features = ["serde", "v4"] }
 
 [dependencies]
-acp-app-support.workspace = true
+acp-app-support-errors.workspace = true
+acp-app-support-frontend.workspace = true
+acp-app-support-http.workspace = true
+acp-app-support-temp.workspace = true
+acp-app-support-tracing.workspace = true
 acp-cli = { path = "crates/acp-cli", version = "=0.1.0" }
 acp-mock = { path = "crates/acp-mock", version = "=0.1.0" }
 acp-web-backend = { path = "crates/acp-web-backend", version = "=0.1.0" }
@@ -86,5 +118,3 @@ uuid.workspace = true
 name = "acp"
 path = "src/main.rs"
 
-[dev-dependencies]
-acp-contracts.workspace = true

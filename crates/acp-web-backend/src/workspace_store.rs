@@ -1,8 +1,5 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-#[cfg(test)]
-use acp_contracts::SessionStatus;
-use acp_contracts::{LocalAccount, SessionSnapshot};
 use chrono::Utc;
 #[cfg(test)]
 use rusqlite::params;
@@ -12,6 +9,10 @@ use rusqlite::{Connection, TransactionBehavior};
 use std::path::Path;
 
 use crate::auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind};
+use crate::contract_accounts::LocalAccount;
+use crate::contract_sessions::SessionSnapshot;
+#[cfg(test)]
+use crate::contract_sessions::SessionStatus;
 pub use crate::workspace_records::{
     SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
 };

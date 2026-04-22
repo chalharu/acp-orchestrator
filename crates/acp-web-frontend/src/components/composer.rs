@@ -1,28 +1,28 @@
 //! Composer (message input + submit) component.
 
-use acp_contracts::CompletionCandidate;
+use acp_contracts_slash::CompletionCandidate;
 use leptos::{html as leptos_html, prelude::*};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::{JsCast, closure::Closure};
 
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
-
-#[derive(Clone, Copy)]
-pub(crate) struct ComposerSlashSignals {
-    pub visible: Signal<bool>,
-    pub candidates: Signal<Vec<CompletionCandidate>>,
-    pub selected_index: Signal<usize>,
-    pub apply_selected: Signal<bool>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct ComposerSlashCallbacks {
-    pub select_next: Callback<()>,
-    pub select_previous: Callback<()>,
-    pub apply_selected: Callback<()>,
-    pub apply_index: Callback<usize>,
-    pub dismiss: Callback<()>,
-}
+type SlashKeydownSignals = (Signal<bool>, Signal<bool>);
+type SlashKeydownCallbacks = (Callback<()>, Callback<()>, Callback<()>, Callback<()>);
+#[cfg(test)]
+type SlashTestSignals = (
+    Signal<bool>,
+    Signal<Vec<CompletionCandidate>>,
+    Signal<usize>,
+    Signal<bool>,
+);
+#[cfg(test)]
+type SlashTestCallbacks = (
+    Callback<()>,
+    Callback<()>,
+    Callback<()>,
+    Callback<usize>,
+    Callback<()>,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SlashPaletteState {
@@ -49,8 +49,15 @@ pub(crate) fn Composer(
     #[prop(into)] show_cancel: Signal<bool>,
     #[prop(into)] cancel_disabled: Signal<bool>,
     on_cancel: Callback<()>,
-    slash_signals: ComposerSlashSignals,
-    slash_callbacks: ComposerSlashCallbacks,
+    #[prop(into)] slash_visible: Signal<bool>,
+    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
+    #[prop(into)] slash_selected_index: Signal<usize>,
+    #[prop(into)] slash_apply_selected: Signal<bool>,
+    on_slash_select_next: Callback<()>,
+    on_slash_select_previous: Callback<()>,
+    on_slash_apply_selected: Callback<()>,
+    on_slash_apply_index: Callback<usize>,
+    on_slash_dismiss: Callback<()>,
 ) -> impl IntoView {
     let form = NodeRef::<leptos_html::Form>::new();
     let textarea = NodeRef::<leptos_html::Textarea>::new();
@@ -77,8 +84,15 @@ pub(crate) fn Composer(
         >
             <ComposerEditor
                 draft=draft
-                slash_signals=slash_signals
-                slash_callbacks=slash_callbacks
+                slash_visible=slash_visible
+                slash_candidates=slash_candidates
+                slash_selected_index=slash_selected_index
+                slash_apply_selected=slash_apply_selected
+                on_slash_select_next=on_slash_select_next
+                on_slash_select_previous=on_slash_select_previous
+                on_slash_apply_selected=on_slash_apply_selected
+                on_slash_apply_index=on_slash_apply_index
+                on_slash_dismiss=on_slash_dismiss
                 submit_context=submit_context
             />
             <ComposerFooter
@@ -95,21 +109,36 @@ pub(crate) fn Composer(
 #[component]
 fn ComposerEditor(
     draft: RwSignal<String>,
-    slash_signals: ComposerSlashSignals,
-    slash_callbacks: ComposerSlashCallbacks,
+    #[prop(into)] slash_visible: Signal<bool>,
+    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
+    #[prop(into)] slash_selected_index: Signal<usize>,
+    #[prop(into)] slash_apply_selected: Signal<bool>,
+    on_slash_select_next: Callback<()>,
+    on_slash_select_previous: Callback<()>,
+    on_slash_apply_selected: Callback<()>,
+    on_slash_apply_index: Callback<usize>,
+    on_slash_dismiss: Callback<()>,
     submit_context: SubmitDraftContext,
 ) -> impl IntoView {
     view! {
         <div class="composer__editor">
             <ComposerInput
                 draft=draft
-                slash_signals=slash_signals
-                slash_callbacks=slash_callbacks
+                slash_visible=slash_visible
+                slash_candidates=slash_candidates
+                slash_selected_index=slash_selected_index
+                slash_apply_selected=slash_apply_selected
+                on_slash_select_next=on_slash_select_next
+                on_slash_select_previous=on_slash_select_previous
+                on_slash_apply_selected=on_slash_apply_selected
+                on_slash_dismiss=on_slash_dismiss
                 submit_context=submit_context
             />
             <SlashPalette
-                slash_signals=slash_signals
-                on_apply_index=slash_callbacks.apply_index
+                slash_visible=slash_visible
+                slash_candidates=slash_candidates
+                slash_selected_index=slash_selected_index
+                on_apply_index=on_slash_apply_index
             />
         </div>
     }
@@ -124,8 +153,14 @@ fn slash_option_id(index: usize) -> String {
 #[component]
 fn ComposerInput(
     draft: RwSignal<String>,
-    slash_signals: ComposerSlashSignals,
-    slash_callbacks: ComposerSlashCallbacks,
+    #[prop(into)] slash_visible: Signal<bool>,
+    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
+    #[prop(into)] slash_selected_index: Signal<usize>,
+    #[prop(into)] slash_apply_selected: Signal<bool>,
+    on_slash_select_next: Callback<()>,
+    on_slash_select_previous: Callback<()>,
+    on_slash_apply_selected: Callback<()>,
+    on_slash_dismiss: Callback<()>,
     submit_context: SubmitDraftContext,
 ) -> impl IntoView {
     bind_submit_focus(submit_context.clone());
@@ -143,10 +178,10 @@ fn ComposerInput(
             aria-autocomplete="list"
             aria-haspopup="listbox"
             aria-controls=SLASH_PALETTE_LISTBOX_ID
-            aria-expanded=move || if slash_signals.visible.get() { "true" } else { "false" }
+            aria-expanded=move || if slash_visible.get() { "true" } else { "false" }
             aria-activedescendant=move || {
-                if slash_signals.visible.get() && !slash_signals.candidates.get().is_empty() {
-                    Some(slash_option_id(slash_signals.selected_index.get()))
+                if slash_visible.get() && !slash_candidates.get().is_empty() {
+                    Some(slash_option_id(slash_selected_index.get()))
                 } else {
                     None
                 }
@@ -160,8 +195,13 @@ fn ComposerInput(
                     ev,
                     draft,
                     keydown_submit_context.clone(),
-                    slash_signals,
-                    slash_callbacks,
+                    (slash_visible, slash_apply_selected),
+                    (
+                        on_slash_select_next,
+                        on_slash_select_previous,
+                        on_slash_apply_selected,
+                        on_slash_dismiss,
+                    ),
                 );
             }
             prop:disabled=move || disabled.get()
@@ -272,8 +312,8 @@ fn handle_composer_keydown(
     ev: web_sys::KeyboardEvent,
     draft: RwSignal<String>,
     submit_context: SubmitDraftContext,
-    slash_signals: ComposerSlashSignals,
-    slash_callbacks: ComposerSlashCallbacks,
+    slash_signals: SlashKeydownSignals,
+    slash_callbacks: SlashKeydownCallbacks,
 ) {
     if ev.is_composing() {
         return;
@@ -299,27 +339,32 @@ fn handle_slash_palette_keydown(
     ev: &web_sys::KeyboardEvent,
     draft: RwSignal<String>,
     submit_context: SubmitDraftContext,
-    slash_signals: ComposerSlashSignals,
-    slash_callbacks: ComposerSlashCallbacks,
+    (slash_visible, slash_apply_selected): SlashKeydownSignals,
+    (
+        on_slash_select_next,
+        on_slash_select_previous,
+        on_slash_apply_selected,
+        on_slash_dismiss,
+    ): SlashKeydownCallbacks,
 ) -> bool {
-    if !slash_signals.visible.get_untracked() {
+    if !slash_visible.get_untracked() {
         return false;
     }
 
     match ev.key().as_str() {
-        "ArrowDown" => slash_callbacks.select_next.run(()),
-        "ArrowUp" => slash_callbacks.select_previous.run(()),
-        "Tab" if !ev.shift_key() && slash_signals.apply_selected.get_untracked() => {
-            slash_callbacks.apply_selected.run(());
+        "ArrowDown" => on_slash_select_next.run(()),
+        "ArrowUp" => on_slash_select_previous.run(()),
+        "Tab" if !ev.shift_key() && slash_apply_selected.get_untracked() => {
+            on_slash_apply_selected.run(());
         }
         "Enter" if !ev.shift_key() => {
-            if slash_signals.apply_selected.get_untracked() {
-                slash_callbacks.apply_selected.run(());
+            if slash_apply_selected.get_untracked() {
+                on_slash_apply_selected.run(());
             } else {
                 submit_draft(draft, submit_context);
             }
         }
-        "Escape" => slash_callbacks.dismiss.run(()),
+        "Escape" => on_slash_dismiss.run(()),
         _ => return false,
     }
 
@@ -359,16 +404,18 @@ fn submit_text(current_value: String, disabled: bool) -> Option<String> {
 
 #[component]
 fn SlashPalette(
-    slash_signals: ComposerSlashSignals,
+    #[prop(into)] slash_visible: Signal<bool>,
+    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
+    #[prop(into)] slash_selected_index: Signal<usize>,
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
     view! {
-        <Show when=move || should_render_slash_palette(slash_signals)>
+        <Show when=move || should_render_slash_palette(slash_visible)>
             <section class="composer__slash-palette" aria-label="Slash command suggestions">
                 {move || {
                     render_slash_palette_state(
-                        slash_palette_state(slash_signals),
-                        slash_signals.selected_index.get(),
+                        slash_palette_state(slash_candidates),
+                        slash_selected_index.get(),
                         on_apply_index,
                     )
                 }}
@@ -377,13 +424,12 @@ fn SlashPalette(
     }
 }
 
-fn should_render_slash_palette(slash_signals: ComposerSlashSignals) -> bool {
-    slash_signals.visible.get()
+fn should_render_slash_palette(slash_visible: Signal<bool>) -> bool {
+    slash_visible.get()
 }
 
-fn slash_palette_state(slash_signals: ComposerSlashSignals) -> SlashPaletteState {
-    let items = slash_signals
-        .candidates
+fn slash_palette_state(slash_candidates: Signal<Vec<CompletionCandidate>>) -> SlashPaletteState {
+    let items = slash_candidates
         .get()
         .into_iter()
         .enumerate()
@@ -539,14 +585,14 @@ fn ComposerActions(
 
 #[cfg(test)]
 mod tests {
-    use acp_contracts::{CompletionCandidate, CompletionKind};
+    use acp_contracts_slash::{CompletionCandidate, CompletionKind};
     use leptos::prelude::*;
 
     use super::{
-        Composer, ComposerActions, ComposerFooter, ComposerSlashCallbacks, ComposerSlashSignals,
-        SlashPalette, SlashPaletteItem, SlashPaletteList, SlashPaletteState, current_submit_value,
-        render_slash_palette_state, should_render_slash_palette, slash_option_id,
-        slash_palette_state, submit_text,
+        Composer, ComposerActions, ComposerFooter, SlashPalette, SlashPaletteItem,
+        SlashPaletteList, SlashPaletteState, SlashTestCallbacks, SlashTestSignals,
+        current_submit_value, render_slash_palette_state, should_render_slash_palette,
+        slash_option_id, slash_palette_state, submit_text,
     };
 
     fn make_candidate(label: &str) -> CompletionCandidate {
@@ -563,13 +609,13 @@ mod tests {
         candidates: Vec<CompletionCandidate>,
         selected_index: usize,
         apply_selected: bool,
-    ) -> ComposerSlashSignals {
-        ComposerSlashSignals {
-            visible: Signal::derive(move || visible),
-            candidates: Signal::derive(move || candidates.clone()),
-            selected_index: Signal::derive(move || selected_index),
-            apply_selected: Signal::derive(move || apply_selected),
-        }
+    ) -> SlashTestSignals {
+        (
+            Signal::derive(move || visible),
+            Signal::derive(move || candidates.clone()),
+            Signal::derive(move || selected_index),
+            Signal::derive(move || apply_selected),
+        )
     }
 
     #[test]
@@ -600,11 +646,11 @@ mod tests {
     fn should_render_slash_palette_follows_visible_signal() {
         let owner = Owner::new();
         owner.with(|| {
-            let signals = make_slash_signals(true, vec![], 0, false);
-            assert!(should_render_slash_palette(signals));
+            let (visible, ..) = make_slash_signals(true, vec![], 0, false);
+            assert!(should_render_slash_palette(visible));
 
-            let signals_hidden = make_slash_signals(false, vec![], 0, false);
-            assert!(!should_render_slash_palette(signals_hidden));
+            let (hidden, ..) = make_slash_signals(false, vec![], 0, false);
+            assert!(!should_render_slash_palette(hidden));
         });
     }
 
@@ -612,8 +658,8 @@ mod tests {
     fn slash_palette_state_empty_when_no_candidates() {
         let owner = Owner::new();
         owner.with(|| {
-            let signals = make_slash_signals(true, vec![], 0, false);
-            assert_eq!(slash_palette_state(signals), SlashPaletteState::Empty);
+            let (_, candidates, ..) = make_slash_signals(true, vec![], 0, false);
+            assert_eq!(slash_palette_state(candidates), SlashPaletteState::Empty);
         });
     }
 
@@ -622,7 +668,8 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let candidates = vec![make_candidate("/help"), make_candidate("/clear")];
-            let state = slash_palette_state(make_slash_signals(true, candidates, 0, false));
+            let (_, candidates, ..) = make_slash_signals(true, candidates, 0, false);
+            let state = slash_palette_state(candidates);
             assert!(matches!(
                 state,
                 SlashPaletteState::Ready(items)
@@ -638,7 +685,8 @@ mod tests {
             let candidates: Vec<_> = (0..10)
                 .map(|i| make_candidate(&format!("/cmd{i}")))
                 .collect();
-            let state = slash_palette_state(make_slash_signals(true, candidates, 0, false));
+            let (_, candidates, ..) = make_slash_signals(true, candidates, 0, false);
+            let state = slash_palette_state(candidates);
             assert!(matches!(state, SlashPaletteState::Ready(items) if items.len() == 5));
         });
     }
@@ -666,10 +714,14 @@ mod tests {
         owner.with(|| {
             let candidates = vec![make_candidate("/help"), make_candidate("/clear")];
             let on_apply = Callback::new(|_: usize| {});
+            let (visible, candidates_signal, selected_index, _) =
+                make_slash_signals(true, candidates.clone(), 1, true);
 
             let _ = view! {
                 <SlashPalette
-                    slash_signals=make_slash_signals(true, candidates.clone(), 1, true)
+                    slash_visible=visible
+                    slash_candidates=candidates_signal
+                    slash_selected_index=selected_index
                     on_apply_index=on_apply
                 />
             };
@@ -750,14 +802,14 @@ mod tests {
     // Composer – full component build (covers the constructor function body)
     // -----------------------------------------------------------------------
 
-    fn make_slash_callbacks() -> ComposerSlashCallbacks {
-        ComposerSlashCallbacks {
-            select_next: Callback::new(|()| {}),
-            select_previous: Callback::new(|()| {}),
-            apply_selected: Callback::new(|()| {}),
-            apply_index: Callback::new(|_: usize| {}),
-            dismiss: Callback::new(|()| {}),
-        }
+    fn make_slash_callbacks() -> SlashTestCallbacks {
+        (
+            Callback::new(|()| {}),
+            Callback::new(|()| {}),
+            Callback::new(|()| {}),
+            Callback::new(|_: usize| {}),
+            Callback::new(|()| {}),
+        )
     }
 
     #[test]
@@ -765,8 +817,15 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let draft = RwSignal::new(String::new());
-            let slash_signals = make_slash_signals(false, vec![], 0, false);
-            let slash_callbacks = make_slash_callbacks();
+            let (slash_visible, slash_candidates, slash_selected_index, slash_apply_selected) =
+                make_slash_signals(false, vec![], 0, false);
+            let (
+                on_slash_select_next,
+                on_slash_select_previous,
+                on_slash_apply_selected,
+                on_slash_apply_index,
+                on_slash_dismiss,
+            ) = make_slash_callbacks();
 
             let _ = view! {
                 <Composer
@@ -777,8 +836,15 @@ mod tests {
                     show_cancel=Signal::derive(|| false)
                     cancel_disabled=Signal::derive(|| false)
                     on_cancel=Callback::new(|()| {})
-                    slash_signals=slash_signals
-                    slash_callbacks=slash_callbacks
+                    slash_visible=slash_visible
+                    slash_candidates=slash_candidates
+                    slash_selected_index=slash_selected_index
+                    slash_apply_selected=slash_apply_selected
+                    on_slash_select_next=on_slash_select_next
+                    on_slash_select_previous=on_slash_select_previous
+                    on_slash_apply_selected=on_slash_apply_selected
+                    on_slash_apply_index=on_slash_apply_index
+                    on_slash_dismiss=on_slash_dismiss
                 />
             };
         });

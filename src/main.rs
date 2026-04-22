@@ -6,12 +6,12 @@ use std::{
     time::Duration,
 };
 
-use acp_app_support::{BoxError, build_http_client_for_url, init_tracing, wait_for_http_success};
 use snafu::prelude::*;
 
 mod frontend_bundle;
 mod launcher_process;
 mod launcher_stack;
+mod support;
 
 pub(crate) use frontend_bundle::{ensure_frontend_built, frontend_dist_path};
 #[cfg(test)]
@@ -21,6 +21,9 @@ pub(crate) use frontend_bundle::{
 
 use launcher_process::{ensure_success, spawn_foreground_role};
 use launcher_stack::prepare_launcher_stack;
+use support::errors::BoxError;
+use support::http::{build_http_client_for_url, wait_for_http_success};
+use support::tracing::init_tracing;
 
 #[cfg(test)]
 pub(crate) use launcher_process::{read_startup_url, terminate_child};

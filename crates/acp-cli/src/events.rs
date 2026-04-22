@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use super::*;
-use acp_contracts::{ConversationMessage, PermissionRequest};
+use crate::contract_messages::ConversationMessage;
+use crate::contract_permissions::PermissionRequest;
 use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, pin_mut};
 
@@ -270,7 +271,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             id: "s_test".to_string(),
             title: "New chat".to_string(),
-            status: acp_contracts::SessionStatus::Active,
+            status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 1,
             messages: vec![assistant_message("m_1", "hello")],
             pending_permissions: vec![PermissionRequest {
@@ -295,7 +296,7 @@ mod tests {
         let session = SessionSnapshot {
             id: "s_test".to_string(),
             title: "New chat".to_string(),
-            status: acp_contracts::SessionStatus::Active,
+            status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 2,
             messages: vec![
                 assistant_message("m_known", "known"),

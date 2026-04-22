@@ -5,10 +5,7 @@
 //! supported in the web UI; other commands (cancel, approve, deny, quit)
 //! have dedicated on-screen controls.
 
-use acp_contracts::{
-    CompletionCandidate, CompletionKind, SLASH_COMMAND_SPECS, SlashCommand, SlashCompletionQuery,
-    classify_slash_completion_prefix, parse_slash_command,
-};
+use acp_contracts_slash::{CompletionCandidate, CompletionKind, SLASH_COMMAND_SPECS, SlashCommand, SlashCompletionQuery, classify_slash_completion_prefix, parse_slash_command};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BrowserSlashAction {
@@ -162,7 +159,7 @@ fn ensure_no_extra_slash_args(command: SlashCommand, has_extra_args: bool) -> Re
     }
 }
 
-fn spec_to_candidate(spec: &acp_contracts::SlashCommandSpec) -> CompletionCandidate {
+fn spec_to_candidate(spec: &acp_contracts_slash::SlashCommandSpec) -> CompletionCandidate {
     CompletionCandidate {
         label: spec.label.to_string(),
         insert_text: spec.insert_text.to_string(),
@@ -174,7 +171,7 @@ fn spec_to_candidate(spec: &acp_contracts::SlashCommandSpec) -> CompletionCandid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp_contracts::CompletionKind;
+    use acp_contracts_slash::CompletionKind;
 
     #[test]
     fn slash_palette_visibility_requires_a_supported_prefix() {

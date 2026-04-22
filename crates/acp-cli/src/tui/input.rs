@@ -1,4 +1,3 @@
-use acp_contracts::classify_slash_completion_prefix;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use reqwest::Client;
@@ -8,6 +7,7 @@ use super::{SLASH_COMPLETION_TIMEOUT, app::ChatApp, render};
 use crate::{
     Result,
     api::{get_session, submit_prompt},
+    contract_slash::classify_slash_completion_prefix,
     repl_commands::{
         PendingPermissionsUpdate, ReplCommandNotice, ReplCommandOutcome, execute_repl_command,
     },

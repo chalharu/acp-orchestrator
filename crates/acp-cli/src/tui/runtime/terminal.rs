@@ -135,13 +135,15 @@ pub(super) fn read_terminal_event() -> Result<Option<Event>> {
 
 #[cfg(test)]
 mod tests {
-    use acp_contracts::{SessionSnapshot, SessionStatus};
     use reqwest::Client;
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::ChatSession;
     use crate::tui::runtime::UiEventChannel;
+    use crate::{
+        ChatSession,
+        contract_sessions::{SessionSnapshot, SessionStatus},
+    };
 
     fn reset_terminal_test_hooks() {
         *terminal_test_state()

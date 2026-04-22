@@ -1,9 +1,9 @@
 use super::*;
 
-use acp_contracts::{
-    CompletionCandidate, CompletionKind, CreateSessionResponse, PermissionRequest, PromptResponse,
-    SessionSnapshot, SessionStatus, SlashCompletionsResponse,
-};
+use crate::contract_messages::PromptResponse;
+use crate::contract_permissions::PermissionRequest;
+use crate::contract_sessions::{CreateSessionResponse, SessionSnapshot, SessionStatus};
+use crate::contract_slash::{CompletionCandidate, CompletionKind, SlashCompletionsResponse};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

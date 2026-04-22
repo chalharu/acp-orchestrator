@@ -1,4 +1,4 @@
-use acp_contracts::ErrorResponse;
+use acp_contracts_errors::ErrorResponse;
 
 use super::errors::{
     SessionLoadError, classify_session_load_failure_parts, decode_backend_error_message,

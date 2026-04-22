@@ -1,4 +1,4 @@
-pub(crate) use crate::domain::routing::{decode_component, encode_component};
+pub(crate) use crate::routing::{decode_component, encode_component};
 
 pub(crate) fn session_path(session_id: &str) -> String {
     format!("/api/v1/sessions/{}", encode_component(session_id))

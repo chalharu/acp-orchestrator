@@ -1,5 +1,6 @@
 mod prompt;
 pub mod runtime;
+pub mod support;
 
 #[cfg(test)]
 mod tests;

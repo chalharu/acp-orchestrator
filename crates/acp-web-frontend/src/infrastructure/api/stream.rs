@@ -1,6 +1,6 @@
 #![cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
 
-use acp_contracts::StreamEvent;
+use acp_contracts_stream::StreamEvent;
 use futures_channel::mpsc;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::{JsCast, closure::Closure};

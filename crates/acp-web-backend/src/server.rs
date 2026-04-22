@@ -1,7 +1,9 @@
 use std::{fmt::Display, path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(test)]
-use acp_contracts::{PromptRequest, RenameSessionRequest};
+use crate::contract_messages::PromptRequest;
+#[cfg(test)]
+use crate::contract_sessions::RenameSessionRequest;
 #[cfg(test)]
 use axum::{
     Json,
@@ -28,6 +30,7 @@ use crate::{
         AuthError, AuthenticatedPrincipal, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME,
         authorize_request, cookie_value,
     },
+    contract_health::ErrorResponse,
     mock_client::{MockClient, MockClientError, ReplyProvider},
     sessions::{SessionStore, SessionStoreError},
     workspace_records::{UserRecord, WorkspaceStoreError},
@@ -35,9 +38,11 @@ use crate::{
 };
 
 mod account_api;
+mod account_service;
 mod assets;
 mod connection;
 mod session_api;
+mod session_service;
 
 use self::account_api::{
     auth_status, bootstrap_register, create_account, delete_account, list_accounts, sign_in,
@@ -51,7 +56,7 @@ use self::session_api::{
     stream_session_events,
 };
 #[cfg(test)]
-use self::session_api::{
+use self::session_service::{
     persist_prompt_snapshot_best_effort, persist_session_metadata_best_effort,
 };
 
@@ -338,7 +343,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (
             self.status_code(),
-            axum::Json(acp_contracts::ErrorResponse {
+            axum::Json(ErrorResponse {
                 error: self.message().to_string(),
             }),
         )

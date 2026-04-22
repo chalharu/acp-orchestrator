@@ -1,0 +1,8 @@
+[package]
+name = "acp-app-support-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+acp-app-support-temp.workspace = true

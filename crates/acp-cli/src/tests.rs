@@ -167,7 +167,7 @@ async fn stream_events_renders_new_messages_from_an_initial_snapshot_delta() {
         url,
         "developer".to_string(),
         Some(InitialSnapshotState::from_messages_and_permissions(
-            &[acp_contracts::ConversationMessage {
+            &[crate::contract_messages::ConversationMessage {
                 id: "m_known".to_string(),
                 role: MessageRole::Assistant,
                 text: "already rendered".to_string(),
@@ -197,7 +197,7 @@ async fn stream_events_renders_new_pending_permissions_from_an_initial_snapshot_
         "developer".to_string(),
         Some(InitialSnapshotState::from_messages_and_permissions(
             &[],
-            &[acp_contracts::PermissionRequest {
+            &[crate::contract_permissions::PermissionRequest {
                 request_id: "req_old".to_string(),
                 summary: "read_text_file Cargo.toml".to_string(),
             }],
@@ -244,15 +244,15 @@ fn render_event_covers_all_display_variants() {
     let snapshot = SessionSnapshot {
         id: "s_test".to_string(),
         title: "New chat".to_string(),
-        status: acp_contracts::SessionStatus::Active,
+        status: crate::contract_sessions::SessionStatus::Active,
         latest_sequence: 2,
-        messages: vec![acp_contracts::ConversationMessage {
+        messages: vec![crate::contract_messages::ConversationMessage {
             id: "m_test".to_string(),
             role: MessageRole::Assistant,
             text: "hello".to_string(),
             created_at,
         }],
-        pending_permissions: vec![acp_contracts::PermissionRequest {
+        pending_permissions: vec![crate::contract_permissions::PermissionRequest {
             request_id: "req_1".to_string(),
             summary: "read_text_file README.md".to_string(),
         }],
@@ -272,7 +272,7 @@ fn render_event_covers_all_display_variants() {
     render_event(&StreamEvent {
         sequence: 4,
         payload: StreamEventPayload::PermissionRequested {
-            request: acp_contracts::PermissionRequest {
+            request: crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             },
@@ -291,20 +291,20 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
         session: SessionSnapshot {
             id: "s_test".to_string(),
             title: "New chat".to_string(),
-            status: acp_contracts::SessionStatus::Active,
+            status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 2,
-            messages: vec![acp_contracts::ConversationMessage {
+            messages: vec![crate::contract_messages::ConversationMessage {
                 id: "m_snapshot".to_string(),
                 role: MessageRole::Assistant,
                 text: "from snapshot".to_string(),
                 created_at,
             }],
-            pending_permissions: vec![acp_contracts::PermissionRequest {
+            pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
         },
-        resume_history: vec![acp_contracts::ConversationMessage {
+        resume_history: vec![crate::contract_messages::ConversationMessage {
             id: "m_history".to_string(),
             role: MessageRole::Assistant,
             text: "from history".to_string(),
@@ -328,10 +328,10 @@ fn print_chat_status_handles_pending_permissions() {
         session: SessionSnapshot {
             id: "s_test".to_string(),
             title: "New chat".to_string(),
-            status: acp_contracts::SessionStatus::Active,
+            status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 1,
             messages: Vec::new(),
-            pending_permissions: vec![acp_contracts::PermissionRequest {
+            pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
@@ -349,7 +349,7 @@ fn cli_helpers_cover_missing_urls_closed_sessions_and_not_found_errors() {
         session: SessionSnapshot {
             id: "s_closed".to_string(),
             title: "New chat".to_string(),
-            status: acp_contracts::SessionStatus::Closed,
+            status: crate::contract_sessions::SessionStatus::Closed,
             latest_sequence: 1,
             messages: Vec::new(),
             pending_permissions: Vec::new(),
@@ -360,7 +360,7 @@ fn cli_helpers_cover_missing_urls_closed_sessions_and_not_found_errors() {
 
     assert!(closed_session.is_read_only());
     assert_eq!(
-        session_status_label(&acp_contracts::SessionStatus::Closed),
+        session_status_label(&crate::contract_sessions::SessionStatus::Closed),
         "closed"
     );
     assert!(matches!(

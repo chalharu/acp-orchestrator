@@ -3,24 +3,83 @@
 use leptos::{html as leptos_html, prelude::*};
 
 #[cfg(target_family = "wasm")]
-use crate::domain::transcript::tail_scroll_top;
-use crate::domain::transcript::{
-    EntryRole, TranscriptEntry, compute_virtual_window, render_markdown,
-};
+use crate::transcript_view::tail_scroll_top;
+use crate::transcript_view::{compute_virtual_window, render_markdown};
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::{JsCast, closure::Closure};
 
 const DEFAULT_VIEWPORT_HEIGHT: f64 = 640.0;
 const BOTTOM_TOLERANCE_PX: f64 = 24.0;
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptEntry {
+    pub(crate) id: String,
+    pub(crate) role: EntryRole,
+    pub(crate) text: String,
+}
+
+impl TranscriptItem for TranscriptEntry {
+    fn transcript_id(&self) -> &str {
+        &self.id
+    }
+
+    fn transcript_role(&self) -> EntryRole {
+        self.role.clone()
+    }
+
+    fn transcript_text(&self) -> &str {
+        &self.text
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EntryRole {
+    User,
+    Assistant,
+    Status,
+}
+
+impl EntryRole {
+    pub(crate) fn css_class(&self) -> &'static str {
+        match self {
+            Self::User => "transcript-entry--user",
+            Self::Assistant => "transcript-entry--assistant",
+            Self::Status => "transcript-entry--status",
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Status => "status",
+        }
+    }
+}
+
+pub(crate) trait TranscriptItem: Clone + PartialEq + Send + Sync {
+    fn transcript_id(&self) -> &str;
+    fn transcript_role(&self) -> EntryRole;
+    fn transcript_text(&self) -> &str;
+}
+
 #[component]
-pub(crate) fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl IntoView {
+pub(crate) fn Transcript<T>(#[prop(into)] entries: Signal<Vec<T>>) -> impl IntoView
+where
+    T: TranscriptItem + 'static,
+{
     let viewport = NodeRef::<leptos_html::Section>::new();
     let scroll_top = RwSignal::new(0.0);
     let viewport_height = RwSignal::new(DEFAULT_VIEWPORT_HEIGHT);
     let follow_tail = RwSignal::new(true);
     let virtual_window = Memo::new(move |_| {
-        compute_virtual_window(&entries.get(), scroll_top.get(), viewport_height.get())
+        compute_virtual_window(
+            &entries.get(),
+            scroll_top.get(),
+            viewport_height.get(),
+            estimated_entry_height,
+        )
     });
     let visible_entries = Signal::derive(move || virtual_window.get().visible);
     let top_spacer_height = Signal::derive(move || virtual_window.get().top_spacer_height);
@@ -54,8 +113,8 @@ pub(crate) fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) ->
                     <TranscriptSpacer height=top_spacer_height />
                     <For
                         each=move || visible_entries.get()
-                        key=|entry| entry.id.clone()
-                        children=move |entry| view! { <TranscriptEntryItem entry=entry /> }
+                        key=|entry| entry.transcript_id().to_string()
+                        children=move |entry| render_transcript_entry_item(entry)
                     />
                     <TranscriptSpacer height=bottom_spacer_height />
                 </ol>
@@ -64,9 +123,12 @@ pub(crate) fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) ->
     }
 }
 
-#[component]
-fn TranscriptEntryItem(entry: TranscriptEntry) -> impl IntoView {
-    let TranscriptEntry { role, text, .. } = entry;
+fn render_transcript_entry_item<T>(entry: T) -> AnyView
+where
+    T: TranscriptItem,
+{
+    let role = entry.transcript_role();
+    let text = entry.transcript_text().to_string();
     let css = role.css_class().to_string();
     let label = format!("{}: ", role.label());
 
@@ -125,13 +187,15 @@ fn TranscriptSpacer(#[prop(into)] height: Signal<f64>) -> impl IntoView {
     }
 }
 
-fn bind_viewport_effects(
+fn bind_viewport_effects<T>(
     viewport: NodeRef<leptos_html::Section>,
-    entries: Signal<Vec<TranscriptEntry>>,
+    entries: Signal<Vec<T>>,
     viewport_height: RwSignal<f64>,
     scroll_top: RwSignal<f64>,
     follow_tail: RwSignal<bool>,
-) {
+) where
+    T: TranscriptItem + 'static,
+{
     #[cfg(not(target_family = "wasm"))]
     {
         let _ = (
@@ -216,11 +280,44 @@ fn update_scroll_metrics(
     follow_tail.set(remaining_distance <= BOTTOM_TOLERANCE_PX);
 }
 
+fn estimated_entry_height<T>(entry: &T) -> f64
+where
+    T: TranscriptItem,
+{
+    let (base_height, chars_per_line) = match entry.transcript_role() {
+        EntryRole::User | EntryRole::Assistant => (48.0, 52),
+        EntryRole::Status => (36.0, 62),
+    };
+    let estimated_lines = entry
+        .transcript_text()
+        .lines()
+        .map(|line| estimate_visual_lines(line, chars_per_line))
+        .sum::<usize>()
+        .max(1);
+
+    base_height + (estimated_lines as f64 * 22.0)
+}
+
+fn estimate_visual_lines(line: &str, chars_per_line: usize) -> usize {
+    let char_count = line.chars().count().max(1);
+    (char_count + chars_per_line.saturating_sub(1)) / chars_per_line.max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use leptos::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn entry_role_helpers_return_expected_labels_and_classes() {
+        assert_eq!(EntryRole::User.css_class(), "transcript-entry--user");
+        assert_eq!(EntryRole::Assistant.css_class(), "transcript-entry--assistant");
+        assert_eq!(EntryRole::Status.css_class(), "transcript-entry--status");
+        assert_eq!(EntryRole::User.label(), "user");
+        assert_eq!(EntryRole::Assistant.label(), "assistant");
+        assert_eq!(EntryRole::Status.label(), "status");
+    }
 
     fn entry(id: &str, role: EntryRole, text: &str) -> TranscriptEntry {
         TranscriptEntry {
@@ -251,9 +348,9 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let _ =
-                view! { <TranscriptEntryItem entry=entry("status", EntryRole::Status, "done") /> };
+                render_transcript_entry_item(entry("status", EntryRole::Status, "done"));
             let _ = view! {
-                <TranscriptEntryItem entry=entry("assistant", EntryRole::Assistant, "**bold**") />
+                {render_transcript_entry_item(entry("assistant", EntryRole::Assistant, "**bold**"))}
             };
         });
     }
@@ -265,5 +362,27 @@ mod tests {
             let _ = view! { <TranscriptMarkdown markdown="**bold**".to_string() /> };
             let _ = view! { <TranscriptSpacer height=Signal::derive(|| 24.0) /> };
         });
+    }
+    #[test]
+    fn estimated_entry_height_uses_status_layout() {
+        assert_eq!(estimated_entry_height(&entry("status", EntryRole::Status, "")), 58.0);
+    }
+
+    #[test]
+    fn estimated_entry_height_uses_chat_layout_and_wraps_long_lines() {
+        let wrapped = estimated_entry_height(&entry(
+            "assistant",
+            EntryRole::Assistant,
+            &"x".repeat(53),
+        ));
+
+        assert_eq!(wrapped, 92.0);
+    }
+
+    #[test]
+    fn estimate_visual_lines_handles_empty_lines_and_zero_width_inputs() {
+        assert_eq!(estimate_visual_lines("", 52), 1);
+        assert_eq!(estimate_visual_lines("abcd", 0), 4);
+        assert_eq!(estimate_visual_lines("abcdef", 4), 2);
     }
 }

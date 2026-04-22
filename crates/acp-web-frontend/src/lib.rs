@@ -3,7 +3,11 @@
 mod application;
 mod browser;
 mod components;
-mod domain;
+mod routing;
+mod session_activity;
+mod session_lifecycle;
+mod session_state;
+mod transcript_view;
 mod infrastructure;
 mod presentation;
 mod session;
@@ -13,7 +17,7 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
-use crate::domain::routing::{AppRoute, current_route};
+use crate::routing::{AppRoute, current_route};
 use crate::presentation::{AccountsPage, RegisterPage, SignInPage};
 use crate::session::{HomePage, SessionView};
 

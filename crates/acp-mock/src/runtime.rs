@@ -1,13 +1,14 @@
 use std::{ffi::OsString, time::Duration};
 
-use acp_app_support::{
-    BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
-    listener_endpoint, print_startup_line, run_service_with_readiness, shutdown_signal,
-    wait_for_tcp_connect,
-};
 use clap::Parser;
 use snafu::prelude::*;
 
+use crate::support::errors::{BoxError, ListenerSetupError, ServiceReadinessError};
+use crate::support::http::wait_for_tcp_connect;
+use crate::support::runtime::{
+    RuntimeListenArgs, bind_listener, listener_endpoint, print_startup_line,
+};
+use crate::support::service::{run_service_with_readiness, shutdown_signal};
 use crate::{MockConfig, serve_with_shutdown};
 
 type Result<T, E = MockAppError> = std::result::Result<T, E>;

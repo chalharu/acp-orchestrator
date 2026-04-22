@@ -1,7 +1,7 @@
-use acp_contracts::MessageRole;
 use tokio::sync::mpsc;
 
 use super::super::{TuiEvent, app::ChatApp, input::UiContext};
+use crate::contract_messages::MessageRole;
 
 #[derive(Default)]
 pub(super) struct PendingPermissionRefreshState {

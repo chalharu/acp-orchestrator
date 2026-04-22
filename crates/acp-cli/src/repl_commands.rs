@@ -1,10 +1,11 @@
+use crate::contract_permissions::PermissionDecision;
+use crate::contract_slash::{
+    CompletionCandidate, CompletionKind, SlashCommand, parse_slash_command,
+};
 use crate::{
     Result,
     api::{cancel_turn, get_slash_completions, resolve_permission},
     events::permission_decision_label,
-};
-use acp_contracts::{
-    CompletionCandidate, CompletionKind, PermissionDecision, SlashCommand, parse_slash_command,
 };
 use reqwest::Client;
 
@@ -244,7 +245,7 @@ fn permission_decision(command: SlashCommand) -> PermissionDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp_contracts::SlashCompletionsResponse;
+    use crate::contract_slash::SlashCompletionsResponse;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -376,8 +377,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_repl_command_refreshes_pending_permissions_after_cancel() {
-        let payload = serde_json::to_string(&acp_contracts::CancelTurnResponse { cancelled: true })
-            .expect("payload should serialize");
+        let payload = serde_json::to_string(&crate::contract_sessions::CancelTurnResponse {
+            cancelled: true,
+        })
+        .expect("payload should serialize");
         let url = spawn_json_server(payload).await;
         let client = Client::builder().build().expect("client should build");
 
@@ -399,11 +402,12 @@ mod tests {
 
     #[tokio::test]
     async fn execute_repl_command_removes_resolved_permission_requests() {
-        let payload = serde_json::to_string(&acp_contracts::ResolvePermissionResponse {
-            request_id: "req_1".to_string(),
-            decision: PermissionDecision::Deny,
-        })
-        .expect("payload should serialize");
+        let payload =
+            serde_json::to_string(&crate::contract_permissions::ResolvePermissionResponse {
+                request_id: "req_1".to_string(),
+                decision: PermissionDecision::Deny,
+            })
+            .expect("payload should serialize");
         let url = spawn_json_server(payload).await;
         let client = Client::builder().build().expect("client should build");
 

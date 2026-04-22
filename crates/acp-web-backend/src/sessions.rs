@@ -1,12 +1,15 @@
 use std::{cmp::Reverse, collections::HashMap, sync::Arc};
 
-use acp_contracts::{
-    ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    ResolvePermissionResponse, SessionListItem, SessionSnapshot, StreamEvent,
-};
 use chrono::Utc;
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
+
+use crate::contract_messages::{ConversationMessage, MessageRole};
+use crate::contract_permissions::{
+    PermissionDecision, PermissionRequest, ResolvePermissionResponse,
+};
+use crate::contract_sessions::{SessionListItem, SessionSnapshot};
+use crate::contract_stream::StreamEvent;
 
 mod handle;
 

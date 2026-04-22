@@ -5,8 +5,20 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-acp-app-support.workspace = true
-acp-contracts.workspace = true
+acp-app-support-errors.workspace = true
+acp-app-support-frontend.workspace = true
+acp-app-support-http.workspace = true
+acp-app-support-listener.workspace = true
+acp-app-support-runtime.workspace = true
+acp-app-support-service.workspace = true
+acp-app-support-tracing.workspace = true
+acp-contracts-accounts.workspace = true
+acp-contracts-errors.workspace = true
+acp-contracts-messages.workspace = true
+acp-contracts-permissions.workspace = true
+acp-contracts-sessions.workspace = true
+acp-contracts-slash.workspace = true
+acp-contracts-stream.workspace = true
 agent-client-protocol.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
@@ -33,7 +45,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-acp-app-support = { workspace = true, features = ["test-helpers"] }
 acp-mock = { path = "../acp-mock", version = "=0.1.0" }
 anyhow = "=1.0.102"
 eventsource-stream.workspace = true

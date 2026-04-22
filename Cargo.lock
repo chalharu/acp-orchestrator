@@ -6,10 +6,74 @@ version = 4
 name = "acp-app-support"
 version = "0.1.0"
 dependencies = [
- "clap",
+ "acp-app-support-errors",
+ "acp-app-support-frontend",
+ "acp-app-support-http",
+ "acp-app-support-listener",
+ "acp-app-support-runtime",
+ "acp-app-support-service",
+ "acp-app-support-temp",
+ "acp-app-support-tracing",
+]
+
+[[package]]
+name = "acp-app-support-errors"
+version = "0.1.0"
+dependencies = [
+ "snafu",
+]
+
+[[package]]
+name = "acp-app-support-frontend"
+version = "0.1.0"
+dependencies = [
+ "acp-app-support-temp",
+]
+
+[[package]]
+name = "acp-app-support-http"
+version = "0.1.0"
+dependencies = [
+ "acp-app-support-errors",
  "reqwest",
+ "tokio",
+]
+
+[[package]]
+name = "acp-app-support-listener"
+version = "0.1.0"
+dependencies = [
+ "acp-app-support-errors",
+ "acp-app-support-tracing",
  "snafu",
  "tokio",
+]
+
+[[package]]
+name = "acp-app-support-runtime"
+version = "0.1.0"
+dependencies = [
+ "acp-app-support-errors",
+ "clap",
+ "tokio",
+]
+
+[[package]]
+name = "acp-app-support-service"
+version = "0.1.0"
+dependencies = [
+ "acp-app-support-errors",
+ "tokio",
+]
+
+[[package]]
+name = "acp-app-support-temp"
+version = "0.1.0"
+
+[[package]]
+name = "acp-app-support-tracing"
+version = "0.1.0"
+dependencies = [
  "tracing-subscriber",
 ]
 
@@ -17,8 +81,14 @@ dependencies = [
 name = "acp-cli"
 version = "0.1.0"
 dependencies = [
- "acp-app-support",
- "acp-contracts",
+ "acp-app-support-http",
+ "acp-app-support-tracing",
+ "acp-contracts-errors",
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "acp-contracts-sessions",
+ "acp-contracts-slash",
+ "acp-contracts-stream",
  "acp-mock",
  "acp-web-backend",
  "chrono",
@@ -41,16 +111,84 @@ dependencies = [
 name = "acp-contracts"
 version = "0.1.0"
 dependencies = [
+ "acp-contracts-accounts",
+ "acp-contracts-errors",
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "acp-contracts-sessions",
+ "acp-contracts-slash",
+ "acp-contracts-stream",
+]
+
+[[package]]
+name = "acp-contracts-accounts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-errors"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-messages"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-sessions"
+version = "0.1.0"
+dependencies = [
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
  "chrono",
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "acp-contracts-slash"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "acp-contracts-stream"
+version = "0.1.0"
+dependencies = [
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "acp-contracts-sessions",
+ "serde",
+]
+
+[[package]]
 name = "acp-mock"
 version = "0.1.0"
 dependencies = [
- "acp-app-support",
+ "acp-app-support-errors",
+ "acp-app-support-http",
+ "acp-app-support-listener",
+ "acp-app-support-runtime",
+ "acp-app-support-service",
+ "acp-app-support-tracing",
  "agent-client-protocol",
  "async-trait",
  "clap",
@@ -64,9 +202,12 @@ dependencies = [
 name = "acp-orchestrator"
 version = "0.1.0"
 dependencies = [
- "acp-app-support",
+ "acp-app-support-errors",
+ "acp-app-support-frontend",
+ "acp-app-support-http",
+ "acp-app-support-temp",
+ "acp-app-support-tracing",
  "acp-cli",
- "acp-contracts",
  "acp-mock",
  "acp-web-backend",
  "dirs",
@@ -86,8 +227,20 @@ dependencies = [
 name = "acp-web-backend"
 version = "0.1.0"
 dependencies = [
- "acp-app-support",
- "acp-contracts",
+ "acp-app-support-errors",
+ "acp-app-support-frontend",
+ "acp-app-support-http",
+ "acp-app-support-listener",
+ "acp-app-support-runtime",
+ "acp-app-support-service",
+ "acp-app-support-tracing",
+ "acp-contracts-accounts",
+ "acp-contracts-errors",
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "acp-contracts-sessions",
+ "acp-contracts-slash",
+ "acp-contracts-stream",
  "acp-mock",
  "agent-client-protocol",
  "anyhow",

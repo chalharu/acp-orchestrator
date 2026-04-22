@@ -1,20 +1,20 @@
 use std::{error::Error as StdError, ffi::OsString, future::Future, io::IsTerminal, path::PathBuf};
 
-use acp_app_support::{build_http_client_for_url, init_tracing};
-use acp_contracts::{
-    CancelTurnResponse, CloseSessionResponse, ConversationMessage, CreateSessionResponse,
-    ErrorResponse, MessageRole, PermissionDecision, PromptRequest, PromptResponse,
-    ResolvePermissionRequest, ResolvePermissionResponse, SessionSnapshot, SessionStatus,
-    StreamEvent, StreamEventPayload,
-};
 use clap::{Args, Parser, Subcommand};
 use reqwest::{Client, Response, StatusCode};
 use snafu::prelude::*;
 
 mod api;
+pub mod contract_errors;
+pub mod contract_messages;
+pub mod contract_permissions;
+pub mod contract_sessions;
+pub mod contract_slash;
+pub mod contract_stream;
 mod events;
 mod input;
 mod repl_commands;
+pub mod support;
 mod tui;
 
 #[cfg(test)]
@@ -25,8 +25,19 @@ mod tests;
 use api::{
     close_session, create_session, ensure_success, get_session, get_session_history, list_sessions,
 };
+use contract_errors::ErrorResponse;
+use contract_messages::{ConversationMessage, MessageRole, PromptRequest, PromptResponse};
+use contract_permissions::{
+    PermissionDecision, ResolvePermissionRequest, ResolvePermissionResponse,
+};
+use contract_sessions::{
+    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, SessionSnapshot, SessionStatus,
+};
+use contract_stream::{StreamEvent, StreamEventPayload};
 use events::{InitialSnapshotState, stream_events_to_stderr};
 use input::drive_repl;
+use support::http::build_http_client_for_url;
+use support::tracing::init_tracing;
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
 

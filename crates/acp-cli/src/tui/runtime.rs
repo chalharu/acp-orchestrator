@@ -1,10 +1,11 @@
 use std::io;
 
-use acp_contracts::CompletionCandidate;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use reqwest::Client;
 use snafu::ResultExt;
 use tokio::{runtime::Handle, sync::mpsc};
+
+use crate::contract_slash::CompletionCandidate;
 
 use super::{
     TuiEvent,
@@ -150,10 +151,9 @@ fn draw_app(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acp_contracts::{
-        ConversationMessage, CreateSessionResponse, MessageRole, PermissionRequest,
-        SessionSnapshot, SessionStatus,
-    };
+    use crate::contract_messages::{ConversationMessage, MessageRole};
+    use crate::contract_permissions::PermissionRequest;
+    use crate::contract_sessions::{CreateSessionResponse, SessionSnapshot, SessionStatus};
     use chrono::Utc;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

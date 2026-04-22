@@ -1,21 +1,23 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts::{CompletionCandidate, SessionListItem};
+use acp_contracts_sessions::{SessionListItem};
+use acp_contracts_slash::{CompletionCandidate};
+use acp_contracts_permissions::PermissionRequest;
 use futures_util::future::AbortHandle;
 use leptos::prelude::*;
 use web_sys::EventSource;
 
 use crate::{
     browser::{load_draft, save_draft},
-    components::composer::ComposerSlashCallbacks,
-    domain::session::{
-        PendingPermission, SessionLifecycle, StatusBadge, TurnState, connection_badge_state,
+    session_lifecycle::{SessionLifecycle, TurnState},
+    session_state::{
         session_action_busy, session_composer_cancel_visible, session_composer_disabled,
-        session_composer_status_message, worker_badge_state,
+        session_composer_status_message,
     },
-    domain::transcript::TranscriptEntry,
     slash::{slash_palette_is_visible, slash_palette_should_apply_selected},
 };
+
+use super::entries::SessionEntry;
 
 #[derive(Clone, Copy)]
 pub(super) struct SlashSignals {
@@ -36,8 +38,8 @@ pub(super) struct SessionListSignals {
 
 #[derive(Clone, Copy)]
 pub(super) struct SessionSignals {
-    pub(super) entries: RwSignal<Vec<TranscriptEntry>>,
-    pub(super) pending_permissions: RwSignal<Vec<PendingPermission>>,
+    pub(super) entries: RwSignal<Vec<SessionEntry>>,
+    pub(super) pending_permissions: RwSignal<Vec<PermissionRequest>>,
     pub(super) action_error: RwSignal<Option<String>>,
     pub(super) connection_error: RwSignal<Option<String>>,
     pub(super) event_source: RwSignal<Option<EventSource>>,
@@ -52,12 +54,21 @@ pub(super) struct SessionSignals {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct SessionSlashCallbacks {
+    pub(super) select_next: Callback<()>,
+    pub(super) select_previous: Callback<()>,
+    pub(super) apply_selected: Callback<()>,
+    pub(super) apply_index: Callback<usize>,
+    pub(super) dismiss: Callback<()>,
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct SessionViewCallbacks {
     pub(super) submit: Callback<String>,
     pub(super) approve: Callback<String>,
     pub(super) deny: Callback<String>,
     pub(super) cancel: Callback<()>,
-    pub(super) slash: ComposerSlashCallbacks,
+    pub(super) slash: SessionSlashCallbacks,
     pub(super) rename_session: Callback<(String, String)>,
     pub(super) delete_session: Callback<String>,
 }
@@ -87,9 +98,16 @@ pub(super) struct SessionMainSignals {
     pub(super) topbar_message: Signal<Option<String>>,
     pub(super) connection_badge: Signal<StatusBadge>,
     pub(super) worker_badge: Signal<StatusBadge>,
-    pub(super) entries: Signal<Vec<TranscriptEntry>>,
-    pub(super) pending_permissions: Signal<Vec<PendingPermission>>,
+    pub(super) entries: Signal<Vec<SessionEntry>>,
+    pub(super) pending_permissions: Signal<Vec<PermissionRequest>>,
     pub(super) pending_action_busy: Signal<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct StatusBadge {
+    pub(super) label: &'static str,
+    pub(super) value: &'static str,
+    pub(super) tone: crate::session_lifecycle::BadgeTone,
 }
 
 #[derive(Clone, Copy)]
@@ -255,7 +273,33 @@ fn main_connection_badge(
     session_status: SessionLifecycle,
     has_connection_error: bool,
 ) -> StatusBadge {
-    connection_badge_state(session_status, has_connection_error)
+    match session_status {
+        SessionLifecycle::Loading => StatusBadge {
+            label: "Connection",
+            value: "connecting",
+            tone: crate::session_lifecycle::BadgeTone::Neutral,
+        },
+        SessionLifecycle::Active if has_connection_error => StatusBadge {
+            label: "Connection",
+            value: "reconnecting",
+            tone: crate::session_lifecycle::BadgeTone::Warning,
+        },
+        SessionLifecycle::Active => StatusBadge {
+            label: "Connection",
+            value: "live",
+            tone: crate::session_lifecycle::BadgeTone::Success,
+        },
+        SessionLifecycle::Closed => StatusBadge {
+            label: "Connection",
+            value: "ended",
+            tone: crate::session_lifecycle::BadgeTone::Neutral,
+        },
+        SessionLifecycle::Unavailable | SessionLifecycle::Error => StatusBadge {
+            label: "Connection",
+            value: "unavailable",
+            tone: crate::session_lifecycle::BadgeTone::Danger,
+        },
+    }
 }
 
 fn main_worker_badge(
@@ -263,7 +307,50 @@ fn main_worker_badge(
     turn_state: TurnState,
     has_pending_permissions: bool,
 ) -> StatusBadge {
-    worker_badge_state(session_status, turn_state, has_pending_permissions)
+    match session_status {
+        SessionLifecycle::Loading => StatusBadge {
+            label: "Worker",
+            value: "starting",
+            tone: crate::session_lifecycle::BadgeTone::Neutral,
+        },
+        SessionLifecycle::Unavailable | SessionLifecycle::Error => StatusBadge {
+            label: "Worker",
+            value: "unavailable",
+            tone: crate::session_lifecycle::BadgeTone::Danger,
+        },
+        SessionLifecycle::Closed => StatusBadge {
+            label: "Worker",
+            value: "stopped",
+            tone: crate::session_lifecycle::BadgeTone::Neutral,
+        },
+        SessionLifecycle::Active if has_pending_permissions => StatusBadge {
+            label: "Worker",
+            value: "permission",
+            tone: crate::session_lifecycle::BadgeTone::Warning,
+        },
+        SessionLifecycle::Active => match turn_state {
+            TurnState::Submitting | TurnState::AwaitingReply => StatusBadge {
+                label: "Worker",
+                value: "running",
+                tone: crate::session_lifecycle::BadgeTone::Success,
+            },
+            TurnState::Cancelling => StatusBadge {
+                label: "Worker",
+                value: "cancelling",
+                tone: crate::session_lifecycle::BadgeTone::Warning,
+            },
+            TurnState::AwaitingPermission => StatusBadge {
+                label: "Worker",
+                value: "permission",
+                tone: crate::session_lifecycle::BadgeTone::Warning,
+            },
+            TurnState::Idle => StatusBadge {
+                label: "Worker",
+                value: "idle",
+                tone: crate::session_lifecycle::BadgeTone::Neutral,
+            },
+        },
+    }
 }
 
 pub(super) fn session_sidebar_item_signals(
@@ -372,7 +459,7 @@ fn session_composer_status_signal(
 
 fn session_composer_cancel_visible_signal(
     turn_state: RwSignal<TurnState>,
-    pending_permissions: RwSignal<Vec<PendingPermission>>,
+    pending_permissions: RwSignal<Vec<PermissionRequest>>,
     current_session_deleting: Signal<bool>,
 ) -> Signal<bool> {
     Signal::derive(move || {
@@ -398,10 +485,12 @@ fn session_composer_cancel_busy_signal(
 
 #[cfg(test)]
 mod tests {
-    use acp_contracts::{CompletionCandidate, CompletionKind, SessionListItem};
+    use acp_contracts_permissions::PermissionRequest;
+    use acp_contracts_sessions::SessionListItem;
+    use acp_contracts_slash::{CompletionCandidate, CompletionKind};
 
-    use crate::domain::session::{PendingPermission, SessionLifecycle, TurnState};
-
+    use crate::session::page::entries::SessionEntry;
+    use crate::session_lifecycle::{SessionLifecycle, TurnState};
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -412,13 +501,13 @@ mod tests {
         SessionListItem {
             id: id.to_string(),
             title: id.to_string(),
-            status: acp_contracts::SessionStatus::Active,
+            status: acp_contracts_sessions::SessionStatus::Active,
             last_activity_at: chrono::Utc::now(),
         }
     }
 
-    fn pending_permission(id: &str) -> PendingPermission {
-        PendingPermission {
+    fn pending_permission(id: &str) -> PermissionRequest {
+        PermissionRequest {
             request_id: id.to_string(),
             summary: format!("Permission for {id}"),
         }
@@ -735,6 +824,12 @@ mod tests {
             assert!(main.entries.get().is_empty());
             assert!(main.pending_permissions.get().is_empty());
             assert!(!main.pending_action_busy.get());
+
+            signals
+                .entries
+                .set(vec![SessionEntry::status("status-1", "done")]);
+            assert_eq!(main.entries.get().len(), 1);
+            assert_eq!(main.entries.get()[0].text, "done");
 
             signals
                 .pending_permissions

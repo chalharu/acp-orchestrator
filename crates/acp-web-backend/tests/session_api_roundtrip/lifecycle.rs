@@ -40,7 +40,7 @@ async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
 async fn direct_mock_server_accepts_tcp_connections() -> Result<()> {
     let (address, shutdown, handle) = spawn_direct_mock_server().await?;
 
-    acp_app_support::wait_for_tcp_connect(&address, 50, Duration::from_millis(50))
+    acp_web_backend::support::http::wait_for_tcp_connect(&address, 50, Duration::from_millis(50))
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
@@ -55,12 +55,17 @@ async fn direct_mock_server_accepts_tcp_connections() -> Result<()> {
 #[tokio::test]
 async fn direct_backend_server_reports_health() -> Result<()> {
     let (base_url, handle) = spawn_direct_backend_server("127.0.0.1:9".to_string()).await?;
-    let client = acp_app_support::build_http_client_for_url(&base_url, None)
+    let client = acp_web_backend::support::http::build_http_client_for_url(&base_url, None)
         .context("building test client")?;
 
-    acp_app_support::wait_for_health(&client, &base_url, 50, Duration::from_millis(50))
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    acp_web_backend::support::http::wait_for_health(
+        &client,
+        &base_url,
+        50,
+        Duration::from_millis(50),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     handle.abort();
     let _ = handle.await;
@@ -71,7 +76,7 @@ async fn direct_backend_server_reports_health() -> Result<()> {
 async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
     let (address, shutdown, handle) = spawn_graceful_mock_server().await?;
 
-    acp_app_support::wait_for_tcp_connect(&address, 50, Duration::from_millis(50))
+    acp_web_backend::support::http::wait_for_tcp_connect(&address, 50, Duration::from_millis(50))
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let _ = shutdown.send(());
@@ -87,12 +92,17 @@ async fn graceful_mock_server_shutdown_completes_cleanly() -> Result<()> {
 async fn graceful_backend_server_shutdown_completes_cleanly() -> Result<()> {
     let (base_url, shutdown, handle) =
         spawn_graceful_backend_server("127.0.0.1:9".to_string()).await?;
-    let client = acp_app_support::build_http_client_for_url(&base_url, None)
+    let client = acp_web_backend::support::http::build_http_client_for_url(&base_url, None)
         .context("building test client")?;
 
-    acp_app_support::wait_for_health(&client, &base_url, 50, Duration::from_millis(50))
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    acp_web_backend::support::http::wait_for_health(
+        &client,
+        &base_url,
+        50,
+        Duration::from_millis(50),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
     let _ = shutdown.send(());
     handle
         .await

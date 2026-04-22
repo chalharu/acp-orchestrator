@@ -1,12 +1,13 @@
 use super::*;
+use crate::contract_permissions::PermissionDecision;
+use crate::contract_stream::StreamEventPayload;
 use crate::sessions::TurnHandle;
-use acp_contracts::{PermissionDecision, StreamEventPayload};
 
 async fn permission_roundtrip_context() -> (
     MockClient,
     SessionStore,
     String,
-    tokio::sync::broadcast::Receiver<acp_contracts::StreamEvent>,
+    tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
     crate::sessions::PendingPrompt,
     tokio::sync::oneshot::Sender<()>,
 ) {
@@ -34,7 +35,7 @@ async fn permission_roundtrip_context() -> (
 }
 
 async fn expect_permission_requested(
-    receiver: &mut tokio::sync::broadcast::Receiver<acp_contracts::StreamEvent>,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
 ) {
     let permission_event = receiver
         .recv()
@@ -51,7 +52,7 @@ async fn expect_permission_requested(
 async fn approve_permission_request(
     store: &SessionStore,
     session_id: &str,
-    receiver: &mut tokio::sync::broadcast::Receiver<acp_contracts::StreamEvent>,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
 ) {
     store
         .resolve_permission("alice", session_id, "req_1", PermissionDecision::Approve)

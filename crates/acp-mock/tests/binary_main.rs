@@ -1,6 +1,6 @@
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
-use acp_app_support::read_startup_url;
+use acp_mock::support::runtime::read_startup_url;
 use agent_client_protocol::{self as acp, schema};
 use tokio::{net::TcpStream, process::Command, sync::Mutex, time::timeout};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};

@@ -1,0 +1,11 @@
+[package]
+name = "acp-app-support-listener"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+acp-app-support-errors.workspace = true
+acp-app-support-tracing.workspace = true
+snafu.workspace = true
+tokio.workspace = true

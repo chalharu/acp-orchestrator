@@ -1,6 +1,6 @@
 use super::*;
 use crate::sessions::{PendingPrompt, SessionStore};
-use acp_app_support::wait_for_tcp_connect;
+use crate::support::http::wait_for_tcp_connect;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use tokio::{net::TcpListener, sync::oneshot};
 

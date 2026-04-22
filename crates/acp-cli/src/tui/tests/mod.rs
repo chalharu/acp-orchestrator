@@ -1,8 +1,10 @@
 use super::{app::ChatApp, render};
-use acp_contracts::{CompletionCandidate, CompletionKind, MessageRole, PermissionRequest};
 use chrono::Utc;
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
+use crate::contract_messages::MessageRole;
+use crate::contract_permissions::PermissionRequest;
+use crate::contract_slash::{CompletionCandidate, CompletionKind};
 use crate::events::StreamUpdate;
 
 mod app;
@@ -18,8 +20,8 @@ fn command_candidate(label: &str, detail: &str) -> CompletionCandidate {
     }
 }
 
-fn assistant_message(id: &str, text: &str) -> acp_contracts::ConversationMessage {
-    acp_contracts::ConversationMessage {
+fn assistant_message(id: &str, text: &str) -> crate::contract_messages::ConversationMessage {
+    crate::contract_messages::ConversationMessage {
         id: id.to_string(),
         role: MessageRole::Assistant,
         text: text.to_string(),
@@ -27,8 +29,8 @@ fn assistant_message(id: &str, text: &str) -> acp_contracts::ConversationMessage
     }
 }
 
-fn user_message(id: &str, text: &str) -> acp_contracts::ConversationMessage {
-    acp_contracts::ConversationMessage {
+fn user_message(id: &str, text: &str) -> crate::contract_messages::ConversationMessage {
+    crate::contract_messages::ConversationMessage {
         id: id.to_string(),
         role: MessageRole::User,
         text: text.to_string(),

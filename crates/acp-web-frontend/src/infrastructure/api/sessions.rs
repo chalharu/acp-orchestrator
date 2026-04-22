@@ -1,13 +1,10 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts::{
-    CancelTurnResponse, DeleteSessionResponse, PermissionDecision, PromptRequest,
-    RenameSessionRequest, ResolvePermissionRequest, SessionListItem, SessionSnapshot,
-};
+use acp_contracts_messages::{PromptRequest};
+use acp_contracts_permissions::{PermissionDecision, ResolvePermissionRequest};
+use acp_contracts_sessions::{CancelTurnResponse, DeleteSessionResponse, RenameSessionRequest, SessionListItem, SessionSnapshot};
 #[cfg(target_family = "wasm")]
-use acp_contracts::{
-    CreateSessionResponse, RenameSessionResponse, SessionListResponse, SessionResponse,
-};
+use acp_contracts_sessions::{CreateSessionResponse, RenameSessionResponse, SessionListResponse, SessionResponse};
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 

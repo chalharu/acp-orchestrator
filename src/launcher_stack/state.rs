@@ -5,13 +5,13 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use acp_app_support::{
-    FRONTEND_JAVASCRIPT_ASSET_PATH, build_http_client_for_url, wait_for_health,
-    wait_for_http_success, wait_for_tcp_connect,
-};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
+use crate::support::frontend::FRONTEND_JAVASCRIPT_ASSET_PATH;
+use crate::support::http::{
+    build_http_client_for_url, wait_for_health, wait_for_http_success, wait_for_tcp_connect,
+};
 use crate::{
     CreateLauncherStateDirectorySnafu, MissingLauncherStateDirectorySnafu, ParseLauncherStateSnafu,
     ReadLauncherExecutableMetadataSnafu, ReadLauncherExecutableModifiedTimeSnafu,

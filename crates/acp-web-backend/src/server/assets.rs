@@ -3,11 +3,6 @@ use std::{
     path::{Path as FsPath, PathBuf},
 };
 
-use acp_app_support::{
-    FRONTEND_JAVASCRIPT_ASSET_PATH, FRONTEND_WASM_ASSET_PATH, FrontendBundleAsset,
-    LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH, LEGACY_FRONTEND_WASM_ASSET_PATH,
-    find_frontend_bundle_asset,
-};
 use axum::{
     Router,
     extract::{Path, State},
@@ -20,6 +15,15 @@ use axum::{
 };
 use serde::Deserialize;
 use uuid::Uuid;
+
+use crate::{
+    contract_health::HealthResponse,
+    support::frontend::{
+        FRONTEND_JAVASCRIPT_ASSET_PATH, FRONTEND_WASM_ASSET_PATH, FrontendBundleAsset,
+        LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH, LEGACY_FRONTEND_WASM_ASSET_PATH,
+        find_frontend_bundle_asset,
+    },
+};
 
 use super::{AppState, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, cookie_value};
 
@@ -47,8 +51,8 @@ pub(super) fn install_frontend_routes(router: Router<AppState>) -> Router<AppSta
         .route("/app/sessions/{session_id}", get(app_session_entrypoint))
 }
 
-pub(super) async fn healthz() -> axum::Json<acp_contracts::HealthResponse> {
-    axum::Json(acp_contracts::HealthResponse {
+pub(super) async fn healthz() -> axum::Json<HealthResponse> {
+    axum::Json(HealthResponse {
         status: "ok".to_string(),
     })
 }

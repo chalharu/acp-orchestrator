@@ -1,12 +1,11 @@
 //! Pending permission panel rendered below the transcript.
 
+use acp_contracts_permissions::PermissionRequest;
 use leptos::prelude::*;
-
-use crate::domain::session::PendingPermission;
 
 #[component]
 pub(crate) fn ChatActivity(
-    #[prop(into)] items: Signal<Vec<PendingPermission>>,
+    #[prop(into)] items: Signal<Vec<PermissionRequest>>,
     #[prop(into)] busy: Signal<bool>,
     on_approve: Callback<String>,
     on_deny: Callback<String>,
@@ -116,8 +115,8 @@ mod tests {
 
     use super::*;
 
-    fn permission(id: &str) -> PendingPermission {
-        PendingPermission {
+    fn permission(id: &str) -> PermissionRequest {
+        PermissionRequest {
             request_id: id.to_string(),
             summary: format!("summary for {id}"),
         }
@@ -182,7 +181,7 @@ mod tests {
     fn chat_activity_renders_nothing_when_items_are_empty() {
         let owner = Owner::new();
         owner.with(|| {
-            let items = Signal::derive(Vec::<PendingPermission>::new);
+            let items = Signal::derive(Vec::<PermissionRequest>::new);
             let busy = Signal::derive(|| false);
 
             let _ = view! {

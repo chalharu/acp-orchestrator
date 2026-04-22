@@ -1,6 +1,7 @@
 use std::{io, path::PathBuf, process::Stdio, time::Duration};
 
-use acp_app_support::{unique_temp_json_path, wait_for_tcp_connect};
+use acp_app_support_http::wait_for_tcp_connect;
+use acp_app_support_temp::unique_temp_json_path;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},

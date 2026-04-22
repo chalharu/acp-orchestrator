@@ -1,6 +1,6 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts::{AuthStatusResponse, LocalAccount};
+use acp_contracts_accounts::{AuthStatusResponse, LocalAccount};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HomeRouteTarget {
@@ -77,7 +77,7 @@ pub fn account_capabilities(
 
 #[cfg(test)]
 mod tests {
-    use acp_contracts::{AuthStatusResponse, LocalAccount};
+    use acp_contracts_accounts::{AuthStatusResponse, LocalAccount};
     use chrono::{TimeZone, Utc};
 
     use super::*;

@@ -1,11 +1,8 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts::{
-    AccountListResponse, CreateAccountRequest, DeleteAccountResponse, LocalAccount,
-    UpdateAccountRequest,
-};
+use acp_contracts_accounts::{AccountListResponse, CreateAccountRequest, DeleteAccountResponse, LocalAccount, UpdateAccountRequest};
 #[cfg(target_family = "wasm")]
-use acp_contracts::{CreateAccountResponse, UpdateAccountResponse};
+use acp_contracts_accounts::{CreateAccountResponse, UpdateAccountResponse};
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 

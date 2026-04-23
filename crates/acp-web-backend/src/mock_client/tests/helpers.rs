@@ -1,60 +1,21 @@
 use super::*;
+use agent_client_protocol::schema;
+use std::collections::HashMap;
 
 #[test]
 fn reply_from_stop_reason_maps_cancelled_and_empty_outputs() {
     assert_eq!(
-        reply_from_stop_reason(acp::StopReason::Cancelled, "ignored".to_string()),
+        reply_from_stop_reason(schema::StopReason::Cancelled, "ignored".to_string()),
         ReplyResult::Status("turn cancelled".to_string())
     );
     assert_eq!(
-        reply_from_stop_reason(acp::StopReason::EndTurn, String::new()),
+        reply_from_stop_reason(schema::StopReason::EndTurn, String::new()),
         ReplyResult::NoOutput
     );
     assert_eq!(
-        reply_from_stop_reason(acp::StopReason::EndTurn, "reply".to_string()),
+        reply_from_stop_reason(schema::StopReason::EndTurn, "reply".to_string()),
         ReplyResult::Reply("reply".to_string())
     );
-}
-
-#[tokio::test]
-async fn cancelled_before_prompt_aborts_pending_io_tasks() {
-    let started = Arc::new(Notify::new());
-    let started_task = started.clone();
-    let io_task = pending_io_task!(started_task);
-    started.notified().await;
-
-    assert_eq!(
-        cancelled_before_prompt(io_task).await,
-        ReplyResult::Status("turn cancelled".to_string())
-    );
-}
-
-#[tokio::test]
-async fn cancelled_before_prompt_reply_returns_none_when_the_turn_is_not_cancelled() {
-    let mut io_task = Some(tokio::spawn(async {}));
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-
-    assert_eq!(
-        cancelled_before_prompt_reply(&cancel_rx, &mut io_task).await,
-        None
-    );
-    let _ = io_task.expect("task should remain available").await;
-}
-
-#[tokio::test]
-async fn cancelled_before_prompt_reply_returns_a_status_when_the_turn_is_cancelled() {
-    let started = Arc::new(Notify::new());
-    let started_task = started.clone();
-    let mut io_task = Some(pending_io_task!(started_task));
-    started.notified().await;
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let _ = cancel_tx.send(true);
-
-    assert_eq!(
-        cancelled_before_prompt_reply(&cancel_rx, &mut io_task).await,
-        Some(ReplyResult::Status("turn cancelled".to_string()))
-    );
-    assert!(io_task.is_none());
 }
 
 #[test]
@@ -93,4 +54,37 @@ fn reuse_cached_session_clears_stale_mappings_after_failed_loads() {
         !upstream_sessions.contains_key("backend"),
         "stale cached mappings should be removed"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn handle_cancelled_prompt_sends_cancels_and_reports_cancelled_status() {
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let prompt_future = async { Ok(schema::PromptResponse::new(schema::StopReason::EndTurn)) };
+    tokio::pin!(prompt_future);
+    let client = BackendAcpClient::without_turn();
+
+    let reply = handle_cancelled_prompt(
+        true,
+        &mut prompt_future,
+        schema::CancelNotification::new("mock_0"),
+        |cancel_request| {
+            cancel_tx
+                .send(cancel_request)
+                .expect("cancel requests should send");
+            Ok(())
+        },
+        &client,
+    )
+    .await
+    .expect("cancelled prompts should resolve");
+
+    assert_eq!(
+        cancel_rx
+            .await
+            .expect("cancel requests should be received")
+            .session_id
+            .to_string(),
+        "mock_0"
+    );
+    assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
 }

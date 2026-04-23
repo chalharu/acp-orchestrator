@@ -2,11 +2,12 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use acp_contracts::{CompletionCandidate, PermissionRequest};
 use reqwest::Client;
 use snafu::ResultExt;
 use tokio::{runtime::Handle, sync::mpsc};
 
+use crate::contract_permissions::PermissionRequest;
+use crate::contract_slash::CompletionCandidate;
 use crate::{
     ChatSession, JoinInteractiveUiSnafu, Result,
     events::{InitialSnapshotState, StreamUpdate, stream_updates},

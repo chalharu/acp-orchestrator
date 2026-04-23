@@ -1,4 +1,4 @@
-use agent_client_protocol as acp;
+use agent_client_protocol::schema;
 use std::time::Duration;
 use tokio::{sync::watch, time::sleep};
 
@@ -6,7 +6,7 @@ pub const MANUAL_PERMISSION_TRIGGER: &str = "verify permission";
 pub const MANUAL_CANCEL_TRIGGER: &str = "verify cancel";
 const MANUAL_CANCEL_RESPONSE_DELAY: Duration = Duration::from_secs(10);
 
-pub(super) fn prompt_text(prompt: &[acp::ContentBlock]) -> String {
+pub(super) fn prompt_text(prompt: &[schema::ContentBlock]) -> String {
     prompt
         .iter()
         .map(content_text)
@@ -14,13 +14,13 @@ pub(super) fn prompt_text(prompt: &[acp::ContentBlock]) -> String {
         .join(" ")
 }
 
-fn content_text(content: &acp::ContentBlock) -> String {
+fn content_text(content: &schema::ContentBlock) -> String {
     match content {
-        acp::ContentBlock::Text(text) => text.text.clone(),
-        acp::ContentBlock::Image(_) => "<image>".to_string(),
-        acp::ContentBlock::Audio(_) => "<audio>".to_string(),
-        acp::ContentBlock::ResourceLink(link) => link.uri.clone(),
-        content => resource_placeholder(matches!(content, acp::ContentBlock::Resource(_))),
+        schema::ContentBlock::Text(text) => text.text.clone(),
+        schema::ContentBlock::Image(_) => "<image>".to_string(),
+        schema::ContentBlock::Audio(_) => "<audio>".to_string(),
+        schema::ContentBlock::ResourceLink(link) => link.uri.clone(),
+        content => resource_placeholder(matches!(content, schema::ContentBlock::Resource(_))),
     }
 }
 

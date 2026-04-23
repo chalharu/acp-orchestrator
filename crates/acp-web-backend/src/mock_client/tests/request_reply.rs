@@ -1,5 +1,68 @@
 use super::*;
+use crate::contract_permissions::PermissionDecision;
+use crate::contract_stream::StreamEventPayload;
 use crate::sessions::TurnHandle;
+
+async fn permission_roundtrip_context() -> (
+    MockClient,
+    SessionStore,
+    String,
+    tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
+    crate::sessions::PendingPrompt,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+    let client = MockClient::new(mock_address).expect("client construction should succeed");
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice")
+        .await
+        .expect("session creation should succeed");
+    let (_snapshot, receiver) = store
+        .session_events("alice", &session.id)
+        .await
+        .expect("session subscriptions should succeed");
+    let pending = store
+        .submit_prompt(
+            "alice",
+            &session.id,
+            acp_mock::MANUAL_PERMISSION_TRIGGER.to_string(),
+        )
+        .await
+        .expect("prompt submission should succeed");
+
+    (client, store, session.id, receiver, pending, shutdown_tx)
+}
+
+async fn expect_permission_requested(
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
+) {
+    let permission_event = receiver
+        .recv()
+        .await
+        .expect("permission requests should be published");
+    assert!(matches!(
+        permission_event.payload,
+        StreamEventPayload::PermissionRequested { request }
+            if request.request_id == "req_1"
+                && request.summary == "read_text_file README.md"
+    ));
+}
+
+async fn approve_permission_request(
+    store: &SessionStore,
+    session_id: &str,
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::contract_stream::StreamEvent>,
+) {
+    store
+        .resolve_permission("alice", session_id, "req_1", PermissionDecision::Approve)
+        .await
+        .expect("permission approvals should succeed");
+    let _ = receiver
+        .recv()
+        .await
+        .expect("permission snapshots should be published");
+}
 
 #[tokio::test]
 async fn request_reply_collects_text_from_acp_mock() {
@@ -213,6 +276,36 @@ async fn request_reply_returns_cancelled_status_when_turns_are_cancelled() {
         .expect("request task should join")
         .expect("cancelled turns should resolve cleanly");
     assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn request_reply_roundtrips_permission_requests_through_acp() {
+    let (client, store, session_id, mut receiver, pending, shutdown_tx) =
+        permission_roundtrip_context().await;
+
+    let _ = receiver
+        .recv()
+        .await
+        .expect("user prompt events should arrive");
+    let request_task = {
+        let client = client.clone();
+        let turn = pending.turn_handle();
+        tokio::spawn(async move { client.request_reply(turn).await })
+    };
+
+    expect_permission_requested(&mut receiver).await;
+    approve_permission_request(&store, &session_id, &mut receiver).await;
+
+    let reply = request_task
+        .await
+        .expect("request task should join")
+        .expect("permission-gated replies should succeed");
+    assert!(matches!(
+        reply,
+        ReplyResult::Reply(text) if text.starts_with("mock assistant:")
+    ));
 
     let _ = shutdown_tx.send(());
 }

@@ -1,8 +1,12 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
+
 use leptos::prelude::*;
 
 use crate::{
-    application::auth::home_route_target, components::ErrorBanner, domain::auth::HomeRouteTarget,
-    infrastructure::api, navigate_to,
+    application::auth::{HomeRouteTarget, home_route_target},
+    browser::navigate_to,
+    components::ErrorBanner,
+    infrastructure::api,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +38,7 @@ impl AuthPageState {
     }
 }
 
+#[cfg(target_family = "wasm")]
 pub fn initialize_auth_page(kind: AuthPageKind, state: AuthPageState) {
     Effect::new(move |_| {
         if state.checked.get() {
@@ -53,6 +58,22 @@ pub fn initialize_auth_page(kind: AuthPageKind, state: AuthPageState) {
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
+pub fn initialize_auth_page(_kind: AuthPageKind, state: AuthPageState) {
+    initialize_auth_page_host(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn initialize_auth_page_host(state: AuthPageState) {
+    if state.checked.get_untracked() {
+        return;
+    }
+
+    state.checked.set(true);
+    state.loading.set(false);
+}
+
+#[cfg(target_family = "wasm")]
 pub fn submit_credentials_handler(
     kind: AuthPageKind,
     state: AuthPageState,
@@ -79,6 +100,14 @@ pub fn submit_credentials_handler(
             }
         });
     })
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn submit_credentials_handler(
+    _kind: AuthPageKind,
+    state: AuthPageState,
+) -> Callback<web_sys::SubmitEvent> {
+    Callback::new(move |_| submit_credentials_host(state))
 }
 
 pub fn auth_page_view(
@@ -200,9 +229,27 @@ fn auth_page_route(kind: AuthPageKind, target: HomeRouteTarget) -> AuthPageRoute
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn submit_credentials_host(state: AuthPageState) {
+    if state.submitting.get_untracked() {
+        return;
+    }
+
+    state.submitting.set(true);
+    state.error.set(None);
+}
+
 #[cfg(test)]
 mod tests {
+    use leptos::prelude::*;
+    use wasm_bindgen::{JsCast, JsValue};
+
     use super::*;
+
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_submit_event() -> web_sys::SubmitEvent {
+        JsValue::NULL.unchecked_into()
+    }
 
     #[test]
     fn auth_page_route_redirects_to_the_expected_destination() {
@@ -247,5 +294,150 @@ mod tests {
             "Creating account…"
         );
         assert_eq!(submit_button_label(AuthPageKind::SignIn, false), "Sign in");
+    }
+
+    #[test]
+    fn page_title_and_loading_message_differ_by_page_kind() {
+        assert_eq!(
+            page_title(AuthPageKind::Register),
+            "Register bootstrap account"
+        );
+        assert_eq!(page_title(AuthPageKind::SignIn), "Sign in");
+        assert_eq!(
+            loading_message(AuthPageKind::Register),
+            "Checking registration status…"
+        );
+        assert_eq!(
+            loading_message(AuthPageKind::SignIn),
+            "Checking sign-in status…"
+        );
+    }
+
+    #[test]
+    fn submit_button_label_covers_remaining_combinations() {
+        assert_eq!(
+            submit_button_label(AuthPageKind::Register, false),
+            "Create account"
+        );
+        assert_eq!(
+            submit_button_label(AuthPageKind::SignIn, true),
+            "Signing in…"
+        );
+    }
+
+    #[test]
+    fn auth_page_state_starts_with_blank_inputs_and_loading_enabled() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AuthPageState::new();
+            assert!(state.username.get().is_empty());
+            assert!(state.password.get().is_empty());
+            assert!(state.error.get().is_none());
+            assert!(state.loading.get());
+            assert!(!state.submitting.get());
+        });
+    }
+
+    #[test]
+    fn handle_auth_status_updates_ready_and_redirect_routes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let ready_state = AuthPageState::new();
+            handle_auth_status(
+                AuthPageKind::Register,
+                HomeRouteTarget::Register,
+                ready_state,
+            );
+            assert!(!ready_state.loading.get());
+
+            let redirect_state = AuthPageState::new();
+            handle_auth_status(
+                AuthPageKind::SignIn,
+                HomeRouteTarget::PrepareSession,
+                redirect_state,
+            );
+            assert!(redirect_state.loading.get());
+            assert!(redirect_state.error.get().is_none());
+        });
+    }
+
+    #[test]
+    fn auth_page_view_builds_register_and_sign_in_forms() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let register = AuthPageState::new();
+            register.loading.set(false);
+            let sign_in = AuthPageState::new();
+            sign_in.loading.set(false);
+
+            let _ = auth_page_view(
+                AuthPageKind::Register,
+                register,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+            let _ = auth_page_view(
+                AuthPageKind::SignIn,
+                sign_in,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+        });
+    }
+
+    #[test]
+    fn auth_page_view_builds_loading_fallbacks() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let register = AuthPageState::new();
+            let sign_in = AuthPageState::new();
+
+            let _ = auth_page_view(
+                AuthPageKind::Register,
+                register,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+            let _ = auth_page_view(
+                AuthPageKind::SignIn,
+                sign_in,
+                Callback::new(|_: web_sys::SubmitEvent| {}),
+            );
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_auth_helpers_set_flags_once_and_clear_errors() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AuthPageState::new();
+            state.error.set(Some("stale".to_string()));
+
+            initialize_auth_page_host(state);
+            assert!(state.checked.get());
+            assert!(!state.loading.get());
+
+            state.loading.set(true);
+            initialize_auth_page_host(state);
+            assert!(state.loading.get());
+
+            submit_credentials_host(state);
+            assert!(state.submitting.get());
+            assert!(state.error.get().is_none());
+
+            state.error.set(Some("still submitting".to_string()));
+            submit_credentials_host(state);
+            assert_eq!(state.error.get(), Some("still submitting".to_string()));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_submit_credentials_handler_uses_submit_helper() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AuthPageState::new();
+            submit_credentials_handler(AuthPageKind::Register, state).run(fake_submit_event());
+            assert!(state.submitting.get());
+            assert!(state.error.get().is_none());
+        });
     }
 }

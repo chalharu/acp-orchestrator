@@ -4,9 +4,10 @@ use std::{
     time::SystemTime,
 };
 
-use acp_app_support::{FrontendBundleAsset, is_frontend_bundle_asset};
-
-use super::{LauncherError, Result};
+use super::{
+    LauncherError, Result,
+    support::frontend::{FrontendBundleAsset, is_frontend_bundle_asset},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrontendBundleState {

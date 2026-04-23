@@ -1,11 +1,10 @@
 //! Reusable Leptos UI components for the ACP web frontend.
 
-mod composer;
-mod error_banner;
-mod pending_permissions;
-mod transcript;
+pub(crate) mod composer;
+mod composer_footer;
+mod composer_palette;
+pub(crate) mod error_banner;
+pub(crate) mod pending_permissions;
+pub(crate) mod transcript;
 
-pub use composer::{Composer, ComposerSlashCallbacks, ComposerSlashSignals};
-pub use error_banner::ErrorBanner;
-pub use pending_permissions::ChatActivity;
-pub use transcript::Transcript;
+pub(crate) use error_banner::ErrorBanner;

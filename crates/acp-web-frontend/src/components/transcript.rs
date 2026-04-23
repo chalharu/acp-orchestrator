@@ -1,34 +1,56 @@
 //! Conversation transcript component.
 
 use leptos::{html as leptos_html, prelude::*};
-use pulldown_cmark::{
-    Event as MarkdownEvent, LinkType, Options as MarkdownOptions, Parser, Tag, TagEnd,
-    html::push_html,
-};
+
+#[cfg(target_family = "wasm")]
+use crate::transcript_view::tail_scroll_top;
+use crate::transcript_view::{compute_virtual_window, render_markdown};
+#[cfg(target_family = "wasm")]
 use wasm_bindgen::{JsCast, closure::Closure};
 
-use crate::{EntryRole, TranscriptEntry};
-
 const DEFAULT_VIEWPORT_HEIGHT: f64 = 640.0;
-const OVERSCAN_PX: f64 = 320.0;
 const BOTTOM_TOLERANCE_PX: f64 = 24.0;
 
-#[derive(Clone, Debug, PartialEq)]
-struct VirtualWindow {
-    visible: Vec<TranscriptEntry>,
-    top_spacer_height: f64,
-    bottom_spacer_height: f64,
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptEntry {
+    pub(crate) id: String,
+    pub(crate) role: EntryRole,
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryRole {
+    User,
+    Assistant,
+    Status,
+}
+
+impl EntryRole {
+    pub(crate) fn css_class(&self) -> &'static str {
+        match self {
+            Self::User => "transcript-entry--user",
+            Self::Assistant => "transcript-entry--assistant",
+            Self::Status => "transcript-entry--status",
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Status => "status",
+        }
+    }
 }
 
 #[component]
-pub fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl IntoView {
+pub(crate) fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl IntoView {
     let viewport = NodeRef::<leptos_html::Section>::new();
     let scroll_top = RwSignal::new(0.0);
     let viewport_height = RwSignal::new(DEFAULT_VIEWPORT_HEIGHT);
     let follow_tail = RwSignal::new(true);
-    let virtual_window = Memo::new(move |_| {
-        compute_virtual_window(&entries.get(), scroll_top.get(), viewport_height.get())
-    });
+    let virtual_window = transcript_virtual_window_memo(entries, scroll_top, viewport_height);
     let visible_entries = Signal::derive(move || virtual_window.get().visible);
     let top_spacer_height = Signal::derive(move || virtual_window.get().top_spacer_height);
     let bottom_spacer_height = Signal::derive(move || virtual_window.get().bottom_spacer_height);
@@ -47,32 +69,60 @@ pub fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl I
             node_ref=viewport
             on:scroll=on_scroll
         >
-            <Show
-                when=move || !entries.get().is_empty()
-                fallback=move || {
-                    view! {
-                        <div class="transcript-empty">
-                            <p class="muted">"No messages yet."</p>
-                        </div>
-                    }
-                }
-            >
-                <ol class="transcript">
-                    <TranscriptSpacer height=top_spacer_height />
-                    <For
-                        each=move || visible_entries.get()
-                        key=|entry| entry.id.clone()
-                        children=move |entry| view! { <TranscriptEntryItem entry=entry /> }
-                    />
-                    <TranscriptSpacer height=bottom_spacer_height />
-                </ol>
-            </Show>
+            {transcript_content(
+                entries,
+                visible_entries,
+                top_spacer_height,
+                bottom_spacer_height,
+            )}
         </section>
     }
 }
 
-#[component]
-fn TranscriptEntryItem(entry: TranscriptEntry) -> impl IntoView {
+fn transcript_virtual_window(
+    entries: &[TranscriptEntry],
+    scroll_top: f64,
+    viewport_height: f64,
+) -> crate::transcript_view::VirtualWindow<TranscriptEntry> {
+    compute_virtual_window(entries, scroll_top, viewport_height, estimated_entry_height)
+}
+
+fn transcript_virtual_window_memo(
+    entries: Signal<Vec<TranscriptEntry>>,
+    scroll_top: RwSignal<f64>,
+    viewport_height: RwSignal<f64>,
+) -> Memo<crate::transcript_view::VirtualWindow<TranscriptEntry>> {
+    Memo::new(move |_| {
+        transcript_virtual_window(&entries.get(), scroll_top.get(), viewport_height.get())
+    })
+}
+
+fn transcript_empty_view() -> impl IntoView {
+    view! {
+        <div class="transcript-empty">
+            <p class="muted">"No messages yet."</p>
+        </div>
+    }
+}
+
+fn transcript_content(
+    entries: Signal<Vec<TranscriptEntry>>,
+    visible_entries: Signal<Vec<TranscriptEntry>>,
+    top_spacer_height: Signal<f64>,
+    bottom_spacer_height: Signal<f64>,
+) -> impl IntoView {
+    #[rustfmt::skip]
+    view! {
+        <Show
+            when=move || !entries.get().is_empty()
+            fallback=transcript_empty_view
+        >
+            <ol class="transcript"><TranscriptSpacer height=top_spacer_height /><For each=move || visible_entries.get() key=|entry| entry.id.clone() children=render_transcript_entry_item /><TranscriptSpacer height=bottom_spacer_height /></ol>
+        </Show>
+    }
+}
+
+fn render_transcript_entry_item(entry: TranscriptEntry) -> AnyView {
     let TranscriptEntry { role, text, .. } = entry;
     let css = role.css_class().to_string();
     let label = format!("{}: ", role.label());
@@ -103,11 +153,15 @@ fn TranscriptMarkdown(markdown: String) -> impl IntoView {
     let container = NodeRef::<leptos_html::Div>::new();
     let rendered_html = Memo::new(move |_| render_markdown(&markdown));
 
+    #[cfg(target_family = "wasm")]
     Effect::new(move |_| {
         if let Some(element) = container.get() {
             element.set_inner_html(&rendered_html.get());
         }
     });
+
+    #[cfg(not(target_family = "wasm"))]
+    let _ = &rendered_html;
 
     view! {
         <div
@@ -135,28 +189,44 @@ fn bind_viewport_effects(
     scroll_top: RwSignal<f64>,
     follow_tail: RwSignal<bool>,
 ) {
-    let viewport_for_metrics = viewport;
-    Effect::new(move |_| {
-        if let Some(element) = viewport_for_metrics.get() {
-            viewport_height.set(measured_viewport_height(&element));
-        }
-    });
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = (
+            &viewport,
+            &entries,
+            &viewport_height,
+            &scroll_top,
+            &follow_tail,
+        );
+    }
 
-    Effect::new(move |_| {
-        if !follow_tail.get() || entries.get().is_empty() {
-            return;
-        }
-        if let Some(element) = viewport.get() {
-            viewport_height.set(measured_viewport_height(&element));
-            schedule_tail_scroll(element, scroll_top);
-        }
-    });
+    #[cfg(target_family = "wasm")]
+    {
+        let viewport_for_metrics = viewport;
+        Effect::new(move |_| {
+            if let Some(element) = viewport_for_metrics.get() {
+                viewport_height.set(measured_viewport_height(&element));
+            }
+        });
+
+        Effect::new(move |_| {
+            if !follow_tail.get() || entries.get().is_empty() {
+                return;
+            }
+            if let Some(element) = viewport.get() {
+                viewport_height.set(measured_viewport_height(&element));
+                schedule_tail_scroll(element, scroll_top);
+            }
+        });
+    }
 }
 
+#[cfg(target_family = "wasm")]
 fn measured_viewport_height(element: &web_sys::HtmlElement) -> f64 {
     f64::from(element.client_height()).max(DEFAULT_VIEWPORT_HEIGHT / 4.0)
 }
 
+#[cfg(target_family = "wasm")]
 fn schedule_tail_scroll(element: web_sys::HtmlElement, scroll_top: RwSignal<f64>) {
     let Some(window) = web_sys::window() else {
         scroll_element_to_tail(&element, scroll_top);
@@ -178,16 +248,13 @@ fn schedule_tail_scroll(element: web_sys::HtmlElement, scroll_top: RwSignal<f64>
     }
 }
 
+#[cfg(target_family = "wasm")]
 fn scroll_element_to_tail(element: &web_sys::HtmlElement, scroll_top: RwSignal<f64>) {
     element.set_scroll_top(tail_scroll_top(
         element.scroll_height(),
         element.client_height(),
     ));
     scroll_top.set(f64::from(element.scroll_top()));
-}
-
-fn tail_scroll_top(scroll_height: i32, client_height: i32) -> i32 {
-    (scroll_height - client_height).max(0)
 }
 
 fn update_scroll_metrics(
@@ -204,193 +271,6 @@ fn update_scroll_metrics(
     scroll_top.set(current_scroll_top.max(0.0));
     viewport_height.set(current_viewport_height.max(DEFAULT_VIEWPORT_HEIGHT / 4.0));
     follow_tail.set(remaining_distance <= BOTTOM_TOLERANCE_PX);
-}
-
-fn render_markdown(source: &str) -> String {
-    let parser = Parser::new_ext(source, markdown_options());
-    let mut rendered = String::new();
-    push_html(&mut rendered, sanitize_markdown_events(parser).into_iter());
-    rendered
-}
-
-fn markdown_options() -> MarkdownOptions {
-    let mut options = MarkdownOptions::empty();
-    options.insert(MarkdownOptions::ENABLE_STRIKETHROUGH);
-    options.insert(MarkdownOptions::ENABLE_TABLES);
-    options.insert(MarkdownOptions::ENABLE_TASKLISTS);
-    options.insert(MarkdownOptions::ENABLE_SMART_PUNCTUATION);
-    options
-}
-
-fn sanitize_markdown_events<'a>(parser: Parser<'a>) -> Vec<MarkdownEvent<'a>> {
-    let mut ignored_ends = Vec::new();
-
-    parser
-        .filter_map(|event| match event {
-            MarkdownEvent::Start(tag) => sanitize_markdown_start(tag, &mut ignored_ends),
-            MarkdownEvent::End(tag_end) => sanitize_markdown_end(tag_end, &mut ignored_ends),
-            MarkdownEvent::Text(text) => Some(MarkdownEvent::Text(text)),
-            MarkdownEvent::Code(code) => Some(MarkdownEvent::Code(code)),
-            MarkdownEvent::InlineMath(text)
-            | MarkdownEvent::DisplayMath(text)
-            | MarkdownEvent::FootnoteReference(text) => Some(MarkdownEvent::Text(text)),
-            MarkdownEvent::Html(html) | MarkdownEvent::InlineHtml(html) => {
-                Some(MarkdownEvent::Text(html))
-            }
-            MarkdownEvent::SoftBreak | MarkdownEvent::HardBreak => Some(MarkdownEvent::HardBreak),
-            MarkdownEvent::Rule => Some(MarkdownEvent::Rule),
-            MarkdownEvent::TaskListMarker(checked) => Some(MarkdownEvent::TaskListMarker(checked)),
-        })
-        .collect()
-}
-
-fn sanitize_markdown_start<'a>(
-    tag: Tag<'a>,
-    ignored_ends: &mut Vec<TagEnd>,
-) -> Option<MarkdownEvent<'a>> {
-    match tag {
-        Tag::Heading { level, .. } => Some(MarkdownEvent::Start(Tag::Heading {
-            level,
-            id: None,
-            classes: Vec::new(),
-            attrs: Vec::new(),
-        })),
-        Tag::Link {
-            link_type,
-            dest_url,
-            title,
-            id,
-        } if is_safe_markdown_link(link_type, dest_url.as_ref()) => {
-            Some(MarkdownEvent::Start(Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            }))
-        }
-        Tag::Link { .. } => {
-            ignored_ends.push(TagEnd::Link);
-            None
-        }
-        Tag::Image { .. } => {
-            ignored_ends.push(TagEnd::Image);
-            None
-        }
-        Tag::HtmlBlock => {
-            ignored_ends.push(TagEnd::HtmlBlock);
-            None
-        }
-        Tag::FootnoteDefinition(_) => {
-            ignored_ends.push(TagEnd::FootnoteDefinition);
-            None
-        }
-        Tag::MetadataBlock(kind) => {
-            ignored_ends.push(TagEnd::MetadataBlock(kind));
-            None
-        }
-        tag => Some(MarkdownEvent::Start(tag)),
-    }
-}
-
-fn sanitize_markdown_end<'a>(
-    tag_end: TagEnd,
-    ignored_ends: &mut Vec<TagEnd>,
-) -> Option<MarkdownEvent<'a>> {
-    if ignored_ends.last() == Some(&tag_end) {
-        ignored_ends.pop();
-        return None;
-    }
-
-    match tag_end {
-        TagEnd::HtmlBlock
-        | TagEnd::Image
-        | TagEnd::FootnoteDefinition
-        | TagEnd::MetadataBlock(_) => None,
-        tag_end => Some(MarkdownEvent::End(tag_end)),
-    }
-}
-
-fn is_safe_markdown_link(link_type: LinkType, url: &str) -> bool {
-    !matches!(link_type, LinkType::Email | LinkType::WikiLink { .. }) && is_safe_markdown_url(url)
-}
-
-fn is_safe_markdown_url(url: &str) -> bool {
-    let trimmed = url.trim();
-    let scheme_candidate = trimmed
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(trimmed)
-        .to_ascii_lowercase();
-
-    if scheme_candidate.contains("%3a") {
-        return false;
-    }
-
-    if trimmed.starts_with('#')
-        || trimmed.starts_with('/')
-        || trimmed.starts_with("./")
-        || trimmed.starts_with("../")
-    {
-        return true;
-    }
-
-    match trimmed.split_once(':') {
-        Some((scheme, _)) => matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https"),
-        None => true,
-    }
-}
-
-fn compute_virtual_window(
-    entries: &[TranscriptEntry],
-    scroll_top: f64,
-    viewport_height: f64,
-) -> VirtualWindow {
-    if entries.is_empty() {
-        return VirtualWindow {
-            visible: Vec::new(),
-            top_spacer_height: 0.0,
-            bottom_spacer_height: 0.0,
-        };
-    }
-
-    let start_threshold = (scroll_top - OVERSCAN_PX).max(0.0);
-    let end_threshold = scroll_top + viewport_height + OVERSCAN_PX;
-    let mut offset = 0.0;
-    let mut start_index = 0;
-
-    while start_index < entries.len() {
-        let next_offset = offset + estimated_entry_height(&entries[start_index]);
-        if next_offset >= start_threshold {
-            break;
-        }
-        offset = next_offset;
-        start_index += 1;
-    }
-
-    if start_index == entries.len() {
-        start_index = entries.len().saturating_sub(1);
-        offset -= estimated_entry_height(&entries[start_index]);
-    }
-
-    let top_spacer_height = offset;
-    let mut end_index = start_index;
-    let mut rendered_height = offset;
-
-    while end_index < entries.len() {
-        rendered_height += estimated_entry_height(&entries[end_index]);
-        end_index += 1;
-        if rendered_height >= end_threshold {
-            break;
-        }
-    }
-
-    let total_height = entries.iter().map(estimated_entry_height).sum::<f64>();
-
-    VirtualWindow {
-        visible: entries[start_index..end_index].to_vec(),
-        top_spacer_height,
-        bottom_spacer_height: (total_height - rendered_height).max(0.0),
-    }
 }
 
 fn estimated_entry_height(entry: &TranscriptEntry) -> f64 {
@@ -415,71 +295,21 @@ fn estimate_visual_lines(line: &str, chars_per_line: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_virtual_window, render_markdown, tail_scroll_top};
-    use crate::{EntryRole, TranscriptEntry};
+    use leptos::prelude::*;
+
+    use super::*;
 
     #[test]
-    fn virtual_window_returns_all_entries_for_short_transcripts() {
-        let entries = vec![entry("1", EntryRole::Assistant, "hello")];
-        let window = compute_virtual_window(&entries, 0.0, 800.0);
-
-        assert_eq!(window.visible, entries);
-        assert_eq!(window.top_spacer_height, 0.0);
-        assert_eq!(window.bottom_spacer_height, 0.0);
-    }
-
-    #[test]
-    fn virtual_window_skips_entries_before_the_visible_region() {
-        let entries = (0..20)
-            .map(|index| {
-                let id = index.to_string();
-                let text = "line ".repeat(12);
-                entry(&id, EntryRole::Assistant, &text)
-            })
-            .collect::<Vec<_>>();
-        let window = compute_virtual_window(&entries, 900.0, 280.0);
-
-        assert!(window.visible.len() < entries.len());
-        assert!(window.top_spacer_height > 0.0);
-        assert!(window.bottom_spacer_height > 0.0);
-    }
-
-    #[test]
-    fn tail_scroll_top_clamps_at_zero() {
-        assert_eq!(tail_scroll_top(120, 400), 0);
-        assert_eq!(tail_scroll_top(640, 320), 320);
-    }
-
-    #[test]
-    fn render_markdown_formats_common_markdown() {
-        let rendered = render_markdown("**Bold**\n\n- item\n\n`code`");
-
-        assert!(rendered.contains("<strong>Bold</strong>"));
-        assert!(rendered.contains("<ul>"));
-        assert!(rendered.contains("<code>code</code>"));
-    }
-
-    #[test]
-    fn render_markdown_escapes_html_and_unsafe_links() {
-        let rendered =
-            render_markdown("<b>hi</b> [x](javascript:alert(1)) ![alt](https://example.com/x.png)");
-
-        assert!(rendered.contains("&lt;b&gt;hi&lt;/b&gt;"));
-        assert!(!rendered.contains("javascript:alert"));
-        assert!(!rendered.contains("<img"));
-        assert!(rendered.contains("alt"));
-    }
-
-    #[test]
-    fn render_markdown_rejects_mailto_and_encoded_scheme_links() {
-        let rendered = render_markdown(
-            "[mail](mailto:test@example.com) [safe](https://example.com) [encoded](javascript%3aalert(1)) <test@example.com>",
+    fn entry_role_helpers_return_expected_labels_and_classes() {
+        assert_eq!(EntryRole::User.css_class(), "transcript-entry--user");
+        assert_eq!(
+            EntryRole::Assistant.css_class(),
+            "transcript-entry--assistant"
         );
-
-        assert!(!rendered.contains("mailto:"));
-        assert!(rendered.contains("https://example.com"));
-        assert!(!rendered.contains("javascript%253aalert"));
-        assert!(!rendered.contains("test@example.com</a>"));
+        assert_eq!(EntryRole::Status.css_class(), "transcript-entry--status");
+        assert_eq!(EntryRole::User.label(), "user");
+        assert_eq!(EntryRole::Assistant.label(), "assistant");
+        assert_eq!(EntryRole::Status.label(), "status");
     }
 
     fn entry(id: &str, role: EntryRole, text: &str) -> TranscriptEntry {
@@ -488,5 +318,99 @@ mod tests {
             role,
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn transcript_builds_for_empty_and_populated_entry_lists() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = RwSignal::new(Vec::<TranscriptEntry>::new());
+            let signal = Signal::derive(move || entries.get());
+
+            let _ = view! { <Transcript entries=signal /> };
+            entries.set(vec![
+                entry("assistant", EntryRole::Assistant, "hello"),
+                entry("status", EntryRole::Status, "done"),
+            ]);
+            let _ = view! { <Transcript entries=signal /> };
+        });
+    }
+
+    #[test]
+    fn transcript_entry_stores_the_underlying_values() {
+        let transcript_entry = entry("assistant", EntryRole::Assistant, "hello");
+
+        assert_eq!(transcript_entry.id, "assistant");
+        assert_eq!(transcript_entry.role, EntryRole::Assistant);
+        assert_eq!(transcript_entry.text, "hello");
+    }
+
+    #[test]
+    fn transcript_virtual_window_helper_and_empty_view_are_host_safe() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = vec![entry("assistant", EntryRole::Assistant, "hello")];
+            let window = transcript_virtual_window(&entries, 0.0, DEFAULT_VIEWPORT_HEIGHT);
+
+            assert_eq!(window.visible.len(), 1);
+            let _ = transcript_empty_view();
+        });
+    }
+
+    #[test]
+    fn transcript_virtual_window_memo_evaluates_for_host_signals() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = RwSignal::new(vec![entry("assistant", EntryRole::Assistant, "hello")]);
+            let memo = transcript_virtual_window_memo(
+                Signal::derive(move || entries.get()),
+                RwSignal::new(0.0),
+                RwSignal::new(DEFAULT_VIEWPORT_HEIGHT),
+            );
+
+            assert_eq!(memo.get().visible.len(), 1);
+        });
+    }
+
+    #[test]
+    fn transcript_entry_item_builds_status_and_markdown_variants() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = render_transcript_entry_item(entry("status", EntryRole::Status, "done"));
+            let _ = view! {
+                {render_transcript_entry_item(entry("assistant", EntryRole::Assistant, "**bold**"))}
+            };
+        });
+    }
+
+    #[test]
+    fn transcript_markdown_and_spacer_build_without_dom_nodes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! { <TranscriptMarkdown markdown="**bold**".to_string() /> };
+            let _ = view! { <TranscriptSpacer height=Signal::derive(|| 24.0) /> };
+        });
+    }
+    #[test]
+    fn estimated_entry_height_uses_status_layout() {
+        assert_eq!(
+            estimated_entry_height(&entry("status", EntryRole::Status, "")),
+            58.0
+        );
+    }
+
+    #[test]
+    fn estimated_entry_height_uses_chat_layout_and_wraps_long_lines() {
+        let wrapped =
+            estimated_entry_height(&entry("assistant", EntryRole::Assistant, &"x".repeat(53)));
+
+        assert_eq!(wrapped, 92.0);
+    }
+
+    #[test]
+    fn estimate_visual_lines_handles_empty_lines_and_zero_width_inputs() {
+        assert_eq!(estimate_visual_lines("", 52), 1);
+        assert_eq!(estimate_visual_lines("abcd", 0), 4);
+        assert_eq!(estimate_visual_lines("abcdef", 4), 2);
     }
 }

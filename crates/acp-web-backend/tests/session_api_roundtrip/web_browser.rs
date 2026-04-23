@@ -1,6 +1,6 @@
 use super::support::*;
-use acp_contracts::CreateSessionResponse;
 use acp_mock::MANUAL_PERMISSION_TRIGGER;
+use acp_web_backend::contract_sessions::CreateSessionResponse;
 
 #[tokio::test]
 async fn browser_cookie_bootstrap_can_create_stream_and_prompt_a_session() -> Result<()> {
@@ -132,7 +132,7 @@ async fn submit_permission_prompt_and_wait(
     session_id: &str,
     csrf_token: &str,
     events: &mut SseStream,
-) -> Result<acp_contracts::PermissionRequest> {
+) -> Result<acp_web_backend::contract_permissions::PermissionRequest> {
     submit_browser_prompt(
         browser,
         backend_url,
@@ -176,7 +176,7 @@ fn assert_assistant_message(event: StreamEvent) {
 
 async fn next_permission_request(
     events: &mut SseStream,
-) -> Result<acp_contracts::PermissionRequest> {
+) -> Result<acp_web_backend::contract_permissions::PermissionRequest> {
     match expect_next_event(events).await?.payload {
         StreamEventPayload::PermissionRequested { request } => Ok(request),
         payload => panic!("expected permission request event, got {payload:?}"),

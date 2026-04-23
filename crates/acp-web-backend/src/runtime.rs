@@ -1,13 +1,14 @@
 use std::{env, ffi::OsString, path::PathBuf, sync::Arc};
 
-use acp_app_support::{
-    BoxError, ListenerSetupError, RuntimeListenArgs, ServiceReadinessError, bind_listener,
-    build_http_client_for_url, listener_endpoint, print_startup_line, run_service_with_readiness,
-    shutdown_signal, wait_for_health, wait_for_http_success,
-};
 use clap::Parser;
 use snafu::prelude::*;
 
+use crate::support::errors::{BoxError, ListenerSetupError, ServiceReadinessError};
+use crate::support::http::{build_http_client_for_url, wait_for_health, wait_for_http_success};
+use crate::support::runtime::{
+    RuntimeListenArgs, bind_listener, listener_endpoint, print_startup_line,
+};
+use crate::support::service::{run_service_with_readiness, shutdown_signal};
 use crate::{
     AppState, AppStateBuildError, ServerConfig, serve_with_shutdown,
     workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,

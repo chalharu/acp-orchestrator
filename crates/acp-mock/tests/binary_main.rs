@@ -1,78 +1,56 @@
-use std::{
-    cell::{Cell, RefCell},
-    process::Stdio,
-    rc::Rc,
-    time::Duration,
-};
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
-use acp_app_support::read_startup_url;
-use agent_client_protocol::{self as acp, Agent as _};
-use tokio::{net::TcpStream, process::Command, time::timeout};
+use acp_mock::support::runtime::read_startup_url;
+use agent_client_protocol::{self as acp, schema};
+use tokio::{net::TcpStream, process::Command, sync::Mutex, time::timeout};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone)]
 struct TestClient {
-    reply: Rc<RefCell<String>>,
-    saw_first_chunk: Rc<Cell<bool>>,
-    first_chunk: Rc<tokio::sync::Notify>,
+    reply: Arc<Mutex<String>>,
 }
 
 impl TestClient {
     fn new() -> Self {
         Self {
-            reply: Rc::new(RefCell::new(String::new())),
-            saw_first_chunk: Rc::new(Cell::new(false)),
-            first_chunk: Rc::new(tokio::sync::Notify::new()),
+            reply: Arc::new(Mutex::new(String::new())),
         }
     }
 
-    async fn wait_for_first_chunk(&self) {
-        if !self.saw_first_chunk.get() {
-            self.first_chunk.notified().await;
-        }
+    async fn reply_text(&self) -> String {
+        self.reply.lock().await.clone()
     }
 
-    fn reply_text(&self) -> String {
-        self.reply.borrow().clone()
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl acp::Client for TestClient {
     async fn request_permission(
         &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
+        args: schema::RequestPermissionRequest,
+    ) -> acp::Result<schema::RequestPermissionResponse> {
         let selected = args
             .options
             .iter()
             .find(|option| {
                 matches!(
                     option.kind,
-                    acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
+                    schema::PermissionOptionKind::AllowOnce
+                        | schema::PermissionOptionKind::AllowAlways
                 )
             })
             .ok_or_else(acp::Error::invalid_params)?;
-        Ok(acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+        Ok(schema::RequestPermissionResponse::new(
+            schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
                 selected.option_id.to_string(),
             )),
         ))
     }
 
-    async fn session_notification(
-        &self,
-        args: acp::SessionNotification,
-    ) -> acp::Result<(), acp::Error> {
-        if let acp::SessionUpdate::AgentMessageChunk(chunk) = args.update {
+    async fn session_notification(&self, args: schema::SessionNotification) -> acp::Result<()> {
+        if let schema::SessionUpdate::AgentMessageChunk(chunk) = args.update {
             self.reply
-                .borrow_mut()
+                .lock()
+                .await
                 .push_str(&content_text(chunk.content));
-            if !self.saw_first_chunk.replace(true) {
-                self.first_chunk.notify_waiters();
-            }
         }
         Ok(())
     }
@@ -128,50 +106,92 @@ async fn request_reply(address: &str, prompt: &str) -> Result<String> {
     let stream = TcpStream::connect(address).await?;
     let (reader, writer) = stream.into_split();
     let client = TestClient::new();
+    let request_client = client.clone();
+    let notification_client = client.clone();
     let working_dir = std::env::current_dir()?;
-    let local_set = tokio::task::LocalSet::new();
+    let prompt = prompt.to_string();
 
-    local_set
-        .run_until(async move {
-            let (conn, handle_io) = acp::ClientSideConnection::new(
-                client.clone(),
-                writer.compat_write(),
-                reader.compat(),
-                |future| {
-                    tokio::task::spawn_local(future);
-                },
-            );
-            let io_task = tokio::task::spawn_local(handle_io);
-            conn.initialize(
-                acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-                    acp::Implementation::new("acp-mock-test", env!("CARGO_PKG_VERSION"))
-                        .title("ACP Mock Binary Test"),
-                ),
-            )
-            .await?;
-            let session = conn
-                .new_session(acp::NewSessionRequest::new(working_dir))
-                .await?;
-            conn.prompt(acp::PromptRequest::new(
-                session.session_id,
-                vec![prompt.to_string().into()],
-            ))
-            .await?;
-            client.wait_for_first_chunk().await;
-            io_task.abort();
-            let _ = io_task.await;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(client.reply_text())
-        })
-        .await
+    let reply = acp::Client
+        .builder()
+        .name("acp-mock-test")
+        .on_receive_request(
+            async move |args: schema::RequestPermissionRequest, responder, cx| {
+                respond_permission_request(request_client.clone(), args, responder, cx).await
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |args: schema::SessionNotification, _cx| {
+                forward_session_notification(notification_client.clone(), args).await
+            },
+            acp::on_receive_notification!(),
+        )
+        .connect_with(
+            acp::ByteStreams::new(writer.compat_write(), reader.compat()),
+            move |cx| run_prompt_roundtrip(cx, working_dir, prompt, client),
+        )
+        .await?;
+
+    Ok(reply)
 }
 
-fn content_text(content: acp::ContentBlock) -> String {
+async fn respond_permission_request(
+    client: TestClient,
+    args: schema::RequestPermissionRequest,
+    responder: acp::Responder<schema::RequestPermissionResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> acp::Result<()> {
+    connection.spawn(async move {
+        let result = client.request_permission(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn forward_session_notification(
+    client: TestClient,
+    args: schema::SessionNotification,
+) -> acp::Result<()> {
+    client.session_notification(args).await
+}
+
+async fn run_prompt_roundtrip(
+    connection: acp::ConnectionTo<acp::Agent>,
+    working_dir: PathBuf,
+    prompt: String,
+    client: TestClient,
+) -> acp::Result<String> {
+    connection
+        .send_request(
+            schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_info(
+                schema::Implementation::new("acp-mock-test", env!("CARGO_PKG_VERSION"))
+                    .title("ACP Mock Binary Test"),
+            ),
+        )
+        .block_task()
+        .await?;
+    let session = connection
+        .send_request(schema::NewSessionRequest::new(working_dir))
+        .block_task()
+        .await?;
+    connection
+        .send_request(schema::PromptRequest::new(
+            session.session_id,
+            vec![prompt.into()],
+        ))
+        .block_task()
+        .await?;
+    Ok(client.reply_text().await)
+}
+
+fn content_text(content: schema::ContentBlock) -> String {
     match content {
-        acp::ContentBlock::Text(text) => text.text,
-        acp::ContentBlock::Image(_) => "<image>".to_string(),
-        acp::ContentBlock::Audio(_) => "<audio>".to_string(),
-        acp::ContentBlock::ResourceLink(link) => link.uri,
-        acp::ContentBlock::Resource(_) => "<resource>".to_string(),
+        schema::ContentBlock::Text(text) => text.text,
+        schema::ContentBlock::Image(_) => "<image>".to_string(),
+        schema::ContentBlock::Audio(_) => "<audio>".to_string(),
+        schema::ContentBlock::ResourceLink(link) => link.uri,
+        schema::ContentBlock::Resource(_) => "<resource>".to_string(),
         _ => "<unsupported>".to_string(),
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
-use acp_contracts::{MessageRole, StreamEventPayload};
+use crate::contract_messages::MessageRole;
+use crate::contract_stream::StreamEventPayload;
 
 mod history;
 mod permissions;

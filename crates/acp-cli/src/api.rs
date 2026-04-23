@@ -1,7 +1,9 @@
 use super::*;
-use acp_contracts::{
-    SessionHistoryResponse, SessionListResponse, SessionResponse, SlashCompletionsResponse,
+use crate::contract_sessions::{
+    CreateSessionResponse, SessionHistoryResponse, SessionListResponse, SessionResponse,
+    SessionSnapshot,
 };
+use crate::contract_slash::SlashCompletionsResponse;
 
 pub(super) async fn list_sessions(
     client: &Client,

@@ -1,7 +1,8 @@
 use std::{io, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
-use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
-use acp_contracts::{MessageRole, SessionHistoryResponse, SessionListResponse, SessionResponse};
+use acp_cli::contract_messages::MessageRole;
+use acp_cli::contract_sessions::{SessionHistoryResponse, SessionListResponse, SessionResponse};
+use acp_cli::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web_backend::{
     AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown,
@@ -189,7 +190,12 @@ async fn cancel_running_turn(
     stdin.write_all(b"verify cancel\n").await?;
     wait_for_user_message(stack, session_id, "verify cancel").await?;
     sleep(cancel_roundtrip_delay()).await;
+    let cancel_baseline_sequence = fetch_session(&stack.client, &stack.backend_url, session_id)
+        .await?
+        .session
+        .latest_sequence;
     stdin.write_all(b"/cancel\n").await?;
+    wait_for_session_sequence_advance(stack, session_id, cancel_baseline_sequence).await?;
     sleep(cancel_roundtrip_delay()).await;
     Ok(())
 }
@@ -387,6 +393,25 @@ async fn wait_for_no_pending_permissions(stack: &TestStack, session_id: &str) ->
     }
 
     Err(io::Error::other("timed out waiting for pending permissions to clear").into())
+}
+
+async fn wait_for_session_sequence_advance(
+    stack: &TestStack,
+    session_id: &str,
+    baseline_sequence: u64,
+) -> Result<()> {
+    for _ in 0..200 {
+        let session = fetch_session(&stack.client, &stack.backend_url, session_id).await?;
+        if session.session.latest_sequence > baseline_sequence {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(io::Error::other(format!(
+        "timed out waiting for session sequence to advance beyond {baseline_sequence}"
+    ))
+    .into())
 }
 
 async fn wait_for_user_message(

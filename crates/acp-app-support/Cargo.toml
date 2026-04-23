@@ -9,8 +9,11 @@ default = []
 test-helpers = []
 
 [dependencies]
-clap.workspace = true
-reqwest.workspace = true
-snafu.workspace = true
-tokio.workspace = true
-tracing-subscriber.workspace = true
+acp-app-support-errors.workspace = true
+acp-app-support-frontend.workspace = true
+acp-app-support-http.workspace = true
+acp-app-support-listener.workspace = true
+acp-app-support-runtime.workspace = true
+acp-app-support-service.workspace = true
+acp-app-support-temp.workspace = true
+acp-app-support-tracing.workspace = true

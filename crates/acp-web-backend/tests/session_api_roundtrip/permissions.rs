@@ -1,6 +1,6 @@
 use super::support::*;
-use acp_contracts::ResolvePermissionRequest;
 use acp_mock::MANUAL_PERMISSION_TRIGGER;
+use acp_web_backend::contract_permissions::ResolvePermissionRequest;
 use std::time::Duration;
 
 struct PendingPermissionFlow {
@@ -147,7 +147,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
 
 async fn next_permission_request(
     events: &mut SseStream,
-) -> Result<acp_contracts::PermissionRequest> {
+) -> Result<acp_web_backend::contract_permissions::PermissionRequest> {
     match expect_next_event(events).await?.payload {
         StreamEventPayload::PermissionRequested { request } => Ok(request),
         payload => panic!("unexpected payload: {payload:?}"),

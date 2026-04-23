@@ -1,4 +1,6 @@
-use acp_contracts::{CompletionCandidate, ConversationMessage, MessageRole, PermissionRequest};
+use crate::contract_messages::{ConversationMessage, MessageRole};
+use crate::contract_permissions::PermissionRequest;
+use crate::contract_slash::CompletionCandidate;
 use unicode_width::UnicodeWidthStr;
 
 use crate::events::StreamUpdate;

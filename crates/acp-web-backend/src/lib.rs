@@ -1,9 +1,18 @@
 pub mod auth;
 mod completions;
+pub mod contract_accounts;
+pub mod contract_health;
+pub mod contract_messages;
+pub mod contract_permissions;
+pub mod contract_sessions;
+pub mod contract_slash;
+pub mod contract_stream;
 mod mock_client;
 pub mod runtime;
 pub mod server;
 pub mod sessions;
+pub mod support;
+pub mod workspace_records;
 pub mod workspace_repository;
 pub mod workspace_store;
 

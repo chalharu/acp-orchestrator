@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 
-use acp_contracts::{
-    ConversationMessage, MessageRole, PermissionDecision, PermissionRequest,
-    ResolvePermissionResponse, SessionListItem, SessionSnapshot, SessionStatus, StreamEvent,
-    StreamEventPayload,
-};
 use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, broadcast, oneshot, watch};
 use uuid::Uuid;
+
+use crate::contract_messages::{ConversationMessage, MessageRole};
+use crate::contract_permissions::{
+    PermissionDecision, PermissionRequest, ResolvePermissionResponse,
+};
+use crate::contract_sessions::{SessionListItem, SessionSnapshot, SessionStatus};
+use crate::contract_stream::{StreamEvent, StreamEventPayload};
 
 use super::{PendingPermissionResolution, PermissionResolutionOutcome, SessionStoreError};
 

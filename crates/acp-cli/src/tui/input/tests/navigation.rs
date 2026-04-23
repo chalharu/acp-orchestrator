@@ -5,9 +5,9 @@ fn navigation_app() -> ChatApp {
         "s_test",
         "http://127.0.0.1:8080",
         false,
-        &[acp_contracts::ConversationMessage {
+        &[crate::contract_messages::ConversationMessage {
             id: "m_1".to_string(),
-            role: acp_contracts::MessageRole::Assistant,
+            role: crate::contract_messages::MessageRole::Assistant,
             text: "line 1\nline 2\nline 3".to_string(),
             created_at: chrono::Utc::now(),
         }],

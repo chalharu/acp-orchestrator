@@ -1,14 +1,22 @@
 use std::{future::pending, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
-use acp_app_support::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
-use acp_contracts::{
-    BootstrapRegistrationRequest, BootstrapRegistrationResponse, CancelTurnResponse,
-    CreateSessionResponse, PromptRequest, RenameSessionRequest, RenameSessionResponse,
-    ResolvePermissionRequest, ResolvePermissionResponse, SessionListResponse,
-};
-pub(super) use acp_contracts::{MessageRole, PermissionDecision, StreamEvent, StreamEventPayload};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 pub(super) use acp_web_backend::ServerConfig;
+use acp_web_backend::contract_accounts::{
+    BootstrapRegistrationRequest, BootstrapRegistrationResponse,
+};
+pub(super) use acp_web_backend::contract_messages::MessageRole;
+use acp_web_backend::contract_messages::PromptRequest;
+pub(super) use acp_web_backend::contract_permissions::PermissionDecision;
+use acp_web_backend::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
+use acp_web_backend::contract_sessions::{
+    CancelTurnResponse, CreateSessionResponse, RenameSessionRequest, RenameSessionResponse,
+    SessionListResponse,
+};
+pub(super) use acp_web_backend::contract_stream::{StreamEvent, StreamEventPayload};
+use acp_web_backend::support::http::{
+    build_http_client_for_url, wait_for_health, wait_for_tcp_connect,
+};
 use acp_web_backend::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
 use acp_web_backend::{
     workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
@@ -364,7 +372,7 @@ impl TestStack {
         &self,
         token: &str,
         session_id: &str,
-    ) -> Result<acp_contracts::SessionHistoryResponse> {
+    ) -> Result<acp_web_backend::contract_sessions::SessionHistoryResponse> {
         let response = self
             .client
             .get(format!(

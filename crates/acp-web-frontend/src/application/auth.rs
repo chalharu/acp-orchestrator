@@ -1,8 +1,38 @@
-use acp_contracts::{AuthStatusResponse, LocalAccount};
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use crate::domain::auth::{
-    AccountCapabilities, AccountConstraintReason, AccountsRouteAccess, HomeRouteTarget,
-};
+use acp_contracts_accounts::{AuthStatusResponse, LocalAccount};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HomeRouteTarget {
+    Register,
+    SignIn,
+    PrepareSession,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountsRouteAccess {
+    Admin(LocalAccount),
+    RegisterRequired,
+    SignInRequired,
+    Forbidden,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountConstraintReason {
+    CurrentUser,
+    LastAdmin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountCapabilities {
+    pub constraint: Option<AccountConstraintReason>,
+}
+
+impl AccountCapabilities {
+    pub fn can_modify(&self) -> bool {
+        self.constraint.is_none()
+    }
+}
 
 pub fn home_route_target(status: &AuthStatusResponse) -> HomeRouteTarget {
     if status.account.is_some() {
@@ -47,7 +77,7 @@ pub fn account_capabilities(
 
 #[cfg(test)]
 mod tests {
-    use acp_contracts::{AuthStatusResponse, LocalAccount};
+    use acp_contracts_accounts::{AuthStatusResponse, LocalAccount};
     use chrono::{TimeZone, Utc};
 
     use super::*;
@@ -84,6 +114,17 @@ mod tests {
     }
 
     #[test]
+    fn home_target_routes_signed_in_users_to_session_prep() {
+        assert_eq!(
+            home_route_target(&AuthStatusResponse {
+                bootstrap_required: true,
+                account: Some(sample_account("user", false)),
+            }),
+            HomeRouteTarget::PrepareSession
+        );
+    }
+
+    #[test]
     fn accounts_access_requires_admin() {
         assert_eq!(
             accounts_route_access(&AuthStatusResponse {
@@ -98,6 +139,26 @@ mod tests {
                 account: None,
             }),
             AccountsRouteAccess::SignInRequired
+        );
+    }
+
+    #[test]
+    fn accounts_access_routes_bootstrap_to_registration_and_admins_to_accounts() {
+        let admin = sample_account("admin", true);
+
+        assert_eq!(
+            accounts_route_access(&AuthStatusResponse {
+                bootstrap_required: true,
+                account: None,
+            }),
+            AccountsRouteAccess::RegisterRequired
+        );
+        assert_eq!(
+            accounts_route_access(&AuthStatusResponse {
+                bootstrap_required: false,
+                account: Some(admin.clone()),
+            }),
+            AccountsRouteAccess::Admin(admin)
         );
     }
 
@@ -126,5 +187,16 @@ mod tests {
                 constraint: Some(AccountConstraintReason::LastAdmin),
             }
         );
+    }
+
+    #[test]
+    fn account_capabilities_can_modify_only_without_constraints() {
+        assert!(
+            !AccountCapabilities {
+                constraint: Some(AccountConstraintReason::CurrentUser),
+            }
+            .can_modify()
+        );
+        assert!(AccountCapabilities { constraint: None }.can_modify());
     }
 }

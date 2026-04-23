@@ -22,10 +22,33 @@ allow = [
   "Zlib",
 ]
 
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
-crate = "acp-contracts"
+[licenses.private]
+ignore = true
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
-crate = "acp-web-frontend"
+crate = "acp-contracts-accounts"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-errors"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-messages"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-permissions"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-sessions"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-slash"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-stream"

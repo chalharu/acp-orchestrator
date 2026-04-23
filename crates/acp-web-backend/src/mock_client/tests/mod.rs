@@ -1,22 +1,8 @@
 use super::*;
 use crate::sessions::{PendingPrompt, SessionStore};
-use acp_app_support::wait_for_tcp_connect;
+use crate::support::http::wait_for_tcp_connect;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
-use agent_client_protocol::Client as _;
-use std::sync::Arc;
-use tokio::{
-    net::TcpListener,
-    sync::{Notify, oneshot},
-};
-
-macro_rules! pending_io_task {
-    ($started:expr) => {
-        tokio::spawn(async move {
-            $started.notify_one();
-            std::future::pending::<()>().await
-        })
-    };
-}
+use tokio::{net::TcpListener, sync::oneshot};
 
 mod backend_client;
 mod helpers;

@@ -1,8 +1,8 @@
 use super::*;
 
-use acp_contracts::{
-    CompletionCandidate, CompletionKind, MessageRole, SessionSnapshot, SessionStatus,
-};
+use crate::contract_messages::MessageRole;
+use crate::contract_sessions::{SessionSnapshot, SessionStatus};
+use crate::contract_slash::{CompletionCandidate, CompletionKind};
 use chrono::Utc;
 use std::sync::OnceLock;
 use tokio::{
@@ -41,12 +41,12 @@ fn resumed_chat_session() -> ChatSession {
             status: SessionStatus::Active,
             latest_sequence: 2,
             messages: Vec::new(),
-            pending_permissions: vec![acp_contracts::PermissionRequest {
+            pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
         },
-        resume_history: vec![acp_contracts::ConversationMessage {
+        resume_history: vec![crate::contract_messages::ConversationMessage {
             id: "m_1".to_string(),
             role: MessageRole::Assistant,
             text: "resumed".to_string(),

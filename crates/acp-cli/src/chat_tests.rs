@@ -1,8 +1,10 @@
 use super::*;
 
-use acp_contracts::{
-    CloseSessionResponse, CreateSessionResponse, ErrorResponse, MessageRole,
-    SessionHistoryResponse, SessionListItem, SessionListResponse, SessionSnapshot, SessionStatus,
+use crate::contract_errors::ErrorResponse;
+use crate::contract_messages::MessageRole;
+use crate::contract_sessions::{
+    CloseSessionResponse, CreateSessionResponse, SessionHistoryResponse, SessionListItem,
+    SessionListResponse, SessionSnapshot, SessionStatus,
 };
 use reqwest::Client;
 use std::sync::{
@@ -175,7 +177,7 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
                     title: "New chat".to_string(),
                     status: SessionStatus::Active,
                     latest_sequence: 2,
-                    messages: vec![acp_contracts::ConversationMessage {
+                    messages: vec![crate::contract_messages::ConversationMessage {
                         id: "m_snapshot".to_string(),
                         role: MessageRole::Assistant,
                         text: "from snapshot".to_string(),
@@ -354,7 +356,7 @@ fn resumed_chat_args(server_url: &str) -> ChatArgs {
 fn resumed_history_response() -> SessionHistoryResponse {
     SessionHistoryResponse {
         session_id: "s_resume".to_string(),
-        messages: vec![acp_contracts::ConversationMessage {
+        messages: vec![crate::contract_messages::ConversationMessage {
             id: "m_1".to_string(),
             role: MessageRole::Assistant,
             text: "from history".to_string(),
@@ -371,7 +373,7 @@ fn resumed_session_response() -> CreateSessionResponse {
             status: SessionStatus::Active,
             latest_sequence: 2,
             messages: Vec::new(),
-            pending_permissions: vec![acp_contracts::PermissionRequest {
+            pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],

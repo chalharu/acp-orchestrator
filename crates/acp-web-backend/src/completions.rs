@@ -1,4 +1,4 @@
-use acp_contracts::{
+use crate::contract_slash::{
     CompletionCandidate, CompletionKind, SLASH_COMMAND_SPECS, SlashCompletionQuery,
     SlashCompletionsResponse, classify_slash_completion_prefix,
 };

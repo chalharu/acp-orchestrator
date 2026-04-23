@@ -1,10 +1,11 @@
+use crate::contract_permissions::PermissionDecision;
+use crate::contract_slash::{
+    CompletionCandidate, CompletionKind, SlashCommand, parse_slash_command,
+};
 use crate::{
     Result,
     api::{cancel_turn, get_slash_completions, resolve_permission},
     events::permission_decision_label,
-};
-use acp_contracts::{
-    CompletionCandidate, CompletionKind, PermissionDecision, SlashCommand, parse_slash_command,
 };
 use reqwest::Client;
 
@@ -238,5 +239,203 @@ fn permission_decision(command: SlashCommand) -> PermissionDecision {
         PermissionDecision::Approve
     } else {
         PermissionDecision::Deny
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract_slash::SlashCompletionsResponse;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    async fn spawn_json_server(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("server should bind");
+        let address = listener
+            .local_addr()
+            .expect("server address should be readable");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response should write");
+        });
+
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn execute_repl_command_reports_unknown_commands() {
+        let client = Client::builder().build().expect("client should build");
+
+        let outcome = execute_repl_command(
+            "/unknown",
+            &client,
+            "http://127.0.0.1",
+            "developer",
+            "s_test",
+        )
+        .await
+        .expect("unknown commands should not fail");
+
+        assert_eq!(
+            outcome,
+            ReplCommandOutcome::status("unknown command. Use `/help`.")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_repl_command_marks_quit_commands() {
+        let client = Client::builder().build().expect("client should build");
+
+        let outcome =
+            execute_repl_command("/quit", &client, "http://127.0.0.1", "developer", "s_test")
+                .await
+                .expect("quit commands should not fail");
+
+        assert_eq!(outcome, ReplCommandOutcome::quit());
+    }
+
+    #[tokio::test]
+    async fn load_command_catalog_filters_non_command_candidates() {
+        let payload = serde_json::to_string(&SlashCompletionsResponse {
+            candidates: vec![
+                CompletionCandidate {
+                    label: "/help".to_string(),
+                    insert_text: "/help".to_string(),
+                    detail: "show help".to_string(),
+                    kind: CompletionKind::Command,
+                },
+                CompletionCandidate {
+                    label: "--help".to_string(),
+                    insert_text: "--help".to_string(),
+                    detail: "parameter".to_string(),
+                    kind: CompletionKind::Parameter,
+                },
+            ],
+        })
+        .expect("payload should serialize");
+        let url = spawn_json_server(payload).await;
+        let client = Client::builder().build().expect("client should build");
+
+        let catalog = load_command_catalog(&client, &url, "developer", "s_test")
+            .await
+            .expect("catalog should load");
+
+        assert_eq!(
+            catalog,
+            vec![CompletionCandidate {
+                label: "/help".to_string(),
+                insert_text: "/help".to_string(),
+                detail: "show help".to_string(),
+                kind: CompletionKind::Command,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_repl_command_returns_help_candidates_when_available() {
+        let payload = serde_json::to_string(&SlashCompletionsResponse {
+            candidates: vec![CompletionCandidate {
+                label: "/help".to_string(),
+                insert_text: "/help".to_string(),
+                detail: "show help".to_string(),
+                kind: CompletionKind::Command,
+            }],
+        })
+        .expect("payload should serialize");
+        let url = spawn_json_server(payload).await;
+        let client = Client::builder().build().expect("client should build");
+
+        let outcome = execute_repl_command("/help", &client, &url, "developer", "s_test")
+            .await
+            .expect("help commands should not fail");
+
+        assert_eq!(
+            outcome,
+            ReplCommandOutcome::help(vec![CompletionCandidate {
+                label: "/help".to_string(),
+                insert_text: "/help".to_string(),
+                detail: "show help".to_string(),
+                kind: CompletionKind::Command,
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_repl_command_refreshes_pending_permissions_after_cancel() {
+        let payload = serde_json::to_string(&crate::contract_sessions::CancelTurnResponse {
+            cancelled: true,
+        })
+        .expect("payload should serialize");
+        let url = spawn_json_server(payload).await;
+        let client = Client::builder().build().expect("client should build");
+
+        let outcome = execute_repl_command("/cancel", &client, &url, "developer", "s_test")
+            .await
+            .expect("cancel commands should not fail");
+
+        assert_eq!(
+            outcome,
+            ReplCommandOutcome {
+                notices: vec![ReplCommandNotice::Status(
+                    "cancel requested for the running turn".to_string(),
+                )],
+                pending_permissions_update: PendingPermissionsUpdate::Refresh,
+                should_quit: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_repl_command_removes_resolved_permission_requests() {
+        let payload =
+            serde_json::to_string(&crate::contract_permissions::ResolvePermissionResponse {
+                request_id: "req_1".to_string(),
+                decision: PermissionDecision::Deny,
+            })
+            .expect("payload should serialize");
+        let url = spawn_json_server(payload).await;
+        let client = Client::builder().build().expect("client should build");
+
+        let outcome = execute_repl_command("/deny req_1", &client, &url, "developer", "s_test")
+            .await
+            .expect("permission commands should not fail");
+
+        assert_eq!(
+            outcome,
+            ReplCommandOutcome {
+                notices: vec![ReplCommandNotice::Status(
+                    "permission req_1 denied".to_string(),
+                )],
+                pending_permissions_update: PendingPermissionsUpdate::Remove("req_1".to_string()),
+                should_quit: false,
+            }
+        );
+    }
+
+    #[test]
+    fn permission_decision_matches_slash_command_variants() {
+        assert_eq!(
+            permission_decision(SlashCommand::Approve),
+            PermissionDecision::Approve
+        );
+        assert_eq!(
+            permission_decision(SlashCommand::Deny),
+            PermissionDecision::Deny
+        );
     }
 }

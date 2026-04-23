@@ -1,9 +1,10 @@
-use acp_contracts::{LocalAccount, SessionSnapshot};
 use async_trait::async_trait;
 
-use crate::{
-    auth::AuthenticatedPrincipal,
-    workspace_store::{SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError},
+use crate::auth::AuthenticatedPrincipal;
+use crate::contract_accounts::LocalAccount;
+use crate::contract_sessions::SessionSnapshot;
+use crate::workspace_records::{
+    SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
 };
 
 #[async_trait]

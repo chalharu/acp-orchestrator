@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-chrono.workspace = true
-serde.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
+acp-contracts-accounts.workspace = true
+acp-contracts-errors.workspace = true
+acp-contracts-messages.workspace = true
+acp-contracts-permissions.workspace = true
+acp-contracts-sessions.workspace = true
+acp-contracts-slash.workspace = true
+acp-contracts-stream.workspace = true

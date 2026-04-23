@@ -3,6 +3,7 @@ name = "acp-web-frontend"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
+publish = false
 
 # This crate is NOT part of the main Cargo workspace.
 # It is built separately with `trunk build --release` targeting wasm32-unknown-unknown.
@@ -14,7 +15,13 @@ license = "AGPL-3.0-only"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-acp-contracts = { path = "../acp-contracts", version = "=0.1.0" }
+acp-contracts-accounts = { path = "../acp-contracts-accounts", version = "=0.1.0" }
+acp-contracts-errors = { path = "../acp-contracts-errors", version = "=0.1.0" }
+acp-contracts-messages = { path = "../acp-contracts-messages", version = "=0.1.0" }
+acp-contracts-permissions = { path = "../acp-contracts-permissions", version = "=0.1.0" }
+acp-contracts-sessions = { path = "../acp-contracts-sessions", version = "=0.1.0" }
+acp-contracts-slash = { path = "../acp-contracts-slash", version = "=0.1.0" }
+acp-contracts-stream = { path = "../acp-contracts-stream", version = "=0.1.0" }
 console_error_panic_hook = "=0.1.7"
 futures-channel = "=0.3.32"
 futures-util = "=0.3.32"

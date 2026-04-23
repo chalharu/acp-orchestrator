@@ -1,8 +1,9 @@
 use std::{process::Stdio, time::Duration};
 
-use acp_app_support::{build_http_client_for_url, read_startup_url, wait_for_tcp_connect};
-use acp_contracts::HealthResponse;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
+use acp_web_backend::contract_health::HealthResponse;
+use acp_web_backend::support::http::{build_http_client_for_url, wait_for_tcp_connect};
+use acp_web_backend::support::runtime::read_startup_url;
 use tokio::{net::TcpListener, process::Command, sync::oneshot, time::timeout};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

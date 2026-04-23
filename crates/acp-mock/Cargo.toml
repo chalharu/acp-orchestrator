@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-acp-app-support.workspace = true
+acp-app-support-errors.workspace = true
+acp-app-support-http.workspace = true
+acp-app-support-listener.workspace = true
+acp-app-support-runtime.workspace = true
+acp-app-support-service.workspace = true
+acp-app-support-tracing.workspace = true
 agent-client-protocol.workspace = true
 async-trait.workspace = true
 clap.workspace = true
@@ -13,6 +18,3 @@ snafu.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-acp-app-support = { workspace = true, features = ["test-helpers"] }

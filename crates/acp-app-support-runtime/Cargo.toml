@@ -1,0 +1,10 @@
+[package]
+name = "acp-app-support-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+acp-app-support-errors.workspace = true
+clap.workspace = true
+tokio.workspace = true

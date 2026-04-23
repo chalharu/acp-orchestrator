@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "acp-contracts"
+name = "acp-contracts-accounts"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -11,10 +11,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "acp-contracts-errors"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-messages"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-sessions"
+version = "0.1.0"
+dependencies = [
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "chrono",
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-slash"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "acp-contracts-stream"
+version = "0.1.0"
+dependencies = [
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "acp-contracts-sessions",
+ "serde",
+]
+
+[[package]]
 name = "acp-web-frontend"
 version = "0.1.0"
 dependencies = [
- "acp-contracts",
+ "acp-contracts-accounts",
+ "acp-contracts-errors",
+ "acp-contracts-messages",
+ "acp-contracts-permissions",
+ "acp-contracts-sessions",
+ "acp-contracts-slash",
+ "acp-contracts-stream",
  "chrono",
  "console_error_panic_hook",
  "futures-channel",

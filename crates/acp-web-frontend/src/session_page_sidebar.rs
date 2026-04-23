@@ -17,20 +17,6 @@ pub(super) struct SessionSidebarListControls {
 }
 
 #[component]
-fn SessionSidebarWorkspace(#[prop(into)] current_workspace: Signal<Option<String>>) -> impl IntoView {
-    move || {
-        current_workspace.get().map(|workspace| {
-            view! {
-                <p class="session-sidebar__workspace muted" aria-label="Current workspace">
-                    "Workspace: "
-                    <strong>{workspace}</strong>
-                </p>
-            }
-        })
-    }
-}
-
-#[component]
 pub(super) fn SessionSidebar(
     current_session_id: String,
     auth_error: RwSignal<Option<String>>,
@@ -48,8 +34,8 @@ pub(super) fn SessionSidebar(
                 auth_error=auth_error
                 sidebar_open=sidebar_open
             />
-            <SessionSidebarWorkspace current_workspace=shell_signals.current_workspace />
             <SessionSidebarStatus
+                workspace_message=shell_signals.current_workspace
                 session_list_error=shell_signals.list.error
                 has_session_items=has_session_items
             />
@@ -67,5 +53,60 @@ pub(super) fn SessionSidebar(
                 on_delete_session=list_controls.on_delete_session
             />
         </aside>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts_sessions::{SessionListItem, SessionStatus};
+    use chrono::{TimeZone, Utc};
+    use leptos::prelude::*;
+
+    use super::{SessionSidebar, SessionSidebarListControls};
+    use crate::session_page_shell_signals::session_shell_signals;
+    use crate::session_page_signals::session_signals;
+
+    fn sample_sidebar_controls() -> SessionSidebarListControls {
+        SessionSidebarListControls {
+            renaming_session_id: RwSignal::new(None::<String>),
+            saving_rename_session_id: RwSignal::new(None::<String>),
+            rename_draft: RwSignal::new(String::new()),
+            on_rename_session: Callback::new(|_| {}),
+            on_delete_session: Callback::new(|_| {}),
+        }
+    }
+
+    fn sample_session_list_item() -> SessionListItem {
+        SessionListItem {
+            id: "session-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            title: "Session 1".to_string(),
+            status: SessionStatus::Active,
+            last_activity_at: Utc.with_ymd_and_hms(2026, 4, 23, 19, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn session_sidebar_builds_with_workspace_aware_shell_signals() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals
+                .current_workspace_name
+                .set(Some("Default workspace".to_string()));
+            signals.list.loaded.set(true);
+            signals.list.items.set(vec![sample_session_list_item()]);
+
+            let shell_signals = session_shell_signals(signals);
+            let _ = view! {
+                <SessionSidebar
+                    current_session_id="session-1".to_string()
+                    auth_error=signals.action_error
+                    shell_signals=shell_signals
+                    sidebar_open=RwSignal::new(true)
+                    list_controls=sample_sidebar_controls()
+                />
+            };
+        });
     }
 }

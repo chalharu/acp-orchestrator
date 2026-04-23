@@ -7,17 +7,16 @@ use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::session_page_signals::SessionSignals;
 #[cfg(target_family = "wasm")]
 use crate::session_lifecycle::SessionLifecycle;
-
-use super::super::super::state::SessionSignals;
 #[cfg(target_family = "wasm")]
 use super::super::shared::spawn_browser_task;
 #[cfg(target_family = "wasm")]
 use super::events::handle_sse_event;
 
 #[cfg(target_family = "wasm")]
-pub(in crate::session::page::actions) fn spawn_session_stream(
+pub(in crate::session_page_actions) fn spawn_session_stream(
     session_id: String,
     signals: SessionSignals,
 ) {
@@ -32,7 +31,7 @@ pub(in crate::session::page::actions) fn spawn_session_stream(
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(in crate::session::page::actions) fn spawn_session_stream(
+pub(in crate::session_page_actions) fn spawn_session_stream(
     _session_id: String,
     signals: SessionSignals,
 ) {
@@ -118,7 +117,7 @@ mod tests {
     use leptos::prelude::*;
 
     use super::{spawn_session_stream, stop_live_stream};
-    use crate::session::page::state::session_signals;
+    use crate::session_page_signals::session_signals;
 
     #[test]
     fn host_spawn_session_stream_sets_an_abort_handle() {

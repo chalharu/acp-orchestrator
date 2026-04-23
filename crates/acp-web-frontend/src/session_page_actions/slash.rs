@@ -9,18 +9,26 @@ use crate::browser::clear_draft;
 use crate::browser::clear_prepared_session_id;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::session_page_signals::SessionSignals;
 use crate::session_lifecycle::TurnState;
 use crate::slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
     local_slash_candidates, parse_browser_slash_action,
 };
-
-use super::super::state::{SessionSignals, SessionSlashCallbacks};
 #[cfg(target_family = "wasm")]
 use super::session_list::refresh_session_list;
 #[cfg(target_family = "wasm")]
 use super::shared::spawn_browser_task;
 use super::stream::{next_tool_activity_id, push_tool_activity_entry};
+
+#[derive(Clone, Copy)]
+pub(crate) struct SessionSlashCallbacks {
+    pub(crate) select_next: Callback<()>,
+    pub(crate) select_previous: Callback<()>,
+    pub(crate) apply_selected: Callback<()>,
+    pub(crate) apply_index: Callback<usize>,
+    pub(crate) dismiss: Callback<()>,
+}
 
 fn update_slash_completion(signals: SessionSignals, draft: &str) {
     let candidates = local_slash_candidates(draft);
@@ -195,7 +203,7 @@ mod tests {
         bind_slash_completion, dismiss_slash_palette, handle_slash_submit, session_submit_callback,
         slash_palette_callbacks, update_slash_completion,
     };
-    use crate::session::page::state::session_signals;
+    use crate::session_page_signals::session_signals;
     use crate::session_lifecycle::TurnState;
 
     fn candidate(label: &str) -> CompletionCandidate {

@@ -14,12 +14,11 @@ use crate::browser::{navigate_to, prepared_session_id, store_prepared_session_id
 use crate::infrastructure::api;
 #[cfg(target_family = "wasm")]
 use crate::routing::app_session_path;
+use crate::session_page_bootstrap::session_bootstrap_from_snapshot;
+use crate::session_page_entries::{SessionEntry, SessionEntryRole};
+use crate::session_page_signals::SessionSignals;
 use crate::session_lifecycle::{SessionLifecycle, TurnState};
 use crate::session_state::turn_state_for_snapshot;
-
-use super::super::bootstrap::session_bootstrap_from_snapshot;
-use super::super::entries::{SessionEntry, SessionEntryRole};
-use super::super::state::SessionSignals;
 #[cfg(target_family = "wasm")]
 use super::session_list::refresh_session_list;
 #[cfg(target_family = "wasm")]
@@ -178,7 +177,7 @@ mod tests {
         apply_bootstrap_failure_signals, apply_loaded_session, set_home_redirect_error,
         should_clear_prepared_session_on_load,
     };
-    use crate::session::page::state::session_signals;
+    use crate::session_page_signals::session_signals;
     use crate::session_lifecycle::{SessionLifecycle, TurnState};
 
     fn sample_snapshot(
@@ -229,13 +228,13 @@ mod tests {
         ));
         assert!(should_clear_prepared_session_on_load(
             SessionLifecycle::Active,
-            &[crate::session::page::entries::SessionEntry::from_message(
+            &[crate::session_page_entries::SessionEntry::from_message(
                 message("user-1", MessageRole::User, "hello",)
             )],
         ));
         assert!(!should_clear_prepared_session_on_load(
             SessionLifecycle::Active,
-            &[crate::session::page::entries::SessionEntry::from_message(
+            &[crate::session_page_entries::SessionEntry::from_message(
                 message("assistant-1", MessageRole::Assistant, "hi",)
             )],
         ));

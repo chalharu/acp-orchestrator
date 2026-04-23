@@ -8,14 +8,13 @@ use acp_contracts_stream::{StreamEvent, StreamEventPayload};
 use leptos::prelude::*;
 
 use crate::session_activity::tool_activity_text;
+use crate::session_page_bootstrap::session_bootstrap_from_snapshot;
+use crate::session_page_entries::SessionEntry;
+use crate::session_page_signals::SessionSignals;
 use crate::session_lifecycle::{SessionLifecycle, TurnState, session_end_message};
 use crate::session_state::{
     should_apply_snapshot_turn_state, should_release_turn_state, turn_state_for_snapshot,
 };
-
-use super::super::super::bootstrap::session_bootstrap_from_snapshot;
-use super::super::super::entries::SessionEntry;
-use super::super::super::state::SessionSignals;
 
 pub(super) fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
     let StreamEvent { sequence, payload } = event;
@@ -193,7 +192,7 @@ mod tests {
     use super::{
         handle_sse_event, next_tool_activity_id, push_status_entry, push_tool_activity_entry,
     };
-    use crate::session::page::state::session_signals;
+    use crate::session_page_signals::session_signals;
     use crate::session_lifecycle::{SessionLifecycle, TurnState};
 
     fn message(id: &str, role: MessageRole, text: &str) -> ConversationMessage {

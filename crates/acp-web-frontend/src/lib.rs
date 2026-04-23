@@ -6,7 +6,28 @@ mod components;
 mod infrastructure;
 mod presentation;
 mod routing;
-mod session;
+mod session_page_actions;
+mod session_page_bootstrap;
+mod session_page_callbacks;
+mod session_page_composer_signals;
+mod session_page_dock;
+mod session_page_entries;
+mod session_page;
+mod session_page_home;
+mod session_page_layout;
+mod session_page_main;
+mod session_page_main_signals;
+mod session_page_shell_signals;
+mod session_page_signals;
+mod session_page_sidebar;
+mod session_page_sidebar_header;
+mod session_page_sidebar_item;
+mod session_page_sidebar_list;
+mod session_page_sidebar_nav;
+mod session_page_sidebar_status;
+mod session_page_sidebar_styles;
+mod session_page_topbar;
+mod session_page_transcript;
 mod session_activity;
 mod session_lifecycle;
 mod session_state;
@@ -19,7 +40,7 @@ use wasm_bindgen::JsCast;
 
 use crate::presentation::{AccountsPage, RegisterPage, SignInPage};
 use crate::routing::{AppRoute, current_route};
-use crate::session::{HomePage, SessionView};
+use crate::session_page::{HomePage, SessionView};
 
 fn not_found_view() -> impl IntoView {
     view! {

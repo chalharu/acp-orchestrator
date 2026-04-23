@@ -1,9 +1,8 @@
 use acp_contracts_permissions::PermissionRequest;
 use acp_contracts_sessions::SessionSnapshot;
 
+use crate::session_page_entries::{SessionEntry, SessionEntryRole};
 use crate::session_lifecycle::{CLOSED_SESSION_MESSAGE, SessionLifecycle, session_status_label};
-
-use super::entries::{SessionEntry, SessionEntryRole};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionBootstrap {
@@ -65,7 +64,7 @@ mod tests {
         SessionLifecycle, pending_permissions_to_items, push_bootstrap_closed_status_entry,
         session_bootstrap_from_snapshot,
     };
-    use crate::session::page::entries::{SessionEntry, SessionEntryRole};
+    use crate::session_page_entries::{SessionEntry, SessionEntryRole};
     use crate::session_lifecycle::CLOSED_SESSION_MESSAGE;
 
     fn sample_session_bootstrap_response() -> SessionResponse {

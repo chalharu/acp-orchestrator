@@ -8,10 +8,9 @@ use crate::browser::{clear_draft, clear_prepared_session_id_if_matches, navigate
 use crate::infrastructure::api;
 #[cfg(target_family = "wasm")]
 use crate::routing::app_session_path;
+use crate::session_page_signals::SessionSignals;
 use crate::session_lifecycle::{SessionLifecycle, TurnState};
 use crate::session_state::session_action_busy;
-
-use super::super::state::SessionSignals;
 #[cfg(target_family = "wasm")]
 use super::shared::spawn_browser_task;
 use super::stream::stop_live_stream;
@@ -218,7 +217,7 @@ mod tests {
         refresh_session_list, remove_session_from_list, rename_session_callback,
         rename_session_in_list,
     };
-    use crate::session::page::state::session_signals;
+    use crate::session_page_signals::session_signals;
     use crate::session_lifecycle::{SessionLifecycle, TurnState};
 
     fn list_item(id: &str, title: &str) -> SessionListItem {

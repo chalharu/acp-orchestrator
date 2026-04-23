@@ -1,17 +1,14 @@
-use acp_contracts_sessions::{SessionListItem, SessionStatus};
 use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
-use crate::presentation::SessionSidebarAuthControls;
-use crate::routing::app_session_path;
-
-use super::super::state::{
-    SessionSidebarItemCallbacks, SessionSidebarItemSignals, session_sidebar_item_signals,
+use crate::session_page_sidebar_styles::{
+    session_sidebar_item_class, session_sidebar_status_label, session_sidebar_status_pill_class,
+    sidebar_delete_sr_label,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct SidebarSession {
+struct SessionSidebarItemModel {
     id: String,
     href: String,
     title: String,
@@ -20,465 +17,32 @@ pub(super) struct SidebarSession {
     is_closed: bool,
 }
 
-fn sidebar_sessions(sessions: &[SessionListItem], current_session_id: &str) -> Vec<SidebarSession> {
-    sessions
-        .iter()
-        .map(|session| SidebarSession {
-            href: app_session_path(&session.id),
-            title: if session.title.is_empty() {
-                "New chat".to_string()
-            } else {
-                session.title.clone()
-            },
-            activity_label: format!(
-                "Updated {}",
-                session.last_activity_at.format("%Y-%m-%d %H:%M UTC")
-            ),
-            id: session.id.clone(),
-            is_current: session.id == current_session_id,
-            is_closed: matches!(session.status, SessionStatus::Closed),
-        })
-        .collect()
+#[derive(Clone, Copy)]
+struct SessionSidebarItemSignals {
+    is_renaming: Signal<bool>,
+    is_deleting: Signal<bool>,
+    is_saving_rename: Signal<bool>,
+    rename_action_disabled: Signal<bool>,
+    delete_action_disabled: Signal<bool>,
+    save_rename_disabled: Signal<bool>,
 }
 
-fn session_sidebar_status_label(is_closed: bool) -> &'static str {
-    if is_closed { "closed" } else { "active" }
-}
-
-fn session_sidebar_status_pill_class(is_closed: bool) -> &'static str {
-    if is_closed {
-        "session-sidebar__status-pill session-sidebar__status-pill--neutral"
-    } else {
-        "session-sidebar__status-pill session-sidebar__status-pill--success"
-    }
-}
-
-#[component]
-pub(super) fn SessionSidebar(
-    current_session_id: String,
-    auth_error: RwSignal<Option<String>>,
-    #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
-    #[prop(into)] session_list_loaded: Signal<bool>,
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    sidebar_open: RwSignal<bool>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
-    let session_id_for_items = current_session_id.clone();
-    let session_items =
-        Signal::derive(move || sidebar_sessions(&sessions.get(), &session_id_for_items));
-
-    view! {
-        <aside class=move || session_sidebar_class(sidebar_open.get())>
-            <SessionSidebarHeader
-                current_session_id=current_session_id
-                auth_error=auth_error
-                sidebar_open=sidebar_open
-            />
-            <SessionSidebarStatus session_list_error=session_list_error session_items=session_items />
-            <SessionSidebarNav
-                session_items=session_items
-                session_list_loaded=session_list_loaded
-                session_list_error=session_list_error
-                deleting_session_id=deleting_session_id
-                delete_disabled=delete_disabled
-                renaming_session_id=renaming_session_id
-                saving_rename_session_id=saving_rename_session_id
-                rename_draft=rename_draft
-                on_rename_session=on_rename_session
-                on_delete_session=on_delete_session
-            />
-        </aside>
-    }
-}
-
-#[cfg(target_family = "wasm")]
-#[component]
-fn SessionSidebarHeader(
-    current_session_id: String,
-    auth_error: RwSignal<Option<String>>,
-    sidebar_open: RwSignal<bool>,
-) -> impl IntoView {
-    view! {
-        <div class="session-sidebar__header">
-            <div class="session-sidebar__header-links">
-                <a class="session-sidebar__new-link" href="/app/" aria-label="New chat">
-                    <span class="session-sidebar__new-link-icon" aria-hidden="true">
-                        "+"
-                    </span>
-                    <span class="session-sidebar__new-link-label">"New chat"</span>
-                </a>
-                <SessionSidebarAuthControls current_session_id=current_session_id error=auth_error />
-            </div>
-            <button
-                type="button"
-                class="session-sidebar__dismiss"
-                on:click=move |_| sidebar_open.set(false)
-            >
-                <span aria-hidden="true">{"✕"}</span>
-                <span class="sr-only">"Close sidebar"</span>
-            </button>
-        </div>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[component]
-fn SessionSidebarHeader(
-    current_session_id: String,
-    auth_error: RwSignal<Option<String>>,
-    sidebar_open: RwSignal<bool>,
-) -> impl IntoView {
-    let _ = sidebar_open;
-
-    view! {
-        <div class="session-sidebar__header">
-            <div class="session-sidebar__header-links">
-                <a class="session-sidebar__new-link" href="/app/" aria-label="New chat">
-                    <span class="session-sidebar__new-link-icon" aria-hidden="true">
-                        "+"
-                    </span>
-                    <span class="session-sidebar__new-link-label">"New chat"</span>
-                </a>
-                <SessionSidebarAuthControls current_session_id=current_session_id error=auth_error />
-            </div>
-            <button type="button" class="session-sidebar__dismiss">
-                <span aria-hidden="true">{"✕"}</span>
-                <span class="sr-only">"Close sidebar"</span>
-            </button>
-        </div>
-    }
-}
-
-#[cfg(target_family = "wasm")]
-#[component]
-pub(super) fn SessionSidebarStatus(
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-) -> impl IntoView {
-    view! {
-        <Show when=move || session_list_error.get().is_some() && !session_items.get().is_empty()>
-            <p class="session-sidebar__status muted">
-                {move || session_list_error.get().unwrap_or_default()}
-            </p>
-        </Show>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[component]
-pub(super) fn SessionSidebarStatus(
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-) -> impl IntoView {
-    let error = session_list_error.get_untracked();
-    let has_items = !session_items.get_untracked().is_empty();
-
-    if let (true, Some(message)) = (has_items, error) {
-        view! { <p class="session-sidebar__status muted">{message}</p> }.into_any()
-    } else {
-        view! { <span hidden=true></span> }.into_any()
-    }
-}
-
-struct SessionSidebarNavArgs {
-    session_items: Signal<Vec<SidebarSession>>,
-    session_list_loaded: Signal<bool>,
-    session_list_error: Signal<Option<String>>,
-    deleting_session_id: Signal<Option<String>>,
-    delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-}
-
-#[component]
-pub(super) fn SessionSidebarNav(
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-    #[prop(into)] session_list_loaded: Signal<bool>,
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
-    session_sidebar_nav_view(SessionSidebarNavArgs {
-        session_items,
-        session_list_loaded,
-        session_list_error,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    })
-}
-
-#[cfg(target_family = "wasm")]
-fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
-    let SessionSidebarNavArgs {
-        session_items,
-        session_list_loaded,
-        session_list_error,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    } = args;
-
-    view! {
-        <nav class="session-sidebar__nav" aria-label="Sessions">
-            <Show
-                when=move || session_list_loaded.get()
-                fallback=|| {
-                    view! { <p class="session-sidebar__empty muted">"Loading sessions..."</p> }
-                }
-            >
-                <Show
-                    when=move || !session_items.get().is_empty()
-                    fallback=move || {
-                        view! {
-                            <p class="session-sidebar__empty muted">
-                                {move || session_sidebar_empty_message(session_list_error.get().is_some())}
-                            </p>
-                        }
-                    }
-                >
-                    <SessionSidebarList
-                        session_items=session_items
-                        deleting_session_id=deleting_session_id
-                        delete_disabled=delete_disabled
-                        renaming_session_id=renaming_session_id
-                        saving_rename_session_id=saving_rename_session_id
-                        rename_draft=rename_draft
-                        on_rename_session=on_rename_session
-                        on_delete_session=on_delete_session
-                    />
-                </Show>
-            </Show>
-        </nav>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
-    let SessionSidebarNavArgs {
-        session_items,
-        session_list_loaded,
-        session_list_error,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    } = args;
-    let loaded = session_list_loaded.get_untracked();
-    let items = session_items.get_untracked();
-    let has_error = session_list_error.get_untracked().is_some();
-
-    if !loaded {
-        return session_sidebar_loading_view().into_any();
-    }
-
-    if items.is_empty() {
-        return session_sidebar_empty_view(has_error).into_any();
-    }
-
-    session_sidebar_loaded_view(SessionSidebarListArgs {
-        session_items: Signal::derive(move || items.clone()),
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    })
-    .into_any()
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn session_sidebar_loading_view() -> impl IntoView {
-    view! {
-        <nav class="session-sidebar__nav" aria-label="Sessions">
-            <p class="session-sidebar__empty muted">"Loading sessions..."</p>
-        </nav>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn session_sidebar_empty_view(has_error: bool) -> impl IntoView {
-    view! {
-        <nav class="session-sidebar__nav" aria-label="Sessions">
-            <p class="session-sidebar__empty muted">{session_sidebar_empty_message(has_error)}</p>
-        </nav>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn session_sidebar_loaded_view(args: SessionSidebarListArgs) -> impl IntoView {
-    let SessionSidebarListArgs {
-        session_items,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    } = args;
-
-    view! {
-        <nav class="session-sidebar__nav" aria-label="Sessions">
-            <SessionSidebarList
-                session_items=session_items
-                deleting_session_id=deleting_session_id
-                delete_disabled=delete_disabled
-                renaming_session_id=renaming_session_id
-                saving_rename_session_id=saving_rename_session_id
-                rename_draft=rename_draft
-                on_rename_session=on_rename_session
-                on_delete_session=on_delete_session
-            />
-        </nav>
-    }
-}
-
-struct SessionSidebarListArgs {
-    session_items: Signal<Vec<SidebarSession>>,
-    deleting_session_id: Signal<Option<String>>,
-    delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-}
-
-#[component]
-pub(super) fn SessionSidebarList(
-    #[prop(into)] session_items: Signal<Vec<SidebarSession>>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
-    session_sidebar_list_view(SessionSidebarListArgs {
-        session_items,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    })
-}
-
-#[cfg(target_family = "wasm")]
-fn session_sidebar_list_view(args: SessionSidebarListArgs) -> impl IntoView {
-    let SessionSidebarListArgs {
-        session_items,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    } = args;
-
-    view! {
-        <ul class="session-sidebar__list">
-            <For
-                each=move || session_items.get()
-                key=|item| {
-                    (
-                        item.id.clone(),
-                        item.title.clone(),
-                        item.is_closed,
-                        item.is_current,
-                    )
-                }
-                children=move |item| {
-                    view! {
-                        <SessionSidebarItem
-                            item=item
-                            deleting_session_id=deleting_session_id
-                            delete_disabled=delete_disabled
-                            renaming_session_id=renaming_session_id
-                            saving_rename_session_id=saving_rename_session_id
-                            rename_draft=rename_draft
-                            on_rename_session=on_rename_session
-                            on_delete_session=on_delete_session
-                        />
-                    }
-                }
-            />
-        </ul>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn session_sidebar_list_view(args: SessionSidebarListArgs) -> impl IntoView {
-    let SessionSidebarListArgs {
-        session_items,
-        deleting_session_id,
-        delete_disabled,
-        renaming_session_id,
-        saving_rename_session_id,
-        rename_draft,
-        on_rename_session,
-        on_delete_session,
-    } = args;
-    let items = session_items.get_untracked();
-
-    view! {
-        <ul class="session-sidebar__list">
-            {items
-                .into_iter()
-                .map(|item| {
-                    view! {
-                        <SessionSidebarItem
-                            item=item
-                            deleting_session_id=deleting_session_id
-                            delete_disabled=delete_disabled
-                            renaming_session_id=renaming_session_id
-                            saving_rename_session_id=saving_rename_session_id
-                            rename_draft=rename_draft
-                            on_rename_session=on_rename_session
-                            on_delete_session=on_delete_session
-                        />
-                    }
-                })
-                .collect_view()}
-        </ul>
-    }
+#[derive(Clone, Copy)]
+struct SessionSidebarItemCallbacks {
+    begin_rename: Callback<()>,
+    cancel_rename: Callback<()>,
+    commit_rename: Callback<()>,
+    delete_session: Callback<()>,
 }
 
 #[component]
 pub(super) fn SessionSidebarItem(
-    item: SidebarSession,
+    id: String,
+    href: String,
+    title: String,
+    activity_label: String,
+    is_current: bool,
+    is_closed: bool,
     #[prop(into)] deleting_session_id: Signal<Option<String>>,
     #[prop(into)] delete_disabled: Signal<bool>,
     renaming_session_id: RwSignal<Option<String>>,
@@ -487,6 +51,14 @@ pub(super) fn SessionSidebarItem(
     on_rename_session: Callback<(String, String)>,
     on_delete_session: Callback<String>,
 ) -> impl IntoView {
+    let item = SessionSidebarItemModel {
+        id,
+        href,
+        title,
+        activity_label,
+        is_current,
+        is_closed,
+    };
     let item_signals = session_sidebar_item_signals(
         item.id.clone(),
         item.is_current,
@@ -509,7 +81,7 @@ pub(super) fn SessionSidebarItem(
     session_sidebar_item_view(item, rename_draft, item_signals, callbacks)
 }
 
-pub(super) fn session_sidebar_item_callbacks(
+fn session_sidebar_item_callbacks(
     session_id: String,
     title_for_rename_init: String,
     rename_draft: RwSignal<String>,
@@ -553,9 +125,85 @@ pub(super) fn session_sidebar_item_callbacks(
     }
 }
 
+fn session_sidebar_item_signals(
+    session_id: String,
+    is_current: bool,
+    deleting_session_id: Signal<Option<String>>,
+    delete_disabled: Signal<bool>,
+    renaming_session_id: RwSignal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
+    rename_draft: RwSignal<String>,
+) -> SessionSidebarItemSignals {
+    let is_renaming = sidebar_rw_session_match_signal(session_id.clone(), renaming_session_id);
+    let is_deleting = sidebar_session_match_signal(session_id.clone(), deleting_session_id);
+    let is_saving_rename = sidebar_session_match_signal(session_id, saving_rename_session_id);
+    let rename_action_disabled =
+        sidebar_rename_action_disabled_signal(is_deleting, saving_rename_session_id);
+    let delete_action_disabled = sidebar_delete_action_disabled_signal(
+        is_deleting,
+        deleting_session_id,
+        saving_rename_session_id,
+        is_current,
+        delete_disabled,
+    );
+    let save_rename_disabled = sidebar_save_rename_disabled_signal(is_saving_rename, rename_draft);
+
+    SessionSidebarItemSignals {
+        is_renaming,
+        is_deleting,
+        is_saving_rename,
+        rename_action_disabled,
+        delete_action_disabled,
+        save_rename_disabled,
+    }
+}
+
+fn sidebar_rw_session_match_signal(
+    session_id: String,
+    active_session_id: RwSignal<Option<String>>,
+) -> Signal<bool> {
+    Signal::derive(move || active_session_id.get().as_deref() == Some(session_id.as_str()))
+}
+
+fn sidebar_session_match_signal(
+    session_id: String,
+    active_session_id: Signal<Option<String>>,
+) -> Signal<bool> {
+    Signal::derive(move || active_session_id.get().as_deref() == Some(session_id.as_str()))
+}
+
+fn sidebar_rename_action_disabled_signal(
+    is_deleting: Signal<bool>,
+    saving_rename_session_id: Signal<Option<String>>,
+) -> Signal<bool> {
+    Signal::derive(move || is_deleting.get() || saving_rename_session_id.get().is_some())
+}
+
+fn sidebar_delete_action_disabled_signal(
+    is_deleting: Signal<bool>,
+    deleting_session_id: Signal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
+    is_current: bool,
+    delete_disabled: Signal<bool>,
+) -> Signal<bool> {
+    Signal::derive(move || {
+        is_deleting.get()
+            || deleting_session_id.get().is_some()
+            || saving_rename_session_id.get().is_some()
+            || (is_current && delete_disabled.get())
+    })
+}
+
+fn sidebar_save_rename_disabled_signal(
+    is_saving_rename: Signal<bool>,
+    rename_draft: RwSignal<String>,
+) -> Signal<bool> {
+    Signal::derive(move || is_saving_rename.get() || rename_draft.get().trim().is_empty())
+}
+
 #[cfg(target_family = "wasm")]
-pub(super) fn session_sidebar_item_view(
-    item: SidebarSession,
+fn session_sidebar_item_view(
+    item: SessionSidebarItemModel,
     rename_draft: RwSignal<String>,
     item_signals: SessionSidebarItemSignals,
     callbacks: SessionSidebarItemCallbacks,
@@ -601,8 +249,8 @@ pub(super) fn session_sidebar_item_view(
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(super) fn session_sidebar_item_view(
-    item: SidebarSession,
+fn session_sidebar_item_view(
+    item: SessionSidebarItemModel,
     rename_draft: RwSignal<String>,
     item_signals: SessionSidebarItemSignals,
     callbacks: SessionSidebarItemCallbacks,
@@ -943,61 +591,14 @@ pub(super) fn SessionSidebarRenameButtons(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn sidebar_delete_sr_label(is_deleting: bool) -> &'static str {
-    if is_deleting {
-        "Deleting…"
-    } else {
-        "Delete session"
-    }
-}
-
-pub(super) fn session_sidebar_class(sidebar_open: bool) -> &'static str {
-    if sidebar_open {
-        "session-sidebar session-sidebar--open"
-    } else {
-        "session-sidebar"
-    }
-}
-
-pub(super) fn session_sidebar_item_class(is_current: bool, is_closed: bool) -> &'static str {
-    match (is_current, is_closed) {
-        (true, true) => {
-            "session-sidebar__item session-sidebar__item--current session-sidebar__item--closed"
-        }
-        (true, false) => "session-sidebar__item session-sidebar__item--current",
-        (false, true) => "session-sidebar__item session-sidebar__item--closed",
-        (false, false) => "session-sidebar__item",
-    }
-}
-
-pub(super) fn session_sidebar_empty_message(has_error: bool) -> &'static str {
-    if has_error {
-        "Unable to load sessions right now."
-    } else {
-        "No sessions yet. Start a new one."
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use acp_contracts_sessions::{SessionListItem, SessionStatus};
-    use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
 
-    use super::{
-        SessionSidebarDeleteButton, SessionSidebarItem, SessionSidebarItemDisplay,
-        SessionSidebarList, SessionSidebarNav, SessionSidebarRenameButton,
-        SessionSidebarRenameButtons, SessionSidebarRenameForm, SessionSidebarRenameInput,
-        SessionSidebarSessionLink, SessionSidebarStatus, SidebarSession, session_sidebar_class,
-        session_sidebar_empty_message, session_sidebar_item_callbacks, session_sidebar_item_class,
-        session_sidebar_item_view, session_sidebar_status_label, session_sidebar_status_pill_class,
-        sidebar_delete_sr_label, sidebar_sessions,
-    };
-    use crate::session::page::state::session_sidebar_item_signals;
+    use super::*;
 
-    fn sample_sidebar_session() -> SidebarSession {
-        SidebarSession {
+    fn sample_sidebar_session() -> SessionSidebarItemModel {
+        SessionSidebarItemModel {
             id: "s1".to_string(),
             href: "/app/sessions/s1".to_string(),
             title: "Test session".to_string(),
@@ -1005,86 +606,6 @@ mod tests {
             is_current: true,
             is_closed: false,
         }
-    }
-
-    fn session_list_item(id: &str, title: &str, status: SessionStatus) -> SessionListItem {
-        SessionListItem {
-            id: id.to_string(),
-            title: title.to_string(),
-            status,
-            last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
-        }
-    }
-
-    #[test]
-    fn session_sidebar_class_adds_open_modifier_when_sidebar_is_open() {
-        assert_eq!(
-            session_sidebar_class(true),
-            "session-sidebar session-sidebar--open"
-        );
-        assert_eq!(session_sidebar_class(false), "session-sidebar");
-    }
-
-    #[test]
-    fn session_sidebar_item_class_applies_current_and_closed_modifiers() {
-        let both = session_sidebar_item_class(true, true);
-        assert!(both.contains("--current"));
-        assert!(both.contains("--closed"));
-
-        let current_only = session_sidebar_item_class(true, false);
-        assert!(current_only.contains("--current"));
-        assert!(!current_only.contains("--closed"));
-
-        let closed_only = session_sidebar_item_class(false, true);
-        assert!(!closed_only.contains("--current"));
-        assert!(closed_only.contains("--closed"));
-
-        assert_eq!(
-            session_sidebar_item_class(false, false),
-            "session-sidebar__item"
-        );
-    }
-
-    #[test]
-    fn session_sidebar_empty_message_differs_based_on_error_presence() {
-        assert!(session_sidebar_empty_message(true).contains("Unable to load"));
-        assert!(session_sidebar_empty_message(false).contains("No sessions yet"));
-    }
-
-    #[test]
-    fn delete_labels_match_sidebar_state() {
-        assert_eq!(sidebar_delete_sr_label(true), "Deleting…");
-        assert_eq!(sidebar_delete_sr_label(false), "Delete session");
-    }
-
-    #[test]
-    fn sidebar_session_helpers_cover_empty_titles_and_closed_status() {
-        let items = sidebar_sessions(
-            &[
-                session_list_item("s1", "", SessionStatus::Active),
-                session_list_item("s2", "Done", SessionStatus::Closed),
-            ],
-            "s1",
-        );
-
-        assert_eq!(items[0].title, "New chat");
-        assert!(items[0].is_current);
-        assert!(
-            items[0]
-                .activity_label
-                .contains("Updated 2026-04-17 01:00 UTC")
-        );
-        assert!(items[1].is_closed);
-        assert_eq!(session_sidebar_status_label(false), "active");
-        assert_eq!(session_sidebar_status_label(true), "closed");
-        assert_eq!(
-            session_sidebar_status_pill_class(false),
-            "session-sidebar__status-pill session-sidebar__status-pill--success"
-        );
-        assert_eq!(
-            session_sidebar_status_pill_class(true),
-            "session-sidebar__status-pill session-sidebar__status-pill--neutral"
-        );
     }
 
     #[test]
@@ -1280,48 +801,6 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_status_component_builds_without_panicking() {
-        let owner = Owner::new();
-        owner.with(|| {
-            let session_items = Signal::derive(|| vec![sample_sidebar_session()]);
-
-            let _ = view! {
-                <SessionSidebarStatus
-                    session_list_error=Signal::derive(|| Some("temporary".to_string()))
-                    session_items=session_items
-                />
-            };
-        });
-    }
-
-    #[test]
-    fn sidebar_nav_component_builds_without_panicking() {
-        let owner = Owner::new();
-        owner.with(|| {
-            let session_items = Signal::derive(|| vec![sample_sidebar_session()]);
-            let deleting_session_id = Signal::derive(|| None::<String>);
-            let saving_rename_session_id = Signal::derive(|| None::<String>);
-            let rename_draft = RwSignal::new("Draft".to_string());
-            let renaming_session_id = RwSignal::new(None::<String>);
-
-            let _ = view! {
-                <SessionSidebarNav
-                    session_items=session_items
-                    session_list_loaded=Signal::derive(|| true)
-                    session_list_error=Signal::derive(|| None::<String>)
-                    deleting_session_id=deleting_session_id
-                    delete_disabled=Signal::derive(|| false)
-                    renaming_session_id=renaming_session_id
-                    saving_rename_session_id=saving_rename_session_id
-                    rename_draft=rename_draft
-                    on_rename_session=Callback::new(|_: (String, String)| {})
-                    on_delete_session=Callback::new(|_: String| {})
-                />
-            };
-        });
-    }
-
-    #[test]
     fn sidebar_rename_form_builds_without_panicking() {
         let owner = Owner::new();
         owner.with(|| {
@@ -1334,43 +813,6 @@ mod tests {
                     save_disabled=Signal::derive(|| false)
                     on_commit_rename=Callback::new(|()| {})
                     on_cancel_rename=Callback::new(|()| {})
-                />
-            };
-        });
-    }
-
-    #[test]
-    fn session_sidebar_list_and_item_build_without_panicking() {
-        let owner = Owner::new();
-        owner.with(|| {
-            let session_items = Signal::derive(|| vec![sample_sidebar_session()]);
-            let deleting_session_id = Signal::derive(|| None::<String>);
-            let saving_rename_session_id = Signal::derive(|| None::<String>);
-            let rename_draft = RwSignal::new(String::new());
-            let renaming_session_id = RwSignal::new(None::<String>);
-
-            let _ = view! {
-                <SessionSidebarList
-                    session_items=session_items
-                    deleting_session_id=deleting_session_id
-                    delete_disabled=Signal::derive(|| false)
-                    renaming_session_id=renaming_session_id
-                    saving_rename_session_id=saving_rename_session_id
-                    rename_draft=rename_draft
-                    on_rename_session=Callback::new(|_: (String, String)| {})
-                    on_delete_session=Callback::new(|_: String| {})
-                />
-            };
-            let _ = view! {
-                <SessionSidebarItem
-                    item=sample_sidebar_session()
-                    deleting_session_id=deleting_session_id
-                    delete_disabled=Signal::derive(|| false)
-                    renaming_session_id=renaming_session_id
-                    saving_rename_session_id=saving_rename_session_id
-                    rename_draft=rename_draft
-                    on_rename_session=Callback::new(|_: (String, String)| {})
-                    on_delete_session=Callback::new(|_: String| {})
                 />
             };
         });
@@ -1410,28 +852,6 @@ mod tests {
                     save_disabled=Signal::derive(|| false)
                     on_commit_rename=Callback::new(|()| {})
                     on_cancel_rename=Callback::new(|()| {})
-                />
-            };
-        });
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    #[test]
-    fn session_sidebar_nav_builds_empty_state_without_panicking() {
-        let owner = Owner::new();
-        owner.with(|| {
-            let _ = view! {
-                <SessionSidebarNav
-                    session_items=Signal::derive(Vec::<SidebarSession>::new)
-                    session_list_loaded=Signal::derive(|| true)
-                    session_list_error=Signal::derive(|| Some("temporary".to_string()))
-                    deleting_session_id=Signal::derive(|| None::<String>)
-                    delete_disabled=Signal::derive(|| false)
-                    renaming_session_id=RwSignal::new(None::<String>)
-                    saving_rename_session_id=Signal::derive(|| None::<String>)
-                    rename_draft=RwSignal::new(String::new())
-                    on_rename_session=Callback::new(|_: (String, String)| {})
-                    on_delete_session=Callback::new(|_: String| {})
                 />
             };
         });

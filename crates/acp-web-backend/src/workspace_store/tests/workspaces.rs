@@ -172,7 +172,7 @@ async fn listing_workspace_sessions_returns_non_deleted_session_metadata() {
 }
 
 #[tokio::test]
-async fn workspace_repository_trait_methods_cover_workspace_ops() {
+async fn workspace_repository_trait_methods_cover_read_and_write_ops() {
     let repository = test_repository();
     let user = materialized_user(&repository).await;
     let bootstrap = WorkspaceRepository::bootstrap_workspace(&repository, &user.user_id)
@@ -219,10 +219,28 @@ async fn workspace_repository_trait_methods_cover_workspace_ops() {
     assert_eq!(loaded.workspace_id, created.workspace_id);
     assert_eq!(updated.default_ref.as_deref(), Some("refs/heads/release"));
     assert!(sessions.is_empty());
+}
 
+#[tokio::test]
+async fn workspace_repository_trait_methods_cover_delete_ops() {
+    let repository = test_repository();
+    let user = materialized_user(&repository).await;
+    let created = WorkspaceRepository::create_workspace(
+        &repository,
+        &user.user_id,
+        &workspace_request("Trait Repo"),
+    )
+    .await
+    .expect("workspace creation should succeed");
     WorkspaceRepository::delete_workspace(&repository, &user.user_id, &created.workspace_id)
         .await
         .expect("workspace deletion should succeed");
+    let loaded =
+        WorkspaceRepository::load_workspace(&repository, &user.user_id, &created.workspace_id)
+            .await
+            .expect("workspace lookup should succeed");
+
+    assert!(loaded.is_none());
 }
 
 #[tokio::test]

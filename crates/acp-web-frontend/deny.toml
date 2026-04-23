@@ -13,7 +13,6 @@ wildcards = "deny"
 [licenses]
 version = 2
 allow = [
-  "AGPL-3.0-only",
   "Apache-2.0",
   "BSL-1.0",
   "CC0-1.0",
@@ -22,3 +21,34 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
+
+[licenses.private]
+ignore = true
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-accounts"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-errors"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-messages"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-permissions"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-sessions"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-slash"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-stream"

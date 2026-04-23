@@ -3,6 +3,7 @@ name = "acp-web-frontend"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
+publish = false
 
 # This crate is NOT part of the main Cargo workspace.
 # It is built separately with `trunk build --release` targeting wasm32-unknown-unknown.

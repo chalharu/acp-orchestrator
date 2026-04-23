@@ -16,6 +16,17 @@ struct SessionSidebarListArgs {
     on_delete_session: Callback<String>,
 }
 
+#[derive(Clone, Copy)]
+struct SessionSidebarItemRuntime {
+    deleting_session_id: Signal<Option<String>>,
+    delete_disabled: Signal<bool>,
+    renaming_session_id: RwSignal<Option<String>>,
+    saving_rename_session_id: Signal<Option<String>>,
+    rename_draft: RwSignal<String>,
+    on_rename_session: Callback<(String, String)>,
+    on_delete_session: Callback<String>,
+}
+
 #[component]
 pub(super) fn SessionSidebarList(
     current_session_id: String,
@@ -54,44 +65,28 @@ fn session_sidebar_list_view(args: SessionSidebarListArgs) -> impl IntoView {
         on_rename_session,
         on_delete_session,
     } = args;
+    let item_runtime = SessionSidebarItemRuntime {
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    };
     let current_session_id_for_items = current_session_id.clone();
 
     view! {
         <ul class="session-sidebar__list">
             <For
                 each=move || sessions.get()
-                key=|item| {
-                    (
-                        item.id.clone(),
-                        item.title.clone(),
-                        item.status.clone(),
-                    )
-                }
+                key=|item| item.id.clone()
                 children=move |item| {
-                    let id = item.id.clone();
-                    let href = app_session_path(&item.id);
-                    let title = session_sidebar_title(item.title);
-                    let activity_label =
-                        format!("Updated {}", item.last_activity_at.format("%Y-%m-%d %H:%M UTC"));
-                    let is_current = id == current_session_id_for_items;
-                    let is_closed = matches!(item.status, SessionStatus::Closed);
-                    view! {
-                        <SessionSidebarItem
-                            id=id
-                            href=href
-                            title=title
-                            activity_label=activity_label
-                            is_current=is_current
-                            is_closed=is_closed
-                            deleting_session_id=deleting_session_id
-                            delete_disabled=delete_disabled
-                            renaming_session_id=renaming_session_id
-                            saving_rename_session_id=saving_rename_session_id
-                            rename_draft=rename_draft
-                            on_rename_session=on_rename_session
-                            on_delete_session=on_delete_session
-                        />
-                    }
+                    session_sidebar_list_item_view(
+                        item,
+                        current_session_id_for_items.clone(),
+                        item_runtime,
+                    )
                 }
             />
         </ul>
@@ -112,39 +107,56 @@ fn session_sidebar_list_view(args: SessionSidebarListArgs) -> impl IntoView {
         on_delete_session,
     } = args;
     let items = sessions.get_untracked();
+    let item_runtime = SessionSidebarItemRuntime {
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    };
 
     view! {
         <ul class="session-sidebar__list">
             {items
                 .into_iter()
                 .map(|item| {
-                    let id = item.id.clone();
-                    let href = app_session_path(&item.id);
-                    let title = session_sidebar_title(item.title);
-                    let activity_label =
-                        format!("Updated {}", item.last_activity_at.format("%Y-%m-%d %H:%M UTC"));
-                    let is_current = id == current_session_id;
-                    let is_closed = matches!(item.status, SessionStatus::Closed);
-                    view! {
-                        <SessionSidebarItem
-                            id=id
-                            href=href
-                            title=title
-                            activity_label=activity_label
-                            is_current=is_current
-                            is_closed=is_closed
-                            deleting_session_id=deleting_session_id
-                            delete_disabled=delete_disabled
-                            renaming_session_id=renaming_session_id
-                            saving_rename_session_id=saving_rename_session_id
-                            rename_draft=rename_draft
-                            on_rename_session=on_rename_session
-                            on_delete_session=on_delete_session
-                        />
-                    }
+                    session_sidebar_list_item_view(item, current_session_id.clone(), item_runtime)
                 })
                 .collect_view()}
         </ul>
+    }
+}
+
+fn session_sidebar_list_item_view(
+    item: SessionListItem,
+    current_session_id: String,
+    runtime: SessionSidebarItemRuntime,
+) -> impl IntoView {
+    let id = item.id.clone();
+    let href = app_session_path(&item.id);
+    let title = session_sidebar_title(item.title);
+    let activity_label = format!("Updated {}", item.last_activity_at.format("%Y-%m-%d %H:%M UTC"));
+    let is_current = id == current_session_id;
+    let is_closed = matches!(item.status, SessionStatus::Closed);
+
+    view! {
+        <SessionSidebarItem
+            id=id
+            href=href
+            title=title
+            activity_label=activity_label
+            is_current=is_current
+            is_closed=is_closed
+            deleting_session_id=runtime.deleting_session_id
+            delete_disabled=runtime.delete_disabled
+            renaming_session_id=runtime.renaming_session_id
+            saving_rename_session_id=runtime.saving_rename_session_id
+            rename_draft=runtime.rename_draft
+            on_rename_session=runtime.on_rename_session
+            on_delete_session=runtime.on_delete_session
+        />
     }
 }
 

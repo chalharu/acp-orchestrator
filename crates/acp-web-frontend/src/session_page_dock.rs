@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::components::composer::{Composer, ComposerControls};
+use crate::components::composer::{Composer, ComposerControls, ComposerSlashProps};
 use crate::session_page_callbacks::SessionViewCallbacks;
 use crate::session_page_composer_signals::SessionComposerSignals;
 
@@ -22,15 +22,17 @@ pub(crate) fn SessionDock(
                     cancel_disabled: composer.cancel_busy,
                     on_cancel: callbacks.cancel,
                 }
-                slash_visible=composer.slash_palette_visible
-                slash_candidates=composer.slash_candidates
-                slash_selected_index=composer.slash_selected_index
-                slash_apply_selected=composer.slash_apply_selected
-                on_slash_select_next=callbacks.slash.select_next
-                on_slash_select_previous=callbacks.slash.select_previous
-                on_slash_apply_selected=callbacks.slash.apply_selected
-                on_slash_apply_index=callbacks.slash.apply_index
-                on_slash_dismiss=callbacks.slash.dismiss
+                slash=ComposerSlashProps {
+                    visible: composer.slash_palette_visible,
+                    candidates: composer.slash_candidates,
+                    selected_index: composer.slash_selected_index,
+                    apply_selected: composer.slash_apply_selected,
+                    on_select_next: callbacks.slash.select_next,
+                    on_select_previous: callbacks.slash.select_previous,
+                    on_apply_selected: callbacks.slash.apply_selected,
+                    on_apply_index: callbacks.slash.apply_index,
+                    on_dismiss: callbacks.slash.dismiss,
+                }
             />
         </div>
     }

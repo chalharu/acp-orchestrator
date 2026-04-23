@@ -66,37 +66,26 @@ fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
     } = args;
 
     view! {
-        <nav class="session-sidebar__nav" aria-label="Sessions">
-            <Show
-                when=move || session_list_loaded.get()
-                fallback=|| {
-                    view! { <p class="session-sidebar__empty muted">"Loading sessions..."</p> }
-                }
-            >
-                <Show
-                    when=move || !sessions.get().is_empty()
-                    fallback=move || {
-                        view! {
-                            <p class="session-sidebar__empty muted">
-                                {move || session_sidebar_empty_message(session_list_error.get().is_some())}
-                            </p>
-                        }
-                    }
-                >
-                    <SessionSidebarList
-                        current_session_id=current_session_id.clone()
-                        sessions=sessions
-                        deleting_session_id=deleting_session_id
-                        delete_disabled=delete_disabled
-                        renaming_session_id=renaming_session_id
-                        saving_rename_session_id=saving_rename_session_id
-                        rename_draft=rename_draft
-                        on_rename_session=on_rename_session
-                        on_delete_session=on_delete_session
-                    />
-                </Show>
-            </Show>
-        </nav>
+        {move || {
+            if !session_list_loaded.get() {
+                session_sidebar_loading_view().into_any()
+            } else if sessions.get().is_empty() {
+                session_sidebar_empty_view(session_list_error.get().is_some()).into_any()
+            } else {
+                session_sidebar_loaded_view(SessionSidebarListArgs {
+                    current_session_id: current_session_id.clone(),
+                    sessions,
+                    deleting_session_id,
+                    delete_disabled,
+                    renaming_session_id,
+                    saving_rename_session_id,
+                    rename_draft,
+                    on_rename_session,
+                    on_delete_session,
+                })
+                .into_any()
+            }
+        }}
     }
 }
 
@@ -141,7 +130,6 @@ fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
     .into_any()
 }
 
-#[cfg(not(target_family = "wasm"))]
 struct SessionSidebarListArgs {
     current_session_id: String,
     sessions: Signal<Vec<SessionListItem>>,
@@ -154,7 +142,6 @@ struct SessionSidebarListArgs {
     on_delete_session: Callback<String>,
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn session_sidebar_loading_view() -> impl IntoView {
     view! {
         <nav class="session-sidebar__nav" aria-label="Sessions">
@@ -163,7 +150,6 @@ fn session_sidebar_loading_view() -> impl IntoView {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn session_sidebar_empty_view(has_error: bool) -> impl IntoView {
     view! {
         <nav class="session-sidebar__nav" aria-label="Sessions">
@@ -172,7 +158,6 @@ fn session_sidebar_empty_view(has_error: bool) -> impl IntoView {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 fn session_sidebar_loaded_view(args: SessionSidebarListArgs) -> impl IntoView {
     let SessionSidebarListArgs {
         current_session_id,

@@ -4,8 +4,9 @@ use wasm_bindgen::JsCast;
 
 use crate::session_page_sidebar_styles::{
     session_sidebar_item_class, session_sidebar_status_label, session_sidebar_status_pill_class,
-    sidebar_delete_sr_label,
 };
+#[cfg(not(target_family = "wasm"))]
+use crate::session_page_sidebar_styles::sidebar_delete_sr_label;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionSidebarItemModel {

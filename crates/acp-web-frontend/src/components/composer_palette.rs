@@ -82,17 +82,31 @@ fn SlashPaletteList(
                 each=move || items.clone()
                 key=|(index, candidate)| (index.to_owned(), candidate.label.clone())
                 children=move |(index, candidate)| {
-                    view! {
-                        <SlashPaletteItem
-                            index=index
-                            candidate=candidate
-                            is_selected=index == selected_index
-                            on_apply_index=on_apply_index
-                        />
-                    }
+                    slash_palette_item_view(
+                        index,
+                        candidate,
+                        index == selected_index,
+                        on_apply_index,
+                    )
                 }
             />
         </ul>
+    }
+}
+
+fn slash_palette_item_view(
+    index: usize,
+    candidate: CompletionCandidate,
+    is_selected: bool,
+    on_apply_index: Callback<usize>,
+) -> impl IntoView {
+    view! {
+        <SlashPaletteItem
+            index=index
+            candidate=candidate
+            is_selected=is_selected
+            on_apply_index=on_apply_index
+        />
     }
 }
 
@@ -114,22 +128,10 @@ fn SlashPaletteItem(
         >
             <button
                 type="button"
-                class=if is_selected {
-                    "composer__slash-item composer__slash-item--selected"
-                } else {
-                    "composer__slash-item"
-                }
+                class=slash_item_class(is_selected)
                 tabindex="-1"
-                on:mousedown=move |ev| {
-                    ev.prevent_default();
-                    on_apply_index.run(index);
-                }
-                on:keydown=move |ev| {
-                    if matches!(ev.key().as_str(), "Enter" | " ") {
-                        ev.prevent_default();
-                        on_apply_index.run(index);
-                    }
-                }
+                on:mousedown=move |ev| handle_palette_apply_event(&ev, on_apply_index, index)
+                on:keydown=move |ev| handle_palette_key_event(&ev, on_apply_index, index)
             >
                 <span class="composer__slash-label">{label}</span>
                 <span class="composer__slash-detail">{detail}</span>
@@ -138,10 +140,73 @@ fn SlashPaletteItem(
     }
 }
 
+fn slash_item_class(is_selected: bool) -> &'static str {
+    if is_selected {
+        "composer__slash-item composer__slash-item--selected"
+    } else {
+        "composer__slash-item"
+    }
+}
+
+trait PreventDefaultEvent {
+    fn prevent_default_event(&self);
+}
+
+impl PreventDefaultEvent for web_sys::MouseEvent {
+    fn prevent_default_event(&self) {
+        let event: &web_sys::Event = self.as_ref();
+        event.prevent_default();
+    }
+}
+
+impl PreventDefaultEvent for web_sys::KeyboardEvent {
+    fn prevent_default_event(&self) {
+        let event: &web_sys::Event = self.as_ref();
+        event.prevent_default();
+    }
+}
+
+fn handle_palette_apply_event<E: PreventDefaultEvent>(
+    ev: &E,
+    on_apply_index: Callback<usize>,
+    index: usize,
+) {
+    ev.prevent_default_event();
+    on_apply_index.run(index);
+}
+
+fn should_apply_palette_key(key: &str) -> bool {
+    matches!(key, "Enter" | " ")
+}
+
+fn handle_palette_key_event<E>(
+    ev: &E,
+    on_apply_index: Callback<usize>,
+    index: usize,
+) where
+    E: PreventDefaultEvent + KeyEvent,
+{
+    if should_apply_palette_key(ev.key().as_str()) {
+        ev.prevent_default_event();
+        on_apply_index.run(index);
+    }
+}
+
+trait KeyEvent {
+    fn key(&self) -> String;
+}
+
+impl KeyEvent for web_sys::KeyboardEvent {
+    fn key(&self) -> String {
+        web_sys::KeyboardEvent::key(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use acp_contracts_slash::CompletionKind;
+    use std::cell::Cell;
 
     fn make_candidate(label: &str) -> CompletionCandidate {
         CompletionCandidate {
@@ -242,6 +307,90 @@ mod tests {
                     on_apply_index=Callback::new(|_: usize| {})
                 />
             };
+            let _ = slash_palette_item_view(
+                0,
+                make_candidate("/help"),
+                true,
+                Callback::new(|_: usize| {}),
+            );
+        });
+    }
+
+    #[test]
+    fn slash_item_class_matches_selection_state() {
+        assert_eq!(
+            slash_item_class(true),
+            "composer__slash-item composer__slash-item--selected"
+        );
+        assert_eq!(slash_item_class(false), "composer__slash-item");
+    }
+
+    struct FakePointerEvent(Cell<bool>);
+
+    impl PreventDefaultEvent for FakePointerEvent {
+        fn prevent_default_event(&self) {
+            self.0.set(true);
+        }
+    }
+
+    struct FakeKeyboardEvent {
+        prevented: Cell<bool>,
+        key: String,
+    }
+
+    impl PreventDefaultEvent for FakeKeyboardEvent {
+        fn prevent_default_event(&self) {
+            self.prevented.set(true);
+        }
+    }
+
+    impl KeyEvent for FakeKeyboardEvent {
+        fn key(&self) -> String {
+            self.key.clone()
+        }
+    }
+
+    #[test]
+    fn handle_palette_apply_event_runs_callback_and_prevents_default() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let applied = RwSignal::new(Vec::<usize>::new());
+            let event = FakePointerEvent(Cell::new(false));
+
+            handle_palette_apply_event(
+                &event,
+                Callback::new(move |index| applied.update(|items| items.push(index))),
+                3,
+            );
+
+            assert!(event.0.get());
+            assert_eq!(applied.get(), vec![3]);
+        });
+    }
+
+    #[test]
+    fn handle_palette_key_event_only_applies_enter_and_space() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let applied = RwSignal::new(Vec::<usize>::new());
+            let enter = FakeKeyboardEvent {
+                prevented: Cell::new(false),
+                key: "Enter".to_string(),
+            };
+            let other = FakeKeyboardEvent {
+                prevented: Cell::new(false),
+                key: "Escape".to_string(),
+            };
+            let callback = Callback::new(move |index| applied.update(|items| items.push(index)));
+
+            handle_palette_key_event(&enter, callback, 1);
+            handle_palette_key_event(&other, callback, 2);
+
+            assert!(enter.prevented.get());
+            assert!(!other.prevented.get());
+            assert_eq!(applied.get(), vec![1]);
+            assert!(should_apply_palette_key(" "));
+            assert!(!should_apply_palette_key("Escape"));
         });
     }
 }

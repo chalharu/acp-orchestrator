@@ -69,20 +69,36 @@ pub(crate) struct ComposerControls {
     pub(crate) on_cancel: Callback<()>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ComposerSlashProps {
+    pub(crate) visible: Signal<bool>,
+    pub(crate) candidates: Signal<Vec<CompletionCandidate>>,
+    pub(crate) selected_index: Signal<usize>,
+    pub(crate) apply_selected: Signal<bool>,
+    pub(crate) on_select_next: Callback<()>,
+    pub(crate) on_select_previous: Callback<()>,
+    pub(crate) on_apply_selected: Callback<()>,
+    pub(crate) on_apply_index: Callback<usize>,
+    pub(crate) on_dismiss: Callback<()>,
+}
+
+trait PreventDefaultEvent {
+    fn prevent_default_event(&self);
+}
+
+impl PreventDefaultEvent for web_sys::SubmitEvent {
+    fn prevent_default_event(&self) {
+        let event: &web_sys::Event = self.as_ref();
+        event.prevent_default();
+    }
+}
+
 #[component]
 pub(crate) fn Composer(
     draft: RwSignal<String>,
     on_submit: Callback<String>,
     controls: ComposerControls,
-    slash_visible: Signal<bool>,
-    slash_candidates: Signal<Vec<CompletionCandidate>>,
-    slash_selected_index: Signal<usize>,
-    slash_apply_selected: Signal<bool>,
-    on_slash_select_next: Callback<()>,
-    on_slash_select_previous: Callback<()>,
-    on_slash_apply_selected: Callback<()>,
-    on_slash_apply_index: Callback<usize>,
-    on_slash_dismiss: Callback<()>,
+    slash: ComposerSlashProps,
 ) -> impl IntoView {
     let form = NodeRef::<leptos_html::Form>::new();
     let textarea = NodeRef::<leptos_html::Textarea>::new();
@@ -95,22 +111,21 @@ pub(crate) fn Composer(
         restore_focus_after_submit,
     );
     let slash_signals = (
-        slash_visible,
-        slash_candidates,
-        slash_selected_index,
-        slash_apply_selected,
+        slash.visible,
+        slash.candidates,
+        slash.selected_index,
+        slash.apply_selected,
     );
     let slash_callbacks = (
-        on_slash_select_next,
-        on_slash_select_previous,
-        on_slash_apply_selected,
-        on_slash_apply_index,
-        on_slash_dismiss,
+        slash.on_select_next,
+        slash.on_select_previous,
+        slash.on_apply_selected,
+        slash.on_apply_index,
+        slash.on_dismiss,
     );
     let handle_submit_runtime = submit_runtime;
     let handle_submit = move |ev: web_sys::SubmitEvent| {
-        ev.prevent_default();
-        submit_draft(draft, handle_submit_runtime);
+        handle_submit_event(&ev, draft, handle_submit_runtime);
     };
     let (form, _, _, _, _) = submit_runtime;
 
@@ -124,6 +139,15 @@ pub(crate) fn Composer(
             {composer_panel_body(draft, slash_signals, slash_callbacks, submit_runtime, controls)}
         </form>
     }
+}
+
+fn handle_submit_event<E: PreventDefaultEvent>(
+    ev: &E,
+    draft: RwSignal<String>,
+    submit_runtime: SubmitDraftRuntime,
+) {
+    ev.prevent_default_event();
+    submit_draft(draft, submit_runtime);
 }
 
 fn composer_panel_body(
@@ -467,10 +491,12 @@ fn submit_text(current_value: String, disabled: bool) -> Option<String> {
 mod tests {
     use acp_contracts_slash::CompletionCandidate;
     use leptos::prelude::*;
+    use std::cell::Cell;
 
     use super::{
-        Composer, ComposerControls, SlashTestCallbacks, SlashTestSignals,
-        composer_active_descendant, current_submit_value, submit_text,
+        Composer, ComposerControls, ComposerSlashProps, PreventDefaultEvent, SlashTestCallbacks,
+        SlashTestSignals, SubmitDraftRuntime, composer_active_descendant,
+        current_submit_value, handle_submit_event, submit_draft, submit_text,
     };
     use super::super::composer_palette::slash_option_id;
     #[cfg(target_family = "wasm")]
@@ -576,7 +602,6 @@ mod tests {
         )
     }
 
-    #[cfg(target_family = "wasm")]
     fn submit_runtime(
         disabled: Signal<bool>,
         submitted: RwSignal<Vec<String>>,
@@ -591,6 +616,14 @@ mod tests {
             }),
             restore_focus_after_submit,
         )
+    }
+
+    struct FakeSubmitEvent(Cell<bool>);
+
+    impl PreventDefaultEvent for FakeSubmitEvent {
+        fn prevent_default_event(&self) {
+            self.0.set(true);
+        }
     }
 
     #[test]
@@ -619,17 +652,61 @@ mod tests {
                         cancel_disabled: Signal::derive(|| false),
                         on_cancel: Callback::new(|()| {}),
                     }
-                    slash_visible=slash_visible
-                    slash_candidates=slash_candidates
-                    slash_selected_index=slash_selected_index
-                    slash_apply_selected=slash_apply_selected
-                    on_slash_select_next=on_slash_select_next
-                    on_slash_select_previous=on_slash_select_previous
-                    on_slash_apply_selected=on_slash_apply_selected
-                    on_slash_apply_index=on_slash_apply_index
-                    on_slash_dismiss=on_slash_dismiss
+                    slash=ComposerSlashProps {
+                        visible: slash_visible,
+                        candidates: slash_candidates,
+                        selected_index: slash_selected_index,
+                        apply_selected: slash_apply_selected,
+                        on_select_next: on_slash_select_next,
+                        on_select_previous: on_slash_select_previous,
+                        on_apply_selected: on_slash_apply_selected,
+                        on_apply_index: on_slash_apply_index,
+                        on_dismiss: on_slash_dismiss,
+                    }
                 />
             };
+        });
+    }
+
+    #[test]
+    fn submit_draft_runs_submit_callback_and_marks_focus_restore() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let submitted = RwSignal::new(Vec::<String>::new());
+            let restore_focus_after_submit = RwSignal::new(false);
+            let runtime = submit_runtime(
+                Signal::derive(|| false),
+                submitted,
+                restore_focus_after_submit,
+            );
+            let draft = RwSignal::new("  prompt  ".to_string());
+
+            submit_draft(draft, runtime);
+
+            assert_eq!(submitted.get(), vec!["prompt".to_string()]);
+            assert!(restore_focus_after_submit.get());
+        });
+    }
+
+    #[test]
+    fn handle_submit_event_prevents_default_and_submits() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let submitted = RwSignal::new(Vec::<String>::new());
+            let restore_focus_after_submit = RwSignal::new(false);
+            let runtime = submit_runtime(
+                Signal::derive(|| false),
+                submitted,
+                restore_focus_after_submit,
+            );
+            let draft = RwSignal::new("  prompt  ".to_string());
+            let event = FakeSubmitEvent(Cell::new(false));
+
+            handle_submit_event(&event, draft, runtime);
+
+            assert!(event.0.get());
+            assert_eq!(submitted.get(), vec!["prompt".to_string()]);
+            assert!(restore_focus_after_submit.get());
         });
     }
 

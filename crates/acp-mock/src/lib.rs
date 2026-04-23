@@ -640,16 +640,17 @@ async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Re
 mod coverage_tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use agent_client_protocol::schema;
+    use agent_client_protocol::{HandleDispatchFrom, JsonRpcMessage, schema};
     use tokio::{
+        io::{duplex, split},
         net::{TcpListener, TcpStream},
         task::JoinHandle,
     };
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     use super::{
-        MANUAL_PERMISSION_TRIGGER, MockConfig, prompt_response_for_permission_outcome,
-        spawn_with_shutdown_task,
+        MANUAL_PERMISSION_TRIGGER, MockAgent, MockConfig, MockDispatchHandler, MockServerState,
+        prompt_response_for_permission_outcome, spawn_with_shutdown_task,
     };
     use agent_client_protocol as acp;
 
@@ -911,6 +912,37 @@ mod coverage_tests {
 
         assert_eq!(created.session_id.to_string(), "mock_0");
         assert!(reply.starts_with("mock assistant: I received `"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_dispatch_handler_handles_cancel_notifications_directly() {
+        let state = Arc::new(MockServerState::new(MockConfig::default()));
+        let session_id = state.next_session_id();
+        let session = state.session_state(&session_id);
+        let (cancel_rx, generation) = session.subscribe_cancel();
+        let mut handler = MockDispatchHandler::new(MockAgent::new(state));
+        let dispatch = acp::Dispatch::Notification(
+            schema::CancelNotification::new(session_id)
+                .to_untyped_message()
+                .expect("cancel notification should serialize"),
+        );
+        let (_client, server) = duplex(64);
+        let (reader, writer) = split(server);
+        let description = format!("{:?}", handler.describe_chain());
+        let result = acp::Agent
+            .builder()
+            .connect_with(
+                acp::ByteStreams::new(writer.compat_write(), reader.compat()),
+                async move |connection: acp::ConnectionTo<acp::Client>| {
+                    handler.handle_dispatch_from(dispatch, connection).await
+                },
+            )
+            .await
+            .expect("handler should run over a direct test connection");
+
+        assert_eq!(description, "\"MockDispatchHandler\"");
+        assert!(matches!(result, acp::Handled::Yes));
+        assert_eq!(*cancel_rx.borrow(), generation + 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

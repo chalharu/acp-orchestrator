@@ -374,10 +374,12 @@ mod tests {
 
     #[test]
     fn empty_palette_key_text_returns_empty_string() {
-        assert!(empty_palette_key_text(&FakeKeyboardEvent {
-            key: "Enter".to_string(),
-        })
-        .is_empty());
+        assert!(
+            empty_palette_key_text(&FakeKeyboardEvent {
+                key: "Enter".to_string(),
+            })
+            .is_empty()
+        );
     }
 
     #[test]

@@ -11,11 +11,11 @@ use crate::session_page_actions::{bind_slash_completion, spawn_session_bootstrap
 use crate::session_page_composer_signals::{SessionComposerSignals, session_composer_signals};
 use crate::session_page_main::SessionMain;
 use crate::session_page_main_signals::{SessionMainSignals, session_main_signals};
+use crate::session_page_sidebar::SessionSidebar;
 use crate::session_page_signals::{
     SessionSignals, current_session_deleting_signal, persist_session_draft, restore_session_draft,
     session_signals,
 };
-use crate::session_page_sidebar::SessionSidebar;
 
 #[component]
 pub(crate) fn SessionView(session_id: String) -> impl IntoView {

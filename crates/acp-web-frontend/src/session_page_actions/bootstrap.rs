@@ -25,7 +25,9 @@ use crate::routing::app_session_path;
 use crate::session_lifecycle::{SessionLifecycle, TurnState};
 use crate::session_page_bootstrap::session_bootstrap_from_snapshot;
 use crate::session_page_entries::{SessionEntry, SessionEntryRole};
-use crate::session_page_signals::{SessionSignals, clear_current_workspace, set_current_workspace_id};
+use crate::session_page_signals::{
+    SessionSignals, clear_current_workspace, set_current_workspace_id,
+};
 #[cfg(target_family = "wasm")]
 use crate::session_page_signals::set_current_workspace_name;
 use crate::session_state::turn_state_for_snapshot;

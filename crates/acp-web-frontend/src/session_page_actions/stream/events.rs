@@ -39,6 +39,7 @@ pub(super) fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
 }
 
 fn apply_session_snapshot(session: SessionSnapshot, signals: SessionSignals) {
+    #[cfg(target_family = "wasm")]
     let previous_workspace_id = signals.current_workspace_id.get_untracked();
     let bootstrap = session_bootstrap_from_snapshot(session);
     set_current_workspace_id(bootstrap.workspace_id, signals);

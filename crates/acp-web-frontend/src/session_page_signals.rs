@@ -78,10 +78,7 @@ pub(super) fn set_current_workspace_id(workspace_id: String, signals: SessionSig
     signals.current_workspace_id.set(next_workspace_id);
 }
 
-pub(super) fn set_current_workspace_name(
-    workspace_name: Option<String>,
-    signals: SessionSignals,
-) {
+pub(super) fn set_current_workspace_name(workspace_name: Option<String>, signals: SessionSignals) {
     signals
         .current_workspace_name
         .set(normalized_workspace_value(workspace_name));

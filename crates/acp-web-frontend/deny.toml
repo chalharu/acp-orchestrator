@@ -13,6 +13,7 @@ wildcards = "deny"
 [licenses]
 version = 2
 allow = [
+  "AGPL-3.0-only",
   "Apache-2.0",
   "BSL-1.0",
   "CC0-1.0",
@@ -21,11 +22,3 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
-
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
-crate = "acp-contracts"
-
-[[licenses.exceptions]]
-allow = ["AGPL-3.0-only"]
-crate = "acp-web-frontend"

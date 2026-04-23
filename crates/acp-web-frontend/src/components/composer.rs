@@ -215,6 +215,7 @@ fn composer_input_view(
     }
 }
 
+#[allow(dead_code)]
 fn composer_active_descendant(
     slash_visible: bool,
     candidate_count: usize,

@@ -301,8 +301,8 @@ fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
         return session_sidebar_empty_view(has_error).into_any();
     }
 
-    session_sidebar_loaded_view(
-        items,
+    session_sidebar_loaded_view(SessionSidebarListArgs {
+        session_items: Signal::derive(move || items.clone()),
         deleting_session_id,
         delete_disabled,
         renaming_session_id,
@@ -310,7 +310,7 @@ fn session_sidebar_nav_view(args: SessionSidebarNavArgs) -> impl IntoView {
         rename_draft,
         on_rename_session,
         on_delete_session,
-    )
+    })
     .into_any()
 }
 
@@ -333,20 +333,22 @@ fn session_sidebar_empty_view(has_error: bool) -> impl IntoView {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn session_sidebar_loaded_view(
-    items: Vec<SidebarSession>,
-    deleting_session_id: Signal<Option<String>>,
-    delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
+fn session_sidebar_loaded_view(args: SessionSidebarListArgs) -> impl IntoView {
+    let SessionSidebarListArgs {
+        session_items,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = args;
+
     view! {
         <nav class="session-sidebar__nav" aria-label="Sessions">
             <SessionSidebarList
-                session_items=Signal::derive(move || items.clone())
+                session_items=session_items
                 deleting_session_id=deleting_session_id
                 delete_disabled=delete_disabled
                 renaming_session_id=renaming_session_id

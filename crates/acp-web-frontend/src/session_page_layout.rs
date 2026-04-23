@@ -86,6 +86,7 @@ pub(crate) fn SessionShell(
             <SessionSidebar
                 current_session_id=current_session_id
                 auth_error=auth_error
+                current_workspace=shell_signals.current_workspace
                 sessions=shell_signals.sessions
                 session_list_loaded=shell_signals.list.loaded
                 session_list_error=shell_signals.list.error

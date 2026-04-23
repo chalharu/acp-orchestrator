@@ -88,6 +88,27 @@ async fn sidebar_shows_activity_metadata_and_closed_state() -> Result<()> {
     result
 }
 
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn sidebar_shows_current_workspace_label() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.ensure_sidebar_visible().await?;
+
+        assert_eq!(
+            browser.session_sidebar_workspace_label().await?,
+            "Workspace: Default workspace"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
 struct BrowserHarness {
     client: Client,
     stack: TestStack,
@@ -366,6 +387,23 @@ impl BrowserHarness {
             )
             .await?;
         Ok((activity_label, status_label))
+    }
+
+    async fn session_sidebar_workspace_label(&self) -> Result<String> {
+        self.wait_for_condition(
+            "return document.querySelector('.session-sidebar__workspace')\
+             ?.textContent?.trim()?.length > 0;",
+            Duration::from_secs(10),
+            "sidebar workspace label",
+        )
+        .await?;
+
+        self.evaluate(
+            "return document.querySelector('.session-sidebar__workspace')\
+             ?.textContent?.trim() ?? '';",
+            "reading workspace label",
+        )
+        .await
     }
 
     async fn close_current_session(&self) -> Result<()> {

@@ -9,11 +9,13 @@ pub(crate) struct SessionBootstrap {
     pub(crate) entries: Vec<SessionEntry>,
     pub(crate) pending_permissions: Vec<PermissionRequest>,
     pub(crate) session_status: SessionLifecycle,
+    pub(crate) workspace_id: String,
 }
 
 pub(crate) fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> SessionBootstrap {
     let SessionSnapshot {
         status,
+        workspace_id,
         messages,
         pending_permissions,
         ..
@@ -31,6 +33,7 @@ pub(crate) fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> Sessi
         entries,
         pending_permissions: pending_permissions_to_items(pending_permissions),
         session_status,
+        workspace_id,
     }
 }
 
@@ -123,6 +126,7 @@ mod tests {
                 summary: "read README.md".to_string(),
             }]
         );
+        assert_eq!(bootstrap.workspace_id, "w_test");
     }
 
     #[test]

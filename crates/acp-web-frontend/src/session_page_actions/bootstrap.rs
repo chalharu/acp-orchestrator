@@ -3,6 +3,7 @@
 use acp_contracts_sessions::SessionSnapshot;
 #[cfg(target_family = "wasm")]
 use acp_contracts_sessions::SessionStatus;
+use acp_contracts_workspaces::WorkspaceSummary;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
@@ -24,7 +25,9 @@ use crate::routing::app_session_path;
 use crate::session_lifecycle::{SessionLifecycle, TurnState};
 use crate::session_page_bootstrap::session_bootstrap_from_snapshot;
 use crate::session_page_entries::{SessionEntry, SessionEntryRole};
-use crate::session_page_signals::SessionSignals;
+use crate::session_page_signals::{SessionSignals, clear_current_workspace, set_current_workspace_id};
+#[cfg(target_family = "wasm")]
+use crate::session_page_signals::set_current_workspace_name;
 use crate::session_state::turn_state_for_snapshot;
 
 #[cfg(target_family = "wasm")]
@@ -51,6 +54,7 @@ pub(crate) fn spawn_session_bootstrap(session_id: String, signals: SessionSignal
             Ok(session) => {
                 let is_closed = session.status == SessionStatus::Closed;
                 apply_loaded_session(session, signals);
+                sync_current_workspace_name(signals).await;
                 refresh_session_list(signals).await;
                 if !is_closed {
                     spawn_session_stream(session_id.clone(), signals);
@@ -122,11 +126,19 @@ fn should_clear_prepared_session_on_load(
             .any(|entry| matches!(entry.role, SessionEntryRole::User))
 }
 
+fn workspace_name_by_id(workspaces: &[WorkspaceSummary], workspace_id: &str) -> Option<String> {
+    workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == workspace_id)
+        .map(|workspace| workspace.name.clone())
+}
+
 fn apply_loaded_session(session: SessionSnapshot, signals: SessionSignals) {
     let bootstrap = session_bootstrap_from_snapshot(session);
     let turn_state_for_session = turn_state_for_snapshot(&bootstrap.pending_permissions);
     let should_clear =
         should_clear_prepared_session_on_load(bootstrap.session_status, &bootstrap.entries);
+    set_current_workspace_id(bootstrap.workspace_id, signals);
     signals.entries.set(bootstrap.entries);
     signals
         .pending_permissions
@@ -138,11 +150,28 @@ fn apply_loaded_session(session: SessionSnapshot, signals: SessionSignals) {
     }
 }
 
+#[cfg(target_family = "wasm")]
+pub(crate) async fn sync_current_workspace_name(signals: SessionSignals) {
+    let Some(workspace_id) = signals.current_workspace_id.get_untracked() else {
+        return;
+    };
+
+    let workspace_name = api::list_workspaces()
+        .await
+        .ok()
+        .and_then(|workspaces| workspace_name_by_id(&workspaces, &workspace_id));
+
+    if signals.current_workspace_id.get_untracked().as_deref() == Some(workspace_id.as_str()) {
+        set_current_workspace_name(workspace_name, signals);
+    }
+}
+
 fn apply_bootstrap_failure_signals(
     message: String,
     session_lifecycle: SessionLifecycle,
     signals: SessionSignals,
 ) {
+    clear_current_workspace(signals);
     signals.connection_error.set(Some(message));
     push_tool_activity_entry(
         signals,
@@ -170,12 +199,13 @@ mod tests {
     use acp_contracts_messages::{ConversationMessage, MessageRole};
     use acp_contracts_permissions::PermissionRequest;
     use acp_contracts_sessions::{SessionSnapshot, SessionStatus};
+    use acp_contracts_workspaces::WorkspaceSummary;
     use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
 
     use super::{
         apply_bootstrap_failure_signals, apply_loaded_session, set_home_redirect_error,
-        should_clear_prepared_session_on_load,
+        should_clear_prepared_session_on_load, workspace_name_by_id,
     };
     use crate::session_lifecycle::{SessionLifecycle, TurnState};
     use crate::session_page_signals::session_signals;
@@ -259,6 +289,11 @@ mod tests {
             assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
             assert_eq!(signals.entries.get().len(), 1);
             assert_eq!(signals.pending_permissions.get().len(), 1);
+            assert_eq!(
+                signals.current_workspace_id.get(),
+                Some("w_test".to_string())
+            );
+            assert_eq!(signals.current_workspace_name.get(), None);
         });
     }
 
@@ -279,6 +314,10 @@ mod tests {
             assert_eq!(signals.session_status.get(), SessionLifecycle::Closed);
             assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
             assert_eq!(signals.entries.get().len(), 2);
+            assert_eq!(
+                signals.current_workspace_id.get(),
+                Some("w_test".to_string())
+            );
         });
     }
 
@@ -288,6 +327,12 @@ mod tests {
         owner.with(|| {
             let signals = session_signals();
             signals.turn_state.set(TurnState::AwaitingReply);
+            signals
+                .current_workspace_id
+                .set(Some("workspace-a".to_string()));
+            signals
+                .current_workspace_name
+                .set(Some("Workspace A".to_string()));
 
             apply_bootstrap_failure_signals(
                 "network down".to_string(),
@@ -303,6 +348,40 @@ mod tests {
             assert_eq!(signals.turn_state.get(), TurnState::Idle);
             assert_eq!(signals.entries.get().len(), 1);
             assert!(signals.entries.get()[0].text.contains("network down"));
+            assert_eq!(signals.current_workspace_id.get(), None);
+            assert_eq!(signals.current_workspace_name.get(), None);
         });
+    }
+
+    #[test]
+    fn workspace_name_lookup_matches_exact_id() {
+        let workspaces = vec![
+            WorkspaceSummary {
+                workspace_id: "workspace-a".to_string(),
+                name: "Workspace A".to_string(),
+                upstream_url: None,
+                default_ref: Some("main".to_string()),
+                bootstrap_kind: None,
+                status: "active".to_string(),
+                created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+                updated_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+            },
+            WorkspaceSummary {
+                workspace_id: "workspace-b".to_string(),
+                name: "Workspace B".to_string(),
+                upstream_url: None,
+                default_ref: Some("main".to_string()),
+                bootstrap_kind: Some("legacy-session-routes".to_string()),
+                status: "active".to_string(),
+                created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+                updated_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+            },
+        ];
+
+        assert_eq!(
+            workspace_name_by_id(&workspaces, "workspace-b"),
+            Some("Workspace B".to_string())
+        );
+        assert_eq!(workspace_name_by_id(&workspaces, "missing"), None);
     }
 }

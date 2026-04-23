@@ -11,6 +11,7 @@ use crate::{
 pub(super) fn SessionSidebar(
     current_session_id: String,
     auth_error: RwSignal<Option<String>>,
+    #[prop(into)] current_workspace: Signal<Option<String>>,
     #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
     #[prop(into)] session_list_loaded: Signal<bool>,
     #[prop(into)] session_list_error: Signal<Option<String>>,
@@ -33,6 +34,16 @@ pub(super) fn SessionSidebar(
                 auth_error=auth_error
                 sidebar_open=sidebar_open
             />
+            {move || {
+                current_workspace.get().map(|workspace| {
+                    view! {
+                        <p class="session-sidebar__workspace muted" aria-label="Current workspace">
+                            "Workspace: "
+                            <strong>{workspace}</strong>
+                        </p>
+                    }
+                })
+            }}
             <SessionSidebarStatus
                 session_list_error=session_list_error
                 has_session_items=has_session_items

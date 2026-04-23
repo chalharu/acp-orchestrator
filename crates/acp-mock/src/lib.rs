@@ -482,6 +482,100 @@ impl MockDispatchHandler {
     fn new(agent: MockAgent) -> Self {
         Self { agent }
     }
+
+    async fn handle_initialize_request(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::InitializeRequest>()? {
+            Ok((args, responder)) => {
+                respond_initialize_request(self.agent.clone(), args, responder).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_authenticate_request(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::AuthenticateRequest>()? {
+            Ok((args, responder)) => {
+                respond_authenticate_request(self.agent.clone(), args, responder).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_new_session_request(
+        &self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Client>,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::NewSessionRequest>()? {
+            Ok((args, responder)) => {
+                respond_new_session_request(self.agent.clone(), args, responder, connection)
+                    .await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_load_session_request(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::LoadSessionRequest>()? {
+            Ok((args, responder)) => {
+                respond_load_session_request(self.agent.clone(), args, responder).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_prompt_request(
+        &self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Client>,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::PromptRequest>()? {
+            Ok((args, responder)) => {
+                respond_prompt_request(self.agent.clone(), args, responder, connection).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_set_session_mode_request(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::SetSessionModeRequest>()? {
+            Ok((args, responder)) => {
+                respond_set_session_mode_request(self.agent.clone(), args, responder).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_cancel_notification(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_notification::<schema::CancelNotification>()? {
+            Ok(args) => {
+                handle_cancel_notification(self.agent.clone(), args).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
 }
 
 impl acp::HandleDispatchFrom<acp::Client> for MockDispatchHandler {
@@ -496,59 +590,37 @@ impl acp::HandleDispatchFrom<acp::Client> for MockDispatchHandler {
     ) -> Result<acp::Handled<acp::Dispatch>, acp::Error> {
         // Keep the handler monomorphic so the launcher binary does not pull in a deeply nested
         // Builder<..., ChainedHandler<...>> type for every registered ACP mock callback.
-        let dispatch = match dispatch.into_request::<schema::InitializeRequest>()? {
-            Ok((args, responder)) => {
-                respond_initialize_request(self.agent.clone(), args, responder).await?;
-                return Ok(acp::Handled::Yes);
-            }
-            Err(dispatch) => dispatch,
+        let Some(dispatch) = self.handle_initialize_request(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
         };
-        let dispatch = match dispatch.into_request::<schema::AuthenticateRequest>()? {
-            Ok((args, responder)) => {
-                respond_authenticate_request(self.agent.clone(), args, responder).await?;
-                return Ok(acp::Handled::Yes);
-            }
-            Err(dispatch) => dispatch,
+        let Some(dispatch) = self.handle_authenticate_request(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
         };
-        let dispatch = match dispatch.into_request::<schema::NewSessionRequest>()? {
-            Ok((args, responder)) => {
-                respond_new_session_request(self.agent.clone(), args, responder, connection)
-                    .await?;
-                return Ok(acp::Handled::Yes);
-            }
-            Err(dispatch) => dispatch,
+        let Some(dispatch) = self
+            .handle_new_session_request(dispatch, connection.clone())
+            .await?
+        else {
+            return Ok(acp::Handled::Yes);
         };
-        let dispatch = match dispatch.into_request::<schema::LoadSessionRequest>()? {
-            Ok((args, responder)) => {
-                respond_load_session_request(self.agent.clone(), args, responder).await?;
-                return Ok(acp::Handled::Yes);
-            }
-            Err(dispatch) => dispatch,
+        let Some(dispatch) = self.handle_load_session_request(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
         };
-        let dispatch = match dispatch.into_request::<schema::PromptRequest>()? {
-            Ok((args, responder)) => {
-                respond_prompt_request(self.agent.clone(), args, responder, connection).await?;
-                return Ok(acp::Handled::Yes);
-            }
-            Err(dispatch) => dispatch,
+        let Some(dispatch) = self
+            .handle_prompt_request(dispatch, connection.clone())
+            .await?
+        else {
+            return Ok(acp::Handled::Yes);
         };
-        let dispatch = match dispatch.into_request::<schema::SetSessionModeRequest>()? {
-            Ok((args, responder)) => {
-                respond_set_session_mode_request(self.agent.clone(), args, responder).await?;
-                return Ok(acp::Handled::Yes);
-            }
-            Err(dispatch) => dispatch,
+        let Some(dispatch) = self.handle_set_session_mode_request(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
         };
-        match dispatch.into_notification::<schema::CancelNotification>()? {
-            Ok(args) => {
-                handle_cancel_notification(self.agent.clone(), args).await?;
-                Ok(acp::Handled::Yes)
-            }
-            Err(dispatch) => Ok(acp::Handled::No {
-                message: dispatch,
-                retry: false,
-            }),
-        }
+        let Some(dispatch) = self.handle_cancel_notification(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
+        };
+        Ok(acp::Handled::No {
+            message: dispatch,
+            retry: false,
+        })
     }
 }
 

@@ -25,28 +25,28 @@ pub(crate) fn current_route() -> AppRoute {
 }
 
 pub(crate) fn route_from_pathname(pathname: &str) -> AppRoute {
-    if pathname == "/app" || pathname == "/app/" {
-        return AppRoute::Home;
-    }
-    if pathname == "/app/register" || pathname == "/app/register/" {
-        return AppRoute::Register;
-    }
-    if pathname == "/app/sign-in" || pathname == "/app/sign-in/" {
-        return AppRoute::SignIn;
-    }
-    if pathname == "/app/accounts" || pathname == "/app/accounts/" {
-        return AppRoute::Accounts;
-    }
-    if pathname == "/app/workspaces" || pathname == "/app/workspaces/" {
-        return AppRoute::Workspaces;
-    }
+    static_app_route(pathname)
+        .or_else(|| session_route(pathname))
+        .unwrap_or(AppRoute::NotFound)
+}
 
+fn static_app_route(pathname: &str) -> Option<AppRoute> {
+    match pathname.trim_end_matches('/') {
+        "/app" => Some(AppRoute::Home),
+        "/app/register" => Some(AppRoute::Register),
+        "/app/sign-in" => Some(AppRoute::SignIn),
+        "/app/accounts" => Some(AppRoute::Accounts),
+        "/app/workspaces" => Some(AppRoute::Workspaces),
+        _ => None,
+    }
+}
+
+fn session_route(pathname: &str) -> Option<AppRoute> {
     pathname
         .strip_prefix("/app/sessions/")
         .filter(|session_id| !session_id.is_empty())
         .and_then(decode_component)
         .map(AppRoute::Session)
-        .unwrap_or(AppRoute::NotFound)
 }
 
 pub(crate) fn app_session_path(session_id: &str) -> String {

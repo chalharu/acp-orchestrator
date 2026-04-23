@@ -130,94 +130,149 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
         state.deleting_workspace_id.get().as_deref() == Some(&workspace_id_for_delete_state)
     });
 
-    let name_cell = {
-        let workspace_id = workspace_id.clone();
-        let workspace_name = workspace_name.clone();
-        move || {
-            if is_editing.get() {
-                let on_save = workspace_save_handler(workspace_id.clone(), state);
-                let on_cancel = workspace_cancel_handler(workspace_id.clone(), state);
-                view! {
-                    <form
-                        class="workspace-inline-form"
-                        on:submit=move |event| on_save.run(event)
-                    >
-                        <input
-                            type="text"
-                            class="workspace-name-input"
-                            prop:value=move || state.edit_name_draft.get()
-                            on:input=move |event| {
-                                state.edit_name_draft.set(event_target_value(&event))
-                            }
-                            prop:disabled=move || is_saving.get()
-                        />
-                        <button
-                            type="submit"
-                            class="workspace-action-btn"
-                            prop:disabled=move || is_saving.get()
-                        >
-                            {move || if is_saving.get() { "Saving…" } else { "Save" }}
-                        </button>
-                        <button
-                            type="button"
-                            class="workspace-action-btn"
-                            prop:disabled=move || is_saving.get()
-                            on:click=move |event| on_cancel.run(event)
-                        >
-                            "Cancel"
-                        </button>
-                    </form>
-                }
-                .into_any()
-            } else {
-                let workspace_name = workspace_name.clone();
-                view! { <span>{workspace_name}</span> }.into_any()
-            }
-        }
-    };
-
-    let action_cell = {
-        let workspace_id = workspace_id.clone();
-        let workspace_name = workspace_name.clone();
-        move || {
-            if is_editing.get() {
-                ().into_any()
-            } else {
-                let on_edit =
-                    workspace_edit_handler(workspace_id.clone(), workspace_name.clone(), state);
-                let on_delete = workspace_delete_handler(workspace_id.clone(), state);
-                view! {
-                    <>
-                        <button
-                            type="button"
-                            class="workspace-action-btn"
-                            prop:disabled=move || is_deleting.get()
-                            on:click=move |event| on_edit.run(event)
-                        >
-                            "Rename"
-                        </button>
-                        <button
-                            type="button"
-                            class="workspace-action-btn workspace-action-btn--danger"
-                            prop:disabled=move || is_deleting.get()
-                            on:click=move |event| on_delete.run(event)
-                        >
-                            {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
-                        </button>
-                    </>
-                }
-                .into_any()
-            }
-        }
-    };
-
     view! {
         <tr>
-            <td>{name_cell}</td>
+            <td>
+                <WorkspaceNameCell
+                    state=state
+                    workspace_id=workspace_id.clone()
+                    workspace_name=workspace_name.clone()
+                    is_editing=is_editing
+                    is_saving=is_saving
+                />
+            </td>
             <td>{workspace_status}</td>
             <td>{created_label}</td>
-            <td>{action_cell}</td>
+            <td>
+                <WorkspaceActionCell
+                    state=state
+                    workspace_id=workspace_id
+                    workspace_name=workspace_name
+                    is_editing=is_editing
+                    is_deleting=is_deleting
+                />
+            </td>
         </tr>
+    }
+}
+
+#[component]
+#[cfg(target_family = "wasm")]
+fn WorkspaceNameCell(
+    state: WorkspacesPageState,
+    workspace_id: String,
+    workspace_name: String,
+    is_editing: Signal<bool>,
+    is_saving: Signal<bool>,
+) -> impl IntoView {
+    let on_save = workspace_save_handler(workspace_id.clone(), state);
+    let on_cancel = workspace_cancel_handler(workspace_id, state);
+
+    view! {
+        <Show
+            when=move || is_editing.get()
+            fallback={
+                let workspace_name = workspace_name.clone();
+                move || view! { <span>{workspace_name.clone()}</span> }
+            }
+        >
+            <WorkspaceRenameForm
+                state=state
+                is_saving=is_saving
+                on_save=on_save
+                on_cancel=on_cancel
+            />
+        </Show>
+    }
+}
+
+#[component]
+#[cfg(target_family = "wasm")]
+fn WorkspaceRenameForm(
+    state: WorkspacesPageState,
+    is_saving: Signal<bool>,
+    on_save: Callback<web_sys::SubmitEvent>,
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <form class="workspace-inline-form" on:submit=move |event| on_save.run(event)>
+            <input
+                type="text"
+                class="workspace-name-input"
+                prop:value=move || state.edit_name_draft.get()
+                on:input=move |event| {
+                    state.edit_name_draft.set(event_target_value(&event))
+                }
+                prop:disabled=move || is_saving.get()
+            />
+            <button
+                type="submit"
+                class="workspace-action-btn"
+                prop:disabled=move || is_saving.get()
+            >
+                {move || if is_saving.get() { "Saving…" } else { "Save" }}
+            </button>
+            <button
+                type="button"
+                class="workspace-action-btn"
+                prop:disabled=move || is_saving.get()
+                on:click=move |event| on_cancel.run(event)
+            >
+                "Cancel"
+            </button>
+        </form>
+    }
+}
+
+#[component]
+#[cfg(target_family = "wasm")]
+fn WorkspaceActionCell(
+    state: WorkspacesPageState,
+    workspace_id: String,
+    workspace_name: String,
+    is_editing: Signal<bool>,
+    is_deleting: Signal<bool>,
+) -> impl IntoView {
+    let on_edit = workspace_edit_handler(workspace_id.clone(), workspace_name, state);
+    let on_delete = workspace_delete_handler(workspace_id, state);
+
+    view! {
+        <Show when=move || !is_editing.get()>
+            <WorkspaceActionButtons
+                is_deleting=is_deleting
+                on_edit=on_edit
+                on_delete=on_delete
+            />
+        </Show>
+    }
+}
+
+#[component]
+#[cfg(target_family = "wasm")]
+fn WorkspaceActionButtons(
+    is_deleting: Signal<bool>,
+    on_edit: Callback<web_sys::MouseEvent>,
+    on_delete: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <>
+            <button
+                type="button"
+                class="workspace-action-btn"
+                prop:disabled=move || is_deleting.get()
+                on:click=move |event| on_edit.run(event)
+            >
+                "Rename"
+            </button>
+            <button
+                type="button"
+                class="workspace-action-btn workspace-action-btn--danger"
+                prop:disabled=move || is_deleting.get()
+                on:click=move |event| on_delete.run(event)
+            >
+                {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
+            </button>
+        </>
     }
 }
 
@@ -326,72 +381,106 @@ fn workspace_delete_handler(
 #[component]
 #[cfg(not(target_family = "wasm"))]
 fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl IntoView {
+    let workspace_id = workspace.workspace_id.clone();
+    let workspace_name = workspace.name.clone();
+    let workspace_status = workspace.status.clone();
+    let created_label = workspace.created_at.format("%Y-%m-%d").to_string();
     let is_editing = state
         .editing_workspace_id
         .get_untracked()
         .as_deref()
-        .is_some_and(|id| id == workspace.workspace_id);
+        .is_some_and(|id| id == workspace_id.as_str());
     let is_deleting = state
         .deleting_workspace_id
         .get_untracked()
         .as_deref()
-        .is_some_and(|id| id == workspace.workspace_id);
-
-    let name_cell = if is_editing {
-        let draft = state.edit_name_draft.get_untracked();
-        let is_saving = state
-            .saving_workspace_id
-            .get_untracked()
-            .as_deref()
-            .is_some_and(|id| id == workspace.workspace_id);
-        view! {
-            <form class="workspace-inline-form">
-                <input
-                    type="text"
-                    class="workspace-name-input"
-                    prop:value=draft
-                    prop:disabled=is_saving
-                />
-                <button type="submit" class="workspace-action-btn" prop:disabled=is_saving>
-                    {if is_saving { "Saving…" } else { "Save" }}
-                </button>
-                <button type="button" class="workspace-action-btn" prop:disabled=is_saving>
-                    "Cancel"
-                </button>
-            </form>
-        }
-        .into_any()
-    } else {
-        view! { <span>{workspace.name.clone()}</span> }.into_any()
-    };
-
-    let action_cell = if !is_editing {
-        view! {
-            <>
-                <button type="button" class="workspace-action-btn" prop:disabled=is_deleting>
-                    "Rename"
-                </button>
-                <button
-                    type="button"
-                    class="workspace-action-btn workspace-action-btn--danger"
-                    prop:disabled=is_deleting
-                >
-                    {if is_deleting { "Deleting…" } else { "Delete" }}
-                </button>
-            </>
-        }
-        .into_any()
-    } else {
-        ().into_any()
-    };
+        .is_some_and(|id| id == workspace_id.as_str());
+    let is_saving = state
+        .saving_workspace_id
+        .get_untracked()
+        .as_deref()
+        .is_some_and(|id| id == workspace_id.as_str());
+    let draft = state.edit_name_draft.get_untracked();
 
     view! {
         <tr>
-            <td>{name_cell}</td>
-            <td>{workspace.status.clone()}</td>
-            <td>{workspace.created_at.format("%Y-%m-%d").to_string()}</td>
-            <td>{action_cell}</td>
+            <td>
+                <WorkspaceNameCellHost
+                    workspace_name=workspace_name
+                    draft=draft
+                    is_editing=is_editing
+                    is_saving=is_saving
+                />
+            </td>
+            <td>{workspace_status}</td>
+            <td>{created_label}</td>
+            <td><WorkspaceActionCellHost is_editing=is_editing is_deleting=is_deleting /></td>
         </tr>
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn WorkspaceNameCellHost(
+    workspace_name: String,
+    draft: String,
+    is_editing: bool,
+    is_saving: bool,
+) -> impl IntoView {
+    if is_editing {
+        view! { <WorkspaceRenameFormHost draft=draft is_saving=is_saving /> }.into_any()
+    } else {
+        view! { <span>{workspace_name}</span> }.into_any()
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn WorkspaceRenameFormHost(draft: String, is_saving: bool) -> impl IntoView {
+    view! {
+        <form class="workspace-inline-form">
+            <input
+                type="text"
+                class="workspace-name-input"
+                prop:value=draft
+                prop:disabled=is_saving
+            />
+            <button type="submit" class="workspace-action-btn" prop:disabled=is_saving>
+                {if is_saving { "Saving…" } else { "Save" }}
+            </button>
+            <button type="button" class="workspace-action-btn" prop:disabled=is_saving>
+                "Cancel"
+            </button>
+        </form>
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn WorkspaceActionCellHost(is_editing: bool, is_deleting: bool) -> impl IntoView {
+    if is_editing {
+        ().into_any()
+    } else {
+        view! { <WorkspaceActionButtonsHost is_deleting=is_deleting /> }.into_any()
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn WorkspaceActionButtonsHost(is_deleting: bool) -> impl IntoView {
+    view! {
+        <>
+            <button type="button" class="workspace-action-btn" prop:disabled=is_deleting>
+                "Rename"
+            </button>
+            <button
+                type="button"
+                class="workspace-action-btn workspace-action-btn--danger"
+                prop:disabled=is_deleting
+            >
+                {if is_deleting { "Deleting…" } else { "Delete" }}
+            </button>
+        </>
     }
 }
 

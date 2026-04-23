@@ -156,36 +156,13 @@ async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> 
         browser.open_app().await?;
         browser.navigate_to_workspaces().await?;
 
-        // Create a new workspace
         let workspace_name = "Browser-Test Workspace";
-        browser.create_workspace(workspace_name).await?;
-        browser
-            .wait_for_body_text("Workspace created.", Duration::from_secs(10))
-            .await?;
-
-        // Verify the workspace appears in the list
-        browser
-            .wait_for_body_text(workspace_name, Duration::from_secs(10))
-            .await?;
-
-        // Rename the workspace
         let renamed = "Browser-Test Workspace Renamed";
-        browser.rename_workspace(workspace_name, renamed).await?;
+        browser.create_workspace_and_confirm(workspace_name).await?;
         browser
-            .wait_for_body_text("Workspace updated.", Duration::from_secs(10))
+            .rename_workspace_and_confirm(workspace_name, renamed)
             .await?;
-        browser
-            .wait_for_body_text(renamed, Duration::from_secs(10))
-            .await?;
-
-        // Delete the workspace
-        browser.delete_workspace(renamed).await?;
-        browser
-            .wait_for_body_text("Workspace deleted.", Duration::from_secs(10))
-            .await?;
-        browser
-            .wait_for_body_text_to_disappear(renamed, Duration::from_secs(10))
-            .await?;
+        browser.delete_workspace_and_confirm(renamed).await?;
 
         Ok(())
     }
@@ -551,66 +528,28 @@ impl BrowserHarness {
             .context("submitting the create workspace form")
     }
 
+    async fn create_workspace_and_confirm(&self, name: &str) -> Result<()> {
+        self.create_workspace(name).await?;
+        self.wait_for_workspace_notice("Workspace created.").await?;
+        self.wait_for_body_text(name, Duration::from_secs(10)).await
+    }
+
     async fn rename_workspace(&self, current_name: &str, new_name: &str) -> Result<()> {
-        let rename_selector = format!(
-            "return Array.from(document.querySelectorAll('.workspace-action-btn'))\
-             .find(btn => btn.closest('tr')?.textContent?.includes({current_name:?}) \
-                         && btn.textContent?.trim() === 'Rename') !== undefined;"
-        );
-        self.wait_for_condition(&rename_selector, Duration::from_secs(10), "rename button")
-            .await?;
-
-        // Use JS click because :has with text is not broadly supported in CSS selectors
-        self.client
-            .execute(
-                &format!(
-                    "const btn = Array.from(document.querySelectorAll('.workspace-action-btn'))\
-                     .find(b => b.closest('tr')?.textContent?.includes({current_name:?}) \
-                               && b.textContent?.trim() === 'Rename'); \
-                     if (btn) btn.click();"
-                ),
-                Vec::new(),
-            )
-            .await
-            .context("clicking rename button")?;
-
-        // Wait for the edit input to appear
-        self.wait_for_condition(
-            "return Boolean(document.querySelector('.workspace-name-input'));",
-            Duration::from_secs(10),
-            "workspace name edit input",
-        )
-        .await?;
-
-        let input = self
-            .client
-            .find(Locator::Css(".workspace-name-input"))
-            .await
-            .context("finding workspace name edit input")?;
-
-        // Clear and type the new name
-        self.client
-            .execute(
-                "document.querySelector('.workspace-name-input').value = '';",
-                Vec::new(),
-            )
-            .await
-            .context("clearing the workspace name input")?;
-        input
+        self.open_workspace_rename(current_name).await?;
+        self.clear_workspace_name_input().await?;
+        self.workspace_name_input()
+            .await?
             .send_keys(new_name)
             .await
             .context("typing new workspace name")?;
+        self.click_workspace_save_button().await
+    }
 
-        // Submit via the Save button
-        self.client
-            .find(Locator::Css(
-                ".workspace-name-input + .workspace-action-btn",
-            ))
+    async fn rename_workspace_and_confirm(&self, current_name: &str, new_name: &str) -> Result<()> {
+        self.rename_workspace(current_name, new_name).await?;
+        self.wait_for_workspace_notice("Workspace updated.").await?;
+        self.wait_for_body_text(new_name, Duration::from_secs(10))
             .await
-            .context("finding Save button")?
-            .click()
-            .await
-            .context("clicking Save button")
     }
 
     async fn delete_workspace(&self, name: &str) -> Result<()> {
@@ -637,6 +576,92 @@ impl BrowserHarness {
             .context("clicking delete button for workspace")?;
 
         Ok(())
+    }
+
+    async fn delete_workspace_and_confirm(&self, name: &str) -> Result<()> {
+        self.delete_workspace(name).await?;
+        self.wait_for_workspace_notice("Workspace deleted.").await?;
+        self.wait_for_body_text_to_disappear(name, Duration::from_secs(10))
+            .await
+    }
+
+    async fn wait_for_workspace_notice(&self, notice: &str) -> Result<()> {
+        self.wait_for_body_text(notice, Duration::from_secs(10))
+            .await
+    }
+
+    async fn open_workspace_rename(&self, current_name: &str) -> Result<()> {
+        self.wait_for_workspace_action_button(
+            ".workspace-action-btn",
+            current_name,
+            "Rename",
+            "rename button",
+        )
+        .await?;
+        self.click_workspace_action_button(".workspace-action-btn", current_name, "Rename")
+            .await?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-name-input'));",
+            Duration::from_secs(10),
+            "workspace name edit input",
+        )
+        .await
+    }
+
+    async fn wait_for_workspace_action_button(
+        &self,
+        selector: &str,
+        row_name: &str,
+        button_label: &str,
+        description: &str,
+    ) -> Result<()> {
+        let script = workspace_action_button_script(selector, row_name, button_label);
+        self.wait_for_condition(&script, Duration::from_secs(10), description)
+            .await
+    }
+
+    async fn click_workspace_action_button(
+        &self,
+        selector: &str,
+        row_name: &str,
+        button_label: &str,
+    ) -> Result<()> {
+        let script = workspace_action_button_click_script(selector, row_name, button_label);
+        self.client
+            .execute(&script, Vec::new())
+            .await
+            .with_context(|| format!("clicking {button_label} button for workspace {row_name}"))?;
+        Ok(())
+    }
+
+    async fn workspace_name_input(&self) -> Result<fantoccini::elements::Element> {
+        self.client
+            .find(Locator::Css(".workspace-name-input"))
+            .await
+            .context("finding workspace name edit input")
+    }
+
+    async fn clear_workspace_name_input(&self) -> Result<()> {
+        self.client
+            .execute(
+                "document.querySelector('.workspace-name-input').value = '';",
+                Vec::new(),
+            )
+            .await
+            .context("clearing the workspace name input")?;
+        Ok(())
+    }
+
+    async fn click_workspace_save_button(&self) -> Result<()> {
+        self.client
+            .find(Locator::Css(
+                ".workspace-name-input + .workspace-action-btn",
+            ))
+            .await
+            .context("finding Save button")?
+            .click()
+            .await
+            .context("clicking Save button")
     }
 
     async fn close_current_session(&self) -> Result<()> {
@@ -761,6 +786,27 @@ impl BrowserHarness {
         let _ = client.close().await;
         webdriver.shutdown().await;
     }
+}
+
+fn workspace_action_button_script(selector: &str, row_name: &str, button_label: &str) -> String {
+    format!(
+        "return Array.from(document.querySelectorAll({selector:?}))\
+         .some(btn => btn.closest('tr')?.textContent?.includes({row_name:?}) \
+                  && btn.textContent?.trim() === {button_label:?});"
+    )
+}
+
+fn workspace_action_button_click_script(
+    selector: &str,
+    row_name: &str,
+    button_label: &str,
+) -> String {
+    format!(
+        "const btn = Array.from(document.querySelectorAll({selector:?}))\
+         .find(candidate => candidate.closest('tr')?.textContent?.includes({row_name:?}) \
+                 && candidate.textContent?.trim() === {button_label:?}); \
+         if (btn) btn.click();"
+    )
 }
 
 struct WebDriverProcess {

@@ -10,6 +10,14 @@ use super::shared::{accounts_path_with_return_to, sign_out_button_label, sign_ou
 
 const WORKSPACES_PATH: &str = "/app/workspaces/";
 
+#[derive(Clone)]
+struct SessionSidebarAuthViewState {
+    accounts_href: String,
+    is_admin: RwSignal<bool>,
+    signed_in: RwSignal<bool>,
+    signing_out: RwSignal<bool>,
+}
+
 #[component]
 pub fn SessionSidebarAuthControls(
     current_session_id: String,
@@ -19,33 +27,65 @@ pub fn SessionSidebarAuthControls(
     let signed_in = RwSignal::new(false);
     let checked = RwSignal::new(false);
     let signing_out = RwSignal::new(false);
-    let accounts_href = accounts_path_with_return_to(&app_session_path(&current_session_id));
+    let view_state = SessionSidebarAuthViewState {
+        accounts_href: accounts_path_with_return_to(&app_session_path(&current_session_id)),
+        is_admin,
+        signed_in,
+        signing_out,
+    };
     let sign_out = sign_out_handler(error, signing_out);
 
     initialize_session_sidebar_auth_controls(checked, signed_in, is_admin, error);
 
-    session_sidebar_auth_controls_view(accounts_href, is_admin, signed_in, signing_out, sign_out)
+    session_sidebar_auth_controls_view(view_state, sign_out)
 }
 
-#[cfg(target_family = "wasm")]
 fn session_sidebar_auth_controls_view(
-    accounts_href: String,
-    is_admin: RwSignal<bool>,
-    signed_in: RwSignal<bool>,
-    signing_out: RwSignal<bool>,
+    state: SessionSidebarAuthViewState,
     sign_out: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
+    view! {
+        <SessionSidebarWorkspacesLink signed_in=state.signed_in />
+        <SessionSidebarAccountsLink accounts_href=state.accounts_href is_admin=state.is_admin />
+        <SessionSidebarSignOutButton
+            signed_in=state.signed_in
+            signing_out=state.signing_out
+            sign_out=sign_out
+        />
+    }
+}
+
+#[component]
+fn SessionSidebarWorkspacesLink(signed_in: RwSignal<bool>) -> impl IntoView {
     view! {
         <Show when=move || signed_in.get()>
             <a class="session-sidebar__secondary-link" href=WORKSPACES_PATH>
                 "Workspaces"
             </a>
         </Show>
-        <Show when=move || is_admin.get()>
-            <a class="session-sidebar__secondary-link" href=accounts_href.clone()>
-                "Accounts"
-            </a>
-        </Show>
+    }
+}
+
+#[component]
+fn SessionSidebarAccountsLink(accounts_href: String, is_admin: RwSignal<bool>) -> impl IntoView {
+    move || {
+        if is_admin.get() {
+            let accounts_href = accounts_href.clone();
+            view! { <a class="session-sidebar__secondary-link" href=accounts_href>"Accounts"</a> }
+                .into_any()
+        } else {
+            ().into_any()
+        }
+    }
+}
+
+#[component]
+fn SessionSidebarSignOutButton(
+    signed_in: RwSignal<bool>,
+    signing_out: RwSignal<bool>,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
         <Show when=move || signed_in.get()>
             <button
                 type="button"
@@ -56,64 +96,6 @@ fn session_sidebar_auth_controls_view(
                 {move || sign_out_button_label(signing_out.get())}
             </button>
         </Show>
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn session_sidebar_auth_controls_view(
-    accounts_href: String,
-    is_admin: RwSignal<bool>,
-    signed_in: RwSignal<bool>,
-    signing_out: RwSignal<bool>,
-    sign_out: Callback<web_sys::MouseEvent>,
-) -> impl IntoView {
-    let signed_in_val = signed_in.get_untracked();
-    let is_admin_val = is_admin.get_untracked();
-    let signing_out_val = signing_out.get_untracked();
-
-    let workspaces_link = if signed_in_val {
-        view! {
-            <a class="session-sidebar__secondary-link" href=WORKSPACES_PATH>
-                "Workspaces"
-            </a>
-        }
-        .into_any()
-    } else {
-        ().into_any()
-    };
-
-    let accounts_link = if is_admin_val {
-        view! {
-            <a class="session-sidebar__secondary-link" href=accounts_href>
-                "Accounts"
-            </a>
-        }
-        .into_any()
-    } else {
-        ().into_any()
-    };
-
-    let sign_out_button = if signed_in_val {
-        let label = sign_out_button_label(signing_out_val);
-        view! {
-            <button
-                type="button"
-                class="session-sidebar__secondary-link session-sidebar__secondary-button"
-                prop:disabled=signing_out_val
-                on:click=move |event| sign_out.run(event)
-            >
-                {label}
-            </button>
-        }
-        .into_any()
-    } else {
-        ().into_any()
-    };
-
-    view! {
-        {workspaces_link}
-        {accounts_link}
-        {sign_out_button}
     }
 }
 
@@ -176,10 +158,12 @@ mod tests {
             };
 
             let _ = session_sidebar_auth_controls_view(
-                "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fabc".to_string(),
-                RwSignal::new(true),
-                RwSignal::new(true),
-                RwSignal::new(false),
+                SessionSidebarAuthViewState {
+                    accounts_href: "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fabc".to_string(),
+                    is_admin: RwSignal::new(true),
+                    signed_in: RwSignal::new(true),
+                    signing_out: RwSignal::new(false),
+                },
                 Callback::new(|_: web_sys::MouseEvent| {}),
             );
         });
@@ -191,19 +175,23 @@ mod tests {
         owner.with(|| {
             // signed-in non-admin: workspaces visible, accounts hidden
             let _ = session_sidebar_auth_controls_view(
-                "/app/accounts/".to_string(),
-                RwSignal::new(false), // not admin
-                RwSignal::new(true),  // signed in
-                RwSignal::new(false),
+                SessionSidebarAuthViewState {
+                    accounts_href: "/app/accounts/".to_string(),
+                    is_admin: RwSignal::new(false),
+                    signed_in: RwSignal::new(true),
+                    signing_out: RwSignal::new(false),
+                },
                 Callback::new(|_: web_sys::MouseEvent| {}),
             );
 
             // not signed in: neither link
             let _ = session_sidebar_auth_controls_view(
-                "/app/accounts/".to_string(),
-                RwSignal::new(false),
-                RwSignal::new(false),
-                RwSignal::new(false),
+                SessionSidebarAuthViewState {
+                    accounts_href: "/app/accounts/".to_string(),
+                    is_admin: RwSignal::new(false),
+                    signed_in: RwSignal::new(false),
+                    signing_out: RwSignal::new(false),
+                },
                 Callback::new(|_: web_sys::MouseEvent| {}),
             );
         });

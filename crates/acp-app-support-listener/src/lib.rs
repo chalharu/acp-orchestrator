@@ -25,24 +25,30 @@ pub fn listener_endpoint(
     service_name: &'static str,
     startup_prefix: &'static str,
 ) -> Result<String, ListenerSetupError> {
-    let address = listener
-        .local_addr()
-        .map_err(|source| ListenerSetupError::ReadBoundAddress {
-            source,
-            service_name,
-        })?;
-    Ok(format!("{startup_prefix}{address}"))
+    listener_endpoint_from_local_addr(listener.local_addr(), service_name, startup_prefix)
 }
 
 pub fn print_startup_line(startup_label: &'static str, endpoint: &str) {
     println!("{startup_label} listening on {endpoint}");
 }
 
+fn listener_endpoint_from_local_addr(
+    local_addr: std::io::Result<std::net::SocketAddr>,
+    service_name: &'static str,
+    startup_prefix: &'static str,
+) -> Result<String, ListenerSetupError> {
+    let address = local_addr.map_err(|source| ListenerSetupError::ReadBoundAddress {
+        source,
+        service_name,
+    })?;
+    Ok(format!("{startup_prefix}{address}"))
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::net::TcpListener;
 
-    use super::{bind_listener, listener_endpoint};
+    use super::{bind_listener, listener_endpoint, listener_endpoint_from_local_addr};
     use acp_app_support_errors::ListenerSetupError;
 
     #[tokio::test]
@@ -91,5 +97,21 @@ mod tests {
     #[test]
     fn print_startup_line_is_callable_in_tests() {
         super::print_startup_line("service", "http://127.0.0.1:1234");
+    }
+
+    #[test]
+    fn listener_endpoint_reports_address_read_failures() {
+        let error = listener_endpoint_from_local_addr(
+            Err(std::io::Error::other("boom")),
+            "test service",
+            "http://",
+        )
+        .expect_err("address read failures should surface");
+
+        assert!(matches!(
+            error,
+            ListenerSetupError::ReadBoundAddress { service_name, .. }
+                if service_name == "test service"
+        ));
     }
 }

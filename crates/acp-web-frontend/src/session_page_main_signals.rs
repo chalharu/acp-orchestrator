@@ -88,7 +88,7 @@ fn main_worker_badge(
 #[cfg(test)]
 pub mod tests {
     use acp_contracts_permissions::PermissionRequest;
-    
+
     use super::session_main_signals;
     use crate::session_lifecycle::{BadgeTone, SessionLifecycle, TurnState};
     use crate::session_page_signals::session_signals;
@@ -193,7 +193,11 @@ pub mod tests {
             badge("Worker", "cancelling", BadgeTone::Warning)
         );
         assert_eq!(
-            main_worker_badge(SessionLifecycle::Active, TurnState::AwaitingPermission, false),
+            main_worker_badge(
+                SessionLifecycle::Active,
+                TurnState::AwaitingPermission,
+                false
+            ),
             badge("Worker", "permission", BadgeTone::Warning)
         );
         assert_eq!(

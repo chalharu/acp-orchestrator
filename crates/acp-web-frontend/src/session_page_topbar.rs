@@ -108,7 +108,7 @@ fn status_badge_class((_, _, tone): (&'static str, &'static str, BadgeTone)) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        StatusBadgeView, SessionTopBar, status_badge_class, topbar_toggle_icon, topbar_toggle_label,
+        SessionTopBar, StatusBadgeView, status_badge_class, topbar_toggle_icon, topbar_toggle_label,
     };
     use crate::session_lifecycle::BadgeTone;
     use crate::session_page_main_signals::tests::badge;

@@ -9,8 +9,8 @@ use web_sys::EventSource;
 
 use crate::{
     browser::{load_draft, save_draft},
-    session_page_entries::SessionEntry,
     session_lifecycle::{SessionLifecycle, TurnState},
+    session_page_entries::SessionEntry,
 };
 
 #[derive(Clone, Copy)]

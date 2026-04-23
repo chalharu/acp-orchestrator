@@ -1,8 +1,8 @@
 use leptos::prelude::*;
 
 use crate::session_page_actions::{
-    delete_session_callback, rename_session_callback, session_permission_callbacks,
-    session_submit_callback, slash_palette_callbacks, SessionSlashCallbacks,
+    SessionSlashCallbacks, delete_session_callback, rename_session_callback,
+    session_permission_callbacks, session_submit_callback, slash_palette_callbacks,
 };
 use crate::session_page_signals::SessionSignals;
 

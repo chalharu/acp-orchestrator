@@ -4,22 +4,22 @@ use acp_contracts_slash::CompletionCandidate;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
+use super::session_list::refresh_session_list;
+#[cfg(target_family = "wasm")]
+use super::shared::spawn_browser_task;
+use super::stream::{next_tool_activity_id, push_tool_activity_entry};
+#[cfg(target_family = "wasm")]
 use crate::browser::clear_draft;
 #[cfg(target_family = "wasm")]
 use crate::browser::clear_prepared_session_id;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
-use crate::session_page_signals::SessionSignals;
 use crate::session_lifecycle::TurnState;
+use crate::session_page_signals::SessionSignals;
 use crate::slash::{
     BrowserSlashAction, apply_slash_completion, cycle_slash_selection, local_browser_commands,
     local_slash_candidates, parse_browser_slash_action,
 };
-#[cfg(target_family = "wasm")]
-use super::session_list::refresh_session_list;
-#[cfg(target_family = "wasm")]
-use super::shared::spawn_browser_task;
-use super::stream::{next_tool_activity_id, push_tool_activity_entry};
 
 #[derive(Clone, Copy)]
 pub(crate) struct SessionSlashCallbacks {
@@ -203,8 +203,8 @@ mod tests {
         bind_slash_completion, dismiss_slash_palette, handle_slash_submit, session_submit_callback,
         slash_palette_callbacks, update_slash_completion,
     };
-    use crate::session_page_signals::session_signals;
     use crate::session_lifecycle::TurnState;
+    use crate::session_page_signals::session_signals;
 
     fn candidate(label: &str) -> CompletionCandidate {
         CompletionCandidate {

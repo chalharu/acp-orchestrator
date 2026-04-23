@@ -204,6 +204,10 @@ where
     }
 }
 
+fn empty_palette_key_text<E>(_event: &E) -> String {
+    String::new()
+}
+
 #[cfg(target_family = "wasm")]
 fn palette_keydown_handler(
     on_apply_index: Callback<usize>,
@@ -222,9 +226,7 @@ fn palette_keydown_handler(
     on_apply_index: Callback<usize>,
     index: usize,
 ) -> impl Fn(web_sys::KeyboardEvent) + Copy + 'static {
-    palette_key_handler(on_apply_index, index, |_event: &web_sys::KeyboardEvent| {
-        String::new()
-    })
+    palette_key_handler(on_apply_index, index, empty_palette_key_text)
 }
 
 #[cfg(test)]
@@ -368,6 +370,14 @@ mod tests {
 
             assert_eq!(applied.get(), vec![3]);
         });
+    }
+
+    #[test]
+    fn empty_palette_key_text_returns_empty_string() {
+        assert!(empty_palette_key_text(&FakeKeyboardEvent {
+            key: "Enter".to_string(),
+        })
+        .is_empty());
     }
 
     #[test]

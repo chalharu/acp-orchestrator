@@ -6,14 +6,14 @@ use futures_util::{StreamExt, future::Abortable};
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
-use crate::infrastructure::api;
-use crate::session_page_signals::SessionSignals;
-#[cfg(target_family = "wasm")]
-use crate::session_lifecycle::SessionLifecycle;
-#[cfg(target_family = "wasm")]
 use super::super::shared::spawn_browser_task;
 #[cfg(target_family = "wasm")]
 use super::events::handle_sse_event;
+#[cfg(target_family = "wasm")]
+use crate::infrastructure::api;
+#[cfg(target_family = "wasm")]
+use crate::session_lifecycle::SessionLifecycle;
+use crate::session_page_signals::SessionSignals;
 
 #[cfg(target_family = "wasm")]
 pub(in crate::session_page_actions) fn spawn_session_stream(

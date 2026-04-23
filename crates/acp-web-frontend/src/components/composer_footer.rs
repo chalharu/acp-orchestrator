@@ -46,25 +46,18 @@ fn ComposerActions(
     #[prop(into)] cancel_disabled: Signal<bool>,
     on_cancel: Callback<()>,
 ) -> impl IntoView {
-    let cancel_props = (cancel_disabled, on_cancel);
+    composer_actions_view(disabled, show_cancel, cancel_disabled, on_cancel)
+}
 
-    view! {
-        <div class="composer__actions">
-            <Show when=move || show_cancel.get()>
-                <ComposerCancelButton
-                    cancel_disabled=cancel_props.0
-                    on_cancel=cancel_props.1
-                />
-            </Show>
-            <button
-                class="composer__submit"
-                type="submit"
-                prop:disabled=move || disabled.get()
-            >
-                "Send"
-            </button>
-        </div>
-    }
+#[rustfmt::skip]
+fn composer_actions_view(
+    disabled: Signal<bool>,
+    show_cancel: Signal<bool>,
+    cancel_disabled: Signal<bool>,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
+    let cancel_props = (cancel_disabled, on_cancel);
+    view! { <div class="composer__actions"><Show when=move || show_cancel.get()><ComposerCancelButton cancel_disabled=cancel_props.0 on_cancel=cancel_props.1 /></Show><button class="composer__submit" type="submit" prop:disabled=move || disabled.get()>"Send"</button></div> }
 }
 
 #[component]
@@ -176,6 +169,20 @@ mod tests {
                     on_cancel=Callback::new(|()| {})
                 />
             };
+        });
+    }
+
+    #[test]
+    fn composer_actions_view_converts_into_any_view() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = composer_actions_view(
+                Signal::derive(|| false),
+                Signal::derive(|| true),
+                Signal::derive(|| false),
+                Callback::new(|()| {}),
+            )
+            .into_any();
         });
     }
 

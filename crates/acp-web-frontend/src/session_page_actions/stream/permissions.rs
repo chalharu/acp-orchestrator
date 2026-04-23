@@ -4,14 +4,14 @@ use acp_contracts_permissions::PermissionDecision;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
-use crate::infrastructure::api;
-use crate::session_page_signals::SessionSignals;
-use crate::session_lifecycle::TurnState;
-#[cfg(target_family = "wasm")]
 use super::super::session_list::refresh_session_list;
 #[cfg(target_family = "wasm")]
 use super::super::shared::spawn_browser_task;
 use super::events::{next_tool_activity_id, push_tool_activity_entry};
+#[cfg(target_family = "wasm")]
+use crate::infrastructure::api;
+use crate::session_lifecycle::TurnState;
+use crate::session_page_signals::SessionSignals;
 
 pub(crate) fn session_permission_callbacks(
     session_id: String,
@@ -175,8 +175,8 @@ mod tests {
         apply_permission_resolution_success, begin_cancel_turn, permission_resolution_detail,
         permission_resolution_turn_state, session_permission_callbacks,
     };
-    use crate::session_page_signals::session_signals;
     use crate::session_lifecycle::TurnState;
+    use crate::session_page_signals::session_signals;
 
     fn permission(id: &str) -> PermissionRequest {
         PermissionRequest {

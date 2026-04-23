@@ -103,6 +103,7 @@ fn session_stream_url(session_id: &str) -> String {
     format!("{}/events", session_path(session_id))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn non_wasm_stream_error(url: &str) -> String {
     format!("Browser event streams are unavailable on non-wasm targets: {url}")
 }

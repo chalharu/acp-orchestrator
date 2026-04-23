@@ -21,10 +21,10 @@ pub(crate) fn SessionTopBar(
                     on:click=move |_| sidebar_open.update(|open| *open = !*open)
                 >
                     <span class="sidebar-toggle-icon" aria-hidden="true">
-                        {move || if sidebar_open.get() { "←" } else { "☰" }}
+                        {move || topbar_toggle_icon(sidebar_open.get())}
                     </span>
                     <span class="session-sidebar__toggle-label">
-                        {move || if sidebar_open.get() { "Hide sessions" } else { "Show sessions" }}
+                        {move || topbar_toggle_label(sidebar_open.get())}
                     </span>
                 </button>
                 <div class="chat-topbar__badges" aria-label="Connection and worker state">

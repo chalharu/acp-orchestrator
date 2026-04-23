@@ -113,6 +113,7 @@ fn sign_in_body(username: &str, password: &str) -> Result<String, String> {
     .map_err(|error| error.to_string())
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn non_wasm_api_error(method: &str, url: &str) -> String {
     format!("Browser {method} auth API is unavailable on non-wasm targets: {url}")
 }

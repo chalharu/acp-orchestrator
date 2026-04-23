@@ -128,6 +128,7 @@ fn account_url(user_id: &str) -> String {
     format!("{ACCOUNTS_URL}/{user_id}")
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn non_wasm_api_error(method: &str, url: &str) -> String {
     format!("Browser {method} accounts API is unavailable on non-wasm targets: {url}")
 }

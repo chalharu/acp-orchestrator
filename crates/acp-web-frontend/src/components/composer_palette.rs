@@ -171,9 +171,11 @@ fn palette_mousedown_handler(
     on_apply_index: Callback<usize>,
     index: usize,
 ) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    let apply = palette_apply_handler(on_apply_index, index);
+
     move |event: web_sys::MouseEvent| {
         event.prevent_default();
-        on_apply_index.run(index);
+        apply(event);
     }
 }
 
@@ -204,6 +206,12 @@ where
     }
 }
 
+#[cfg(target_family = "wasm")]
+fn web_palette_key_text(event: &web_sys::KeyboardEvent) -> String {
+    event.key()
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn empty_palette_key_text<E>(_event: &E) -> String {
     String::new()
 }
@@ -213,11 +221,13 @@ fn palette_keydown_handler(
     on_apply_index: Callback<usize>,
     index: usize,
 ) -> impl Fn(web_sys::KeyboardEvent) + Copy + 'static {
+    let apply = palette_key_handler(on_apply_index, index, web_palette_key_text);
+
     move |event: web_sys::KeyboardEvent| {
         if should_apply_palette_key(event.key().as_str()) {
             event.prevent_default();
-            on_apply_index.run(index);
         }
+        apply(event);
     }
 }
 
@@ -226,7 +236,11 @@ fn palette_keydown_handler(
     on_apply_index: Callback<usize>,
     index: usize,
 ) -> impl Fn(web_sys::KeyboardEvent) + Copy + 'static {
-    palette_key_handler(on_apply_index, index, empty_palette_key_text)
+    palette_key_handler(
+        on_apply_index,
+        index,
+        empty_palette_key_text::<web_sys::KeyboardEvent>,
+    )
 }
 
 #[cfg(test)]

@@ -143,9 +143,11 @@ fn composer_submit_handler(
     draft: RwSignal<String>,
     submit_runtime: SubmitDraftRuntime,
 ) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
+    let submit = submit_handler(draft, submit_runtime);
+
     move |event: web_sys::SubmitEvent| {
         event.prevent_default();
-        submit_draft(draft, submit_runtime);
+        submit(event);
     }
 }
 

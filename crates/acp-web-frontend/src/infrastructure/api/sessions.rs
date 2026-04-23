@@ -236,6 +236,7 @@ fn rename_session_body(title: &str) -> Result<String, String> {
     .map_err(|error| error.to_string())
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn non_wasm_session_error(method: &str, url: &str) -> String {
     format!("Browser {method} sessions API is unavailable on non-wasm targets: {url}")
 }

@@ -105,6 +105,7 @@ fn json_request_headers(csrf: &str) -> [(&'static str, String); 2] {
     ]
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn non_wasm_request_error(method: &str, url: &str) -> String {
     format!("Browser {method} request is unavailable on non-wasm targets: {url}")
 }

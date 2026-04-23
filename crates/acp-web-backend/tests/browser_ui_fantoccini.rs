@@ -665,44 +665,15 @@ impl BrowserHarness {
     }
 
     async fn close_current_session(&self) -> Result<()> {
-        let close_result = self
-            .client
-            .execute_async(
-                r#"
-                const callback = arguments[arguments.length - 1];
-                const sessionId = window.location.pathname.split("/").pop();
-                const csrfToken = document
-                    .querySelector("meta[name='acp-csrf-token']")
-                    ?.getAttribute("content") ?? "";
-                fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
-                    method: "POST",
-                    headers: { "x-csrf-token": csrfToken },
-                })
-                    .then(async (response) => {
-                        if (!response.ok) {
-                            callback({
-                                ok: false,
-                                status: response.status,
-                                body: await response.text(),
-                            });
-                            return;
-                        }
-                        callback({ ok: true });
-                    })
-                    .catch((error) => callback({ ok: false, error: String(error) }));
-                "#,
-                Vec::new(),
-            )
+        let close_result = self.close_current_session_request().await?;
+        ensure_close_current_session_succeeded(&close_result)
+    }
+
+    async fn close_current_session_request(&self) -> Result<Value> {
+        self.client
+            .execute_async(close_current_session_script(), Vec::new())
             .await
-            .context("closing the session from the browser")?;
-        let close_payload = close_result
-            .as_object()
-            .context("close response was not an object")?;
-        ensure!(
-            close_payload.get("ok").and_then(Value::as_bool) == Some(true),
-            "browser close request failed: {close_result}"
-        );
-        Ok(())
+            .context("closing the session from the browser")
     }
 
     async fn wait_for_body_text(&self, needle: &str, timeout: Duration) -> Result<()> {
@@ -788,11 +759,48 @@ impl BrowserHarness {
     }
 }
 
+fn close_current_session_script() -> &'static str {
+    r#"
+    const callback = arguments[arguments.length - 1];
+    const sessionId = window.location.pathname.split("/").pop();
+    const csrfToken = document
+        .querySelector("meta[name='acp-csrf-token']")
+        ?.getAttribute("content") ?? "";
+    fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
+        method: "POST",
+        headers: { "x-csrf-token": csrfToken },
+    })
+        .then(async (response) => {
+            if (!response.ok) {
+                callback({
+                    ok: false,
+                    status: response.status,
+                    body: await response.text(),
+                });
+                return;
+            }
+            callback({ ok: true });
+        })
+        .catch((error) => callback({ ok: false, error: String(error) }));
+    "#
+}
+
+fn ensure_close_current_session_succeeded(close_result: &Value) -> Result<()> {
+    let close_payload = close_result
+        .as_object()
+        .context("close response was not an object")?;
+    ensure!(
+        close_payload.get("ok").and_then(Value::as_bool) == Some(true),
+        "browser close request failed: {close_result}"
+    );
+    Ok(())
+}
+
 fn workspace_action_button_script(selector: &str, row_name: &str, button_label: &str) -> String {
     format!(
         "return Array.from(document.querySelectorAll({selector:?}))\
          .some(btn => btn.closest('tr')?.textContent?.includes({row_name:?}) \
-                  && btn.textContent?.trim() === {button_label:?});"
+                 && btn.textContent?.trim() === {button_label:?});"
     )
 }
 

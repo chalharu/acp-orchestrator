@@ -40,63 +40,82 @@ pub fn SessionSidebarAuthControls(
     session_sidebar_auth_controls_view(view_state, sign_out)
 }
 
+#[cfg(target_family = "wasm")]
 fn session_sidebar_auth_controls_view(
     state: SessionSidebarAuthViewState,
     sign_out: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
+    let accounts_href = state.accounts_href;
+    let is_admin = state.is_admin;
+    let signed_in = state.signed_in;
+    let signing_out = state.signing_out;
+
     view! {
-        <SessionSidebarWorkspacesLink signed_in=state.signed_in />
-        <SessionSidebarAccountsLink accounts_href=state.accounts_href is_admin=state.is_admin />
-        <SessionSidebarSignOutButton
-            signed_in=state.signed_in
-            signing_out=state.signing_out
-            sign_out=sign_out
-        />
+        {move || session_sidebar_workspaces_link_view(signed_in.get())}
+        {move || session_sidebar_accounts_link_view(&accounts_href, is_admin.get())}
+        {move || session_sidebar_sign_out_button_view(sign_out, signed_in.get(), signing_out.get())}
     }
 }
 
-#[component]
-fn SessionSidebarWorkspacesLink(signed_in: RwSignal<bool>) -> impl IntoView {
-    view! {
-        <Show when=move || signed_in.get()>
+#[cfg(not(target_family = "wasm"))]
+fn session_sidebar_auth_controls_view(
+    state: SessionSidebarAuthViewState,
+    sign_out: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    let workspaces_link = session_sidebar_workspaces_link_view(state.signed_in.get_untracked());
+    let accounts_link =
+        session_sidebar_accounts_link_view(&state.accounts_href, state.is_admin.get_untracked());
+    let sign_out_button = session_sidebar_sign_out_button_view(
+        sign_out,
+        state.signed_in.get_untracked(),
+        state.signing_out.get_untracked(),
+    );
+
+    (workspaces_link, accounts_link, sign_out_button)
+}
+
+fn session_sidebar_workspaces_link_view(signed_in: bool) -> AnyView {
+    if signed_in {
+        view! {
             <a class="session-sidebar__secondary-link" href=WORKSPACES_PATH>
                 "Workspaces"
             </a>
-        </Show>
-    }
-}
-
-#[component]
-fn SessionSidebarAccountsLink(accounts_href: String, is_admin: RwSignal<bool>) -> impl IntoView {
-    move || {
-        if is_admin.get() {
-            let accounts_href = accounts_href.clone();
-            view! { <a class="session-sidebar__secondary-link" href=accounts_href>"Accounts"</a> }
-                .into_any()
-        } else {
-            ().into_any()
         }
+        .into_any()
+    } else {
+        ().into_any()
     }
 }
 
-#[component]
-fn SessionSidebarSignOutButton(
-    signed_in: RwSignal<bool>,
-    signing_out: RwSignal<bool>,
-    sign_out: Callback<web_sys::MouseEvent>,
-) -> impl IntoView {
-    view! {
-        <Show when=move || signed_in.get()>
-            <button
-                type="button"
-                class="session-sidebar__secondary-link session-sidebar__secondary-button"
-                prop:disabled=move || signing_out.get()
-                on:click=move |event| sign_out.run(event)
-            >
-                {move || sign_out_button_label(signing_out.get())}
-            </button>
-        </Show>
+fn session_sidebar_accounts_link_view(accounts_href: &str, is_admin: bool) -> AnyView {
+    if is_admin {
+        view! { <a class="session-sidebar__secondary-link" href=accounts_href.to_string()>"Accounts"</a> }
+            .into_any()
+    } else {
+        ().into_any()
     }
+}
+
+fn session_sidebar_sign_out_button_view(
+    sign_out: Callback<web_sys::MouseEvent>,
+    signed_in: bool,
+    signing_out: bool,
+) -> AnyView {
+    if !signed_in {
+        return ().into_any();
+    }
+
+    view! {
+        <button
+            type="button"
+            class="session-sidebar__secondary-link session-sidebar__secondary-button"
+            prop:disabled=signing_out
+            on:click=move |event| sign_out.run(event)
+        >
+            {sign_out_button_label(signing_out)}
+        </button>
+    }
+    .into_any()
 }
 
 #[cfg(target_family = "wasm")]
@@ -194,6 +213,22 @@ mod tests {
                 },
                 Callback::new(|_: web_sys::MouseEvent| {}),
             );
+        });
+    }
+
+    #[test]
+    fn sidebar_link_helpers_cover_signed_in_and_admin_variants() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sign_out = Callback::new(|_: web_sys::MouseEvent| {});
+
+            let _ = session_sidebar_workspaces_link_view(true);
+            let _ = session_sidebar_workspaces_link_view(false);
+            let _ = session_sidebar_accounts_link_view("/app/accounts/", true);
+            let _ = session_sidebar_accounts_link_view("/app/accounts/", false);
+            let _ = session_sidebar_sign_out_button_view(sign_out, true, false);
+            let _ = session_sidebar_sign_out_button_view(sign_out, true, true);
+            let _ = session_sidebar_sign_out_button_view(sign_out, false, false);
         });
     }
 

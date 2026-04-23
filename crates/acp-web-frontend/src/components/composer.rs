@@ -6,7 +6,9 @@ use leptos::{html as leptos_html, prelude::*};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 const MAX_SLASH_PALETTE_ITEMS: usize = 5;
+#[cfg(target_family = "wasm")]
 type SlashKeydownSignals = (Signal<bool>, Signal<bool>);
+#[cfg(target_family = "wasm")]
 type SlashKeydownCallbacks = (Callback<()>, Callback<()>, Callback<()>, Callback<()>);
 #[cfg(test)]
 type SlashTestSignals = (
@@ -30,6 +32,16 @@ enum SlashPaletteState {
     Ready(Vec<(usize, CompletionCandidate)>),
 }
 
+#[cfg(target_family = "wasm")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerKeyAction {
+    Submit,
+    SlashSelectNext,
+    SlashSelectPrevious,
+    SlashApplySelected,
+    SlashDismiss,
+}
+
 #[derive(Clone)]
 struct SubmitDraftContext {
     #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
@@ -40,24 +52,39 @@ struct SubmitDraftContext {
     restore_focus_after_submit: RwSignal<bool>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ComposerControls {
+    pub(crate) disabled: Signal<bool>,
+    pub(crate) status_text: Signal<String>,
+    pub(crate) show_cancel: Signal<bool>,
+    pub(crate) cancel_disabled: Signal<bool>,
+    pub(crate) on_cancel: Callback<()>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ComposerSlashProps {
+    pub(crate) visible: Signal<bool>,
+    pub(crate) candidates: Signal<Vec<CompletionCandidate>>,
+    pub(crate) selected_index: Signal<usize>,
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub(crate) apply_selected: Signal<bool>,
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub(crate) on_select_next: Callback<()>,
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub(crate) on_select_previous: Callback<()>,
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub(crate) on_apply_selected: Callback<()>,
+    pub(crate) on_apply_index: Callback<usize>,
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub(crate) on_dismiss: Callback<()>,
+}
+
 #[component]
 pub(crate) fn Composer(
-    #[prop(into)] disabled: Signal<bool>,
-    #[prop(into)] status_text: Signal<String>,
     draft: RwSignal<String>,
     on_submit: Callback<String>,
-    #[prop(into)] show_cancel: Signal<bool>,
-    #[prop(into)] cancel_disabled: Signal<bool>,
-    on_cancel: Callback<()>,
-    #[prop(into)] slash_visible: Signal<bool>,
-    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
-    #[prop(into)] slash_selected_index: Signal<usize>,
-    #[prop(into)] slash_apply_selected: Signal<bool>,
-    on_slash_select_next: Callback<()>,
-    on_slash_select_previous: Callback<()>,
-    on_slash_apply_selected: Callback<()>,
-    on_slash_apply_index: Callback<usize>,
-    on_slash_dismiss: Callback<()>,
+    controls: ComposerControls,
+    slash: ComposerSlashProps,
 ) -> impl IntoView {
     let form = NodeRef::<leptos_html::Form>::new();
     let textarea = NodeRef::<leptos_html::Textarea>::new();
@@ -65,7 +92,7 @@ pub(crate) fn Composer(
     let submit_context = SubmitDraftContext {
         form,
         textarea,
-        disabled,
+        disabled: controls.disabled,
         on_submit,
         restore_focus_after_submit,
     };
@@ -82,63 +109,51 @@ pub(crate) fn Composer(
             node_ref=form
             on:submit=handle_submit
         >
-            <ComposerEditor
-                draft=draft
-                slash_visible=slash_visible
-                slash_candidates=slash_candidates
-                slash_selected_index=slash_selected_index
-                slash_apply_selected=slash_apply_selected
-                on_slash_select_next=on_slash_select_next
-                on_slash_select_previous=on_slash_select_previous
-                on_slash_apply_selected=on_slash_apply_selected
-                on_slash_apply_index=on_slash_apply_index
-                on_slash_dismiss=on_slash_dismiss
-                submit_context=submit_context
-            />
-            <ComposerFooter
-                status_text=status_text
-                disabled=disabled
-                show_cancel=show_cancel
-                cancel_disabled=cancel_disabled
-                on_cancel=on_cancel
-            />
+            {composer_panel_body(draft, slash, submit_context, controls)}
         </form>
+    }
+}
+
+fn composer_panel_body(
+    draft: RwSignal<String>,
+    slash: ComposerSlashProps,
+    submit_context: SubmitDraftContext,
+    controls: ComposerControls,
+) -> impl IntoView {
+    view! {
+        <ComposerEditor
+            draft=draft
+            slash=slash
+            submit_context=submit_context
+        />
+        <ComposerFooter
+            status_text=controls.status_text
+            disabled=controls.disabled
+            show_cancel=controls.show_cancel
+            cancel_disabled=controls.cancel_disabled
+            on_cancel=controls.on_cancel
+        />
     }
 }
 
 #[component]
 fn ComposerEditor(
     draft: RwSignal<String>,
-    #[prop(into)] slash_visible: Signal<bool>,
-    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
-    #[prop(into)] slash_selected_index: Signal<usize>,
-    #[prop(into)] slash_apply_selected: Signal<bool>,
-    on_slash_select_next: Callback<()>,
-    on_slash_select_previous: Callback<()>,
-    on_slash_apply_selected: Callback<()>,
-    on_slash_apply_index: Callback<usize>,
-    on_slash_dismiss: Callback<()>,
+    slash: ComposerSlashProps,
     submit_context: SubmitDraftContext,
 ) -> impl IntoView {
     view! {
         <div class="composer__editor">
             <ComposerInput
                 draft=draft
-                slash_visible=slash_visible
-                slash_candidates=slash_candidates
-                slash_selected_index=slash_selected_index
-                slash_apply_selected=slash_apply_selected
-                on_slash_select_next=on_slash_select_next
-                on_slash_select_previous=on_slash_select_previous
-                on_slash_apply_selected=on_slash_apply_selected
-                on_slash_dismiss=on_slash_dismiss
+                slash=slash
                 submit_context=submit_context
             />
             <SlashPalette
-                slash_visible=slash_visible
-                slash_candidates=slash_candidates
-                slash_selected_index=slash_selected_index
-                on_apply_index=on_slash_apply_index
+                slash_visible=slash.visible
+                slash_candidates=slash.candidates
+                slash_selected_index=slash.selected_index
+                on_apply_index=slash.on_apply_index
             />
         </div>
     }
@@ -153,21 +168,31 @@ fn slash_option_id(index: usize) -> String {
 #[component]
 fn ComposerInput(
     draft: RwSignal<String>,
-    #[prop(into)] slash_visible: Signal<bool>,
-    #[prop(into)] slash_candidates: Signal<Vec<CompletionCandidate>>,
-    #[prop(into)] slash_selected_index: Signal<usize>,
-    #[prop(into)] slash_apply_selected: Signal<bool>,
-    on_slash_select_next: Callback<()>,
-    on_slash_select_previous: Callback<()>,
-    on_slash_apply_selected: Callback<()>,
-    on_slash_dismiss: Callback<()>,
+    slash: ComposerSlashProps,
     submit_context: SubmitDraftContext,
 ) -> impl IntoView {
     bind_submit_focus(submit_context.clone());
+    composer_input_view(draft, slash, submit_context)
+}
+
+#[cfg(target_family = "wasm")]
+fn composer_input_view(
+    draft: RwSignal<String>,
+    slash: ComposerSlashProps,
+    submit_context: SubmitDraftContext,
+) -> impl IntoView {
     let keydown_submit_context = submit_context.clone();
     let textarea = submit_context.textarea;
     let disabled = submit_context.disabled;
+    let slash_keydown_signals = (slash.visible, slash.apply_selected);
+    let slash_keydown_callbacks = (
+        slash.on_select_next,
+        slash.on_select_previous,
+        slash.on_apply_selected,
+        slash.on_dismiss,
+    );
 
+    #[rustfmt::skip]
     view! {
         <label class="sr-only" for="composer-input">"Prompt"</label>
         <textarea
@@ -178,34 +203,27 @@ fn ComposerInput(
             aria-autocomplete="list"
             aria-haspopup="listbox"
             aria-controls=SLASH_PALETTE_LISTBOX_ID
-            aria-expanded=move || if slash_visible.get() { "true" } else { "false" }
-            aria-activedescendant=move || {
-                if slash_visible.get() && !slash_candidates.get().is_empty() {
-                    Some(slash_option_id(slash_selected_index.get()))
-                } else {
-                    None
-                }
-            }
+            aria-expanded=move || if slash.visible.get() { "true" } else { "false" }
+            aria-activedescendant=move || composer_active_descendant(slash.visible.get(), slash.candidates.get().len(), slash.selected_index.get())
             node_ref=textarea
             placeholder="Write a prompt or type / for commands."
             prop:value=move || draft.get()
             on:input=move |ev| update_draft(draft, ev)
-            on:keydown=move |ev| {
-                handle_composer_keydown(
-                    ev,
-                    draft,
-                    keydown_submit_context.clone(),
-                    (slash_visible, slash_apply_selected),
-                    (
-                        on_slash_select_next,
-                        on_slash_select_previous,
-                        on_slash_apply_selected,
-                        on_slash_dismiss,
-                    ),
-                );
-            }
+            on:keydown=move |ev| handle_composer_keydown(ev, draft, keydown_submit_context.clone(), slash_keydown_signals, slash_keydown_callbacks)
             prop:disabled=move || disabled.get()
         />
+    }
+}
+
+fn composer_active_descendant(
+    slash_visible: bool,
+    candidate_count: usize,
+    selected_index: usize,
+) -> Option<String> {
+    if slash_visible && candidate_count > 0 {
+        Some(slash_option_id(selected_index))
+    } else {
+        None
     }
 }
 
@@ -308,6 +326,7 @@ fn restore_submit_focus_when_ready(submit_context: SubmitDraftContext) {
     });
 }
 
+#[cfg(target_family = "wasm")]
 fn handle_composer_keydown(
     ev: web_sys::KeyboardEvent,
     draft: RwSignal<String>,
@@ -315,31 +334,72 @@ fn handle_composer_keydown(
     slash_signals: SlashKeydownSignals,
     slash_callbacks: SlashKeydownCallbacks,
 ) {
-    if ev.is_composing() {
-        return;
-    }
-
-    if handle_slash_palette_keydown(
-        &ev,
-        draft,
-        submit_context.clone(),
-        slash_signals,
-        slash_callbacks,
+    if let Some(action) = composer_key_action(
+        &ev.key(),
+        ev.is_composing(),
+        ev.shift_key(),
+        slash_signals.0.get_untracked(),
+        slash_signals.1.get_untracked(),
     ) {
-        return;
-    }
-
-    if ev.key() == "Enter" && !ev.shift_key() {
-        ev.prevent_default();
-        submit_draft(draft, submit_context);
+        if apply_composer_key_action(action, draft, submit_context, slash_callbacks) {
+            ev.prevent_default();
+        }
     }
 }
 
-fn handle_slash_palette_keydown(
-    ev: &web_sys::KeyboardEvent,
+#[cfg(not(target_family = "wasm"))]
+fn composer_input_view(
+    draft: RwSignal<String>,
+    _slash: ComposerSlashProps,
+    submit_context: SubmitDraftContext,
+) -> impl IntoView {
+    let textarea = submit_context.textarea;
+    let disabled = submit_context.disabled;
+
+    view! {
+        <label class="sr-only" for="composer-input">"Prompt"</label>
+        <textarea
+            id="composer-input"
+            name="prompt"
+            rows="4"
+            node_ref=textarea
+            placeholder="Write a prompt or type / for commands."
+            prop:value=move || draft.get()
+            on:input=move |ev| update_draft(draft, ev)
+            prop:disabled=move || disabled.get()
+        />
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[rustfmt::skip]
+fn composer_key_action(
+    key: &str,
+    is_composing: bool,
+    shift_key: bool,
+    slash_visible: bool,
+    slash_apply_selected: bool,
+) -> Option<ComposerKeyAction> {
+    if is_composing { return None; }
+    if slash_visible {
+        return match key {
+            "ArrowDown" => Some(ComposerKeyAction::SlashSelectNext),
+            "ArrowUp" => Some(ComposerKeyAction::SlashSelectPrevious),
+            "Tab" if !shift_key && slash_apply_selected => Some(ComposerKeyAction::SlashApplySelected),
+            "Enter" if !shift_key && slash_apply_selected => Some(ComposerKeyAction::SlashApplySelected),
+            "Enter" if !shift_key => Some(ComposerKeyAction::Submit),
+            "Escape" => Some(ComposerKeyAction::SlashDismiss),
+            _ => None,
+        };
+    }
+    (key == "Enter" && !shift_key).then_some(ComposerKeyAction::Submit)
+}
+
+#[cfg(target_family = "wasm")]
+fn apply_composer_key_action(
+    action: ComposerKeyAction,
     draft: RwSignal<String>,
     submit_context: SubmitDraftContext,
-    (slash_visible, slash_apply_selected): SlashKeydownSignals,
     (
         on_slash_select_next,
         on_slash_select_previous,
@@ -347,28 +407,13 @@ fn handle_slash_palette_keydown(
         on_slash_dismiss,
     ): SlashKeydownCallbacks,
 ) -> bool {
-    if !slash_visible.get_untracked() {
-        return false;
+    match action {
+        ComposerKeyAction::SlashSelectNext => on_slash_select_next.run(()),
+        ComposerKeyAction::SlashSelectPrevious => on_slash_select_previous.run(()),
+        ComposerKeyAction::SlashApplySelected => on_slash_apply_selected.run(()),
+        ComposerKeyAction::Submit => submit_draft(draft, submit_context),
+        ComposerKeyAction::SlashDismiss => on_slash_dismiss.run(()),
     }
-
-    match ev.key().as_str() {
-        "ArrowDown" => on_slash_select_next.run(()),
-        "ArrowUp" => on_slash_select_previous.run(()),
-        "Tab" if !ev.shift_key() && slash_apply_selected.get_untracked() => {
-            on_slash_apply_selected.run(());
-        }
-        "Enter" if !ev.shift_key() => {
-            if slash_apply_selected.get_untracked() {
-                on_slash_apply_selected.run(());
-            } else {
-                submit_draft(draft, submit_context);
-            }
-        }
-        "Escape" => on_slash_dismiss.run(()),
-        _ => return false,
-    }
-
-    ev.prevent_default();
     true
 }
 
@@ -409,17 +454,10 @@ fn SlashPalette(
     #[prop(into)] slash_selected_index: Signal<usize>,
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
+    #[rustfmt::skip]
     view! {
         <Show when=move || should_render_slash_palette(slash_visible)>
-            <section class="composer__slash-palette" aria-label="Slash command suggestions">
-                {move || {
-                    render_slash_palette_state(
-                        slash_palette_state(slash_candidates),
-                        slash_selected_index.get(),
-                        on_apply_index,
-                    )
-                }}
-            </section>
+            <section class="composer__slash-palette" aria-label="Slash command suggestions">{move || render_slash_palette_state(slash_palette_state(slash_candidates), slash_selected_index.get(), on_apply_index)}</section>
         </Show>
     }
 }
@@ -589,10 +627,15 @@ mod tests {
     use leptos::prelude::*;
 
     use super::{
-        Composer, ComposerActions, ComposerFooter, SlashPalette, SlashPaletteItem,
-        SlashPaletteList, SlashPaletteState, SlashTestCallbacks, SlashTestSignals,
-        current_submit_value, render_slash_palette_state, should_render_slash_palette,
-        slash_option_id, slash_palette_state, submit_text,
+        Composer, ComposerActions, ComposerControls, ComposerFooter, ComposerSlashProps,
+        SlashPalette, SlashPaletteItem, SlashPaletteList, SlashPaletteState, SlashTestCallbacks,
+        SlashTestSignals, composer_active_descendant, current_submit_value,
+        render_slash_palette_state, should_render_slash_palette, slash_option_id,
+        slash_palette_state, submit_text,
+    };
+    #[cfg(target_family = "wasm")]
+    use super::{
+        ComposerKeyAction, SubmitDraftContext, apply_composer_key_action, composer_key_action,
     };
 
     fn make_candidate(label: &str) -> CompletionCandidate {
@@ -640,6 +683,50 @@ mod tests {
     fn slash_option_id_formats_index_as_string() {
         assert_eq!(slash_option_id(0), "slash-option-0");
         assert_eq!(slash_option_id(3), "slash-option-3");
+    }
+
+    #[test]
+    fn composer_active_descendant_requires_a_visible_non_empty_palette() {
+        assert_eq!(
+            composer_active_descendant(true, 2, 1),
+            Some("slash-option-1".to_string())
+        );
+        assert_eq!(composer_active_descendant(false, 2, 1), None);
+        assert_eq!(composer_active_descendant(true, 0, 1), None);
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[test]
+    fn composer_key_action_covers_submit_and_slash_navigation_paths() {
+        assert_eq!(
+            composer_key_action("Enter", false, false, false, false),
+            Some(ComposerKeyAction::Submit)
+        );
+        assert_eq!(
+            composer_key_action("ArrowDown", false, false, true, false),
+            Some(ComposerKeyAction::SlashSelectNext)
+        );
+        assert_eq!(
+            composer_key_action("ArrowUp", false, false, true, false),
+            Some(ComposerKeyAction::SlashSelectPrevious)
+        );
+        assert_eq!(
+            composer_key_action("Tab", false, false, true, true),
+            Some(ComposerKeyAction::SlashApplySelected)
+        );
+        assert_eq!(
+            composer_key_action("Enter", false, false, true, true),
+            Some(ComposerKeyAction::SlashApplySelected)
+        );
+        assert_eq!(
+            composer_key_action("Escape", false, false, true, false),
+            Some(ComposerKeyAction::SlashDismiss)
+        );
+        assert_eq!(
+            composer_key_action("Enter", true, false, false, false),
+            None
+        );
+        assert_eq!(composer_key_action("x", false, false, true, false), None);
     }
 
     #[test]
@@ -812,6 +899,43 @@ mod tests {
         )
     }
 
+    fn make_slash_props(
+        visible: Signal<bool>,
+        candidates: Signal<Vec<CompletionCandidate>>,
+        selected_index: Signal<usize>,
+        apply_selected: Signal<bool>,
+        callbacks: SlashTestCallbacks,
+    ) -> ComposerSlashProps {
+        ComposerSlashProps {
+            visible,
+            candidates,
+            selected_index,
+            apply_selected,
+            on_select_next: callbacks.0,
+            on_select_previous: callbacks.1,
+            on_apply_selected: callbacks.2,
+            on_apply_index: callbacks.3,
+            on_dismiss: callbacks.4,
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn submit_context(
+        disabled: Signal<bool>,
+        submitted: RwSignal<Vec<String>>,
+        restore_focus_after_submit: RwSignal<bool>,
+    ) -> SubmitDraftContext {
+        SubmitDraftContext {
+            form: NodeRef::new(),
+            textarea: NodeRef::new(),
+            disabled,
+            on_submit: Callback::new(move |text: String| {
+                submitted.update(|items| items.push(text));
+            }),
+            restore_focus_after_submit,
+        }
+    }
+
     #[test]
     fn composer_full_component_builds_without_panicking() {
         let owner = Owner::new();
@@ -829,24 +953,114 @@ mod tests {
 
             let _ = view! {
                 <Composer
-                    disabled=Signal::derive(|| false)
-                    status_text=Signal::derive(String::new)
                     draft=draft
                     on_submit=Callback::new(|_: String| {})
-                    show_cancel=Signal::derive(|| false)
-                    cancel_disabled=Signal::derive(|| false)
-                    on_cancel=Callback::new(|()| {})
-                    slash_visible=slash_visible
-                    slash_candidates=slash_candidates
-                    slash_selected_index=slash_selected_index
-                    slash_apply_selected=slash_apply_selected
-                    on_slash_select_next=on_slash_select_next
-                    on_slash_select_previous=on_slash_select_previous
-                    on_slash_apply_selected=on_slash_apply_selected
-                    on_slash_apply_index=on_slash_apply_index
-                    on_slash_dismiss=on_slash_dismiss
+                    controls=ComposerControls {
+                        disabled: Signal::derive(|| false),
+                        status_text: Signal::derive(String::new),
+                        show_cancel: Signal::derive(|| false),
+                        cancel_disabled: Signal::derive(|| false),
+                        on_cancel: Callback::new(|()| {}),
+                    }
+                    slash=make_slash_props(
+                        slash_visible,
+                        slash_candidates,
+                        slash_selected_index,
+                        slash_apply_selected,
+                        (
+                            on_slash_select_next,
+                            on_slash_select_previous,
+                            on_slash_apply_selected,
+                            on_slash_apply_index,
+                            on_slash_dismiss,
+                        ),
+                    )
                 />
             };
+        });
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[test]
+    fn apply_composer_key_action_submits_trimmed_drafts() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let submitted = RwSignal::new(Vec::<String>::new());
+            let restore_focus_after_submit = RwSignal::new(false);
+            let submit_context = submit_context(
+                Signal::derive(|| false),
+                submitted,
+                restore_focus_after_submit,
+            );
+            let draft = RwSignal::new("  prompt  ".to_string());
+            let callbacks = (
+                Callback::new(|()| {}),
+                Callback::new(|()| {}),
+                Callback::new(|()| {}),
+                Callback::new(|()| {}),
+            );
+
+            assert!(apply_composer_key_action(
+                ComposerKeyAction::Submit,
+                draft,
+                submit_context,
+                callbacks
+            ));
+            assert_eq!(submitted.get(), vec!["prompt".to_string()]);
+            assert!(restore_focus_after_submit.get());
+        });
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[test]
+    fn apply_composer_key_action_runs_slash_callbacks() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let submit_context = submit_context(
+                Signal::derive(|| false),
+                RwSignal::new(Vec::<String>::new()),
+                RwSignal::new(false),
+            );
+            let draft = RwSignal::new("prompt".to_string());
+            let next_calls = RwSignal::new(0usize);
+            let prev_calls = RwSignal::new(0usize);
+            let apply_calls = RwSignal::new(0usize);
+            let dismiss_calls = RwSignal::new(0usize);
+            let callbacks = (
+                Callback::new(move |()| next_calls.update(|value| *value += 1)),
+                Callback::new(move |()| prev_calls.update(|value| *value += 1)),
+                Callback::new(move |()| apply_calls.update(|value| *value += 1)),
+                Callback::new(move |()| dismiss_calls.update(|value| *value += 1)),
+            );
+
+            apply_composer_key_action(
+                ComposerKeyAction::SlashSelectNext,
+                draft,
+                submit_context.clone(),
+                callbacks,
+            );
+            apply_composer_key_action(
+                ComposerKeyAction::SlashSelectPrevious,
+                draft,
+                submit_context.clone(),
+                callbacks,
+            );
+            apply_composer_key_action(
+                ComposerKeyAction::SlashApplySelected,
+                draft,
+                submit_context.clone(),
+                callbacks,
+            );
+            apply_composer_key_action(
+                ComposerKeyAction::SlashDismiss,
+                draft,
+                submit_context,
+                callbacks,
+            );
+            assert_eq!(next_calls.get(), 1);
+            assert_eq!(prev_calls.get(), 1);
+            assert_eq!(apply_calls.get(), 1);
+            assert_eq!(dismiss_calls.get(), 1);
         });
     }
 }

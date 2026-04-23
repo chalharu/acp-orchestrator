@@ -1,8 +1,6 @@
 use std::{fmt::Display, path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(test)]
-use crate::contract_messages::PromptRequest;
-#[cfg(test)]
 use crate::contract_sessions::RenameSessionRequest;
 #[cfg(test)]
 use axum::{

@@ -1,7 +1,7 @@
 use acp_contracts_permissions::PermissionRequest;
 use acp_contracts_sessions::SessionSnapshot;
 
-use crate::session_lifecycle::{session_status_label, SessionLifecycle, CLOSED_SESSION_MESSAGE};
+use crate::session_lifecycle::{CLOSED_SESSION_MESSAGE, SessionLifecycle, session_status_label};
 
 use super::entries::{SessionEntry, SessionEntryRole};
 
@@ -62,8 +62,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        pending_permissions_to_items, push_bootstrap_closed_status_entry,
-        session_bootstrap_from_snapshot, SessionLifecycle,
+        SessionLifecycle, pending_permissions_to_items, push_bootstrap_closed_status_entry,
+        session_bootstrap_from_snapshot,
     };
     use crate::session::page::entries::{SessionEntry, SessionEntryRole};
     use crate::session_lifecycle::CLOSED_SESSION_MESSAGE;
@@ -99,7 +99,8 @@ mod tests {
 
     #[test]
     fn session_bootstrap_from_snapshot_maps_messages_and_permissions() {
-        let bootstrap = session_bootstrap_from_snapshot(sample_session_bootstrap_response().session);
+        let bootstrap =
+            session_bootstrap_from_snapshot(sample_session_bootstrap_response().session);
 
         assert_eq!(bootstrap.session_status, SessionLifecycle::Closed);
         assert_eq!(bootstrap.entries.len(), 3);
@@ -110,7 +111,10 @@ mod tests {
             bootstrap.entries[1].role,
             SessionEntryRole::Assistant
         ));
-        assert!(matches!(bootstrap.entries[2].role, SessionEntryRole::Status));
+        assert!(matches!(
+            bootstrap.entries[2].role,
+            SessionEntryRole::Status
+        ));
         assert_eq!(bootstrap.entries[2].text, CLOSED_SESSION_MESSAGE);
         assert_eq!(
             bootstrap.pending_permissions,

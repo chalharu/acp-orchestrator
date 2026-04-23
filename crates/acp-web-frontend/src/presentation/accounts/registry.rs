@@ -702,6 +702,35 @@ mod tests {
     }
 
     #[test]
+    fn role_labels_and_badge_classes_cover_admin_and_member_variants() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let admin_kind = Signal::derive(|| AccountRoleKind::Admin);
+            let member_kind = Signal::derive(|| AccountRoleKind::Member);
+
+            assert_eq!(account_role_label(AccountRoleKind::Admin), "admin");
+            assert_eq!(account_role_label(AccountRoleKind::Member), "member");
+            assert_eq!(
+                account_role_badge_modifier(AccountRoleKind::Active),
+                "active"
+            );
+            assert_eq!(account_role_badge_modifier(AccountRoleKind::Admin), "admin");
+            assert_eq!(
+                account_role_badge_modifier(AccountRoleKind::Member),
+                "member"
+            );
+            assert_eq!(
+                account_role_badge_class_signal(admin_kind).get(),
+                "account-role-pill account-role-pill--admin"
+            );
+            assert_eq!(
+                account_role_badge_class_signal(member_kind).get(),
+                "account-role-pill account-role-pill--member"
+            );
+        });
+    }
+
+    #[test]
     fn account_count_label_handles_zero_one_and_many() {
         assert_eq!(account_count_label(0), "0 accounts");
         assert_eq!(account_count_label(1), "1 account");
@@ -749,8 +778,10 @@ mod tests {
                     role_badge_class=role_badge_class
                 />
             };
-            let _ = view! { <AccountPasswordField password=password username="admin".to_string() /> };
-            let _ = view! { <AccountAdminToggle admin_checked=admin_checked can_modify=can_modify /> };
+            let _ =
+                view! { <AccountPasswordField password=password username="admin".to_string() /> };
+            let _ =
+                view! { <AccountAdminToggle admin_checked=admin_checked can_modify=can_modify /> };
             let _ = view! {
                 <AccountRowActions
                     saving=saving
@@ -799,6 +830,14 @@ mod tests {
         });
     }
 
+    #[test]
+    fn account_row_hint_covers_delete_state() {
+        assert_eq!(
+            account_row_hint(false, true, true, true, String::new()),
+            "Removing account…"
+        );
+    }
+
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn account_save_and_delete_host_update_notice() {
@@ -817,6 +856,39 @@ mod tests {
             account_delete_host("alice", state, deleting);
             assert!(!deleting.get());
             assert_eq!(state.notice.get(), Some("Account deleted.".to_string()));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_account_handlers_preserve_existing_notice_when_already_busy() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            state.notice.set(Some("keep".to_string()));
+
+            let password = RwSignal::new("next-password".to_string());
+            let admin_checked = RwSignal::new(true);
+            let saving = RwSignal::new(true);
+            account_save_host("alice", state, password, admin_checked, saving);
+            assert_eq!(state.notice.get_untracked(), Some("keep".to_string()));
+
+            let deleting = RwSignal::new(true);
+            account_delete_host("alice", state, deleting);
+            assert_eq!(state.notice.get_untracked(), Some("keep".to_string()));
+
+            let save_callback = account_save_handler(
+                "alice".to_string(),
+                state,
+                RwSignal::new("password".to_string()),
+                RwSignal::new(false),
+                RwSignal::new(false),
+            );
+            save_callback.run(());
+            assert_eq!(
+                state.notice.get_untracked(),
+                Some("Account updated.".to_string())
+            );
         });
     }
 }

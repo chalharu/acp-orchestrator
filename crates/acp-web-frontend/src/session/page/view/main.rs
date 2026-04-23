@@ -1,7 +1,7 @@
 use acp_contracts_permissions::PermissionRequest;
 use leptos::prelude::*;
 
-use crate::components::composer::Composer;
+use crate::components::composer::{Composer, ComposerControls, ComposerSlashProps};
 use crate::components::error_banner::ErrorBanner;
 use crate::components::pending_permissions::ChatActivity;
 use crate::components::transcript::Transcript;
@@ -171,22 +171,26 @@ pub(super) fn SessionDock(
     view! {
         <div class="chat-dock">
             <Composer
-                disabled=composer.disabled
-                status_text=composer.status
                 draft=draft
                 on_submit=callbacks.submit
-                show_cancel=composer.cancel_visible
-                cancel_disabled=composer.cancel_busy
-                on_cancel=callbacks.cancel
-                slash_visible=composer.slash_palette_visible
-                slash_candidates=composer.slash_candidates
-                slash_selected_index=composer.slash_selected_index
-                slash_apply_selected=composer.slash_apply_selected
-                on_slash_select_next=callbacks.slash.select_next
-                on_slash_select_previous=callbacks.slash.select_previous
-                on_slash_apply_selected=callbacks.slash.apply_selected
-                on_slash_apply_index=callbacks.slash.apply_index
-                on_slash_dismiss=callbacks.slash.dismiss
+                controls=ComposerControls {
+                    disabled: composer.disabled,
+                    status_text: composer.status,
+                    show_cancel: composer.cancel_visible,
+                    cancel_disabled: composer.cancel_busy,
+                    on_cancel: callbacks.cancel,
+                }
+                slash=ComposerSlashProps {
+                    visible: composer.slash_palette_visible,
+                    candidates: composer.slash_candidates,
+                    selected_index: composer.slash_selected_index,
+                    apply_selected: composer.slash_apply_selected,
+                    on_select_next: callbacks.slash.select_next,
+                    on_select_previous: callbacks.slash.select_previous,
+                    on_apply_selected: callbacks.slash.apply_selected,
+                    on_apply_index: callbacks.slash.apply_index,
+                    on_dismiss: callbacks.slash.dismiss,
+                }
             />
         </div>
     }
@@ -221,13 +225,13 @@ mod tests {
 
     use super::{
         SessionClosedNotice, SessionDock, SessionMain, SessionTopBar, SessionTranscriptPanel,
-        StatusBadgeView, topbar_toggle_icon, topbar_toggle_label,
+        StatusBadgeView, status_badge_class, topbar_toggle_icon, topbar_toggle_label,
     };
-    use crate::session_lifecycle::{BadgeTone, SessionLifecycle};
     use crate::session::page::state::{
         StatusBadge, session_composer_signals, session_main_signals, session_signals,
     };
     use crate::session::page::view::layout::session_view_callbacks;
+    use crate::session_lifecycle::{BadgeTone, SessionLifecycle};
     use acp_contracts_permissions::PermissionRequest;
 
     fn badge(label: &'static str, value: &'static str, tone: BadgeTone) -> StatusBadge {
@@ -328,5 +332,25 @@ mod tests {
         assert_eq!(badge.label, "Connection");
         assert_eq!(badge.value, "live");
         assert_eq!(badge.tone, BadgeTone::Success);
+    }
+
+    #[test]
+    fn status_badge_class_matches_badge_tone() {
+        assert_eq!(
+            status_badge_class(badge("Connection", "live", BadgeTone::Neutral)),
+            "status-badge status-badge--neutral"
+        );
+        assert_eq!(
+            status_badge_class(badge("Connection", "live", BadgeTone::Success)),
+            "status-badge status-badge--success"
+        );
+        assert_eq!(
+            status_badge_class(badge("Connection", "live", BadgeTone::Warning)),
+            "status-badge status-badge--warning"
+        );
+        assert_eq!(
+            status_badge_class(badge("Connection", "live", BadgeTone::Danger)),
+            "status-badge status-badge--danger"
+        );
     }
 }

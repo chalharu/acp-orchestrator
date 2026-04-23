@@ -1,6 +1,8 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts_accounts::{AuthStatusResponse, BootstrapRegistrationRequest, LocalAccount, SignInRequest};
+use acp_contracts_accounts::{
+    AuthStatusResponse, BootstrapRegistrationRequest, LocalAccount, SignInRequest,
+};
 #[cfg(target_family = "wasm")]
 use acp_contracts_accounts::{BootstrapRegistrationResponse, SignInResponse};
 #[cfg(target_family = "wasm")]

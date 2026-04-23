@@ -73,14 +73,7 @@ where
     let scroll_top = RwSignal::new(0.0);
     let viewport_height = RwSignal::new(DEFAULT_VIEWPORT_HEIGHT);
     let follow_tail = RwSignal::new(true);
-    let virtual_window = Memo::new(move |_| {
-        compute_virtual_window(
-            &entries.get(),
-            scroll_top.get(),
-            viewport_height.get(),
-            estimated_entry_height,
-        )
-    });
+    let virtual_window = transcript_virtual_window_memo(entries, scroll_top, viewport_height);
     let visible_entries = Signal::derive(move || virtual_window.get().visible);
     let top_spacer_height = Signal::derive(move || virtual_window.get().top_spacer_height);
     let bottom_spacer_height = Signal::derive(move || virtual_window.get().bottom_spacer_height);
@@ -99,27 +92,65 @@ where
             node_ref=viewport
             on:scroll=on_scroll
         >
-            <Show
-                when=move || !entries.get().is_empty()
-                fallback=move || {
-                    view! {
-                        <div class="transcript-empty">
-                            <p class="muted">"No messages yet."</p>
-                        </div>
-                    }
-                }
-            >
-                <ol class="transcript">
-                    <TranscriptSpacer height=top_spacer_height />
-                    <For
-                        each=move || visible_entries.get()
-                        key=|entry| entry.transcript_id().to_string()
-                        children=move |entry| render_transcript_entry_item(entry)
-                    />
-                    <TranscriptSpacer height=bottom_spacer_height />
-                </ol>
-            </Show>
+            {transcript_content(
+                entries,
+                visible_entries,
+                top_spacer_height,
+                bottom_spacer_height,
+            )}
         </section>
+    }
+}
+
+fn transcript_virtual_window<T>(
+    entries: &[T],
+    scroll_top: f64,
+    viewport_height: f64,
+) -> crate::transcript_view::VirtualWindow<T>
+where
+    T: TranscriptItem,
+{
+    compute_virtual_window(entries, scroll_top, viewport_height, estimated_entry_height)
+}
+
+fn transcript_virtual_window_memo<T>(
+    entries: Signal<Vec<T>>,
+    scroll_top: RwSignal<f64>,
+    viewport_height: RwSignal<f64>,
+) -> Memo<crate::transcript_view::VirtualWindow<T>>
+where
+    T: TranscriptItem + 'static,
+{
+    Memo::new(move |_| {
+        transcript_virtual_window(&entries.get(), scroll_top.get(), viewport_height.get())
+    })
+}
+
+fn transcript_empty_view() -> impl IntoView {
+    view! {
+        <div class="transcript-empty">
+            <p class="muted">"No messages yet."</p>
+        </div>
+    }
+}
+
+fn transcript_content<T>(
+    entries: Signal<Vec<T>>,
+    visible_entries: Signal<Vec<T>>,
+    top_spacer_height: Signal<f64>,
+    bottom_spacer_height: Signal<f64>,
+) -> impl IntoView
+where
+    T: TranscriptItem + 'static,
+{
+    #[rustfmt::skip]
+    view! {
+        <Show
+            when=move || !entries.get().is_empty()
+            fallback=transcript_empty_view
+        >
+            <ol class="transcript"><TranscriptSpacer height=top_spacer_height /><For each=move || visible_entries.get() key=|entry| entry.transcript_id().to_string() children=render_transcript_entry_item /><TranscriptSpacer height=bottom_spacer_height /></ol>
+        </Show>
     }
 }
 
@@ -312,7 +343,10 @@ mod tests {
     #[test]
     fn entry_role_helpers_return_expected_labels_and_classes() {
         assert_eq!(EntryRole::User.css_class(), "transcript-entry--user");
-        assert_eq!(EntryRole::Assistant.css_class(), "transcript-entry--assistant");
+        assert_eq!(
+            EntryRole::Assistant.css_class(),
+            "transcript-entry--assistant"
+        );
         assert_eq!(EntryRole::Status.css_class(), "transcript-entry--status");
         assert_eq!(EntryRole::User.label(), "user");
         assert_eq!(EntryRole::Assistant.label(), "assistant");
@@ -344,11 +378,46 @@ mod tests {
     }
 
     #[test]
+    fn transcript_entry_trait_methods_return_the_underlying_values() {
+        let transcript_entry = entry("assistant", EntryRole::Assistant, "hello");
+
+        assert_eq!(transcript_entry.transcript_id(), "assistant");
+        assert_eq!(transcript_entry.transcript_role(), EntryRole::Assistant);
+        assert_eq!(transcript_entry.transcript_text(), "hello");
+    }
+
+    #[test]
+    fn transcript_virtual_window_helper_and_empty_view_are_host_safe() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = vec![entry("assistant", EntryRole::Assistant, "hello")];
+            let window = transcript_virtual_window(&entries, 0.0, DEFAULT_VIEWPORT_HEIGHT);
+
+            assert_eq!(window.visible.len(), 1);
+            let _ = transcript_empty_view();
+        });
+    }
+
+    #[test]
+    fn transcript_virtual_window_memo_evaluates_for_host_signals() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = RwSignal::new(vec![entry("assistant", EntryRole::Assistant, "hello")]);
+            let memo = transcript_virtual_window_memo(
+                Signal::derive(move || entries.get()),
+                RwSignal::new(0.0),
+                RwSignal::new(DEFAULT_VIEWPORT_HEIGHT),
+            );
+
+            assert_eq!(memo.get().visible.len(), 1);
+        });
+    }
+
+    #[test]
     fn transcript_entry_item_builds_status_and_markdown_variants() {
         let owner = Owner::new();
         owner.with(|| {
-            let _ =
-                render_transcript_entry_item(entry("status", EntryRole::Status, "done"));
+            let _ = render_transcript_entry_item(entry("status", EntryRole::Status, "done"));
             let _ = view! {
                 {render_transcript_entry_item(entry("assistant", EntryRole::Assistant, "**bold**"))}
             };
@@ -365,16 +434,16 @@ mod tests {
     }
     #[test]
     fn estimated_entry_height_uses_status_layout() {
-        assert_eq!(estimated_entry_height(&entry("status", EntryRole::Status, "")), 58.0);
+        assert_eq!(
+            estimated_entry_height(&entry("status", EntryRole::Status, "")),
+            58.0
+        );
     }
 
     #[test]
     fn estimated_entry_height_uses_chat_layout_and_wraps_long_lines() {
-        let wrapped = estimated_entry_height(&entry(
-            "assistant",
-            EntryRole::Assistant,
-            &"x".repeat(53),
-        ));
+        let wrapped =
+            estimated_entry_height(&entry("assistant", EntryRole::Assistant, &"x".repeat(53)));
 
         assert_eq!(wrapped, 92.0);
     }

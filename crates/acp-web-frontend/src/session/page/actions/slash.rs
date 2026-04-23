@@ -4,9 +4,9 @@ use acp_contracts_slash::CompletionCandidate;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
-use crate::browser::clear_prepared_session_id;
-#[cfg(target_family = "wasm")]
 use crate::browser::clear_draft;
+#[cfg(target_family = "wasm")]
+use crate::browser::clear_prepared_session_id;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 use crate::session_lifecycle::TurnState;
@@ -182,5 +182,205 @@ fn available_slash_commands_detail(commands: &[CompletionCandidate]) -> String {
     } else {
         "Use the composer for `/help` and the on-screen controls for cancel or permission actions."
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts_slash::{CompletionCandidate, CompletionKind};
+    use leptos::prelude::*;
+
+    use super::{
+        apply_selected_slash_candidate, apply_slash_candidate_at, available_slash_commands_detail,
+        bind_slash_completion, dismiss_slash_palette, handle_slash_submit, session_submit_callback,
+        slash_palette_callbacks, update_slash_completion,
+    };
+    use crate::session::page::state::session_signals;
+    use crate::session_lifecycle::TurnState;
+
+    fn candidate(label: &str) -> CompletionCandidate {
+        CompletionCandidate {
+            label: label.to_string(),
+            insert_text: label.to_string(),
+            detail: "detail".to_string(),
+            kind: CompletionKind::Command,
+        }
+    }
+
+    #[test]
+    fn slash_completion_updates_or_dismisses_candidates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            update_slash_completion(signals, "/");
+            assert_eq!(signals.slash.candidates.get().len(), 1);
+            assert_eq!(signals.slash.selected_index.get(), 0);
+
+            update_slash_completion(signals, "hello");
+            assert!(signals.slash.candidates.get().is_empty());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn bind_slash_completion_uses_the_current_host_draft() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/".to_string());
+
+            bind_slash_completion(signals);
+
+            assert_eq!(signals.slash.candidates.get().len(), 1);
+        });
+    }
+
+    #[test]
+    fn slash_callbacks_cycle_apply_and_dismiss() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/he".to_string());
+            signals
+                .slash
+                .candidates
+                .set(vec![candidate("/help"), candidate("/quit")]);
+            let callbacks = slash_palette_callbacks(signals);
+
+            callbacks.select_next.run(());
+            assert_eq!(signals.slash.selected_index.get(), 1);
+            callbacks.select_previous.run(());
+            assert_eq!(signals.slash.selected_index.get(), 0);
+
+            callbacks.apply_index.run(0);
+            assert_eq!(signals.draft.get(), "/help");
+
+            signals.draft.set("/he".to_string());
+            callbacks.apply_selected.run(());
+            assert_eq!(signals.draft.get(), "/help");
+
+            callbacks.dismiss.run(());
+            assert!(signals.slash.candidates.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn slash_candidate_helpers_skip_invalid_indexes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/he".to_string());
+            signals.slash.candidates.set(vec![candidate("/help")]);
+
+            apply_slash_candidate_at(signals, 99);
+            assert_eq!(signals.draft.get(), "/he");
+
+            signals.slash.selected_index.set(0);
+            apply_selected_slash_candidate(signals);
+            assert_eq!(signals.draft.get(), "/help");
+
+            dismiss_slash_palette(signals);
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn slash_submit_records_success_and_error_activity_messages() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/help".to_string());
+            handle_slash_submit("/help", signals);
+            assert!(signals.action_error.get().is_none());
+            assert!(signals.draft.get().is_empty());
+            assert_eq!(signals.entries.get().len(), 1);
+            assert!(
+                signals.entries.get()[0]
+                    .text
+                    .contains("Available slash commands")
+            );
+
+            handle_slash_submit("/quit", signals);
+            assert_eq!(signals.entries.get().len(), 2);
+            assert!(
+                signals.entries.get()[1]
+                    .text
+                    .contains("Use the session list")
+            );
+        });
+    }
+
+    #[test]
+    fn host_submit_callback_updates_turn_state_for_prompts() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.action_error.set(Some("old".to_string()));
+            signals.slash.candidates.set(vec![candidate("/help")]);
+            let submit = session_submit_callback("session-1".to_string(), signals);
+
+            submit.run("hello".to_string());
+
+            assert_eq!(signals.turn_state.get(), TurnState::Submitting);
+            assert!(signals.action_error.get().is_none());
+            assert!(signals.slash.candidates.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn host_submit_callback_routes_slash_prompts_to_local_actions() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let submit = session_submit_callback("session-1".to_string(), signals);
+
+            submit.run("/help".to_string());
+
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert_eq!(signals.entries.get().len(), 1);
+            assert!(
+                signals.entries.get()[0]
+                    .text
+                    .contains("Available slash commands")
+            );
+        });
+    }
+
+    #[test]
+    fn slash_candidate_application_skips_completions_that_do_not_change_the_draft() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("/help".to_string());
+            signals.slash.candidates.set(vec![candidate("/help")]);
+
+            apply_slash_candidate_at(signals, 0);
+
+            assert_eq!(signals.draft.get(), "/help");
+            assert_eq!(signals.slash.selected_index.get(), 0);
+        });
+    }
+
+    #[test]
+    fn slash_candidate_application_ignores_drafts_without_a_completion_prefix() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.draft.set("hello".to_string());
+            signals.slash.candidates.set(vec![candidate("/help")]);
+
+            apply_slash_candidate_at(signals, 0);
+
+            assert_eq!(signals.draft.get(), "hello");
+        });
+    }
+
+    #[test]
+    fn available_slash_commands_detail_mentions_palette_and_controls() {
+        assert_eq!(
+            available_slash_commands_detail(&[]),
+            "No browser slash commands are available."
+        );
+        assert!(available_slash_commands_detail(&[candidate("/help")]).contains("composer"));
     }
 }

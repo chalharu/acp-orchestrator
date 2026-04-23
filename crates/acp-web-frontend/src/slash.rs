@@ -5,7 +5,10 @@
 //! supported in the web UI; other commands (cancel, approve, deny, quit)
 //! have dedicated on-screen controls.
 
-use acp_contracts_slash::{CompletionCandidate, CompletionKind, SLASH_COMMAND_SPECS, SlashCommand, SlashCompletionQuery, classify_slash_completion_prefix, parse_slash_command};
+use acp_contracts_slash::{
+    CompletionCandidate, CompletionKind, SLASH_COMMAND_SPECS, SlashCommand, SlashCompletionQuery,
+    classify_slash_completion_prefix, parse_slash_command,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BrowserSlashAction {

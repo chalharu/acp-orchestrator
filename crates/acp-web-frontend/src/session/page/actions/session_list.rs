@@ -174,7 +174,10 @@ fn handle_delete_session_error(message: String, signals: SessionSignals) {
     signals.list.deleting_id.set(None);
 }
 
-fn remove_session_from_list(sessions: &mut Vec<acp_contracts_sessions::SessionListItem>, session_id: &str) {
+fn remove_session_from_list(
+    sessions: &mut Vec<acp_contracts_sessions::SessionListItem>,
+    session_id: &str,
+) {
     sessions.retain(|session| session.id != session_id);
 }
 
@@ -193,5 +196,156 @@ fn rename_session_in_list(
 ) {
     if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
         session.title = title;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
+    use acp_contracts_permissions::PermissionRequest;
+    use acp_contracts_sessions::{SessionListItem, SessionStatus};
+    use chrono::{TimeZone, Utc};
+    use leptos::prelude::*;
+
+    use super::{
+        delete_session_callback, delete_session_is_blocked,
+        handle_current_session_delete_navigation_error, handle_delete_session_error,
+        refresh_session_list, remove_session_from_list, rename_session_callback,
+        rename_session_in_list,
+    };
+    use crate::session::page::state::session_signals;
+    use crate::session_lifecycle::{SessionLifecycle, TurnState};
+
+    fn list_item(id: &str, title: &str) -> SessionListItem {
+        SessionListItem {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: SessionStatus::Active,
+            last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+        }
+    }
+
+    fn permission(id: &str) -> PermissionRequest {
+        PermissionRequest {
+            request_id: id.to_string(),
+            summary: format!("Permission for {id}"),
+        }
+    }
+
+    #[test]
+    fn rename_session_callback_handles_blank_and_non_blank_titles_on_host() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let rename = rename_session_callback(signals);
+
+            signals.list.rename_draft.set("Draft".to_string());
+            signals.list.renaming_id.set(Some("session-1".to_string()));
+            rename.run(("session-1".to_string(), "   ".to_string()));
+            assert!(signals.list.rename_draft.get().is_empty());
+            assert!(signals.list.renaming_id.get().is_none());
+
+            rename.run(("session-2".to_string(), " New title ".to_string()));
+            assert_eq!(
+                signals.list.saving_rename_id.get(),
+                Some("session-2".to_string())
+            );
+            assert_eq!(signals.list.error.get(), None);
+        });
+    }
+
+    #[test]
+    fn delete_session_callback_respects_blockers_on_host() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let delete = delete_session_callback("session-1".to_string(), signals);
+
+            signals.turn_state.set(TurnState::AwaitingReply);
+            delete.run("session-1".to_string());
+            assert!(signals.list.deleting_id.get().is_none());
+
+            signals.turn_state.set(TurnState::Idle);
+            delete.run("session-2".to_string());
+            assert_eq!(
+                signals.list.deleting_id.get(),
+                Some("session-2".to_string())
+            );
+            assert_eq!(signals.list.error.get(), None);
+        });
+    }
+
+    #[test]
+    fn delete_session_blocked_checks_pending_deletes_and_busy_current_session() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            assert!(!delete_session_is_blocked(
+                "session-2",
+                "session-1",
+                signals
+            ));
+
+            signals.list.deleting_id.set(Some("session-3".to_string()));
+            assert!(delete_session_is_blocked("session-2", "session-1", signals));
+
+            signals.list.deleting_id.set(None);
+            signals.turn_state.set(TurnState::AwaitingReply);
+            assert!(delete_session_is_blocked("session-1", "session-1", signals));
+        });
+    }
+
+    #[test]
+    fn session_list_helpers_update_errors_and_items() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.list.items.set(vec![
+                list_item("session-1", "Old"),
+                list_item("session-2", "Keep"),
+            ]);
+            signals.list.deleting_id.set(Some("session-1".to_string()));
+            signals.pending_permissions.set(vec![permission("perm")]);
+            signals.turn_state.set(TurnState::AwaitingPermission);
+
+            handle_current_session_delete_navigation_error("nav failed".to_string(), signals);
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Unavailable);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert_eq!(signals.list.error.get(), Some("nav failed".to_string()));
+            assert!(signals.list.deleting_id.get().is_none());
+
+            handle_delete_session_error("delete failed".to_string(), signals);
+            assert_eq!(signals.list.error.get(), Some("delete failed".to_string()));
+
+            let mut items = vec![
+                list_item("session-1", "Old"),
+                list_item("session-2", "Keep"),
+            ];
+            remove_session_from_list(&mut items, "session-1");
+            rename_session_in_list(&mut items, "session-2", "Renamed".to_string());
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].title, "Renamed");
+        });
+    }
+
+    #[test]
+    fn host_refresh_session_list_completes_immediately() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            let mut future = pin!(refresh_session_list(signals));
+
+            assert!(matches!(
+                Future::poll(future.as_mut(), &mut context),
+                Poll::Ready(())
+            ));
+        });
     }
 }

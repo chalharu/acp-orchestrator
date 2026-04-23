@@ -1,8 +1,8 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts_sessions::{SessionListItem};
-use acp_contracts_slash::{CompletionCandidate};
 use acp_contracts_permissions::PermissionRequest;
+use acp_contracts_sessions::SessionListItem;
+use acp_contracts_slash::CompletionCandidate;
 use futures_util::future::AbortHandle;
 use leptos::prelude::*;
 use web_sys::EventSource;
@@ -489,9 +489,9 @@ mod tests {
     use acp_contracts_sessions::SessionListItem;
     use acp_contracts_slash::{CompletionCandidate, CompletionKind};
 
+    use super::*;
     use crate::session::page::entries::SessionEntry;
     use crate::session_lifecycle::{SessionLifecycle, TurnState};
-    use super::*;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -864,6 +864,126 @@ mod tests {
                 main.worker_badge.get()
             );
         });
+    }
+
+    #[test]
+    fn main_connection_badge_covers_all_session_status_variants() {
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Active, true),
+            StatusBadge {
+                label: "Connection",
+                value: "reconnecting",
+                tone: crate::session_lifecycle::BadgeTone::Warning,
+            }
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Active, false),
+            StatusBadge {
+                label: "Connection",
+                value: "live",
+                tone: crate::session_lifecycle::BadgeTone::Success,
+            }
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Closed, false),
+            StatusBadge {
+                label: "Connection",
+                value: "ended",
+                tone: crate::session_lifecycle::BadgeTone::Neutral,
+            }
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Unavailable, false),
+            StatusBadge {
+                label: "Connection",
+                value: "unavailable",
+                tone: crate::session_lifecycle::BadgeTone::Danger,
+            }
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Error, false),
+            StatusBadge {
+                label: "Connection",
+                value: "unavailable",
+                tone: crate::session_lifecycle::BadgeTone::Danger,
+            }
+        );
+    }
+
+    #[test]
+    fn main_worker_badge_covers_non_active_and_turn_specific_states() {
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Loading, TurnState::Idle, false),
+            StatusBadge {
+                label: "Worker",
+                value: "starting",
+                tone: crate::session_lifecycle::BadgeTone::Neutral,
+            }
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Unavailable, TurnState::Idle, false),
+            StatusBadge {
+                label: "Worker",
+                value: "unavailable",
+                tone: crate::session_lifecycle::BadgeTone::Danger,
+            }
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Error, TurnState::Idle, false),
+            StatusBadge {
+                label: "Worker",
+                value: "unavailable",
+                tone: crate::session_lifecycle::BadgeTone::Danger,
+            }
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Closed, TurnState::Idle, false),
+            StatusBadge {
+                label: "Worker",
+                value: "stopped",
+                tone: crate::session_lifecycle::BadgeTone::Neutral,
+            }
+        );
+    }
+
+    #[test]
+    fn main_worker_badge_covers_active_turn_variants() {
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Submitting, false),
+            StatusBadge {
+                label: "Worker",
+                value: "running",
+                tone: crate::session_lifecycle::BadgeTone::Success,
+            }
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Cancelling, false),
+            StatusBadge {
+                label: "Worker",
+                value: "cancelling",
+                tone: crate::session_lifecycle::BadgeTone::Warning,
+            }
+        );
+        assert_eq!(
+            main_worker_badge(
+                SessionLifecycle::Active,
+                TurnState::AwaitingPermission,
+                false
+            ),
+            StatusBadge {
+                label: "Worker",
+                value: "permission",
+                tone: crate::session_lifecycle::BadgeTone::Warning,
+            }
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Idle, false),
+            StatusBadge {
+                label: "Worker",
+                value: "idle",
+                tone: crate::session_lifecycle::BadgeTone::Neutral,
+            }
+        );
     }
 
     // -----------------------------------------------------------------------

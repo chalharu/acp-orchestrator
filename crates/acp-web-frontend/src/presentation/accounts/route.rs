@@ -1,17 +1,13 @@
 use leptos::prelude::*;
 
-use crate::{
-    application::auth::AccountsRouteAccess,
-    components::ErrorBanner,
-};
+use crate::{application::auth::AccountsRouteAccess, components::ErrorBanner};
 
 use super::{
     create_account::CreateAccountSection,
     registry::CurrentAccountsSection,
     shared::{
-        AccountsPageState, accounts_back_to_chat_path_from_location,
-        accounts_page_shows_sign_out, initialize_accounts_page, sign_out_button_label,
-        sign_out_handler,
+        AccountsPageState, accounts_back_to_chat_path_from_location, accounts_page_shows_sign_out,
+        initialize_accounts_page, sign_out_button_label, sign_out_handler,
     },
 };
 

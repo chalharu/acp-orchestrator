@@ -31,7 +31,35 @@ allow = [
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
-crate = "acp-app-support"
+crate = "acp-app-support-errors"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-frontend"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-http"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-listener"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-runtime"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-service"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-temp"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-app-support-tracing"
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
@@ -39,7 +67,31 @@ crate = "acp-cli"
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
-crate = "acp-contracts"
+crate = "acp-contracts-accounts"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-errors"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-messages"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-permissions"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-sessions"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-slash"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-stream"
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]

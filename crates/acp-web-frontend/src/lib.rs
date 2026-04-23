@@ -3,22 +3,22 @@
 mod application;
 mod browser;
 mod components;
+mod infrastructure;
+mod presentation;
 mod routing;
+mod session;
 mod session_activity;
 mod session_lifecycle;
 mod session_state;
-mod transcript_view;
-mod infrastructure;
-mod presentation;
-mod session;
 mod slash;
+mod transcript_view;
 
 use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
-use crate::routing::{AppRoute, current_route};
 use crate::presentation::{AccountsPage, RegisterPage, SignInPage};
+use crate::routing::{AppRoute, current_route};
 use crate::session::{HomePage, SessionView};
 
 fn not_found_view() -> impl IntoView {

@@ -1,11 +1,9 @@
-use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use leptos::portal::Portal;
+use leptos::prelude::*;
 
 use crate::components::error_banner::ErrorBanner;
 
-use super::main::SessionMain;
-use super::sidebar::SessionSidebar;
 use super::super::{
     actions::{
         bind_slash_completion, delete_session_callback, rename_session_callback,
@@ -14,11 +12,13 @@ use super::super::{
     },
     state::{
         SessionComposerSignals, SessionMainSignals, SessionShellSignals, SessionSignals,
-        SessionViewCallbacks,
-        current_session_deleting_signal, persist_session_draft, restore_session_draft,
-        session_composer_signals, session_main_signals, session_shell_signals, session_signals,
+        SessionViewCallbacks, current_session_deleting_signal, persist_session_draft,
+        restore_session_draft, session_composer_signals, session_main_signals,
+        session_shell_signals, session_signals,
     },
 };
+use super::main::SessionMain;
+use super::sidebar::SessionSidebar;
 
 /// Landing page. Prepares a fresh session and immediately redirects to the
 /// live chat route so startup hints appear before the first prompt.

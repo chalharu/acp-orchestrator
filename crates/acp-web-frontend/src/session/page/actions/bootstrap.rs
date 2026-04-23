@@ -1,8 +1,8 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
+use acp_contracts_sessions::SessionSnapshot;
 #[cfg(target_family = "wasm")]
 use acp_contracts_sessions::SessionStatus;
-use acp_contracts_sessions::SessionSnapshot;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
@@ -24,9 +24,9 @@ use super::super::state::SessionSignals;
 use super::session_list::refresh_session_list;
 #[cfg(target_family = "wasm")]
 use super::shared::spawn_browser_task;
-use super::stream::{next_tool_activity_id, push_tool_activity_entry};
 #[cfg(target_family = "wasm")]
 use super::stream::spawn_session_stream;
+use super::stream::{next_tool_activity_id, push_tool_activity_entry};
 
 #[cfg(target_family = "wasm")]
 pub(crate) fn spawn_home_redirect(error: RwSignal<Option<String>>, preparing: RwSignal<bool>) {
@@ -129,7 +129,9 @@ fn apply_loaded_session(session: SessionSnapshot, signals: SessionSignals) {
     let should_clear =
         should_clear_prepared_session_on_load(bootstrap.session_status, &bootstrap.entries);
     signals.entries.set(bootstrap.entries);
-    signals.pending_permissions.set(bootstrap.pending_permissions);
+    signals
+        .pending_permissions
+        .set(bootstrap.pending_permissions);
     signals.session_status.set(bootstrap.session_status);
     signals.turn_state.set(turn_state_for_session);
     if should_clear {
@@ -162,4 +164,145 @@ fn record_session_bootstrap_failure(
 ) {
     clear_prepared_session_id();
     apply_bootstrap_failure_signals(message, session_lifecycle, signals);
+}
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts_messages::{ConversationMessage, MessageRole};
+    use acp_contracts_permissions::PermissionRequest;
+    use acp_contracts_sessions::{SessionSnapshot, SessionStatus};
+    use chrono::{TimeZone, Utc};
+    use leptos::prelude::*;
+
+    use super::{
+        apply_bootstrap_failure_signals, apply_loaded_session, set_home_redirect_error,
+        should_clear_prepared_session_on_load,
+    };
+    use crate::session::page::state::session_signals;
+    use crate::session_lifecycle::{SessionLifecycle, TurnState};
+
+    fn sample_snapshot(
+        status: SessionStatus,
+        messages: Vec<ConversationMessage>,
+    ) -> SessionSnapshot {
+        SessionSnapshot {
+            id: "session-1".to_string(),
+            title: "Session".to_string(),
+            status,
+            latest_sequence: 2,
+            messages,
+            pending_permissions: vec![PermissionRequest {
+                request_id: "perm-1".to_string(),
+                summary: "Read README".to_string(),
+            }],
+        }
+    }
+
+    fn message(id: &str, role: MessageRole, text: &str) -> ConversationMessage {
+        ConversationMessage {
+            id: id.to_string(),
+            role,
+            text: text.to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn home_redirect_error_clears_preparing_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let error = RwSignal::new(None::<String>);
+            let preparing = RwSignal::new(true);
+
+            set_home_redirect_error(error, preparing, "boom".to_string());
+
+            assert_eq!(error.get(), Some("boom".to_string()));
+            assert!(!preparing.get());
+        });
+    }
+
+    #[test]
+    fn prepared_session_is_cleared_for_closed_or_user_entry_sessions() {
+        assert!(should_clear_prepared_session_on_load(
+            SessionLifecycle::Closed,
+            &[],
+        ));
+        assert!(should_clear_prepared_session_on_load(
+            SessionLifecycle::Active,
+            &[crate::session::page::entries::SessionEntry::from_message(
+                message("user-1", MessageRole::User, "hello",)
+            )],
+        ));
+        assert!(!should_clear_prepared_session_on_load(
+            SessionLifecycle::Active,
+            &[crate::session::page::entries::SessionEntry::from_message(
+                message("assistant-1", MessageRole::Assistant, "hi",)
+            )],
+        ));
+    }
+
+    #[test]
+    fn apply_loaded_session_updates_host_signals() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            apply_loaded_session(
+                sample_snapshot(
+                    SessionStatus::Active,
+                    vec![message("assistant-1", MessageRole::Assistant, "hi")],
+                ),
+                signals,
+            );
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Active);
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
+            assert_eq!(signals.entries.get().len(), 1);
+            assert_eq!(signals.pending_permissions.get().len(), 1);
+        });
+    }
+
+    #[test]
+    fn apply_loaded_session_handles_closed_sessions_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+
+            apply_loaded_session(
+                sample_snapshot(
+                    SessionStatus::Closed,
+                    vec![message("user-1", MessageRole::User, "hello")],
+                ),
+                signals,
+            );
+
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Closed);
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
+            assert_eq!(signals.entries.get().len(), 2);
+        });
+    }
+
+    #[test]
+    fn bootstrap_failure_signals_record_connection_activity() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+
+            apply_bootstrap_failure_signals(
+                "network down".to_string(),
+                SessionLifecycle::Unavailable,
+                signals,
+            );
+
+            assert_eq!(
+                signals.connection_error.get(),
+                Some("network down".to_string())
+            );
+            assert_eq!(signals.session_status.get(), SessionLifecycle::Unavailable);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+            assert_eq!(signals.entries.get().len(), 1);
+            assert!(signals.entries.get()[0].text.contains("network down"));
+        });
+    }
 }

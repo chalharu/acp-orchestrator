@@ -7,12 +7,12 @@ use leptos::prelude::*;
 use crate::infrastructure::api;
 use crate::session_lifecycle::TurnState;
 
-use super::events::{next_tool_activity_id, push_tool_activity_entry};
 use super::super::super::state::SessionSignals;
 #[cfg(target_family = "wasm")]
 use super::super::session_list::refresh_session_list;
 #[cfg(target_family = "wasm")]
 use super::super::shared::spawn_browser_task;
+use super::events::{next_tool_activity_id, push_tool_activity_entry};
 
 pub(crate) fn session_permission_callbacks(
     session_id: String,
@@ -165,4 +165,107 @@ fn cancel_turn_callback(_session_id: String, signals: SessionSignals) -> Callbac
     Callback::new(move |()| {
         begin_cancel_turn(signals);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts_permissions::{PermissionDecision, PermissionRequest};
+    use leptos::prelude::*;
+
+    use super::{
+        apply_permission_resolution_success, begin_cancel_turn, permission_resolution_detail,
+        permission_resolution_turn_state, session_permission_callbacks,
+    };
+    use crate::session::page::state::session_signals;
+    use crate::session_lifecycle::TurnState;
+
+    fn permission(id: &str) -> PermissionRequest {
+        PermissionRequest {
+            request_id: id.to_string(),
+            summary: format!("Permission for {id}"),
+        }
+    }
+
+    #[test]
+    fn permission_resolution_helpers_match_decisions() {
+        assert_eq!(
+            permission_resolution_turn_state(&PermissionDecision::Approve),
+            TurnState::AwaitingReply
+        );
+        assert_eq!(
+            permission_resolution_turn_state(&PermissionDecision::Deny),
+            TurnState::Idle
+        );
+        assert_eq!(
+            permission_resolution_detail("perm-1", &PermissionDecision::Approve),
+            "perm-1 approved."
+        );
+        assert_eq!(
+            permission_resolution_detail("perm-1", &PermissionDecision::Deny),
+            "perm-1 denied."
+        );
+    }
+
+    #[test]
+    fn permission_resolution_success_removes_requests_and_records_activity() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals
+                .pending_permissions
+                .set(vec![permission("perm-1"), permission("perm-2")]);
+
+            apply_permission_resolution_success("perm-1", &PermissionDecision::Approve, signals);
+
+            assert_eq!(signals.pending_permissions.get().len(), 1);
+            assert_eq!(signals.pending_permissions.get()[0].request_id, "perm-2");
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingReply);
+            assert_eq!(signals.entries.get().len(), 1);
+            assert!(signals.entries.get()[0].text.contains("perm-1 approved."));
+        });
+    }
+
+    #[test]
+    fn permission_callbacks_update_host_busy_and_cancel_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let (approve, deny, cancel) =
+                session_permission_callbacks("session-1".to_string(), signals);
+
+            signals.action_error.set(Some("old".to_string()));
+            approve.run("perm-1".to_string());
+            assert!(signals.pending_action_busy.get());
+            assert!(signals.action_error.get().is_none());
+
+            signals.pending_action_busy.set(false);
+            signals.action_error.set(Some("old".to_string()));
+            deny.run("perm-2".to_string());
+            assert!(signals.pending_action_busy.get());
+            assert!(signals.action_error.get().is_none());
+
+            signals.pending_action_busy.set(false);
+            signals.turn_state.set(TurnState::AwaitingReply);
+            cancel.run(());
+            assert!(signals.pending_action_busy.get());
+            assert_eq!(signals.turn_state.get(), TurnState::Cancelling);
+        });
+    }
+
+    #[test]
+    fn begin_cancel_turn_preserves_the_previous_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingPermission);
+            signals.action_error.set(Some("old".to_string()));
+
+            let previous = begin_cancel_turn(signals);
+
+            assert_eq!(previous, TurnState::AwaitingPermission);
+            assert!(signals.pending_action_busy.get());
+            assert_eq!(signals.turn_state.get(), TurnState::Cancelling);
+            assert!(signals.action_error.get().is_none());
+        });
+    }
 }

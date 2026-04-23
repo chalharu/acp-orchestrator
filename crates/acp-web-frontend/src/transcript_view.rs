@@ -38,14 +38,13 @@ pub(crate) fn compute_virtual_window<T: Clone>(
     let end_threshold = scroll_top + viewport_height + OVERSCAN_PX;
     let (start_index, top_spacer_height) =
         find_window_start(entries, start_threshold, &estimated_entry_height);
-    let (end_index, rendered_height) =
-        find_window_end(
-            entries,
-            start_index,
-            top_spacer_height,
-            end_threshold,
-            &estimated_entry_height,
-        );
+    let (end_index, rendered_height) = find_window_end(
+        entries,
+        start_index,
+        top_spacer_height,
+        end_threshold,
+        &estimated_entry_height,
+    );
 
     let total_height = entries.iter().map(&estimated_entry_height).sum::<f64>();
 
@@ -246,8 +245,8 @@ mod tests {
 
     use super::{
         compute_virtual_window, is_safe_markdown_link, is_safe_markdown_url, markdown_options,
-        render_markdown, sanitize_markdown_end, sanitize_markdown_events,
-        sanitize_markdown_start, tail_scroll_top,
+        render_markdown, sanitize_markdown_end, sanitize_markdown_events, sanitize_markdown_start,
+        tail_scroll_top,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq)]

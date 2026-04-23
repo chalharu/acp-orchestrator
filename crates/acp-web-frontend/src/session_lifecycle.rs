@@ -52,7 +52,9 @@ pub(crate) fn session_status_label(status: SessionStatus) -> SessionLifecycle {
 mod tests {
     use acp_contracts_sessions::SessionStatus;
 
-    use super::{CLOSED_SESSION_MESSAGE, SessionLifecycle, session_end_message, session_status_label};
+    use super::{
+        CLOSED_SESSION_MESSAGE, SessionLifecycle, session_end_message, session_status_label,
+    };
 
     #[test]
     fn session_end_message_normalizes_empty_and_default_reasons() {

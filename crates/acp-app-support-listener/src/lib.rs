@@ -87,4 +87,9 @@ mod tests {
 
         assert!(endpoint.starts_with("http://127.0.0.1:"));
     }
+
+    #[test]
+    fn print_startup_line_is_callable_in_tests() {
+        super::print_startup_line("service", "http://127.0.0.1:1234");
+    }
 }

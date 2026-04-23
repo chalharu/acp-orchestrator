@@ -30,9 +30,7 @@ use contract_messages::{ConversationMessage, MessageRole, PromptRequest, PromptR
 use contract_permissions::{
     PermissionDecision, ResolvePermissionRequest, ResolvePermissionResponse,
 };
-use contract_sessions::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, SessionSnapshot, SessionStatus,
-};
+use contract_sessions::{CancelTurnResponse, CloseSessionResponse, SessionSnapshot, SessionStatus};
 use contract_stream::{StreamEvent, StreamEventPayload};
 use events::{InitialSnapshotState, stream_events_to_stderr};
 use input::drive_repl;

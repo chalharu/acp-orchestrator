@@ -13,3 +13,13 @@ where
     Task: Future<Output = ()> + 'static,
 {
 }
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_browser_task;
+
+    #[test]
+    fn host_spawn_browser_task_accepts_futures_without_panicking() {
+        spawn_browser_task(async {});
+    }
+}

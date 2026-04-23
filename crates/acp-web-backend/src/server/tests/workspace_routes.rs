@@ -1,14 +1,55 @@
 use super::*;
 use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
-#[tokio::test]
-async fn listing_workspaces_bootstraps_the_default_workspace() {
-    let state = AppState::with_dependencies(
+fn workspace_state() -> AppState {
+    AppState::with_dependencies(
         Arc::new(SessionStore::new(4)),
         Arc::new(StaticReplyProvider {
             reply: String::new(),
         }),
-    );
+    )
+}
+
+async fn create_owned_workspace(
+    state: &AppState,
+    name: &str,
+) -> crate::contract_workspaces::WorkspaceDetail {
+    create_workspace(
+        State(state.clone()),
+        bearer_principal("alice"),
+        Json(CreateWorkspaceRequest {
+            name: name.to_string(),
+            upstream_url: Some("https://example.com/repo.git".to_string()),
+            default_ref: Some("refs/heads/main".to_string()),
+            credential_reference_id: None,
+        }),
+    )
+    .await
+    .expect("workspace creation should succeed")
+    .1
+    .0
+    .workspace
+}
+
+async fn create_workspace_session_for(
+    state: &AppState,
+    workspace_id: &str,
+) -> crate::contract_sessions::SessionSnapshot {
+    create_workspace_session(
+        State(state.clone()),
+        Path(workspace_id.to_string()),
+        bearer_principal("alice"),
+    )
+    .await
+    .expect("workspace session should create")
+    .1
+    .0
+    .session
+}
+
+#[tokio::test]
+async fn listing_workspaces_bootstraps_the_default_workspace() {
+    let state = workspace_state();
 
     let response = list_workspaces(State(state), bearer_principal("alice"))
         .await
@@ -24,26 +65,9 @@ async fn listing_workspaces_bootstraps_the_default_workspace() {
 
 #[tokio::test]
 async fn workspace_crud_handlers_round_trip_owned_workspaces() {
-    let state = AppState::with_dependencies(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-    );
-
-    let created = create_workspace(
-        State(state.clone()),
-        bearer_principal("alice"),
-        Json(CreateWorkspaceRequest {
-            name: "Repo".to_string(),
-            upstream_url: Some("https://example.com/repo.git".to_string()),
-            default_ref: Some("refs/heads/main".to_string()),
-            credential_reference_id: None,
-        }),
-    )
-    .await
-    .expect("workspace creation should succeed");
-    let workspace_id = created.1.0.workspace.workspace_id.clone();
+    let state = workspace_state();
+    let created = create_owned_workspace(&state, "Repo").await;
+    let workspace_id = created.workspace_id.clone();
 
     let fetched = get_workspace(
         State(state.clone()),
@@ -92,67 +116,14 @@ async fn workspace_crud_handlers_round_trip_owned_workspaces() {
 
 #[tokio::test]
 async fn workspace_session_routes_scope_sessions_to_the_workspace() {
-    let state = AppState::with_dependencies(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-    );
+    let state = workspace_state();
+    let first_workspace = create_owned_workspace(&state, "First").await;
+    let second_workspace = create_owned_workspace(&state, "Second").await;
+    let created = create_workspace_session_for(&state, &first_workspace.workspace_id).await;
+    let other = create_workspace_session_for(&state, &second_workspace.workspace_id).await;
 
-    let first_workspace = create_workspace(
-        State(state.clone()),
-        bearer_principal("alice"),
-        Json(CreateWorkspaceRequest {
-            name: "First".to_string(),
-            upstream_url: None,
-            default_ref: None,
-            credential_reference_id: None,
-        }),
-    )
-    .await
-    .expect("first workspace should create")
-    .1
-    .0
-    .workspace;
-    let second_workspace = create_workspace(
-        State(state.clone()),
-        bearer_principal("alice"),
-        Json(CreateWorkspaceRequest {
-            name: "Second".to_string(),
-            upstream_url: None,
-            default_ref: None,
-            credential_reference_id: None,
-        }),
-    )
-    .await
-    .expect("second workspace should create")
-    .1
-    .0
-    .workspace;
-
-    let created = create_workspace_session(
-        State(state.clone()),
-        Path(first_workspace.workspace_id.clone()),
-        bearer_principal("alice"),
-    )
-    .await
-    .expect("workspace session should create");
-    let other = create_workspace_session(
-        State(state.clone()),
-        Path(second_workspace.workspace_id.clone()),
-        bearer_principal("alice"),
-    )
-    .await
-    .expect("other workspace session should create");
-
-    assert_eq!(
-        created.1.0.session.workspace_id,
-        first_workspace.workspace_id
-    );
-    assert_eq!(
-        other.1.0.session.workspace_id,
-        second_workspace.workspace_id
-    );
+    assert_eq!(created.workspace_id, first_workspace.workspace_id);
+    assert_eq!(other.workspace_id, second_workspace.workspace_id);
 
     let response = list_workspace_sessions(
         State(state),
@@ -163,36 +134,14 @@ async fn workspace_session_routes_scope_sessions_to_the_workspace() {
     .expect("listing workspace sessions should succeed");
 
     assert_eq!(response.0.sessions.len(), 1);
-    assert_eq!(response.0.sessions[0].id, created.1.0.session.id);
-    assert_eq!(
-        response.0.sessions[0].workspace_id,
-        created.1.0.session.workspace_id
-    );
+    assert_eq!(response.0.sessions[0].id, created.id);
+    assert_eq!(response.0.sessions[0].workspace_id, created.workspace_id);
 }
 
 #[tokio::test]
 async fn workspace_updates_require_name_or_default_ref() {
-    let state = AppState::with_dependencies(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-    );
-    let created = create_workspace(
-        State(state.clone()),
-        bearer_principal("alice"),
-        Json(CreateWorkspaceRequest {
-            name: "Repo".to_string(),
-            upstream_url: Some("https://example.com/repo.git".to_string()),
-            default_ref: None,
-            credential_reference_id: None,
-        }),
-    )
-    .await
-    .expect("workspace creation should succeed")
-    .1
-    .0
-    .workspace;
+    let state = workspace_state();
+    let created = create_owned_workspace(&state, "Repo").await;
 
     let error = update_workspace(
         State(state),

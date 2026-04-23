@@ -1,4 +1,8 @@
-use std::{cmp::Reverse, collections::HashMap, sync::Arc};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::HashMap,
+    sync::Arc,
+};
 
 use chrono::Utc;
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
@@ -271,13 +275,7 @@ impl SessionStore {
             }
         }
 
-        owned_sessions.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
-                .then_with(|| left.1.id.cmp(&right.1.id))
-        });
+        sort_session_entries(&mut owned_sessions);
 
         owned_sessions.into_iter().map(|(_, item)| item).collect()
     }
@@ -300,13 +298,7 @@ impl SessionStore {
             }
         }
 
-        workspace_sessions.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
-                .then_with(|| left.1.id.cmp(&right.1.id))
-        });
+        sort_session_entries(&mut workspace_sessions);
 
         workspace_sessions
             .into_iter()
@@ -542,4 +534,19 @@ impl SessionStore {
             sessions.remove(&session_id);
         }
     }
+}
+
+fn sort_session_entries(entries: &mut [(u64, SessionListItem)]) {
+    entries.sort_by(compare_session_entries);
+}
+
+fn compare_session_entries(
+    left: &(u64, SessionListItem),
+    right: &(u64, SessionListItem),
+) -> Ordering {
+    right
+        .0
+        .cmp(&left.0)
+        .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
+        .then_with(|| left.1.id.cmp(&right.1.id))
 }

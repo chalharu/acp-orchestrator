@@ -1,33 +1,43 @@
 use super::support::*;
 use acp_web_backend::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
-#[tokio::test]
-async fn workspace_crud_and_workspace_scoped_sessions_work_over_http() -> Result<()> {
-    let stack = TestStack::spawn(ServerConfig {
+async fn workspace_stack() -> Result<TestStack> {
+    TestStack::spawn(ServerConfig {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,
     })
-    .await?;
+    .await
+}
+
+fn repo_workspace_request(name: &str) -> CreateWorkspaceRequest {
+    CreateWorkspaceRequest {
+        name: name.to_string(),
+        upstream_url: Some("https://example.com/repo.git".to_string()),
+        default_ref: Some("refs/heads/main".to_string()),
+        credential_reference_id: None,
+    }
+}
+
+async fn create_repo_workspace(stack: &TestStack, name: &str) -> Result<String> {
+    Ok(stack
+        .create_workspace("alice", &repo_workspace_request(name))
+        .await?
+        .workspace
+        .workspace_id)
+}
+
+#[tokio::test]
+async fn workspace_crud_works_over_http() -> Result<()> {
+    let stack = workspace_stack().await?;
 
     let initial = stack.list_workspaces("alice").await?;
     assert_eq!(initial.workspaces.len(), 1);
     assert_eq!(initial.workspaces[0].name, "Default workspace");
 
-    let created = stack
-        .create_workspace(
-            "alice",
-            &CreateWorkspaceRequest {
-                name: "Repo".to_string(),
-                upstream_url: Some("https://example.com/repo.git".to_string()),
-                default_ref: Some("refs/heads/main".to_string()),
-                credential_reference_id: None,
-            },
-        )
-        .await?;
-    let workspace_id = created.workspace.workspace_id.clone();
+    let workspace_id = create_repo_workspace(&stack, "Repo").await?;
 
     let fetched = stack.get_workspace("alice", &workspace_id).await?;
     assert_eq!(fetched.workspace.name, "Repo");
@@ -48,10 +58,30 @@ async fn workspace_crud_and_workspace_scoped_sessions_work_over_http() -> Result
         Some("refs/heads/release")
     );
 
+    stack.delete_workspace("alice", &workspace_id).await?;
+    let response = stack
+        .client
+        .get(format!(
+            "{}/api/v1/workspaces/{workspace_id}",
+            stack.backend_url
+        ))
+        .bearer_auth("alice")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_sessions_are_scoped_over_http() -> Result<()> {
+    let stack = workspace_stack().await?;
+    let initial = stack.list_workspaces("alice").await?;
+    let bootstrap_workspace_id = initial.workspaces[0].workspace_id.clone();
+    let workspace_id = create_repo_workspace(&stack, "Repo").await?;
     let first = stack
         .create_workspace_session("alice", &workspace_id)
         .await?;
-    let bootstrap_workspace_id = initial.workspaces[0].workspace_id.clone();
     let _legacy = stack.create_legacy_session("alice").await?;
 
     let listed = stack
@@ -73,16 +103,5 @@ async fn workspace_crud_and_workspace_scoped_sessions_work_over_http() -> Result
 
     stack.delete_session("alice", &first.session.id).await?;
     stack.delete_workspace("alice", &workspace_id).await?;
-    let response = stack
-        .client
-        .get(format!(
-            "{}/api/v1/workspaces/{workspace_id}",
-            stack.backend_url
-        ))
-        .bearer_auth("alice")
-        .send()
-        .await?;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
     Ok(())
 }

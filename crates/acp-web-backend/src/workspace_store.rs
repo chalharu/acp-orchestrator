@@ -173,19 +173,11 @@ impl SqliteWorkspaceRepository {
             updated_at: Utc::now(),
             ..existing
         };
-        let updated_row = update_workspace_record(
-            &tx,
-            owner_user_id,
-            workspace_id,
-            &updated.name,
-            updated.default_ref.as_deref(),
-            updated.updated_at,
-        )?;
-        if !updated_row {
-            return Err(WorkspaceStoreError::NotFound(
-                "workspace not found".to_string(),
-            ));
-        }
+        let updated_row = apply_workspace_update(&tx, owner_user_id, workspace_id, &updated)?;
+        debug_assert!(
+            updated_row,
+            "loaded workspace should remain updateable within the transaction"
+        );
         tx.commit().map_err(database_error)?;
         Ok(updated)
     }
@@ -203,11 +195,10 @@ impl SqliteWorkspaceRepository {
             .ok_or_else(|| WorkspaceStoreError::NotFound("workspace not found".to_string()))?;
         ensure_workspace_can_be_deleted(&tx, &workspace)?;
         let deleted = soft_delete_workspace(&tx, owner_user_id, workspace_id, Utc::now())?;
-        if !deleted {
-            return Err(WorkspaceStoreError::NotFound(
-                "workspace not found".to_string(),
-            ));
-        }
+        debug_assert!(
+            deleted,
+            "loaded workspace should remain deletable within the transaction"
+        );
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -446,11 +437,29 @@ fn validate_workspace_update(
             "workspace update must include name or default_ref".to_string(),
         ));
     }
-    if let Some(name) = request.name.as_deref() {
-        let _ = validate_workspace_name(name)?;
-    }
+    request
+        .name
+        .as_deref()
+        .map(validate_workspace_name)
+        .transpose()?;
     let _ = validate_workspace_default_ref(request.default_ref.as_deref())?;
     Ok(())
+}
+
+fn apply_workspace_update(
+    connection: &Connection,
+    owner_user_id: &str,
+    workspace_id: &str,
+    workspace: &WorkspaceRecord,
+) -> Result<bool, WorkspaceStoreError> {
+    update_workspace_record(
+        connection,
+        owner_user_id,
+        workspace_id,
+        &workspace.name,
+        workspace.default_ref.as_deref(),
+        workspace.updated_at,
+    )
 }
 
 fn validate_workspace_name(name: &str) -> Result<String, WorkspaceStoreError> {
@@ -877,6 +886,8 @@ mod tests {
     use super::*;
     use tokio::time::sleep;
 
+    mod workspaces;
+
     fn test_repository() -> SqliteWorkspaceRepository {
         let root = std::env::temp_dir().join(format!(
             "acp-workspace-store-test-{}",
@@ -1233,173 +1244,6 @@ mod tests {
         assert_eq!(second.workspace_id, first.workspace_id);
         assert_eq!(second.owner_user_id, user.user_id);
         assert_eq!(second.name, BOOTSTRAP_WORKSPACE_NAME);
-    }
-
-    #[tokio::test]
-    async fn workspaces_can_be_created_listed_updated_and_deleted() {
-        let repository = test_repository();
-        let user = repository
-            .materialize_user(&bearer_principal("developer"))
-            .await
-            .expect("principal materialization should succeed");
-
-        let created = repository
-            .create_workspace(
-                &user.user_id,
-                &CreateWorkspaceRequest {
-                    name: "Repo".to_string(),
-                    upstream_url: Some("https://example.com/repo.git".to_string()),
-                    default_ref: Some("refs/heads/main".to_string()),
-                    credential_reference_id: None,
-                },
-            )
-            .await
-            .expect("workspace creation should succeed");
-
-        assert_eq!(created.name, "Repo");
-        assert_eq!(
-            created.upstream_url.as_deref(),
-            Some("https://example.com/repo.git")
-        );
-
-        let listed = repository
-            .list_workspaces(&user.user_id)
-            .await
-            .expect("workspace listing should succeed");
-        assert!(
-            listed
-                .iter()
-                .any(|workspace| workspace.workspace_id == created.workspace_id)
-        );
-
-        let updated = repository
-            .update_workspace(
-                &user.user_id,
-                &created.workspace_id,
-                &UpdateWorkspaceRequest {
-                    name: Some("Renamed repo".to_string()),
-                    default_ref: Some("refs/heads/release".to_string()),
-                },
-            )
-            .await
-            .expect("workspace update should succeed");
-        assert_eq!(updated.name, "Renamed repo");
-        assert_eq!(updated.default_ref.as_deref(), Some("refs/heads/release"));
-
-        repository
-            .delete_workspace(&user.user_id, &created.workspace_id)
-            .await
-            .expect("workspace delete should succeed");
-        let loaded = repository
-            .load_workspace(&user.user_id, &created.workspace_id)
-            .await
-            .expect("deleted workspace lookup should succeed");
-        assert!(loaded.is_none());
-    }
-
-    #[tokio::test]
-    async fn workspace_updates_require_a_mutable_field() {
-        let repository = test_repository();
-        let user = repository
-            .materialize_user(&bearer_principal("developer"))
-            .await
-            .expect("principal materialization should succeed");
-        let created = repository
-            .create_workspace(
-                &user.user_id,
-                &CreateWorkspaceRequest {
-                    name: "Repo".to_string(),
-                    upstream_url: Some("https://example.com/repo.git".to_string()),
-                    default_ref: None,
-                    credential_reference_id: None,
-                },
-            )
-            .await
-            .expect("workspace creation should succeed");
-
-        let error = repository
-            .update_workspace(
-                &user.user_id,
-                &created.workspace_id,
-                &UpdateWorkspaceRequest {
-                    name: None,
-                    default_ref: None,
-                },
-            )
-            .await
-            .expect_err("empty workspace updates should fail");
-
-        assert_eq!(
-            error,
-            WorkspaceStoreError::Validation(
-                "workspace update must include name or default_ref".to_string()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn listing_workspace_sessions_returns_non_deleted_session_metadata() {
-        let repository = test_repository();
-        let user = repository
-            .materialize_user(&bearer_principal("developer"))
-            .await
-            .expect("principal materialization should succeed");
-        let workspace = repository
-            .create_workspace(
-                &user.user_id,
-                &CreateWorkspaceRequest {
-                    name: "Repo".to_string(),
-                    upstream_url: None,
-                    default_ref: None,
-                    credential_reference_id: None,
-                },
-            )
-            .await
-            .expect("workspace creation should succeed");
-
-        repository
-            .persist_session_snapshot(
-                &user.user_id,
-                &SessionSnapshot {
-                    id: "s_active".to_string(),
-                    workspace_id: workspace.workspace_id.clone(),
-                    title: "Active".to_string(),
-                    status: SessionStatus::Active,
-                    latest_sequence: 0,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                },
-                true,
-                None,
-            )
-            .await
-            .expect("active session metadata should persist");
-        repository
-            .persist_session_snapshot(
-                &user.user_id,
-                &SessionSnapshot {
-                    id: "s_deleted".to_string(),
-                    workspace_id: workspace.workspace_id.clone(),
-                    title: "Deleted".to_string(),
-                    status: SessionStatus::Closed,
-                    latest_sequence: 0,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                },
-                false,
-                Some("deleted"),
-            )
-            .await
-            .expect("deleted session metadata should persist");
-
-        let listed = repository
-            .list_workspace_sessions(&user.user_id, &workspace.workspace_id)
-            .await
-            .expect("workspace session listing should succeed");
-
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, "s_active");
-        assert_eq!(listed[0].workspace_id, workspace.workspace_id);
     }
 
     #[tokio::test]

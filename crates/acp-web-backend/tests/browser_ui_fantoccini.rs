@@ -759,8 +759,7 @@ impl BrowserHarness {
     }
 }
 
-fn close_current_session_script() -> &'static str {
-    r#"
+const CLOSE_CURRENT_SESSION_SCRIPT: &str = r#"
     const callback = arguments[arguments.length - 1];
     const sessionId = window.location.pathname.split("/").pop();
     const csrfToken = document
@@ -782,7 +781,10 @@ fn close_current_session_script() -> &'static str {
             callback({ ok: true });
         })
         .catch((error) => callback({ ok: false, error: String(error) }));
-    "#
+    "#;
+
+fn close_current_session_script() -> &'static str {
+    CLOSE_CURRENT_SESSION_SCRIPT
 }
 
 fn ensure_close_current_session_succeeded(close_result: &Value) -> Result<()> {

@@ -17,6 +17,13 @@ pub enum AccountsRouteAccess {
     Forbidden,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspacesRouteAccess {
+    SignedIn,
+    RegisterRequired,
+    SignInRequired,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountConstraintReason {
     CurrentUser,
@@ -50,6 +57,14 @@ pub fn accounts_route_access(status: &AuthStatusResponse) -> AccountsRouteAccess
         Some(_) => AccountsRouteAccess::Forbidden,
         None if status.bootstrap_required => AccountsRouteAccess::RegisterRequired,
         None => AccountsRouteAccess::SignInRequired,
+    }
+}
+
+pub fn workspaces_route_access(status: &AuthStatusResponse) -> WorkspacesRouteAccess {
+    match &status.account {
+        Some(_) => WorkspacesRouteAccess::SignedIn,
+        None if status.bootstrap_required => WorkspacesRouteAccess::RegisterRequired,
+        None => WorkspacesRouteAccess::SignInRequired,
     }
 }
 
@@ -198,5 +213,31 @@ mod tests {
             .can_modify()
         );
         assert!(AccountCapabilities { constraint: None }.can_modify());
+    }
+
+    #[test]
+    fn workspaces_access_allows_any_signed_in_user() {
+        let member = sample_account("member", false);
+        assert_eq!(
+            workspaces_route_access(&AuthStatusResponse {
+                bootstrap_required: false,
+                account: Some(member),
+            }),
+            WorkspacesRouteAccess::SignedIn
+        );
+        assert_eq!(
+            workspaces_route_access(&AuthStatusResponse {
+                bootstrap_required: false,
+                account: None,
+            }),
+            WorkspacesRouteAccess::SignInRequired
+        );
+        assert_eq!(
+            workspaces_route_access(&AuthStatusResponse {
+                bootstrap_required: true,
+                account: None,
+            }),
+            WorkspacesRouteAccess::RegisterRequired
+        );
     }
 }

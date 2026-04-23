@@ -26,7 +26,9 @@ pub(crate) use sessions::{
     resolve_permission, send_message,
 };
 pub(crate) use stream::{SseItem, open_session_event_stream};
-pub(crate) use workspaces::list_workspaces;
+pub(crate) use workspaces::{
+    create_workspace, delete_workspace, list_workspaces, update_workspace,
+};
 
 #[cfg(test)]
 pub(crate) fn poll_ready<T>(future: impl std::future::Future<Output = T>) -> T {

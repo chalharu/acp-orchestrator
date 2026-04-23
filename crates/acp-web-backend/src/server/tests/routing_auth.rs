@@ -200,6 +200,18 @@ async fn app_accounts_entrypoint_reuses_the_app_shell() {
 }
 
 #[tokio::test]
+async fn app_workspaces_entrypoint_reuses_the_app_shell() {
+    let response = app_workspaces_entrypoint(HeaderMap::new()).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("id=\"app-root\""));
+    assert!(body.contains("wasm-init.js"));
+}
+
+#[tokio::test]
 async fn bootstrap_registration_changes_auth_status_for_the_browser_session() {
     let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),

@@ -21,6 +21,7 @@ use support::{ServerConfig, TestStack, test_state_dir};
 
 const APP_PATH: &str = "/app/";
 const REGISTER_PATH: &str = "/app/register/";
+const WORKSPACES_PATH: &str = "/app/workspaces/";
 const COMPOSER_SELECTOR: &str = "#composer-input";
 const REGISTER_USERNAME_SELECTOR: &str = ".account-form input[type='text']";
 const REGISTER_PASSWORD_SELECTOR: &str = ".account-form input[type='password']";
@@ -100,6 +101,91 @@ async fn sidebar_shows_current_workspace_label() -> Result<()> {
             browser.session_sidebar_workspace_label().await?,
             "Workspace: Default workspace"
         );
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_is_reachable_via_sidebar_link() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.ensure_sidebar_visible().await?;
+
+        browser.click_workspaces_link().await?;
+
+        browser
+            .wait_for_condition(
+                &format!(
+                    "return window.location.pathname === {WORKSPACES_PATH:?} \
+                     || window.location.pathname === '/app/workspaces';",
+                ),
+                Duration::from_secs(10),
+                "workspaces page navigation",
+            )
+            .await?;
+
+        browser
+            .wait_for_condition(
+                "return Boolean(document.querySelector('h1')) \
+                 && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
+                Duration::from_secs(10),
+                "workspaces page heading",
+            )
+            .await?;
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.navigate_to_workspaces().await?;
+
+        // Create a new workspace
+        let workspace_name = "Browser-Test Workspace";
+        browser.create_workspace(workspace_name).await?;
+        browser
+            .wait_for_body_text("Workspace created.", Duration::from_secs(10))
+            .await?;
+
+        // Verify the workspace appears in the list
+        browser
+            .wait_for_body_text(workspace_name, Duration::from_secs(10))
+            .await?;
+
+        // Rename the workspace
+        let renamed = "Browser-Test Workspace Renamed";
+        browser.rename_workspace(workspace_name, renamed).await?;
+        browser
+            .wait_for_body_text("Workspace updated.", Duration::from_secs(10))
+            .await?;
+        browser
+            .wait_for_body_text(renamed, Duration::from_secs(10))
+            .await?;
+
+        // Delete the workspace
+        browser.delete_workspace(renamed).await?;
+        browser
+            .wait_for_body_text("Workspace deleted.", Duration::from_secs(10))
+            .await?;
+        browser
+            .wait_for_body_text_to_disappear(renamed, Duration::from_secs(10))
+            .await?;
 
         Ok(())
     }
@@ -406,6 +492,153 @@ impl BrowserHarness {
         .await
     }
 
+    async fn click_workspaces_link(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('a[href=\"/app/workspaces/\"]'));",
+            Duration::from_secs(10),
+            "workspaces sidebar link",
+        )
+        .await?;
+        self.client
+            .find(Locator::Css("a[href='/app/workspaces/']"))
+            .await
+            .context("finding the workspaces sidebar link")?
+            .click()
+            .await
+            .context("clicking the workspaces sidebar link")
+    }
+
+    async fn navigate_to_workspaces(&self) -> Result<()> {
+        self.client
+            .goto(&format!("{}{}", self.stack.backend_url, WORKSPACES_PATH))
+            .await
+            .context("navigating to the workspaces page")?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('h1')) \
+             && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
+            Duration::from_secs(15),
+            "workspaces page heading after direct navigation",
+        )
+        .await
+    }
+
+    async fn create_workspace(&self, name: &str) -> Result<()> {
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.account-form input[type=\"text\"]'));",
+            Duration::from_secs(10),
+            "workspace name input",
+        )
+        .await?;
+        let input = self
+            .client
+            .find(Locator::Css(".account-form input[type='text']"))
+            .await
+            .context("finding workspace name input")?;
+        input
+            .click()
+            .await
+            .context("focusing workspace name input")?;
+        input
+            .send_keys(name)
+            .await
+            .context("typing workspace name")?;
+        self.client
+            .find(Locator::Css(".account-form__submit"))
+            .await
+            .context("finding create workspace submit button")?
+            .click()
+            .await
+            .context("submitting the create workspace form")
+    }
+
+    async fn rename_workspace(&self, current_name: &str, new_name: &str) -> Result<()> {
+        let rename_selector = format!(
+            "return Array.from(document.querySelectorAll('.workspace-action-btn'))\
+             .find(btn => btn.closest('tr')?.textContent?.includes({current_name:?}) \
+                         && btn.textContent?.trim() === 'Rename') !== undefined;"
+        );
+        self.wait_for_condition(&rename_selector, Duration::from_secs(10), "rename button")
+            .await?;
+
+        // Use JS click because :has with text is not broadly supported in CSS selectors
+        self.client
+            .execute(
+                &format!(
+                    "const btn = Array.from(document.querySelectorAll('.workspace-action-btn'))\
+                     .find(b => b.closest('tr')?.textContent?.includes({current_name:?}) \
+                               && b.textContent?.trim() === 'Rename'); \
+                     if (btn) btn.click();"
+                ),
+                Vec::new(),
+            )
+            .await
+            .context("clicking rename button")?;
+
+        // Wait for the edit input to appear
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-name-input'));",
+            Duration::from_secs(10),
+            "workspace name edit input",
+        )
+        .await?;
+
+        let input = self
+            .client
+            .find(Locator::Css(".workspace-name-input"))
+            .await
+            .context("finding workspace name edit input")?;
+
+        // Clear and type the new name
+        self.client
+            .execute(
+                "document.querySelector('.workspace-name-input').value = '';",
+                Vec::new(),
+            )
+            .await
+            .context("clearing the workspace name input")?;
+        input
+            .send_keys(new_name)
+            .await
+            .context("typing new workspace name")?;
+
+        // Submit via the Save button
+        self.client
+            .find(Locator::Css(
+                ".workspace-name-input + .workspace-action-btn",
+            ))
+            .await
+            .context("finding Save button")?
+            .click()
+            .await
+            .context("clicking Save button")
+    }
+
+    async fn delete_workspace(&self, name: &str) -> Result<()> {
+        self.wait_for_condition(
+            &format!(
+                "return Array.from(document.querySelectorAll('.workspace-action-btn--danger'))\
+                 .some(btn => btn.closest('tr')?.textContent?.includes({name:?}));"
+            ),
+            Duration::from_secs(10),
+            "delete button for workspace",
+        )
+        .await?;
+
+        self.client
+            .execute(
+                &format!(
+                    "const btn = Array.from(document.querySelectorAll('.workspace-action-btn--danger'))\
+                     .find(b => b.closest('tr')?.textContent?.includes({name:?})); \
+                     if (btn) btn.click();"
+                ),
+                Vec::new(),
+            )
+            .await
+            .context("clicking delete button for workspace")?;
+
+        Ok(())
+    }
+
     async fn close_current_session(&self) -> Result<()> {
         let close_result = self
             .client
@@ -453,6 +686,16 @@ impl BrowserHarness {
             &format!("return document.body?.innerText?.includes({encoded}) ?? false;"),
             timeout,
             &format!("body text containing {needle}"),
+        )
+        .await
+    }
+
+    async fn wait_for_body_text_to_disappear(&self, needle: &str, timeout: Duration) -> Result<()> {
+        let encoded = serde_json::to_string(needle).context("encoding body-text needle")?;
+        self.wait_for_condition(
+            &format!("return !(document.body?.innerText?.includes({encoded}) ?? false);"),
+            timeout,
+            &format!("body text excluding {needle}"),
         )
         .await
     }

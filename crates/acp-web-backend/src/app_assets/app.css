@@ -1152,6 +1152,36 @@ textarea:focus-visible {
   line-height: 1.45;
 }
 
+.workspace-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.workspace-name-input {
+  flex: 1 1 14rem;
+  min-width: 12rem;
+}
+
+.workspace-action-btn {
+  min-width: 6.5rem;
+}
+
+.workspace-action-btn + .workspace-action-btn {
+  margin-left: 0.5rem;
+}
+
+.workspace-inline-form .workspace-action-btn + .workspace-action-btn {
+  margin-left: 0;
+}
+
+.workspace-action-btn--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: #fff7f5;
+}
+
 .account-notice {
   margin: 0;
   padding: 0.75rem 0.9rem;

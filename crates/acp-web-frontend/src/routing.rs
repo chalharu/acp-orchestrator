@@ -4,6 +4,7 @@ pub(crate) enum AppRoute {
     Register,
     SignIn,
     Accounts,
+    Workspaces,
     Session(String),
     NotFound,
 }
@@ -35,6 +36,9 @@ pub(crate) fn route_from_pathname(pathname: &str) -> AppRoute {
     }
     if pathname == "/app/accounts" || pathname == "/app/accounts/" {
         return AppRoute::Accounts;
+    }
+    if pathname == "/app/workspaces" || pathname == "/app/workspaces/" {
+        return AppRoute::Workspaces;
     }
 
     pathname
@@ -112,6 +116,11 @@ mod tests {
         assert_eq!(route_from_pathname("/app/sign-in/"), AppRoute::SignIn);
         assert_eq!(route_from_pathname("/app/accounts"), AppRoute::Accounts);
         assert_eq!(route_from_pathname("/app/accounts/"), AppRoute::Accounts);
+        assert_eq!(route_from_pathname("/app/workspaces"), AppRoute::Workspaces);
+        assert_eq!(
+            route_from_pathname("/app/workspaces/"),
+            AppRoute::Workspaces
+        );
         assert_eq!(
             route_from_pathname("/app/sessions/s%2F1"),
             AppRoute::Session("s/1".to_string())

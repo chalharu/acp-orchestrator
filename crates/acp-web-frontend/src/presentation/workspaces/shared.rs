@@ -1,0 +1,168 @@
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+
+use acp_contracts_workspaces::WorkspaceSummary;
+use leptos::prelude::*;
+
+#[cfg(target_family = "wasm")]
+use crate::infrastructure::api;
+
+use crate::application::auth::WorkspacesRouteAccess;
+
+#[derive(Clone, Copy)]
+pub(super) struct WorkspacesPageState {
+    pub(super) error: RwSignal<Option<String>>,
+    pub(super) notice: RwSignal<Option<String>>,
+    pub(super) access: RwSignal<Option<WorkspacesRouteAccess>>,
+    pub(super) workspaces: RwSignal<Vec<WorkspaceSummary>>,
+    pub(super) loading: RwSignal<bool>,
+    pub(super) create_name: RwSignal<String>,
+    pub(super) creating: RwSignal<bool>,
+    pub(super) editing_workspace_id: RwSignal<Option<String>>,
+    pub(super) edit_name_draft: RwSignal<String>,
+    pub(super) saving_workspace_id: RwSignal<Option<String>>,
+    pub(super) deleting_workspace_id: RwSignal<Option<String>>,
+    pub(super) checked: RwSignal<bool>,
+}
+
+impl WorkspacesPageState {
+    pub(super) fn new() -> Self {
+        Self {
+            error: RwSignal::new(None::<String>),
+            notice: RwSignal::new(None::<String>),
+            access: RwSignal::new(None::<WorkspacesRouteAccess>),
+            workspaces: RwSignal::new(Vec::<WorkspaceSummary>::new()),
+            loading: RwSignal::new(true),
+            create_name: RwSignal::new(String::new()),
+            creating: RwSignal::new(false),
+            editing_workspace_id: RwSignal::new(None::<String>),
+            edit_name_draft: RwSignal::new(String::new()),
+            saving_workspace_id: RwSignal::new(None::<String>),
+            deleting_workspace_id: RwSignal::new(None::<String>),
+            checked: RwSignal::new(false),
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub(super) fn initialize_workspaces_page(state: WorkspacesPageState) {
+    Effect::new(move |_| {
+        if state.checked.get() {
+            return;
+        }
+
+        state.checked.set(true);
+        leptos::task::spawn_local(async move {
+            match api::auth_status().await {
+                Ok(status) => {
+                    let access = crate::application::auth::workspaces_route_access(&status);
+                    let should_load = matches!(access, WorkspacesRouteAccess::SignedIn);
+                    state.access.set(Some(access));
+                    if should_load {
+                        spawn_workspace_reload(state);
+                    } else {
+                        state.loading.set(false);
+                    }
+                }
+                Err(message) => {
+                    state.loading.set(false);
+                    state.error.set(Some(message));
+                }
+            }
+        });
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn initialize_workspaces_page(state: WorkspacesPageState) {
+    initialize_workspaces_page_host(state);
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn initialize_workspaces_page_host(state: WorkspacesPageState) {
+    if state.checked.get_untracked() {
+        return;
+    }
+
+    state.checked.set(true);
+    state.loading.set(false);
+}
+
+#[cfg(target_family = "wasm")]
+pub(super) fn spawn_workspace_reload(state: WorkspacesPageState) {
+    state.loading.set(true);
+    state.error.set(None);
+    leptos::task::spawn_local(async move {
+        match api::list_workspaces().await {
+            Ok(workspaces) => {
+                state.workspaces.set(workspaces);
+                state.loading.set(false);
+            }
+            Err(message) => {
+                state.loading.set(false);
+                state.error.set(Some(message));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn spawn_workspace_reload(state: WorkspacesPageState) {
+    state.loading.set(true);
+    state.error.set(None);
+    state.loading.set(false);
+}
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn workspaces_page_state_starts_with_empty_defaults() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            assert!(state.error.get().is_none());
+            assert!(state.notice.get().is_none());
+            assert!(state.access.get().is_none());
+            assert!(state.workspaces.get().is_empty());
+            assert!(state.loading.get());
+            assert!(state.create_name.get().is_empty());
+            assert!(!state.creating.get());
+            assert!(state.editing_workspace_id.get().is_none());
+            assert!(state.edit_name_draft.get().is_empty());
+            assert!(state.saving_workspace_id.get().is_none());
+            assert!(state.deleting_workspace_id.get().is_none());
+            assert!(!state.checked.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_initializer_marks_state_once() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            initialize_workspaces_page_host(state);
+            assert!(state.checked.get());
+            assert!(!state.loading.get());
+            state.loading.set(true);
+            initialize_workspaces_page_host(state);
+            assert!(state.loading.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn spawn_workspace_reload_clears_errors_and_loading() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.error.set(Some("old error".to_string()));
+            spawn_workspace_reload(state);
+            assert!(!state.loading.get());
+            assert!(state.error.get().is_none());
+        });
+    }
+}

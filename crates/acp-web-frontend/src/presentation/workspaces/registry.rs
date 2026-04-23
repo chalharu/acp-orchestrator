@@ -87,18 +87,25 @@ fn WorkspaceRegistryTable(children: Children) -> impl IntoView {
     view! {
         <div class="account-table-wrap">
             <table class="account-table">
-                <caption class="sr-only">"Workspace list and management controls"</caption>
-                <thead>
-                    <tr>
-                        <th scope="col">"Name"</th>
-                        <th scope="col">"Status"</th>
-                        <th scope="col">"Created"</th>
-                        <th scope="col">"Actions"</th>
-                    </tr>
-                </thead>
+                <WorkspaceRegistryHead />
                 <tbody>{children()}</tbody>
             </table>
         </div>
+    }
+}
+
+#[component]
+fn WorkspaceRegistryHead() -> impl IntoView {
+    view! {
+        <caption class="sr-only">"Workspace list and management controls"</caption>
+        <thead>
+            <tr>
+                <th scope="col">"Name"</th>
+                <th scope="col">"Status"</th>
+                <th scope="col">"Created"</th>
+                <th scope="col">"Actions"</th>
+            </tr>
+        </thead>
     }
 }
 

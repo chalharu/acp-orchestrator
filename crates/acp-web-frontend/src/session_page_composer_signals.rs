@@ -44,7 +44,9 @@ pub(crate) fn session_composer_signals(
             signals.pending_action_busy,
             current_session_deleting,
         ),
-        slash_palette_visible: Signal::derive(move || slash_palette_is_visible(&signals.draft.get())),
+        slash_palette_visible: Signal::derive(move || {
+            slash_palette_is_visible(&signals.draft.get())
+        }),
         slash_candidates: Signal::derive(move || signals.slash.candidates.get()),
         slash_selected_index: Signal::derive(move || signals.slash.selected_index.get()),
         slash_apply_selected: Signal::derive(move || {
@@ -109,4 +111,82 @@ fn session_composer_cancel_busy_signal(
             || current_session_deleting.get()
             || matches!(turn_state.get(), TurnState::Cancelling)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use acp_contracts_permissions::PermissionRequest;
+    use acp_contracts_slash::{CompletionCandidate, CompletionKind};
+    use leptos::prelude::*;
+
+    use super::*;
+    use crate::session_page_signals::session_signals;
+
+    fn permission(id: &str) -> PermissionRequest {
+        PermissionRequest {
+            request_id: id.to_string(),
+            summary: format!("summary for {id}"),
+        }
+    }
+
+    fn candidate(label: &str) -> CompletionCandidate {
+        CompletionCandidate {
+            label: label.to_string(),
+            insert_text: label.to_string(),
+            detail: "detail".to_string(),
+            kind: CompletionKind::Command,
+        }
+    }
+
+    #[test]
+    fn session_composer_signals_derive_runtime_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let current_session_deleting = RwSignal::new(false);
+            let composer_signals = session_composer_signals(
+                signals,
+                Signal::derive(move || current_session_deleting.get()),
+            );
+
+            signals.session_status.set(SessionLifecycle::Active);
+            signals.turn_state.set(TurnState::Idle);
+            signals.draft.set("/he".to_string());
+            signals.slash.candidates.set(vec![candidate("/help")]);
+            signals.slash.selected_index.set(0);
+
+            assert!(!composer_signals.disabled.get());
+            assert_eq!(composer_signals.status.get(), "");
+            assert!(!composer_signals.cancel_visible.get());
+            assert!(!composer_signals.cancel_busy.get());
+            assert!(composer_signals.slash_palette_visible.get());
+            assert_eq!(composer_signals.slash_candidates.get().len(), 1);
+            assert_eq!(composer_signals.slash_selected_index.get(), 0);
+            assert!(composer_signals.slash_apply_selected.get());
+
+            signals.turn_state.set(TurnState::AwaitingReply);
+            assert_eq!(composer_signals.status.get(), "Waiting for response...");
+            assert!(composer_signals.cancel_visible.get());
+
+            signals.turn_state.set(TurnState::Cancelling);
+            assert!(composer_signals.cancel_busy.get());
+
+            signals.turn_state.set(TurnState::AwaitingPermission);
+            signals.pending_permissions.set(vec![permission("req-1")]);
+            assert_eq!(
+                composer_signals.status.get(),
+                "Resolve the pending request before sending another message."
+            );
+            assert!(!composer_signals.cancel_visible.get());
+
+            signals.pending_action_busy.set(true);
+            assert!(composer_signals.cancel_busy.get());
+
+            signals.pending_action_busy.set(false);
+            current_session_deleting.set(true);
+            assert!(composer_signals.disabled.get());
+            assert_eq!(composer_signals.status.get(), "Deleting session...");
+            assert!(composer_signals.cancel_busy.get());
+        });
+    }
 }

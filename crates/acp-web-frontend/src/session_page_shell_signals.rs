@@ -22,3 +22,30 @@ pub(crate) fn session_shell_signals(signals: SessionSignals) -> SessionShellSign
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use super::*;
+    use crate::session_lifecycle::TurnState;
+    use crate::session_page_signals::session_signals;
+
+    #[test]
+    fn session_shell_signals_reflect_delete_disabled_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let shell_signals = session_shell_signals(signals);
+
+            assert!(!shell_signals.delete_disabled.get());
+
+            signals.turn_state.set(TurnState::Submitting);
+            assert!(shell_signals.delete_disabled.get());
+
+            signals.turn_state.set(TurnState::Idle);
+            signals.pending_action_busy.set(true);
+            assert!(shell_signals.delete_disabled.get());
+        });
+    }
+}

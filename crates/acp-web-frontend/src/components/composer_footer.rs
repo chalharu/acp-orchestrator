@@ -46,23 +46,15 @@ fn ComposerActions(
     #[prop(into)] cancel_disabled: Signal<bool>,
     on_cancel: Callback<()>,
 ) -> impl IntoView {
-    let cancel_class = cancel_button_class();
-    let cancel_type = cancel_button_type();
-    let cancel_label = cancel_button_label();
-    let cancel_click = cancel_click_handler(on_cancel);
-    let cancel_disabled_binding = cancel_button_disabled_binding(cancel_disabled);
+    let cancel_props = (cancel_disabled, on_cancel);
 
     view! {
         <div class="composer__actions">
             <Show when=move || show_cancel.get()>
-                <button
-                    class=cancel_class
-                    type=cancel_type
-                    on:click=cancel_click
-                    prop:disabled=cancel_disabled_binding
-                >
-                    {cancel_label}
-                </button>
+                <ComposerCancelButton
+                    cancel_disabled=cancel_props.0
+                    on_cancel=cancel_props.1
+                />
             </Show>
             <button
                 class="composer__submit"
@@ -72,6 +64,29 @@ fn ComposerActions(
                 "Send"
             </button>
         </div>
+    }
+}
+
+#[component]
+fn ComposerCancelButton(
+    #[prop(into)] cancel_disabled: Signal<bool>,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
+    let cancel_class = cancel_button_class();
+    let cancel_type = cancel_button_type();
+    let cancel_label = cancel_button_label();
+    let cancel_click = cancel_click_handler(on_cancel);
+    let cancel_disabled_binding = cancel_button_disabled_binding(cancel_disabled);
+
+    view! {
+        <button
+            class=cancel_class
+            type=cancel_type
+            on:click=cancel_click
+            prop:disabled=cancel_disabled_binding
+        >
+            {cancel_label}
+        </button>
     }
 }
 
@@ -144,6 +159,19 @@ mod tests {
                 <ComposerActions
                     disabled=Signal::derive(|| false)
                     show_cancel=Signal::derive(|| false)
+                    cancel_disabled=Signal::derive(|| false)
+                    on_cancel=Callback::new(|()| {})
+                />
+            };
+        });
+    }
+
+    #[test]
+    fn composer_cancel_button_builds_without_panicking() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = view! {
+                <ComposerCancelButton
                     cancel_disabled=Signal::derive(|| false)
                     on_cancel=Callback::new(|()| {})
                 />

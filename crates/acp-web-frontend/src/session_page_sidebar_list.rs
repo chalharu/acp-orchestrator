@@ -137,7 +137,10 @@ fn session_sidebar_list_item_view(
     let id = item.id.clone();
     let href = app_session_path(&item.id);
     let title = session_sidebar_title(item.title);
-    let activity_label = format!("Updated {}", item.last_activity_at.format("%Y-%m-%d %H:%M UTC"));
+    let activity_label = format!(
+        "Updated {}",
+        item.last_activity_at.format("%Y-%m-%d %H:%M UTC")
+    );
     let is_current = id == current_session_id;
     let is_closed = matches!(item.status, SessionStatus::Closed);
 

@@ -222,7 +222,9 @@ fn palette_keydown_handler(
     on_apply_index: Callback<usize>,
     index: usize,
 ) -> impl Fn(web_sys::KeyboardEvent) + Copy + 'static {
-    palette_key_handler(on_apply_index, index, |_event: &web_sys::KeyboardEvent| String::new())
+    palette_key_handler(on_apply_index, index, |_event: &web_sys::KeyboardEvent| {
+        String::new()
+    })
 }
 
 #[cfg(test)]
@@ -359,7 +361,10 @@ mod tests {
         owner.with(|| {
             let applied = RwSignal::new(Vec::<usize>::new());
 
-            palette_apply_handler(Callback::new(move |index| applied.update(|items| items.push(index))), 3)(());
+            palette_apply_handler(
+                Callback::new(move |index| applied.update(|items| items.push(index))),
+                3,
+            )(());
 
             assert_eq!(applied.get(), vec![3]);
         });

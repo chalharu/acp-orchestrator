@@ -287,10 +287,7 @@ fn bind_submit_focus(submit_runtime: SubmitDraftRuntime) {
     #[cfg(target_family = "wasm")]
     {
         let (form, _, _, _, restore_focus_after_submit) = submit_runtime.clone();
-        bind_focus_restore_cancel(
-            form,
-            restore_focus_after_submit,
-        );
+        bind_focus_restore_cancel(form, restore_focus_after_submit);
         restore_submit_focus_when_ready(submit_runtime);
     }
 }
@@ -501,12 +498,12 @@ mod tests {
     #[cfg(not(target_family = "wasm"))]
     use wasm_bindgen::{JsCast, JsValue};
 
+    use super::super::composer_palette::slash_option_id;
     use super::{
         Composer, ComposerControls, ComposerSlashProps, SlashTestCallbacks, SlashTestSignals,
         SubmitDraftRuntime, composer_active_descendant, composer_submit_handler,
         current_submit_value, submit_draft, submit_handler, submit_text,
     };
-    use super::super::composer_palette::slash_option_id;
     #[cfg(target_family = "wasm")]
     use super::{ComposerKeyAction, apply_composer_key_action, composer_key_action};
 

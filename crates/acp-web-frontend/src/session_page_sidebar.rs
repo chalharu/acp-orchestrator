@@ -2,8 +2,7 @@ use acp_contracts_sessions::SessionListItem;
 use leptos::prelude::*;
 
 use crate::{
-    session_page_sidebar_header::SessionSidebarHeader,
-    session_page_sidebar_nav::SessionSidebarNav,
+    session_page_sidebar_header::SessionSidebarHeader, session_page_sidebar_nav::SessionSidebarNav,
     session_page_sidebar_status::SessionSidebarStatus,
     session_page_sidebar_styles::session_sidebar_class,
 };

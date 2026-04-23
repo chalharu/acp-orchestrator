@@ -26,11 +26,7 @@ pub(super) fn session_sidebar_empty_message(has_error: bool) -> &'static str {
 }
 
 pub(super) fn session_sidebar_status_label(is_closed: bool) -> &'static str {
-    if is_closed {
-        "closed"
-    } else {
-        "active"
-    }
+    if is_closed { "closed" } else { "active" }
 }
 
 pub(super) fn session_sidebar_status_pill_class(is_closed: bool) -> &'static str {

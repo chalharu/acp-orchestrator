@@ -106,3 +106,34 @@ pub(super) fn session_signals() -> SessionSignals {
         tool_activity_serial: RwSignal::new(0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use leptos::prelude::*;
+
+    use super::apply_restored_session_draft;
+
+    #[test]
+    fn apply_restored_session_draft_sets_non_empty_text() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let draft = RwSignal::new(String::new());
+
+            apply_restored_session_draft(draft, "saved draft".to_string());
+
+            assert_eq!(draft.get_untracked(), "saved draft");
+        });
+    }
+
+    #[test]
+    fn apply_restored_session_draft_keeps_existing_text_for_empty_restore() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let draft = RwSignal::new("current".to_string());
+
+            apply_restored_session_draft(draft, String::new());
+
+            assert_eq!(draft.get_untracked(), "current");
+        });
+    }
+}

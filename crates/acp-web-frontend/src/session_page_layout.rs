@@ -1,13 +1,9 @@
 // Re-exports for public API
-pub(crate) use crate::session_page_callbacks::{
-    SessionViewCallbacks, session_view_callbacks,
-};
+pub(crate) use crate::session_page_callbacks::{SessionViewCallbacks, session_view_callbacks};
 pub(crate) use crate::session_page_home::{
     SessionBackdrop, default_sidebar_open, session_layout_class,
 };
-pub(crate) use crate::session_page_shell_signals::{
-    SessionShellSignals, session_shell_signals,
-};
+pub(crate) use crate::session_page_shell_signals::{SessionShellSignals, session_shell_signals};
 
 use leptos::prelude::*;
 

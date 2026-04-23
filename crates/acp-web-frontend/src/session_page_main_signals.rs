@@ -87,10 +87,14 @@ fn main_worker_badge(
 
 #[cfg(test)]
 pub mod tests {
+    use acp_contracts_permissions::PermissionRequest;
+    
     use super::session_main_signals;
-    use crate::session_lifecycle::BadgeTone;
+    use crate::session_lifecycle::{BadgeTone, SessionLifecycle, TurnState};
     use crate::session_page_signals::session_signals;
     use leptos::prelude::*;
+
+    use super::{main_connection_badge, main_worker_badge};
 
     pub fn badge(
         label: &'static str,
@@ -98,6 +102,13 @@ pub mod tests {
         tone: BadgeTone,
     ) -> (&'static str, &'static str, BadgeTone) {
         (label, value, tone)
+    }
+
+    fn permission(id: &str) -> PermissionRequest {
+        PermissionRequest {
+            request_id: id.to_string(),
+            summary: format!("summary for {id}"),
+        }
     }
 
     #[test]
@@ -116,6 +127,119 @@ pub mod tests {
             let main_signals = session_main_signals(signals);
             // Just verify it compiles and runs without panic
             let _ = main_signals.entries.get();
+        });
+    }
+
+    #[test]
+    fn main_connection_badge_covers_each_status() {
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Loading, false),
+            badge("Connection", "connecting", BadgeTone::Neutral)
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Active, false),
+            badge("Connection", "live", BadgeTone::Success)
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Active, true),
+            badge("Connection", "reconnecting", BadgeTone::Warning)
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Closed, false),
+            badge("Connection", "ended", BadgeTone::Neutral)
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Unavailable, false),
+            badge("Connection", "unavailable", BadgeTone::Danger)
+        );
+        assert_eq!(
+            main_connection_badge(SessionLifecycle::Error, false),
+            badge("Connection", "unavailable", BadgeTone::Danger)
+        );
+    }
+
+    #[test]
+    fn main_worker_badge_covers_each_status() {
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Loading, TurnState::Idle, false),
+            badge("Worker", "starting", BadgeTone::Neutral)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Unavailable, TurnState::Idle, false),
+            badge("Worker", "unavailable", BadgeTone::Danger)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Error, TurnState::Idle, false),
+            badge("Worker", "unavailable", BadgeTone::Danger)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Closed, TurnState::Idle, false),
+            badge("Worker", "stopped", BadgeTone::Neutral)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Idle, true),
+            badge("Worker", "permission", BadgeTone::Warning)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Submitting, false),
+            badge("Worker", "running", BadgeTone::Success)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::AwaitingReply, false),
+            badge("Worker", "running", BadgeTone::Success)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Cancelling, false),
+            badge("Worker", "cancelling", BadgeTone::Warning)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::AwaitingPermission, false),
+            badge("Worker", "permission", BadgeTone::Warning)
+        );
+        assert_eq!(
+            main_worker_badge(SessionLifecycle::Active, TurnState::Idle, false),
+            badge("Worker", "idle", BadgeTone::Neutral)
+        );
+    }
+
+    #[test]
+    fn session_main_signals_derive_badges_from_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let main_signals = session_main_signals(signals);
+
+            assert_eq!(
+                main_signals.connection_badge.get(),
+                badge("Connection", "connecting", BadgeTone::Neutral)
+            );
+            assert_eq!(
+                main_signals.worker_badge.get(),
+                badge("Worker", "starting", BadgeTone::Neutral)
+            );
+
+            signals.session_status.set(SessionLifecycle::Active);
+            signals.turn_state.set(TurnState::Submitting);
+            assert_eq!(
+                main_signals.connection_badge.get(),
+                badge("Connection", "live", BadgeTone::Success)
+            );
+            assert_eq!(
+                main_signals.worker_badge.get(),
+                badge("Worker", "running", BadgeTone::Success)
+            );
+
+            signals.connection_error.set(Some("lost".to_string()));
+            assert_eq!(
+                main_signals.connection_badge.get(),
+                badge("Connection", "reconnecting", BadgeTone::Warning)
+            );
+
+            signals.pending_permissions.set(vec![permission("req-1")]);
+            assert_eq!(
+                main_signals.worker_badge.get(),
+                badge("Worker", "permission", BadgeTone::Warning)
+            );
         });
     }
 }

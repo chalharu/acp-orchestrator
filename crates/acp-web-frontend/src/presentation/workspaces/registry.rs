@@ -14,47 +14,26 @@ use super::shared::spawn_workspace_reload;
 #[cfg(target_family = "wasm")]
 pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoView {
     let workspace_count = Signal::derive(move || state.workspaces.get().len());
-
-    view! {
-        <div class="account-panel__section account-panel__section--registry">
-            <div class="account-panel__section-heading">
-                <div class="account-panel__section-copy">
-                    <h2>"Workspaces"</h2>
-                    <p class="muted">"Manage workspaces. Rename or remove them below."</p>
-                </div>
-                <p class="account-panel__summary">
-                    {move || workspace_count_label(workspace_count.get())}
-                </p>
-            </div>
-            <Show
-                when=move || !state.loading.get()
-                fallback=|| view! { <p class="muted">"Loading workspaces…"</p> }
-            >
-                <div class="account-table-wrap">
-                    <table class="account-table">
-                        <caption class="sr-only">"Workspace list and management controls"</caption>
-                        <thead>
-                            <tr>
-                                <th scope="col">"Name"</th>
-                                <th scope="col">"Status"</th>
-                                <th scope="col">"Created"</th>
-                                <th scope="col">"Actions"</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <For
-                                each=move || state.workspaces.get()
-                                key=|workspace| workspace.workspace_id.clone()
-                                children=move |workspace| {
-                                    view! { <WorkspaceRow workspace state /> }
-                                }
-                            />
-                        </tbody>
-                    </table>
-                </div>
-            </Show>
-        </div>
+    let summary = view! {
+        <>{move || workspace_count_label(workspace_count.get())}</>
     }
+    .into_any();
+    let content = view! {
+        <Show when=move || !state.loading.get() fallback=workspace_loading_view>
+            <WorkspaceRegistryTable>
+                <For
+                    each=move || state.workspaces.get()
+                    key=|workspace| workspace.workspace_id.clone()
+                    children=move |workspace| {
+                        view! { <WorkspaceRow workspace state /> }
+                    }
+                />
+            </WorkspaceRegistryTable>
+        </Show>
+    }
+    .into_any();
+
+    workspace_registry_panel(summary, content)
 }
 
 #[component]
@@ -63,7 +42,7 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
     let loading = state.loading.get_untracked();
     let summary = workspace_count_label(state.workspaces.get_untracked().len());
     let content = if loading {
-        view! { <p class="muted">"Loading workspaces…"</p> }.into_any()
+        workspace_loading_view()
     } else {
         let rows = state
             .workspaces
@@ -73,24 +52,22 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
             .collect_view()
             .into_any();
         view! {
-            <div class="account-table-wrap">
-                <table class="account-table">
-                    <caption class="sr-only">"Workspace list and management controls"</caption>
-                    <thead>
-                        <tr>
-                            <th scope="col">"Name"</th>
-                            <th scope="col">"Status"</th>
-                            <th scope="col">"Created"</th>
-                            <th scope="col">"Actions"</th>
-                        </tr>
-                    </thead>
-                    <tbody>{rows}</tbody>
-                </table>
-            </div>
+            <WorkspaceRegistryTable>{rows}</WorkspaceRegistryTable>
         }
         .into_any()
     };
 
+    workspace_registry_panel(view! { <>{summary}</> }.into_any(), content)
+}
+
+fn workspace_loading_view() -> AnyView {
+    view! {
+        <p class="muted">"Loading workspaces…"</p>
+    }
+    .into_any()
+}
+
+fn workspace_registry_panel(summary: AnyView, content: AnyView) -> impl IntoView {
     view! {
         <div class="account-panel__section account-panel__section--registry">
             <div class="account-panel__section-heading">
@@ -101,6 +78,26 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
                 <p class="account-panel__summary">{summary}</p>
             </div>
             {content}
+        </div>
+    }
+}
+
+#[component]
+fn WorkspaceRegistryTable(children: Children) -> impl IntoView {
+    view! {
+        <div class="account-table-wrap">
+            <table class="account-table">
+                <caption class="sr-only">"Workspace list and management controls"</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">"Name"</th>
+                        <th scope="col">"Status"</th>
+                        <th scope="col">"Created"</th>
+                        <th scope="col">"Actions"</th>
+                    </tr>
+                </thead>
+                <tbody>{children()}</tbody>
+            </table>
         </div>
     }
 }

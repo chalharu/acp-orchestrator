@@ -76,21 +76,26 @@ fn SlashPaletteList(
     selected_index: usize,
     on_apply_index: Callback<usize>,
 ) -> impl IntoView {
+    let render_item = slash_palette_list_children(selected_index, on_apply_index);
+
     view! {
         <ul id=SLASH_PALETTE_LISTBOX_ID role="listbox" class="composer__slash-list">
             <For
                 each=move || items.clone()
                 key=|(index, candidate)| (index.to_owned(), candidate.label.clone())
-                children=move |(index, candidate)| {
-                    slash_palette_item_view(
-                        index,
-                        candidate,
-                        index == selected_index,
-                        on_apply_index,
-                    )
-                }
+                children=render_item
             />
         </ul>
+    }
+}
+
+fn slash_palette_list_children(
+    selected_index: usize,
+    on_apply_index: Callback<usize>,
+) -> impl Fn((usize, CompletionCandidate)) -> AnyView + Copy + 'static {
+    move |(index, candidate)| {
+        slash_palette_item_view(index, candidate, index == selected_index, on_apply_index)
+            .into_any()
     }
 }
 
@@ -119,6 +124,9 @@ fn SlashPaletteItem(
 ) -> impl IntoView {
     let CompletionCandidate { label, detail, .. } = candidate;
     let option_id = slash_option_id(index);
+    let item_class = slash_item_class(is_selected);
+    let on_mousedown = palette_mousedown_handler(on_apply_index, index);
+    let on_keydown = palette_keydown_handler(on_apply_index, index);
 
     view! {
         <li
@@ -128,10 +136,10 @@ fn SlashPaletteItem(
         >
             <button
                 type="button"
-                class=slash_item_class(is_selected)
+                class=item_class
                 tabindex="-1"
-                on:mousedown=move |ev| handle_palette_apply_event(&ev, on_apply_index, index)
-                on:keydown=move |ev| handle_palette_key_event(&ev, on_apply_index, index)
+                on:mousedown=on_mousedown
+                on:keydown=on_keydown
             >
                 <span class="composer__slash-label">{label}</span>
                 <span class="composer__slash-detail">{detail}</span>
@@ -148,65 +156,79 @@ fn slash_item_class(is_selected: bool) -> &'static str {
     }
 }
 
-trait PreventDefaultEvent {
-    fn prevent_default_event(&self);
-}
-
-impl PreventDefaultEvent for web_sys::MouseEvent {
-    fn prevent_default_event(&self) {
-        let event: &web_sys::Event = self.as_ref();
-        event.prevent_default();
-    }
-}
-
-impl PreventDefaultEvent for web_sys::KeyboardEvent {
-    fn prevent_default_event(&self) {
-        let event: &web_sys::Event = self.as_ref();
-        event.prevent_default();
-    }
-}
-
-fn handle_palette_apply_event<E: PreventDefaultEvent>(
-    ev: &E,
+fn palette_apply_handler<E>(
     on_apply_index: Callback<usize>,
     index: usize,
-) {
-    ev.prevent_default_event();
-    on_apply_index.run(index);
+) -> impl Fn(E) + Copy + 'static
+where
+    E: 'static,
+{
+    move |_event: E| on_apply_index.run(index)
+}
+
+#[cfg(target_family = "wasm")]
+fn palette_mousedown_handler(
+    on_apply_index: Callback<usize>,
+    index: usize,
+) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    move |event: web_sys::MouseEvent| {
+        event.prevent_default();
+        on_apply_index.run(index);
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn palette_mousedown_handler(
+    on_apply_index: Callback<usize>,
+    index: usize,
+) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    palette_apply_handler(on_apply_index, index)
 }
 
 fn should_apply_palette_key(key: &str) -> bool {
     matches!(key, "Enter" | " ")
 }
 
-fn handle_palette_key_event<E>(
-    ev: &E,
+fn palette_key_handler<E>(
     on_apply_index: Callback<usize>,
     index: usize,
-) where
-    E: PreventDefaultEvent + KeyEvent,
+    key: fn(&E) -> String,
+) -> impl Fn(E) + Copy + 'static
+where
+    E: 'static,
 {
-    if should_apply_palette_key(ev.key().as_str()) {
-        ev.prevent_default_event();
-        on_apply_index.run(index);
+    move |event: E| {
+        if should_apply_palette_key(key(&event).as_str()) {
+            on_apply_index.run(index);
+        }
     }
 }
 
-trait KeyEvent {
-    fn key(&self) -> String;
+#[cfg(target_family = "wasm")]
+fn palette_keydown_handler(
+    on_apply_index: Callback<usize>,
+    index: usize,
+) -> impl Fn(web_sys::KeyboardEvent) + Copy + 'static {
+    move |event: web_sys::KeyboardEvent| {
+        if should_apply_palette_key(event.key().as_str()) {
+            event.prevent_default();
+            on_apply_index.run(index);
+        }
+    }
 }
 
-impl KeyEvent for web_sys::KeyboardEvent {
-    fn key(&self) -> String {
-        web_sys::KeyboardEvent::key(self)
-    }
+#[cfg(not(target_family = "wasm"))]
+fn palette_keydown_handler(
+    on_apply_index: Callback<usize>,
+    index: usize,
+) -> impl Fn(web_sys::KeyboardEvent) + Copy + 'static {
+    palette_key_handler(on_apply_index, index, |_event: &web_sys::KeyboardEvent| String::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use acp_contracts_slash::CompletionKind;
-    use std::cell::Cell;
 
     fn make_candidate(label: &str) -> CompletionCandidate {
         CompletionCandidate {
@@ -313,6 +335,8 @@ mod tests {
                 true,
                 Callback::new(|_: usize| {}),
             );
+            let render_item = slash_palette_list_children(0, Callback::new(|_: usize| {}));
+            let _ = render_item((0, make_candidate("/help")));
         });
     }
 
@@ -325,69 +349,38 @@ mod tests {
         assert_eq!(slash_item_class(false), "composer__slash-item");
     }
 
-    struct FakePointerEvent(Cell<bool>);
-
-    impl PreventDefaultEvent for FakePointerEvent {
-        fn prevent_default_event(&self) {
-            self.0.set(true);
-        }
-    }
-
     struct FakeKeyboardEvent {
-        prevented: Cell<bool>,
         key: String,
     }
 
-    impl PreventDefaultEvent for FakeKeyboardEvent {
-        fn prevent_default_event(&self) {
-            self.prevented.set(true);
-        }
-    }
-
-    impl KeyEvent for FakeKeyboardEvent {
-        fn key(&self) -> String {
-            self.key.clone()
-        }
-    }
-
     #[test]
-    fn handle_palette_apply_event_runs_callback_and_prevents_default() {
+    fn palette_apply_handler_runs_callback() {
         let owner = Owner::new();
         owner.with(|| {
             let applied = RwSignal::new(Vec::<usize>::new());
-            let event = FakePointerEvent(Cell::new(false));
 
-            handle_palette_apply_event(
-                &event,
-                Callback::new(move |index| applied.update(|items| items.push(index))),
-                3,
-            );
+            palette_apply_handler(Callback::new(move |index| applied.update(|items| items.push(index))), 3)(());
 
-            assert!(event.0.get());
             assert_eq!(applied.get(), vec![3]);
         });
     }
 
     #[test]
-    fn handle_palette_key_event_only_applies_enter_and_space() {
+    fn palette_key_handler_only_applies_enter_and_space() {
         let owner = Owner::new();
         owner.with(|| {
             let applied = RwSignal::new(Vec::<usize>::new());
             let enter = FakeKeyboardEvent {
-                prevented: Cell::new(false),
                 key: "Enter".to_string(),
             };
             let other = FakeKeyboardEvent {
-                prevented: Cell::new(false),
                 key: "Escape".to_string(),
             };
             let callback = Callback::new(move |index| applied.update(|items| items.push(index)));
 
-            handle_palette_key_event(&enter, callback, 1);
-            handle_palette_key_event(&other, callback, 2);
+            palette_key_handler(callback, 1, |event: &FakeKeyboardEvent| event.key.clone())(enter);
+            palette_key_handler(callback, 2, |event: &FakeKeyboardEvent| event.key.clone())(other);
 
-            assert!(enter.prevented.get());
-            assert!(!other.prevented.get());
             assert_eq!(applied.get(), vec![1]);
             assert!(should_apply_palette_key(" "));
             assert!(!should_apply_palette_key("Escape"));

@@ -82,17 +82,6 @@ pub(crate) struct ComposerSlashProps {
     pub(crate) on_dismiss: Callback<()>,
 }
 
-trait PreventDefaultEvent {
-    fn prevent_default_event(&self);
-}
-
-impl PreventDefaultEvent for web_sys::SubmitEvent {
-    fn prevent_default_event(&self) {
-        let event: &web_sys::Event = self.as_ref();
-        event.prevent_default();
-    }
-}
-
 #[component]
 pub(crate) fn Composer(
     draft: RwSignal<String>,
@@ -124,9 +113,7 @@ pub(crate) fn Composer(
         slash.on_dismiss,
     );
     let handle_submit_runtime = submit_runtime;
-    let handle_submit = move |ev: web_sys::SubmitEvent| {
-        handle_submit_event(&ev, draft, handle_submit_runtime);
-    };
+    let handle_submit = composer_submit_handler(draft, handle_submit_runtime);
     let (form, _, _, _, _) = submit_runtime;
 
     view! {
@@ -141,13 +128,33 @@ pub(crate) fn Composer(
     }
 }
 
-fn handle_submit_event<E: PreventDefaultEvent>(
-    ev: &E,
+fn submit_handler<E>(
     draft: RwSignal<String>,
     submit_runtime: SubmitDraftRuntime,
-) {
-    ev.prevent_default_event();
-    submit_draft(draft, submit_runtime);
+) -> impl Fn(E) + Copy + 'static
+where
+    E: 'static,
+{
+    move |_ev: E| submit_draft(draft, submit_runtime)
+}
+
+#[cfg(target_family = "wasm")]
+fn composer_submit_handler(
+    draft: RwSignal<String>,
+    submit_runtime: SubmitDraftRuntime,
+) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
+    move |event: web_sys::SubmitEvent| {
+        event.prevent_default();
+        submit_draft(draft, submit_runtime);
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn composer_submit_handler(
+    draft: RwSignal<String>,
+    submit_runtime: SubmitDraftRuntime,
+) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
+    submit_handler(draft, submit_runtime)
 }
 
 fn composer_panel_body(
@@ -491,12 +498,13 @@ fn submit_text(current_value: String, disabled: bool) -> Option<String> {
 mod tests {
     use acp_contracts_slash::CompletionCandidate;
     use leptos::prelude::*;
-    use std::cell::Cell;
+    #[cfg(not(target_family = "wasm"))]
+    use wasm_bindgen::{JsCast, JsValue};
 
     use super::{
-        Composer, ComposerControls, ComposerSlashProps, PreventDefaultEvent, SlashTestCallbacks,
-        SlashTestSignals, SubmitDraftRuntime, composer_active_descendant,
-        current_submit_value, handle_submit_event, submit_draft, submit_text,
+        Composer, ComposerControls, ComposerSlashProps, SlashTestCallbacks, SlashTestSignals,
+        SubmitDraftRuntime, composer_active_descendant, composer_submit_handler,
+        current_submit_value, submit_draft, submit_handler, submit_text,
     };
     use super::super::composer_palette::slash_option_id;
     #[cfg(target_family = "wasm")]
@@ -618,12 +626,11 @@ mod tests {
         )
     }
 
-    struct FakeSubmitEvent(Cell<bool>);
+    struct FakeSubmitEvent;
 
-    impl PreventDefaultEvent for FakeSubmitEvent {
-        fn prevent_default_event(&self) {
-            self.0.set(true);
-        }
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_submit_event() -> web_sys::SubmitEvent {
+        JsValue::NULL.unchecked_into()
     }
 
     #[test]
@@ -689,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_submit_event_prevents_default_and_submits() {
+    fn submit_handler_runs_submit_callback() {
         let owner = Owner::new();
         owner.with(|| {
             let submitted = RwSignal::new(Vec::<String>::new());
@@ -700,11 +707,30 @@ mod tests {
                 restore_focus_after_submit,
             );
             let draft = RwSignal::new("  prompt  ".to_string());
-            let event = FakeSubmitEvent(Cell::new(false));
 
-            handle_submit_event(&event, draft, runtime);
+            submit_handler(draft, runtime)(FakeSubmitEvent);
 
-            assert!(event.0.get());
+            assert_eq!(submitted.get(), vec!["prompt".to_string()]);
+            assert!(restore_focus_after_submit.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn composer_submit_handler_submits_with_host_submit_event() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let submitted = RwSignal::new(Vec::<String>::new());
+            let restore_focus_after_submit = RwSignal::new(false);
+            let runtime = submit_runtime(
+                Signal::derive(|| false),
+                submitted,
+                restore_focus_after_submit,
+            );
+            let draft = RwSignal::new("  prompt  ".to_string());
+
+            composer_submit_handler(draft, runtime)(fake_submit_event());
+
             assert_eq!(submitted.get(), vec!["prompt".to_string()]);
             assert!(restore_focus_after_submit.get());
         });

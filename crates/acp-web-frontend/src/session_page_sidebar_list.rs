@@ -174,7 +174,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
 
-    use super::SessionSidebarList;
+    use super::{SessionSidebarList, session_sidebar_title};
 
     fn sample_sidebar_session() -> SessionListItem {
         SessionListItem {
@@ -209,5 +209,11 @@ mod tests {
                 />
             };
         });
+    }
+
+    #[test]
+    fn session_sidebar_title_defaults_blank_titles() {
+        assert_eq!(session_sidebar_title(String::new()), "New chat");
+        assert_eq!(session_sidebar_title("Existing".to_string()), "Existing");
     }
 }

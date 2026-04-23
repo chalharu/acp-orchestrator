@@ -889,4 +889,20 @@ mod tests {
                 session_sidebar_item_view(item, rename_draft, item_signals, callbacks).into_any();
         });
     }
+
+    #[test]
+    fn sidebar_delete_action_disabled_signal_covers_current_session_guard() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signal = sidebar_delete_action_disabled_signal(
+                Signal::derive(|| false),
+                Signal::derive(|| None::<String>),
+                Signal::derive(|| None::<String>),
+                true,
+                Signal::derive(|| true),
+            );
+
+            assert!(signal.get());
+        });
+    }
 }

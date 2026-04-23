@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use crate::components::composer::{Composer, ComposerControls, ComposerSlashProps};
 use crate::components::error_banner::ErrorBanner;
 use crate::components::pending_permissions::ChatActivity;
-use crate::components::transcript::Transcript;
+use crate::components::transcript::{Transcript, TranscriptEntry};
 use crate::session_lifecycle::SessionLifecycle;
 
 use super::super::entries::SessionEntry;
@@ -52,9 +52,11 @@ pub(super) fn SessionTranscriptPanel(
     on_deny: Callback<String>,
     on_cancel: Callback<()>,
 ) -> impl IntoView {
+    let transcript_entries = session_transcript_entries(entries);
+
     view! {
         <div class="chat-body">
-            <Transcript entries=entries />
+            <Transcript entries=transcript_entries />
             <ChatActivity
                 items=pending_permissions
                 busy=pending_action_busy
@@ -65,6 +67,16 @@ pub(super) fn SessionTranscriptPanel(
         </div>
         <SessionClosedNotice session_status=session_status />
     }
+}
+
+fn session_transcript_entries(entries: Signal<Vec<SessionEntry>>) -> Signal<Vec<TranscriptEntry>> {
+    Signal::derive(move || {
+        entries
+            .get()
+            .into_iter()
+            .map(TranscriptEntry::from)
+            .collect()
+    })
 }
 
 #[component]
@@ -225,7 +237,8 @@ mod tests {
 
     use super::{
         SessionClosedNotice, SessionDock, SessionMain, SessionTopBar, SessionTranscriptPanel,
-        StatusBadgeView, status_badge_class, topbar_toggle_icon, topbar_toggle_label,
+        StatusBadgeView, session_transcript_entries, status_badge_class, topbar_toggle_icon,
+        topbar_toggle_label,
     };
     use crate::session::page::state::{
         StatusBadge, session_composer_signals, session_main_signals, session_signals,
@@ -281,6 +294,21 @@ mod tests {
                     sidebar_open=RwSignal::new(false)
                 />
             };
+        });
+    }
+
+    #[test]
+    fn session_transcript_entries_maps_session_entries_for_rendering() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let entries = RwSignal::new(vec![crate::session::page::entries::SessionEntry::status(
+                "status-1", "done",
+            )]);
+            let transcript_entries =
+                session_transcript_entries(Signal::derive(move || entries.get()));
+
+            assert_eq!(transcript_entries.get().len(), 1);
+            assert_eq!(transcript_entries.get()[0].id, "status-1");
         });
     }
 

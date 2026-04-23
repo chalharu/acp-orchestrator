@@ -1,6 +1,6 @@
 use acp_contracts_messages::{ConversationMessage, MessageRole};
 
-use crate::components::transcript::{EntryRole, TranscriptItem};
+use crate::components::transcript::{EntryRole, TranscriptEntry};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionEntry {
@@ -27,29 +27,31 @@ impl SessionEntry {
     }
 }
 
-impl TranscriptItem for SessionEntry {
-    fn transcript_id(&self) -> &str {
-        &self.id
-    }
-
-    fn transcript_role(&self) -> EntryRole {
-        match self.role {
-            SessionEntryRole::User => EntryRole::User,
-            SessionEntryRole::Assistant => EntryRole::Assistant,
-            SessionEntryRole::Status => EntryRole::Status,
+impl From<SessionEntry> for TranscriptEntry {
+    fn from(entry: SessionEntry) -> Self {
+        Self {
+            id: entry.id,
+            role: entry.role.into(),
+            text: entry.text,
         }
-    }
-
-    fn transcript_text(&self) -> &str {
-        &self.text
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionEntryRole {
     User,
     Assistant,
     Status,
+}
+
+impl From<SessionEntryRole> for EntryRole {
+    fn from(role: SessionEntryRole) -> Self {
+        match role {
+            SessionEntryRole::User => Self::User,
+            SessionEntryRole::Assistant => Self::Assistant,
+            SessionEntryRole::Status => Self::Status,
+        }
+    }
 }
 
 impl From<MessageRole> for SessionEntryRole {
@@ -66,7 +68,7 @@ mod tests {
     use acp_contracts_messages::{ConversationMessage, MessageRole};
     use chrono::{TimeZone, Utc};
 
-    use crate::components::transcript::{EntryRole, TranscriptItem};
+    use crate::components::transcript::{EntryRole, TranscriptEntry};
 
     use super::{SessionEntry, SessionEntryRole};
 
@@ -98,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_item_impl_exposes_entry_fields_for_every_role() {
+    fn session_entries_convert_into_transcript_entries_for_every_role() {
         let user_entry = SessionEntry::from_message(ConversationMessage {
             id: "m2".to_string(),
             role: MessageRole::User,
@@ -106,20 +108,21 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 2).unwrap(),
         });
         let status_entry = SessionEntry::status("status-2", "done");
+        let assistant_entry = SessionEntry::from_message(ConversationMessage {
+            id: "m3".to_string(),
+            role: MessageRole::Assistant,
+            text: "reply".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 3).unwrap(),
+        });
 
-        assert_eq!(user_entry.transcript_id(), "m2");
-        assert_eq!(user_entry.transcript_role(), EntryRole::User);
-        assert_eq!(user_entry.transcript_text(), "prompt");
-        assert_eq!(
-            SessionEntry::from_message(ConversationMessage {
-                id: "m3".to_string(),
-                role: MessageRole::Assistant,
-                text: "reply".to_string(),
-                created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 3).unwrap(),
-            })
-            .transcript_role(),
-            EntryRole::Assistant
-        );
-        assert_eq!(status_entry.transcript_role(), EntryRole::Status);
+        let user_transcript = TranscriptEntry::from(user_entry);
+        let assistant_transcript = TranscriptEntry::from(assistant_entry);
+        let status_transcript = TranscriptEntry::from(status_entry);
+
+        assert_eq!(user_transcript.id, "m2");
+        assert_eq!(user_transcript.role, EntryRole::User);
+        assert_eq!(user_transcript.text, "prompt");
+        assert_eq!(assistant_transcript.role, EntryRole::Assistant);
+        assert_eq!(status_transcript.role, EntryRole::Status);
     }
 }

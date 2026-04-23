@@ -19,21 +19,7 @@ pub(crate) struct TranscriptEntry {
     pub(crate) text: String,
 }
 
-impl TranscriptItem for TranscriptEntry {
-    fn transcript_id(&self) -> &str {
-        &self.id
-    }
-
-    fn transcript_role(&self) -> EntryRole {
-        self.role.clone()
-    }
-
-    fn transcript_text(&self) -> &str {
-        &self.text
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntryRole {
     User,
     Assistant,
@@ -58,17 +44,8 @@ impl EntryRole {
     }
 }
 
-pub(crate) trait TranscriptItem: Clone + PartialEq + Send + Sync {
-    fn transcript_id(&self) -> &str;
-    fn transcript_role(&self) -> EntryRole;
-    fn transcript_text(&self) -> &str;
-}
-
 #[component]
-pub(crate) fn Transcript<T>(#[prop(into)] entries: Signal<Vec<T>>) -> impl IntoView
-where
-    T: TranscriptItem + 'static,
-{
+pub(crate) fn Transcript(#[prop(into)] entries: Signal<Vec<TranscriptEntry>>) -> impl IntoView {
     let viewport = NodeRef::<leptos_html::Section>::new();
     let scroll_top = RwSignal::new(0.0);
     let viewport_height = RwSignal::new(DEFAULT_VIEWPORT_HEIGHT);
@@ -102,25 +79,19 @@ where
     }
 }
 
-fn transcript_virtual_window<T>(
-    entries: &[T],
+fn transcript_virtual_window(
+    entries: &[TranscriptEntry],
     scroll_top: f64,
     viewport_height: f64,
-) -> crate::transcript_view::VirtualWindow<T>
-where
-    T: TranscriptItem,
-{
+) -> crate::transcript_view::VirtualWindow<TranscriptEntry> {
     compute_virtual_window(entries, scroll_top, viewport_height, estimated_entry_height)
 }
 
-fn transcript_virtual_window_memo<T>(
-    entries: Signal<Vec<T>>,
+fn transcript_virtual_window_memo(
+    entries: Signal<Vec<TranscriptEntry>>,
     scroll_top: RwSignal<f64>,
     viewport_height: RwSignal<f64>,
-) -> Memo<crate::transcript_view::VirtualWindow<T>>
-where
-    T: TranscriptItem + 'static,
-{
+) -> Memo<crate::transcript_view::VirtualWindow<TranscriptEntry>> {
     Memo::new(move |_| {
         transcript_virtual_window(&entries.get(), scroll_top.get(), viewport_height.get())
     })
@@ -134,32 +105,25 @@ fn transcript_empty_view() -> impl IntoView {
     }
 }
 
-fn transcript_content<T>(
-    entries: Signal<Vec<T>>,
-    visible_entries: Signal<Vec<T>>,
+fn transcript_content(
+    entries: Signal<Vec<TranscriptEntry>>,
+    visible_entries: Signal<Vec<TranscriptEntry>>,
     top_spacer_height: Signal<f64>,
     bottom_spacer_height: Signal<f64>,
-) -> impl IntoView
-where
-    T: TranscriptItem + 'static,
-{
+) -> impl IntoView {
     #[rustfmt::skip]
     view! {
         <Show
             when=move || !entries.get().is_empty()
             fallback=transcript_empty_view
         >
-            <ol class="transcript"><TranscriptSpacer height=top_spacer_height /><For each=move || visible_entries.get() key=|entry| entry.transcript_id().to_string() children=render_transcript_entry_item /><TranscriptSpacer height=bottom_spacer_height /></ol>
+            <ol class="transcript"><TranscriptSpacer height=top_spacer_height /><For each=move || visible_entries.get() key=|entry| entry.id.clone() children=render_transcript_entry_item /><TranscriptSpacer height=bottom_spacer_height /></ol>
         </Show>
     }
 }
 
-fn render_transcript_entry_item<T>(entry: T) -> AnyView
-where
-    T: TranscriptItem,
-{
-    let role = entry.transcript_role();
-    let text = entry.transcript_text().to_string();
+fn render_transcript_entry_item(entry: TranscriptEntry) -> AnyView {
+    let TranscriptEntry { role, text, .. } = entry;
     let css = role.css_class().to_string();
     let label = format!("{}: ", role.label());
 
@@ -218,15 +182,13 @@ fn TranscriptSpacer(#[prop(into)] height: Signal<f64>) -> impl IntoView {
     }
 }
 
-fn bind_viewport_effects<T>(
+fn bind_viewport_effects(
     viewport: NodeRef<leptos_html::Section>,
-    entries: Signal<Vec<T>>,
+    entries: Signal<Vec<TranscriptEntry>>,
     viewport_height: RwSignal<f64>,
     scroll_top: RwSignal<f64>,
     follow_tail: RwSignal<bool>,
-) where
-    T: TranscriptItem + 'static,
-{
+) {
     #[cfg(not(target_family = "wasm"))]
     {
         let _ = (
@@ -311,16 +273,13 @@ fn update_scroll_metrics(
     follow_tail.set(remaining_distance <= BOTTOM_TOLERANCE_PX);
 }
 
-fn estimated_entry_height<T>(entry: &T) -> f64
-where
-    T: TranscriptItem,
-{
-    let (base_height, chars_per_line) = match entry.transcript_role() {
+fn estimated_entry_height(entry: &TranscriptEntry) -> f64 {
+    let (base_height, chars_per_line) = match entry.role {
         EntryRole::User | EntryRole::Assistant => (48.0, 52),
         EntryRole::Status => (36.0, 62),
     };
     let estimated_lines = entry
-        .transcript_text()
+        .text
         .lines()
         .map(|line| estimate_visual_lines(line, chars_per_line))
         .sum::<usize>()
@@ -378,12 +337,12 @@ mod tests {
     }
 
     #[test]
-    fn transcript_entry_trait_methods_return_the_underlying_values() {
+    fn transcript_entry_stores_the_underlying_values() {
         let transcript_entry = entry("assistant", EntryRole::Assistant, "hello");
 
-        assert_eq!(transcript_entry.transcript_id(), "assistant");
-        assert_eq!(transcript_entry.transcript_role(), EntryRole::Assistant);
-        assert_eq!(transcript_entry.transcript_text(), "hello");
+        assert_eq!(transcript_entry.id, "assistant");
+        assert_eq!(transcript_entry.role, EntryRole::Assistant);
+        assert_eq!(transcript_entry.text, "hello");
     }
 
     #[test]

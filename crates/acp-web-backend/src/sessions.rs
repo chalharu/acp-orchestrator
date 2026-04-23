@@ -199,7 +199,11 @@ impl SessionStore {
         }
     }
 
-    pub async fn create_session(&self, owner: &str) -> Result<SessionSnapshot, SessionStoreError> {
+    pub async fn create_session(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
         let _guard = self.create_session_lock.lock().await;
         let handles = {
             let sessions = self.sessions.read().await;
@@ -223,6 +227,7 @@ impl SessionStore {
         let handle = Arc::new(SessionHandle::new(
             session_id.clone(),
             owner.to_string(),
+            workspace_id.to_string(),
             last_activity_at,
             recent_order,
         ));
@@ -275,6 +280,38 @@ impl SessionStore {
         });
 
         owned_sessions.into_iter().map(|(_, item)| item).collect()
+    }
+
+    pub async fn list_workspace_sessions(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Vec<SessionListItem> {
+        let handles = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect::<Vec<_>>()
+        };
+
+        let mut workspace_sessions = Vec::new();
+        for handle in handles {
+            if handle.owner_matches(owner).await && handle.workspace_matches(workspace_id).await {
+                let (item, recent_order) = handle.session_list_item_with_order().await;
+                workspace_sessions.push((recent_order, item));
+            }
+        }
+
+        workspace_sessions.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
+                .then_with(|| left.1.id.cmp(&right.1.id))
+        });
+
+        workspace_sessions
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect()
     }
 
     pub async fn session_history(

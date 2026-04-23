@@ -55,6 +55,7 @@ impl PendingPermission {
 struct SessionData {
     id: String,
     owner: String,
+    workspace_id: String,
     title: String,
     title_is_auto: bool,
     status: SessionStatus,
@@ -75,6 +76,7 @@ impl SessionHandle {
     pub(super) fn new(
         id: String,
         owner: String,
+        workspace_id: String,
         last_activity_at: DateTime<Utc>,
         recent_order: u64,
     ) -> Self {
@@ -84,6 +86,7 @@ impl SessionHandle {
             data: Mutex::new(SessionData {
                 id,
                 owner,
+                workspace_id,
                 title: "New chat".to_string(),
                 title_is_auto: true,
                 status: SessionStatus::Active,
@@ -110,6 +113,10 @@ impl SessionHandle {
         self.data.lock().await.owner.clone()
     }
 
+    pub(super) async fn workspace_matches(&self, workspace_id: &str) -> bool {
+        self.data.lock().await.workspace_id == workspace_id
+    }
+
     pub(super) async fn is_active(&self) -> bool {
         self.data.lock().await.status == SessionStatus::Active
     }
@@ -128,6 +135,7 @@ impl SessionHandle {
         let data = self.data.lock().await;
         SessionSnapshot {
             id: data.id.clone(),
+            workspace_id: data.workspace_id.clone(),
             title: data.title.clone(),
             status: data.status.clone(),
             latest_sequence: data.latest_sequence,
@@ -146,6 +154,7 @@ impl SessionHandle {
         (
             SessionListItem {
                 id: data.id.clone(),
+                workspace_id: data.workspace_id.clone(),
                 title: data.title.clone(),
                 status: data.status.clone(),
                 last_activity_at: data.last_activity_at,
@@ -510,7 +519,13 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_delete_sets_closed_at_for_already_closed_sessions() {
-        let handle = SessionHandle::new("s_test".to_string(), "alice".to_string(), Utc::now(), 1);
+        let handle = SessionHandle::new(
+            "s_test".to_string(),
+            "alice".to_string(),
+            "w_test".to_string(),
+            Utc::now(),
+            1,
+        );
         {
             let mut data = handle.data.lock().await;
             data.status = SessionStatus::Closed;

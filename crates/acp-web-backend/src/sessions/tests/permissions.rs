@@ -47,7 +47,7 @@ async fn expect_snapshot_without_pending_permissions(
 async fn permission_requests_can_be_resolved_for_the_active_turn() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, mut receiver) = store
@@ -88,7 +88,7 @@ async fn permission_requests_can_be_resolved_for_the_active_turn() {
 async fn permission_requests_without_active_turns_are_cancelled() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -110,7 +110,7 @@ async fn permission_requests_without_active_turns_are_cancelled() {
 async fn permission_requests_for_non_active_prompts_are_cancelled() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let first = store
@@ -141,7 +141,7 @@ async fn permission_requests_for_non_active_prompts_are_cancelled() {
 async fn cancelling_the_active_turn_cancels_pending_permissions() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, mut receiver) = store
@@ -181,7 +181,7 @@ async fn cancelling_the_active_turn_cancels_pending_permissions() {
 async fn session_snapshots_keep_pending_permissions_in_creation_order() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -222,7 +222,7 @@ async fn session_snapshots_keep_pending_permissions_in_creation_order() {
 async fn closed_sessions_reject_permission_registration_resolution_and_cancellation() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -256,7 +256,7 @@ async fn closed_sessions_reject_permission_registration_resolution_and_cancellat
 async fn closing_sessions_cancel_active_turns_and_pending_permissions() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -293,7 +293,7 @@ async fn closing_sessions_cancel_active_turns_and_pending_permissions() {
 async fn cancelling_without_an_active_turn_reports_false() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
 
@@ -309,7 +309,7 @@ async fn cancelling_without_an_active_turn_reports_false() {
 async fn closed_sessions_reject_new_prompts_and_second_closes() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     store

@@ -199,6 +199,7 @@ mod tests {
     fn sample_sidebar_session() -> SessionListItem {
         SessionListItem {
             id: "s1".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "Test session".to_string(),
             status: SessionStatus::Active,
             last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),

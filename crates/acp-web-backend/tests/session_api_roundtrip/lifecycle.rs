@@ -11,7 +11,7 @@ async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
     let mut events = stack.open_events("alice", &session.session.id).await?;
 
     for index in 0..80 {

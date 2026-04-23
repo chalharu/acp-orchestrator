@@ -95,6 +95,10 @@ crate = "acp-contracts-stream"
 
 [[licenses.exceptions]]
 allow = ["AGPL-3.0-only"]
+crate = "acp-contracts-workspaces"
+
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
 crate = "acp-mock"
 
 [[licenses.exceptions]]

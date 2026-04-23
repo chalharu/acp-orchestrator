@@ -183,7 +183,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
 async fn rename_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let state = AppState::with_workspace_repository(
@@ -212,7 +212,7 @@ async fn rename_session_keeps_working_when_workspace_materialization_fails() {
 async fn post_message_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = post_message(
@@ -233,7 +233,7 @@ async fn post_message_keeps_working_when_workspace_materialization_fails() {
 async fn close_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = close_session(
@@ -251,7 +251,7 @@ async fn close_session_keeps_working_when_workspace_materialization_fails() {
 async fn delete_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let state = failing_workspace_state(store.clone());

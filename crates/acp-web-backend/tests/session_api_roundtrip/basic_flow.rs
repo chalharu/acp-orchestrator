@@ -9,7 +9,7 @@ async fn assert_invalid_rename_title(title: String, expected_message: &str) -> R
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
 
     let response = stack
         .client
@@ -46,7 +46,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
     })
     .await?;
 
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
     let mut events = stack.open_events("alice", &session.session.id).await?;
 
     let snapshot = expect_next_event(&mut events).await?;
@@ -90,7 +90,7 @@ async fn session_lookup_rejects_different_principal() -> Result<()> {
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
 
     let response = stack
         .client
@@ -117,7 +117,7 @@ async fn rename_and_delete_reject_different_principal() -> Result<()> {
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
 
     let rename_response = stack
         .client
@@ -160,7 +160,7 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
     })
     .await?;
 
-    let first = stack.create_session("alice").await?;
+    let first = stack.create_legacy_session("alice").await?;
     assert!(first.session.id.starts_with("s_"));
 
     let response = stack
@@ -186,9 +186,9 @@ async fn session_list_is_owner_scoped_and_keeps_retained_closed_sessions() -> Re
     })
     .await?;
 
-    let first = stack.create_session("alice").await?;
-    let second = stack.create_session("alice").await?;
-    let bob = stack.create_session("bob").await?;
+    let first = stack.create_legacy_session("alice").await?;
+    let second = stack.create_legacy_session("alice").await?;
+    let bob = stack.create_legacy_session("bob").await?;
     stack.close_session("alice", &first.session.id).await?;
 
     let sessions = stack.list_sessions("alice").await?;
@@ -225,8 +225,8 @@ async fn getting_a_session_does_not_reorder_the_owned_session_list() -> Result<(
     })
     .await?;
 
-    let first = stack.create_session("alice").await?;
-    let second = stack.create_session("alice").await?;
+    let first = stack.create_legacy_session("alice").await?;
+    let second = stack.create_legacy_session("alice").await?;
 
     let before = stack.list_sessions("alice").await?;
     assert_eq!(
@@ -265,8 +265,8 @@ async fn prompt_submission_moves_session_to_front_of_list() -> Result<()> {
     })
     .await?;
 
-    let first = stack.create_session("alice").await?;
-    let second = stack.create_session("alice").await?;
+    let first = stack.create_legacy_session("alice").await?;
+    let second = stack.create_legacy_session("alice").await?;
 
     let before = stack.list_sessions("alice").await?;
     assert_eq!(before.sessions[0].id, second.session.id);
@@ -294,7 +294,7 @@ async fn session_title_defaults_to_new_chat_and_auto_sets_from_first_prompt() ->
     })
     .await?;
 
-    let created = stack.create_session("alice").await?;
+    let created = stack.create_legacy_session("alice").await?;
     assert_eq!(
         created.session.title, "New chat",
         "freshly created session should have the default title"
@@ -331,7 +331,7 @@ async fn session_can_be_renamed_and_title_appears_in_list_and_snapshot() -> Resu
     })
     .await?;
 
-    let created = stack.create_session("alice").await?;
+    let created = stack.create_legacy_session("alice").await?;
     stack
         .rename_session("alice", &created.session.id, "My renamed session")
         .await?;
@@ -366,7 +366,7 @@ async fn manual_rename_prevents_auto_title_from_first_prompt() -> Result<()> {
     })
     .await?;
 
-    let created = stack.create_session("alice").await?;
+    let created = stack.create_legacy_session("alice").await?;
     stack
         .rename_session("alice", &created.session.id, "My custom title")
         .await?;
@@ -395,7 +395,7 @@ async fn session_can_be_deleted_and_is_no_longer_accessible() -> Result<()> {
     })
     .await?;
 
-    let created = stack.create_session("alice").await?;
+    let created = stack.create_legacy_session("alice").await?;
     let session_id = created.session.id.clone();
 
     stack.delete_session("alice", &session_id).await?;
@@ -436,7 +436,7 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
     let mut last_session_id = None;
 
     for index in 0..33 {
-        let created = stack.create_session("alice").await?;
+        let created = stack.create_legacy_session("alice").await?;
         if index == 0 {
             first_session_id = Some(created.session.id.clone());
         }
@@ -483,7 +483,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
     let mut events = stack.open_events("alice", &session.session.id).await?;
 
     let snapshot = expect_next_event(&mut events).await?;
@@ -517,7 +517,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
     let mut events = stack.open_events("alice", &session.session.id).await?;
 
     let snapshot = expect_next_event(&mut events).await?;

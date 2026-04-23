@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use crate::auth::AuthenticatedPrincipal;
 use crate::contract_accounts::LocalAccount;
-use crate::contract_sessions::SessionSnapshot;
+use crate::contract_sessions::{SessionListItem, SessionSnapshot};
+use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 use crate::workspace_records::{
     SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
 };
@@ -18,6 +19,42 @@ pub trait WorkspaceRepository: Send + Sync {
         &self,
         owner_user_id: &str,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
+
+    async fn list_workspaces(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError>;
+
+    async fn load_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError>;
+
+    async fn create_workspace(
+        &self,
+        owner_user_id: &str,
+        request: &CreateWorkspaceRequest,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
+
+    async fn update_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+        request: &UpdateWorkspaceRequest,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
+
+    async fn delete_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), WorkspaceStoreError>;
+
+    async fn list_workspace_sessions(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<SessionListItem>, WorkspaceStoreError>;
 
     async fn save_session_metadata(
         &self,

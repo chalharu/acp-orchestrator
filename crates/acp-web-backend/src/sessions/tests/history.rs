@@ -14,7 +14,7 @@ async fn assert_no_follow_up(receiver: &mut broadcast::Receiver<StreamEvent>, me
 async fn session_history_includes_completed_replies() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -40,7 +40,7 @@ async fn session_history_includes_completed_replies() {
 async fn pending_prompts_expose_session_prompt_and_turn_handles() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -59,7 +59,7 @@ async fn pending_prompts_expose_session_prompt_and_turn_handles() {
 async fn assistant_replies_follow_prompt_submission_order() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let first = store
@@ -110,7 +110,7 @@ async fn pending_permission_resolutions_can_default_to_cancelled() {
 async fn complete_without_output_releases_queued_follow_up_events() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, mut receiver) = store
@@ -154,7 +154,7 @@ async fn complete_without_output_releases_queued_follow_up_events() {
 async fn complete_without_output_is_ignored_after_session_close() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, mut receiver) = store
@@ -186,7 +186,7 @@ async fn complete_without_output_is_ignored_after_session_close() {
 async fn pending_replies_are_ignored_after_session_close() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -212,7 +212,7 @@ async fn pending_replies_are_ignored_after_session_close() {
 async fn appended_assistant_messages_are_rejected_after_session_close() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     store
@@ -232,7 +232,7 @@ async fn appended_assistant_messages_are_rejected_after_session_close() {
 async fn empty_prompts_are_rejected() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
 
@@ -249,7 +249,7 @@ async fn empty_prompts_are_rejected() {
 async fn pending_prompts_can_broadcast_status_updates() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, mut receiver) = store
@@ -281,7 +281,7 @@ async fn pending_prompts_can_broadcast_status_updates() {
 async fn pending_status_updates_are_ignored_after_session_close() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, mut receiver) = store

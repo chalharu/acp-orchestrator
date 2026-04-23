@@ -14,6 +14,10 @@ use acp_web_backend::contract_sessions::{
     SessionListResponse,
 };
 pub(super) use acp_web_backend::contract_stream::{StreamEvent, StreamEventPayload};
+use acp_web_backend::contract_workspaces::{
+    CreateWorkspaceRequest, CreateWorkspaceResponse, UpdateWorkspaceRequest,
+    UpdateWorkspaceResponse, WorkspaceListResponse, WorkspaceResponse,
+};
 use acp_web_backend::support::http::{
     build_http_client_for_url, wait_for_health, wait_for_tcp_connect,
 };
@@ -238,17 +242,151 @@ impl TestStack {
         })
     }
 
-    pub(super) async fn create_session(&self, token: &str) -> Result<CreateSessionResponse> {
+    pub(super) async fn create_legacy_session(&self, token: &str) -> Result<CreateSessionResponse> {
         let response = self
             .client
             .post(format!("{}/api/v1/sessions", self.backend_url))
             .bearer_auth(token)
             .send()
             .await
-            .context("creating test session")?
+            .context("creating legacy test session")?
             .error_for_status()
-            .context("session creation returned an error")?;
+            .context("legacy session creation returned an error")?;
         response.json().await.context("decoding session response")
+    }
+
+    pub(super) async fn create_workspace(
+        &self,
+        token: &str,
+        request: &CreateWorkspaceRequest,
+    ) -> Result<CreateWorkspaceResponse> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/workspaces", self.backend_url))
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await
+            .context("creating test workspace")?
+            .error_for_status()
+            .context("workspace creation returned an error")?;
+        response.json().await.context("decoding workspace response")
+    }
+
+    pub(super) async fn list_workspaces(&self, token: &str) -> Result<WorkspaceListResponse> {
+        let response = self
+            .client
+            .get(format!("{}/api/v1/workspaces", self.backend_url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("listing test workspaces")?
+            .error_for_status()
+            .context("workspace list returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding workspace list response")
+    }
+
+    pub(super) async fn get_workspace(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<WorkspaceResponse> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("loading test workspace")?
+            .error_for_status()
+            .context("workspace lookup returned an error")?;
+        response.json().await.context("decoding workspace detail")
+    }
+
+    pub(super) async fn update_workspace(
+        &self,
+        token: &str,
+        workspace_id: &str,
+        request: &UpdateWorkspaceRequest,
+    ) -> Result<UpdateWorkspaceResponse> {
+        let response = self
+            .client
+            .patch(format!(
+                "{}/api/v1/workspaces/{workspace_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await
+            .context("updating test workspace")?
+            .error_for_status()
+            .context("workspace update returned an error")?;
+        response.json().await.context("decoding workspace update")
+    }
+
+    pub(super) async fn delete_workspace(&self, token: &str, workspace_id: &str) -> Result<()> {
+        self.client
+            .delete(format!(
+                "{}/api/v1/workspaces/{workspace_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("deleting test workspace")?
+            .error_for_status()
+            .context("workspace delete returned an error")?;
+        Ok(())
+    }
+
+    pub(super) async fn create_workspace_session(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<CreateSessionResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/v1/workspaces/{workspace_id}/sessions",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("creating workspace session")?
+            .error_for_status()
+            .context("workspace session creation returned an error")?;
+        response.json().await.context("decoding workspace session")
+    }
+
+    pub(super) async fn list_workspace_sessions(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<SessionListResponse> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}/sessions",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("listing workspace sessions")?
+            .error_for_status()
+            .context("workspace session list returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding workspace session list")
     }
 
     pub(super) async fn submit_prompt(

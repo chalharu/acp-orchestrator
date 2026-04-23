@@ -10,7 +10,7 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
         }),
     );
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let _ = post_message(
@@ -145,7 +145,7 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         .expect_err("rolled back sessions should be removed");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
     store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("rollback should free the session cap");
 }
@@ -195,7 +195,7 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
         }),
     );
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = close_session(

@@ -27,7 +27,7 @@ async fn pending_permission_context(
 ) {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let session_id = session.id.clone();
@@ -131,7 +131,7 @@ async fn backend_acp_client_uses_the_tool_call_id_when_titles_are_missing() {
 async fn backend_acp_client_maps_store_errors_to_internal_errors() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store

@@ -186,6 +186,7 @@ mod tests {
     ) -> SessionSnapshot {
         SessionSnapshot {
             id: "session-1".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "Session".to_string(),
             status,
             latest_sequence: 2,

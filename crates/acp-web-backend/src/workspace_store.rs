@@ -10,9 +10,10 @@ use std::path::Path;
 
 use crate::auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind};
 use crate::contract_accounts::LocalAccount;
-use crate::contract_sessions::SessionSnapshot;
 #[cfg(test)]
 use crate::contract_sessions::SessionStatus;
+use crate::contract_sessions::{SessionListItem, SessionSnapshot};
+use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 pub use crate::workspace_records::{
     SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
 };
@@ -32,10 +33,12 @@ use self::ops::{
     authenticate_local_account_in_transaction, bind_browser_session_to_user,
     bootstrap_workspace_in_transaction, build_session_metadata_record, database_error,
     delete_local_account_in_transaction, ensure_parent_dir, initialize_schema,
-    insert_local_account, join_error, list_local_accounts, load_session_metadata_record,
+    insert_local_account, insert_workspace, join_error, list_local_accounts,
+    list_workspace_sessions, list_workspaces, load_session_metadata_record, load_workspace,
     local_account_count, local_account_from_user, materialize_bearer_user_in_transaction,
     materialize_browser_session_user_in_transaction, open_immediate_transaction,
-    soft_delete_browser_session, update_local_account_in_transaction, upsert_session_metadata,
+    soft_delete_browser_session, soft_delete_workspace, update_local_account_in_transaction,
+    update_workspace as update_workspace_record, upsert_session_metadata,
 };
 
 #[derive(Debug, Clone)]
@@ -108,6 +111,117 @@ impl SqliteWorkspaceRepository {
         Ok(workspace)
     }
 
+    fn list_workspaces_sync(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        list_workspaces(&connection, owner_user_id)
+    }
+
+    fn load_workspace_sync(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        load_workspace(&connection, owner_user_id, workspace_id)
+    }
+
+    fn create_workspace_sync(
+        &self,
+        owner_user_id: &str,
+        request: &CreateWorkspaceRequest,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let workspace = build_workspace_record(owner_user_id, request)?;
+        insert_workspace(&tx, &workspace)?;
+        tx.commit().map_err(database_error)?;
+        Ok(workspace)
+    }
+
+    fn update_workspace_sync(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+        request: &UpdateWorkspaceRequest,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let existing = load_workspace(&tx, owner_user_id, workspace_id)?
+            .ok_or_else(|| WorkspaceStoreError::NotFound("workspace not found".to_string()))?;
+        validate_workspace_update(&existing, request)?;
+        let updated = WorkspaceRecord {
+            name: request
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(existing.name.as_str())
+                .to_string(),
+            default_ref: request
+                .default_ref
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_string)
+                .or(existing.default_ref.clone()),
+            updated_at: Utc::now(),
+            ..existing
+        };
+        let updated_row = update_workspace_record(
+            &tx,
+            owner_user_id,
+            workspace_id,
+            &updated.name,
+            updated.default_ref.as_deref(),
+            updated.updated_at,
+        )?;
+        if !updated_row {
+            return Err(WorkspaceStoreError::NotFound(
+                "workspace not found".to_string(),
+            ));
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(updated)
+    }
+
+    fn delete_workspace_sync(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let mut connection = self.open_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let workspace = load_workspace(&tx, owner_user_id, workspace_id)?
+            .ok_or_else(|| WorkspaceStoreError::NotFound("workspace not found".to_string()))?;
+        ensure_workspace_can_be_deleted(&tx, &workspace)?;
+        let deleted = soft_delete_workspace(&tx, owner_user_id, workspace_id, Utc::now())?;
+        if !deleted {
+            return Err(WorkspaceStoreError::NotFound(
+                "workspace not found".to_string(),
+            ));
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(())
+    }
+
+    fn list_workspace_sessions_sync(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<SessionListItem>, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        ensure_workspace_exists(&connection, owner_user_id, workspace_id)?;
+        list_workspace_sessions(&connection, owner_user_id, workspace_id)
+    }
+
     fn save_session_metadata_sync(
         &self,
         record: &SessionMetadataRecord,
@@ -132,6 +246,9 @@ impl SqliteWorkspaceRepository {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
+        if !snapshot.workspace_id.is_empty() {
+            ensure_workspace_exists(&tx, owner_user_id, &snapshot.workspace_id)?;
+        }
         let existing = load_session_metadata_record(&tx, owner_user_id, &snapshot.id)?;
         let record = build_session_metadata_record(
             &tx,
@@ -289,6 +406,176 @@ impl SqliteWorkspaceRepository {
     }
 }
 
+fn build_workspace_record(
+    owner_user_id: &str,
+    request: &CreateWorkspaceRequest,
+) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+    let name = validate_workspace_name(&request.name)?;
+    let upstream_url = validate_workspace_upstream_url(request.upstream_url.as_deref())?;
+    let default_ref = validate_workspace_default_ref(request.default_ref.as_deref())?;
+    let credential_reference_id =
+        validate_credential_reference_id(request.credential_reference_id.as_deref())?;
+    let now = Utc::now();
+
+    Ok(WorkspaceRecord {
+        workspace_id: format!("w_{}", uuid::Uuid::new_v4().simple()),
+        owner_user_id: owner_user_id.to_string(),
+        name,
+        upstream_url,
+        default_ref,
+        credential_reference_id,
+        bootstrap_kind: None,
+        status: "active".to_string(),
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+    })
+}
+
+fn validate_workspace_update(
+    existing: &WorkspaceRecord,
+    request: &UpdateWorkspaceRequest,
+) -> Result<(), WorkspaceStoreError> {
+    if existing.bootstrap_kind.is_some() && request.name.is_some() {
+        return Err(WorkspaceStoreError::Conflict(
+            "bootstrap_workspace_immutable".to_string(),
+        ));
+    }
+    if request.name.is_none() && request.default_ref.is_none() {
+        return Err(WorkspaceStoreError::Validation(
+            "workspace update must include name or default_ref".to_string(),
+        ));
+    }
+    if let Some(name) = request.name.as_deref() {
+        let _ = validate_workspace_name(name)?;
+    }
+    let _ = validate_workspace_default_ref(request.default_ref.as_deref())?;
+    Ok(())
+}
+
+fn validate_workspace_name(name: &str) -> Result<String, WorkspaceStoreError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(WorkspaceStoreError::Validation(
+            "workspace name must not be empty".to_string(),
+        ));
+    }
+    if name.chars().count() > 120 {
+        return Err(WorkspaceStoreError::Validation(
+            "workspace name must not exceed 120 characters".to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_workspace_upstream_url(
+    upstream_url: Option<&str>,
+) -> Result<Option<String>, WorkspaceStoreError> {
+    let Some(upstream_url) = upstream_url else {
+        return Ok(None);
+    };
+    let upstream_url = upstream_url.trim();
+    if upstream_url.is_empty() {
+        return Err(WorkspaceStoreError::Validation(
+            "upstream_url must not be empty".to_string(),
+        ));
+    }
+    let parsed = reqwest::Url::parse(upstream_url).map_err(|_| {
+        WorkspaceStoreError::Validation("upstream_url must be a valid URL".to_string())
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(WorkspaceStoreError::Validation(
+            "upstream_url must use https".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(WorkspaceStoreError::Validation(
+            "upstream_url must not embed credentials".to_string(),
+        ));
+    }
+    Ok(Some(parsed.to_string()))
+}
+
+fn validate_workspace_default_ref(
+    default_ref: Option<&str>,
+) -> Result<Option<String>, WorkspaceStoreError> {
+    let Some(default_ref) = default_ref else {
+        return Ok(None);
+    };
+    let default_ref = default_ref.trim();
+    if default_ref.is_empty() {
+        return Err(WorkspaceStoreError::Validation(
+            "default_ref must not be empty".to_string(),
+        ));
+    }
+    if default_ref.chars().any(char::is_whitespace)
+        || default_ref.ends_with('.')
+        || default_ref.starts_with('/')
+        || default_ref.ends_with('/')
+        || default_ref.contains("..")
+        || default_ref.contains('@')
+        || default_ref.contains('\\')
+    {
+        return Err(WorkspaceStoreError::Validation(
+            "default_ref is invalid".to_string(),
+        ));
+    }
+    Ok(Some(default_ref.to_string()))
+}
+
+fn validate_credential_reference_id(
+    credential_reference_id: Option<&str>,
+) -> Result<Option<String>, WorkspaceStoreError> {
+    let Some(credential_reference_id) = credential_reference_id else {
+        return Ok(None);
+    };
+    let credential_reference_id = credential_reference_id.trim();
+    if credential_reference_id.is_empty() {
+        return Err(WorkspaceStoreError::Validation(
+            "credential_reference_id must not be empty".to_string(),
+        ));
+    }
+    Ok(Some(credential_reference_id.to_string()))
+}
+
+fn ensure_workspace_exists(
+    connection: &Connection,
+    owner_user_id: &str,
+    workspace_id: &str,
+) -> Result<(), WorkspaceStoreError> {
+    load_workspace(connection, owner_user_id, workspace_id)?
+        .ok_or_else(|| WorkspaceStoreError::NotFound("workspace not found".to_string()))?;
+    Ok(())
+}
+
+fn ensure_workspace_can_be_deleted(
+    connection: &Connection,
+    workspace: &WorkspaceRecord,
+) -> Result<(), WorkspaceStoreError> {
+    if workspace.bootstrap_kind.is_some() {
+        return Err(WorkspaceStoreError::Conflict(
+            "bootstrap_workspace_immutable".to_string(),
+        ));
+    }
+    let active_sessions = connection
+        .query_row(
+            "SELECT COUNT(1)
+             FROM sessions
+             WHERE owner_user_id = ?1
+               AND workspace_id = ?2
+               AND deleted_at IS NULL",
+            rusqlite::params![workspace.owner_user_id, workspace.workspace_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(database_error)?;
+    if active_sessions != 0 {
+        return Err(WorkspaceStoreError::Conflict(
+            "workspace_not_empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl WorkspaceRepository for SqliteWorkspaceRepository {
     async fn materialize_user(
@@ -311,6 +598,94 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         tokio::task::spawn_blocking(move || repository.bootstrap_workspace_sync(&owner_user_id))
             .await
             .map_err(join_error)?
+    }
+
+    async fn list_workspaces(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        tokio::task::spawn_blocking(move || repository.list_workspaces_sync(&owner_user_id))
+            .await
+            .map_err(join_error)?
+    }
+
+    async fn load_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        let workspace_id = workspace_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.load_workspace_sync(&owner_user_id, &workspace_id)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn create_workspace(
+        &self,
+        owner_user_id: &str,
+        request: &CreateWorkspaceRequest,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || {
+            repository.create_workspace_sync(&owner_user_id, &request)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn update_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+        request: &UpdateWorkspaceRequest,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        let workspace_id = workspace_id.to_string();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || {
+            repository.update_workspace_sync(&owner_user_id, &workspace_id, &request)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn delete_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        let workspace_id = workspace_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.delete_workspace_sync(&owner_user_id, &workspace_id)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn list_workspace_sessions(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<SessionListItem>, WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        let workspace_id = workspace_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.list_workspace_sessions_sync(&owner_user_id, &workspace_id)
+        })
+        .await
+        .map_err(join_error)?
     }
 
     async fn save_session_metadata(
@@ -807,6 +1182,7 @@ mod tests {
     fn snapshot(id: &str, title: &str, status: SessionStatus) -> SessionSnapshot {
         SessionSnapshot {
             id: id.to_string(),
+            workspace_id: String::new(),
             title: title.to_string(),
             status,
             latest_sequence: 0,
@@ -857,6 +1233,173 @@ mod tests {
         assert_eq!(second.workspace_id, first.workspace_id);
         assert_eq!(second.owner_user_id, user.user_id);
         assert_eq!(second.name, BOOTSTRAP_WORKSPACE_NAME);
+    }
+
+    #[tokio::test]
+    async fn workspaces_can_be_created_listed_updated_and_deleted() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+
+        let created = repository
+            .create_workspace(
+                &user.user_id,
+                &CreateWorkspaceRequest {
+                    name: "Repo".to_string(),
+                    upstream_url: Some("https://example.com/repo.git".to_string()),
+                    default_ref: Some("refs/heads/main".to_string()),
+                    credential_reference_id: None,
+                },
+            )
+            .await
+            .expect("workspace creation should succeed");
+
+        assert_eq!(created.name, "Repo");
+        assert_eq!(
+            created.upstream_url.as_deref(),
+            Some("https://example.com/repo.git")
+        );
+
+        let listed = repository
+            .list_workspaces(&user.user_id)
+            .await
+            .expect("workspace listing should succeed");
+        assert!(
+            listed
+                .iter()
+                .any(|workspace| workspace.workspace_id == created.workspace_id)
+        );
+
+        let updated = repository
+            .update_workspace(
+                &user.user_id,
+                &created.workspace_id,
+                &UpdateWorkspaceRequest {
+                    name: Some("Renamed repo".to_string()),
+                    default_ref: Some("refs/heads/release".to_string()),
+                },
+            )
+            .await
+            .expect("workspace update should succeed");
+        assert_eq!(updated.name, "Renamed repo");
+        assert_eq!(updated.default_ref.as_deref(), Some("refs/heads/release"));
+
+        repository
+            .delete_workspace(&user.user_id, &created.workspace_id)
+            .await
+            .expect("workspace delete should succeed");
+        let loaded = repository
+            .load_workspace(&user.user_id, &created.workspace_id)
+            .await
+            .expect("deleted workspace lookup should succeed");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_updates_require_a_mutable_field() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let created = repository
+            .create_workspace(
+                &user.user_id,
+                &CreateWorkspaceRequest {
+                    name: "Repo".to_string(),
+                    upstream_url: Some("https://example.com/repo.git".to_string()),
+                    default_ref: None,
+                    credential_reference_id: None,
+                },
+            )
+            .await
+            .expect("workspace creation should succeed");
+
+        let error = repository
+            .update_workspace(
+                &user.user_id,
+                &created.workspace_id,
+                &UpdateWorkspaceRequest {
+                    name: None,
+                    default_ref: None,
+                },
+            )
+            .await
+            .expect_err("empty workspace updates should fail");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Validation(
+                "workspace update must include name or default_ref".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_workspace_sessions_returns_non_deleted_session_metadata() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let workspace = repository
+            .create_workspace(
+                &user.user_id,
+                &CreateWorkspaceRequest {
+                    name: "Repo".to_string(),
+                    upstream_url: None,
+                    default_ref: None,
+                    credential_reference_id: None,
+                },
+            )
+            .await
+            .expect("workspace creation should succeed");
+
+        repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &SessionSnapshot {
+                    id: "s_active".to_string(),
+                    workspace_id: workspace.workspace_id.clone(),
+                    title: "Active".to_string(),
+                    status: SessionStatus::Active,
+                    latest_sequence: 0,
+                    messages: Vec::new(),
+                    pending_permissions: Vec::new(),
+                },
+                true,
+                None,
+            )
+            .await
+            .expect("active session metadata should persist");
+        repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &SessionSnapshot {
+                    id: "s_deleted".to_string(),
+                    workspace_id: workspace.workspace_id.clone(),
+                    title: "Deleted".to_string(),
+                    status: SessionStatus::Closed,
+                    latest_sequence: 0,
+                    messages: Vec::new(),
+                    pending_permissions: Vec::new(),
+                },
+                false,
+                Some("deleted"),
+            )
+            .await
+            .expect("deleted session metadata should persist");
+
+        let listed = repository
+            .list_workspace_sessions(&user.user_id, &workspace.workspace_id)
+            .await
+            .expect("workspace session listing should succeed");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "s_active");
+        assert_eq!(listed[0].workspace_id, workspace.workspace_id);
     }
 
     #[tokio::test]

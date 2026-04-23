@@ -16,11 +16,11 @@ async fn delete_sessions_for_owners_returns_empty_for_empty_owner_lists() {
 async fn delete_sessions_for_owners_removes_matching_sessions() {
     let store = SessionStore::new(4);
     let alice = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("alice session creation should succeed");
     let bob = store
-        .create_session("bob")
+        .create_session("bob", "w_test")
         .await
         .expect("bob session creation should succeed");
 

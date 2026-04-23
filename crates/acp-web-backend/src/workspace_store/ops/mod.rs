@@ -24,9 +24,11 @@ pub(super) use accounts::{
     next_password_hash, validate_password, validate_username, verify_password,
 };
 pub(super) use queries::load_session_metadata_record;
+pub(super) use queries::{list_workspace_sessions, list_workspaces, load_workspace};
 pub(super) use schema::initialize_schema;
 pub(super) use session_metadata::{
-    bootstrap_workspace_in_transaction, build_session_metadata_record, upsert_session_metadata,
+    bootstrap_workspace_in_transaction, build_session_metadata_record, insert_workspace,
+    soft_delete_workspace, update_workspace, upsert_session_metadata,
 };
 pub(super) use shared::{
     database_error, ensure_parent_dir, join_error, open_immediate_transaction,

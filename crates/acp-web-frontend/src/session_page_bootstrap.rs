@@ -71,6 +71,7 @@ mod tests {
         SessionResponse {
             session: SessionSnapshot {
                 id: "s_123".to_string(),
+                workspace_id: "w_test".to_string(),
                 title: "My test session".to_string(),
                 status: SessionStatus::Closed,
                 latest_sequence: 8,

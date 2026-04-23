@@ -21,7 +21,36 @@ pub(super) async fn create_session_snapshot(
     principal: AuthenticatedPrincipal,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
-    let session = state.store.create_session(&owner.principal.id).await?;
+    let workspace = state
+        .workspace_repository
+        .bootstrap_workspace(&owner.user.user_id)
+        .await?;
+    create_session_snapshot_in_workspace(state, owner, &workspace.workspace_id).await
+}
+
+pub(super) async fn create_session_snapshot_for_workspace(
+    state: &AppState,
+    principal: AuthenticatedPrincipal,
+    workspace_id: &str,
+) -> Result<SessionSnapshot, AppError> {
+    let owner = state.owner_context(principal).await?;
+    create_session_snapshot_in_workspace(state, owner, workspace_id).await
+}
+
+async fn create_session_snapshot_in_workspace(
+    state: &AppState,
+    owner: super::OwnerContext,
+    workspace_id: &str,
+) -> Result<SessionSnapshot, AppError> {
+    state
+        .workspace_repository
+        .load_workspace(&owner.user.user_id, workspace_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("workspace not found".to_string()))?;
+    let session = state
+        .store
+        .create_session(&owner.principal.id, workspace_id)
+        .await?;
     let session_id = session.id.clone();
     let session = match seed_startup_hint(state, &owner.principal.id, session).await {
         Ok(session) => session,

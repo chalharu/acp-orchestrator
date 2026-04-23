@@ -25,6 +25,7 @@ members = [
   "crates/acp-contracts-sessions",
   "crates/acp-contracts-slash",
   "crates/acp-contracts-stream",
+  "crates/acp-contracts-workspaces",
   "crates/acp-mock",
   "crates/acp-web-backend",
 ]
@@ -51,6 +52,7 @@ acp-contracts-permissions = { path = "crates/acp-contracts-permissions", version
 acp-contracts-sessions = { path = "crates/acp-contracts-sessions", version = "=0.1.0" }
 acp-contracts-slash = { path = "crates/acp-contracts-slash", version = "=0.1.0" }
 acp-contracts-stream = { path = "crates/acp-contracts-stream", version = "=0.1.0" }
+acp-contracts-workspaces = { path = "crates/acp-contracts-workspaces", version = "=0.1.0" }
 agent-client-protocol = "=0.11.1"
 argon2 = "=0.5.3"
 async-trait = "=0.1.89"

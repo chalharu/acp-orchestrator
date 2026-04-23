@@ -214,6 +214,7 @@ mod tests {
     fn snapshot(status: SessionStatus, permissions: Vec<PermissionRequest>) -> SessionSnapshot {
         SessionSnapshot {
             id: "session-1".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "Session".to_string(),
             status,
             latest_sequence: 4,
@@ -225,6 +226,7 @@ mod tests {
     fn list_item(id: &str) -> SessionListItem {
         SessionListItem {
             id: id.to_string(),
+            workspace_id: "w_test".to_string(),
             title: id.to_string(),
             status: SessionStatus::Active,
             last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),

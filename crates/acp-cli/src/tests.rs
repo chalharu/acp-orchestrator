@@ -243,6 +243,7 @@ fn render_event_covers_all_display_variants() {
         .expect("timestamp should be valid");
     let snapshot = SessionSnapshot {
         id: "s_test".to_string(),
+        workspace_id: "w_test".to_string(),
         title: "New chat".to_string(),
         status: crate::contract_sessions::SessionStatus::Active,
         latest_sequence: 2,
@@ -290,6 +291,7 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
     let chat_session = ChatSession {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 2,
@@ -327,6 +329,7 @@ fn print_chat_status_handles_pending_permissions() {
     let chat_session = ChatSession {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 1,
@@ -348,6 +351,7 @@ fn cli_helpers_cover_missing_urls_closed_sessions_and_not_found_errors() {
     let closed_session = ChatSession {
         session: SessionSnapshot {
             id: "s_closed".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: crate::contract_sessions::SessionStatus::Closed,
             latest_sequence: 1,

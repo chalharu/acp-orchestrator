@@ -270,6 +270,7 @@ mod tests {
     fn stream_event_updates_replay_full_snapshots_without_a_baseline() {
         let snapshot = SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 1,
@@ -295,6 +296,7 @@ mod tests {
     fn initial_snapshot_delta_updates_skip_already_rendered_entries() {
         let session = SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: crate::contract_sessions::SessionStatus::Active,
             latest_sequence: 2,

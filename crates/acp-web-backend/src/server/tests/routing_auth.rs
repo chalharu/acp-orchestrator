@@ -363,12 +363,12 @@ async fn list_sessions_returns_owned_sessions_for_the_authenticated_principal() 
     let state = auth_test_state();
     let session = state
         .store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     state
         .store
-        .create_session("bob")
+        .create_session("bob", "w_test")
         .await
         .expect("other session creation should succeed");
 
@@ -387,7 +387,7 @@ async fn get_session_returns_the_requested_owned_session() {
     let state = auth_test_state();
     let session = state
         .store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
 
@@ -495,7 +495,7 @@ async fn admin_account_deletions_forget_live_sessions() {
     sign_in_browser_account(&state, &member_browser, "member", "password123").await;
     let live_session = state
         .store
-        .create_session(&member_browser.principal.id)
+        .create_session(&member_browser.principal.id, "w_test")
         .await
         .expect("member live session should create");
 

@@ -22,6 +22,7 @@ acp-contracts-permissions = { path = "../acp-contracts-permissions", version = "
 acp-contracts-sessions = { path = "../acp-contracts-sessions", version = "=0.1.0" }
 acp-contracts-slash = { path = "../acp-contracts-slash", version = "=0.1.0" }
 acp-contracts-stream = { path = "../acp-contracts-stream", version = "=0.1.0" }
+acp-contracts-workspaces = { path = "../acp-contracts-workspaces", version = "=0.1.0" }
 console_error_panic_hook = "=0.1.7"
 futures-channel = "=0.3.32"
 futures-util = "=0.3.32"

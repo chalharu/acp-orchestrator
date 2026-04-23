@@ -25,7 +25,7 @@ INSERT INTO workspaces (
     created_at,
     updated_at,
     deleted_at
-) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5, ?6, ?7, NULL)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)
 "#;
 
 const UPSERT_SESSION_METADATA_SQL: &str = r#"
@@ -62,6 +62,40 @@ ON CONFLICT(session_id) DO UPDATE SET
     deleted_at = excluded.deleted_at
 "#;
 
+const INSERT_WORKSPACE_SQL: &str = r#"
+INSERT INTO workspaces (
+    workspace_id,
+    owner_user_id,
+    name,
+    upstream_url,
+    default_ref,
+    credential_reference_id,
+    status,
+    bootstrap_kind,
+    created_at,
+    updated_at,
+    deleted_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)
+"#;
+
+const UPDATE_WORKSPACE_SQL: &str = r#"
+UPDATE workspaces
+SET
+    name = ?3,
+    default_ref = ?4,
+    updated_at = ?5
+WHERE owner_user_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
+"#;
+
+const SOFT_DELETE_WORKSPACE_SQL: &str = r#"
+UPDATE workspaces
+SET
+    status = 'deleted',
+    updated_at = ?3,
+    deleted_at = ?3
+WHERE owner_user_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
+"#;
+
 pub(in crate::workspace_store) fn bootstrap_workspace_in_transaction(
     connection: &Connection,
     owner_user_id: &str,
@@ -75,6 +109,10 @@ pub(in crate::workspace_store) fn bootstrap_workspace_in_transaction(
         workspace_id: format!("w_{}", uuid::Uuid::new_v4().simple()),
         owner_user_id: owner_user_id.to_string(),
         name: BOOTSTRAP_WORKSPACE_NAME.to_string(),
+        upstream_url: None,
+        default_ref: None,
+        credential_reference_id: None,
+        bootstrap_kind: Some(BOOTSTRAP_WORKSPACE_KIND.to_string()),
         status: ACTIVE_WORKSPACE_STATUS.to_string(),
         created_at: now,
         updated_at: now,
@@ -88,8 +126,11 @@ pub(in crate::workspace_store) fn bootstrap_workspace_in_transaction(
                 workspace.workspace_id,
                 workspace.owner_user_id,
                 workspace.name,
+                workspace.upstream_url,
+                workspace.default_ref,
+                workspace.credential_reference_id,
                 workspace.status,
-                BOOTSTRAP_WORKSPACE_KIND,
+                workspace.bootstrap_kind,
                 timestamp(&workspace.created_at),
                 timestamp(&workspace.updated_at)
             ],
@@ -128,6 +169,68 @@ pub(in crate::workspace_store) fn upsert_session_metadata(
     Ok(())
 }
 
+pub(in crate::workspace_store) fn insert_workspace(
+    connection: &Connection,
+    record: &WorkspaceRecord,
+) -> Result<(), WorkspaceStoreError> {
+    connection
+        .execute(
+            INSERT_WORKSPACE_SQL,
+            params![
+                record.workspace_id,
+                record.owner_user_id,
+                record.name,
+                record.upstream_url,
+                record.default_ref,
+                record.credential_reference_id,
+                record.status,
+                record.bootstrap_kind,
+                timestamp(&record.created_at),
+                timestamp(&record.updated_at),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+pub(in crate::workspace_store) fn update_workspace(
+    connection: &Connection,
+    owner_user_id: &str,
+    workspace_id: &str,
+    name: &str,
+    default_ref: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<bool, WorkspaceStoreError> {
+    let affected = connection
+        .execute(
+            UPDATE_WORKSPACE_SQL,
+            params![
+                owner_user_id,
+                workspace_id,
+                name,
+                default_ref,
+                timestamp(&updated_at),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(affected != 0)
+}
+
+pub(in crate::workspace_store) fn soft_delete_workspace(
+    connection: &Connection,
+    owner_user_id: &str,
+    workspace_id: &str,
+    deleted_at: DateTime<Utc>,
+) -> Result<bool, WorkspaceStoreError> {
+    let affected = connection
+        .execute(
+            SOFT_DELETE_WORKSPACE_SQL,
+            params![owner_user_id, workspace_id, timestamp(&deleted_at)],
+        )
+        .map_err(database_error)?;
+    Ok(affected != 0)
+}
+
 fn snapshot_status_name(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Active => "active",
@@ -155,7 +258,7 @@ pub(in crate::workspace_store) fn build_session_metadata_record(
 
     Ok(SessionMetadataRecord {
         session_id: snapshot.id.clone(),
-        workspace_id: resolve_workspace_id(connection, owner_user_id, existing)?,
+        workspace_id: resolve_workspace_id(connection, owner_user_id, snapshot, existing)?,
         owner_user_id: owner_user_id.to_string(),
         title: snapshot.title.clone(),
         status: lifecycle.status,
@@ -175,8 +278,12 @@ pub(in crate::workspace_store) fn build_session_metadata_record(
 fn resolve_workspace_id(
     connection: &Connection,
     owner_user_id: &str,
+    snapshot: &SessionSnapshot,
     existing: Option<&SessionMetadataRecord>,
 ) -> Result<String, WorkspaceStoreError> {
+    if !snapshot.workspace_id.is_empty() {
+        return Ok(snapshot.workspace_id.clone());
+    }
     match existing {
         Some(record) => Ok(record.workspace_id.clone()),
         None => Ok(bootstrap_workspace_in_transaction(connection, owner_user_id)?.workspace_id),

@@ -60,6 +60,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "acp-contracts-workspaces"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+]
+
+[[package]]
 name = "acp-web-frontend"
 version = "0.1.0"
 dependencies = [
@@ -70,6 +78,7 @@ dependencies = [
  "acp-contracts-sessions",
  "acp-contracts-slash",
  "acp-contracts-stream",
+ "acp-contracts-workspaces",
  "chrono",
  "console_error_panic_hook",
  "futures-channel",

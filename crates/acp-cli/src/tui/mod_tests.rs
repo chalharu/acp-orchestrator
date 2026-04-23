@@ -22,6 +22,7 @@ fn chat_session() -> ChatSession {
     ChatSession {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: SessionStatus::Active,
             latest_sequence: 1,
@@ -37,6 +38,7 @@ fn resumed_chat_session() -> ChatSession {
     ChatSession {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: SessionStatus::Active,
             latest_sequence: 2,

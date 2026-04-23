@@ -223,6 +223,7 @@ mod tests {
     fn list_item(id: &str, title: &str) -> SessionListItem {
         SessionListItem {
             id: id.to_string(),
+            workspace_id: "w_test".to_string(),
             title: title.to_string(),
             status: SessionStatus::Active,
             last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),

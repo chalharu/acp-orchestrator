@@ -64,7 +64,7 @@ mod tests {
     async fn command_completion_filters_the_static_catalog_by_prefix() {
         let store = SessionStore::new(4);
         let session = store
-            .create_session("alice")
+            .create_session("alice", "w_test")
             .await
             .expect("session creation should succeed");
 
@@ -87,7 +87,7 @@ mod tests {
     async fn permission_argument_completion_uses_pending_request_ids() {
         let store = SessionStore::new(4);
         let session = store
-            .create_session("alice")
+            .create_session("alice", "w_test")
             .await
             .expect("session creation should succeed");
         let pending = store
@@ -127,7 +127,7 @@ mod tests {
     async fn non_slash_prefixes_return_no_candidates() {
         let store = SessionStore::new(4);
         let session = store
-            .create_session("alice")
+            .create_session("alice", "w_test")
             .await
             .expect("session creation should succeed");
 
@@ -142,7 +142,7 @@ mod tests {
     async fn unsupported_slash_prefixes_return_no_candidates() {
         let store = SessionStore::new(4);
         let session = store
-            .create_session("alice")
+            .create_session("alice", "w_test")
             .await
             .expect("session creation should succeed");
 
@@ -157,7 +157,7 @@ mod tests {
     async fn owner_checks_apply_to_completion_queries() {
         let store = SessionStore::new(4);
         let session = store
-            .create_session("alice")
+            .create_session("alice", "w_test")
             .await
             .expect("session creation should succeed");
 

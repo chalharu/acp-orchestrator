@@ -11,6 +11,7 @@ mod request;
 mod response;
 mod sessions;
 mod stream;
+mod workspaces;
 
 pub(crate) use accounts::{create_account, delete_account, list_accounts, update_account};
 pub(crate) use auth::{auth_status, bootstrap_register, sign_in, sign_out};
@@ -25,6 +26,7 @@ pub(crate) use sessions::{
     resolve_permission, send_message,
 };
 pub(crate) use stream::{SseItem, open_session_event_stream};
+pub(crate) use workspaces::list_workspaces;
 
 #[cfg(test)]
 pub(crate) fn poll_ready<T>(future: impl std::future::Future<Output = T>) -> T {

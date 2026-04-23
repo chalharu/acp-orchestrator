@@ -473,88 +473,89 @@ async fn handle_cancel_notification(
     agent.cancel(args).await
 }
 
-fn register_request_handler<Req, HandlerState, Runner, Handler, HandlerFuture>(
-    builder: acp::Builder<acp::Agent, HandlerState, Runner>,
+#[derive(Clone)]
+struct MockDispatchHandler {
     agent: MockAgent,
-    handler: Handler,
-) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, Runner>
-where
-    Req: acp::JsonRpcRequest,
-    HandlerState: acp::HandleDispatchFrom<acp::Client>,
-    Handler:
-        Fn(MockAgent, Req, acp::Responder<Req::Response>) -> HandlerFuture + Send + Sync + 'static,
-    HandlerFuture: Future<Output = Result<(), acp::Error>> + Send,
-    Runner: acp::RunWithConnectionTo<acp::Client>,
-{
-    builder.on_receive_request(
-        async move |args: Req, responder, _cx| handler(agent.clone(), args, responder).await,
-        acp::on_receive_request!(),
-    )
 }
 
-fn register_request_handler_with_connection<Req, HandlerState, Runner, Handler, HandlerFuture>(
-    builder: acp::Builder<acp::Agent, HandlerState, Runner>,
-    agent: MockAgent,
-    handler: Handler,
-) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, Runner>
-where
-    Req: acp::JsonRpcRequest,
-    HandlerState: acp::HandleDispatchFrom<acp::Client>,
-    Handler: Fn(
-            MockAgent,
-            Req,
-            acp::Responder<Req::Response>,
-            acp::ConnectionTo<acp::Client>,
-        ) -> HandlerFuture
-        + Send
-        + Sync
-        + 'static,
-    HandlerFuture: Future<Output = Result<(), acp::Error>> + Send,
-    Runner: acp::RunWithConnectionTo<acp::Client>,
-{
-    builder.on_receive_request(
-        async move |args: Req, responder, cx| handler(agent.clone(), args, responder, cx).await,
-        acp::on_receive_request!(),
-    )
+impl MockDispatchHandler {
+    fn new(agent: MockAgent) -> Self {
+        Self { agent }
+    }
 }
 
-fn register_notification_handler<Notif, HandlerState, Runner, Handler, HandlerFuture>(
-    builder: acp::Builder<acp::Agent, HandlerState, Runner>,
-    agent: MockAgent,
-    handler: Handler,
-) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, Runner>
-where
-    Notif: acp::JsonRpcNotification,
-    HandlerState: acp::HandleDispatchFrom<acp::Client>,
-    Handler: Fn(MockAgent, Notif) -> HandlerFuture + Send + Sync + 'static,
-    HandlerFuture: Future<Output = Result<(), acp::Error>> + Send,
-    Runner: acp::RunWithConnectionTo<acp::Client>,
-{
-    #[rustfmt::skip]
-    let builder = builder.on_receive_notification(async move |args: Notif, _cx| handler(agent.clone(), args).await, acp::on_receive_notification!());
-    builder
+impl acp::HandleDispatchFrom<acp::Client> for MockDispatchHandler {
+    fn describe_chain(&self) -> impl std::fmt::Debug {
+        "MockDispatchHandler"
+    }
+
+    async fn handle_dispatch_from(
+        &mut self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Client>,
+    ) -> Result<acp::Handled<acp::Dispatch>, acp::Error> {
+        // Keep the handler monomorphic so the launcher binary does not pull in a deeply nested
+        // Builder<..., ChainedHandler<...>> type for every registered ACP mock callback.
+        let dispatch = match dispatch.into_request::<schema::InitializeRequest>()? {
+            Ok((args, responder)) => {
+                respond_initialize_request(self.agent.clone(), args, responder).await?;
+                return Ok(acp::Handled::Yes);
+            }
+            Err(dispatch) => dispatch,
+        };
+        let dispatch = match dispatch.into_request::<schema::AuthenticateRequest>()? {
+            Ok((args, responder)) => {
+                respond_authenticate_request(self.agent.clone(), args, responder).await?;
+                return Ok(acp::Handled::Yes);
+            }
+            Err(dispatch) => dispatch,
+        };
+        let dispatch = match dispatch.into_request::<schema::NewSessionRequest>()? {
+            Ok((args, responder)) => {
+                respond_new_session_request(self.agent.clone(), args, responder, connection)
+                    .await?;
+                return Ok(acp::Handled::Yes);
+            }
+            Err(dispatch) => dispatch,
+        };
+        let dispatch = match dispatch.into_request::<schema::LoadSessionRequest>()? {
+            Ok((args, responder)) => {
+                respond_load_session_request(self.agent.clone(), args, responder).await?;
+                return Ok(acp::Handled::Yes);
+            }
+            Err(dispatch) => dispatch,
+        };
+        let dispatch = match dispatch.into_request::<schema::PromptRequest>()? {
+            Ok((args, responder)) => {
+                respond_prompt_request(self.agent.clone(), args, responder, connection).await?;
+                return Ok(acp::Handled::Yes);
+            }
+            Err(dispatch) => dispatch,
+        };
+        let dispatch = match dispatch.into_request::<schema::SetSessionModeRequest>()? {
+            Ok((args, responder)) => {
+                respond_set_session_mode_request(self.agent.clone(), args, responder).await?;
+                return Ok(acp::Handled::Yes);
+            }
+            Err(dispatch) => dispatch,
+        };
+        match dispatch.into_notification::<schema::CancelNotification>()? {
+            Ok(args) => {
+                handle_cancel_notification(self.agent.clone(), args).await?;
+                Ok(acp::Handled::Yes)
+            }
+            Err(dispatch) => Ok(acp::Handled::No {
+                message: dispatch,
+                retry: false,
+            }),
+        }
+    }
 }
 
 fn build_mock_agent_builder(
     agent: MockAgent,
-) -> acp::Builder<acp::Agent, impl acp::HandleDispatchFrom<acp::Client>, acp::NullRun> {
-    let builder = register_request_handler(
-        acp::Agent.builder().name("acp-mock"),
-        agent.clone(),
-        respond_initialize_request,
-    );
-    let builder = register_request_handler(builder, agent.clone(), respond_authenticate_request);
-    let builder = register_request_handler_with_connection(
-        builder,
-        agent.clone(),
-        respond_new_session_request,
-    );
-    let builder = register_request_handler(builder, agent.clone(), respond_load_session_request);
-    let builder =
-        register_request_handler_with_connection(builder, agent.clone(), respond_prompt_request);
-    let builder =
-        register_request_handler(builder, agent.clone(), respond_set_session_mode_request);
-    register_notification_handler(builder, agent, handle_cancel_notification)
+) -> acp::Builder<acp::Agent, MockDispatchHandler, acp::NullRun> {
+    acp::Builder::new_with(acp::Agent, MockDispatchHandler::new(agent)).name("acp-mock")
 }
 
 #[rustfmt::skip]

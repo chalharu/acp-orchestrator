@@ -158,7 +158,9 @@ fn spawn_workspace_sessions_reload(state: WorkspacesPageState, workspace: &Works
     leptos::task::spawn_local(async move {
         match api::list_workspace_sessions(&workspace_id).await {
             Ok(sessions) => store_workspace_sessions(state, workspace_id, sessions),
-            Err(message) => store_workspace_sessions_error(state, workspace_id, workspace_name, message),
+            Err(message) => {
+                store_workspace_sessions_error(state, workspace_id, workspace_name, message)
+            }
         }
     });
 }

@@ -43,6 +43,76 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
 }
 
 #[tokio::test]
+async fn get_session_restores_durable_messages_after_live_session_is_cleared() {
+    let store = Arc::new(SessionStore::new(4));
+    let state = AppState::with_dependencies(
+        store.clone(),
+        Arc::new(StaticReplyProvider {
+            reply: "injected reply".to_string(),
+        }),
+    );
+    let principal = bearer_principal("alice");
+    let workspace =
+        create_owned_workspace_for_principal(&state, principal.clone(), "Workspace A").await;
+    let created = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id),
+        principal.clone(),
+    )
+    .await
+    .expect("workspace session should create")
+    .1
+    .0
+    .session;
+    let _ = post_message(
+        State(state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+        Json(PromptRequest {
+            text: "hello".to_string(),
+        }),
+    )
+    .await
+    .expect("prompt submission should succeed");
+    let durable_user = state
+        .workspace_repository
+        .materialize_user(&principal)
+        .await
+        .expect("principal materialization should succeed");
+
+    let durable = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state
+                .workspace_repository
+                .load_session_snapshot(&durable_user.user_id, &created.id)
+                .await
+                .expect("durable snapshot should load");
+            if let Some(snapshot) = snapshot
+                && snapshot.session.messages.len() == 2
+            {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("assistant reply should be durably persisted");
+    assert_eq!(durable.session.messages[1].text, "injected reply");
+
+    store
+        .delete_sessions_for_owners(&["alice".to_string()])
+        .await;
+
+    let restored = get_session(State(state), Path(created.id), principal)
+        .await
+        .expect("durably persisted sessions should restore");
+
+    assert_eq!(restored.0.session.messages.len(), 2);
+    assert_eq!(restored.0.session.messages[0].text, "hello");
+    assert_eq!(restored.0.session.messages[1].text, "injected reply");
+}
+
+#[tokio::test]
 async fn create_session_seeds_startup_hints_when_enabled() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {

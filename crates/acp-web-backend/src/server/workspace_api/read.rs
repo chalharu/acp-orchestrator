@@ -59,9 +59,9 @@ pub(in crate::server) async fn list_workspace_sessions(
         .await?
         .ok_or_else(|| AppError::NotFound("workspace not found".to_string()))?;
     let sessions = state
-        .store
-        .list_workspace_sessions(&owner.principal.id, &workspace_id)
-        .await;
+        .workspace_repository
+        .list_workspace_sessions(&owner.user.user_id, &workspace_id)
+        .await?;
 
     Ok(Json(SessionListResponse { sessions }))
 }

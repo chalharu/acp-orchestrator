@@ -9,7 +9,9 @@ use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest}
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
 use crate::support::frontend::{FrontendBundleAsset, frontend_bundle_file_name};
 use crate::support::http::build_http_client_for_url;
-use crate::workspace_records::{SessionMetadataRecord, UserRecord, WorkspaceRecord};
+use crate::workspace_records::{
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+};
 use crate::workspace_repository::WorkspaceRepository;
 use crate::workspace_store::SqliteWorkspaceRepository;
 use async_trait::async_trait;
@@ -730,6 +732,14 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         Err(self.error.clone())
     }
 
+    async fn load_session_snapshot(
+        &self,
+        _owner_user_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
     async fn auth_status(
         &self,
         _browser_session_id: Option<&str>,
@@ -939,6 +949,14 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _owner_user_id: &str,
         _session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
+        Ok(None)
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        _owner_user_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
         Ok(None)
     }
 

@@ -5,7 +5,8 @@ use crate::contract_accounts::LocalAccount;
 use crate::contract_sessions::{SessionListItem, SessionSnapshot};
 use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 use crate::workspace_records::{
-    SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+    WorkspaceStoreError,
 };
 
 #[async_trait]
@@ -74,6 +75,12 @@ pub trait WorkspaceRepository: Send + Sync {
         owner_user_id: &str,
         session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError>;
+
+    async fn load_session_snapshot(
+        &self,
+        owner_user_id: &str,
+        session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError>;
 
     async fn auth_status(
         &self,

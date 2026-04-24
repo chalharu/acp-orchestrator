@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     restartable_deadline_at TEXT,
     created_at TEXT NOT NULL,
     last_activity_at TEXT NOT NULL,
+    latest_sequence INTEGER NOT NULL DEFAULT 0,
+    messages_json TEXT NOT NULL DEFAULT '[]',
     closed_at TEXT,
     deleted_at TEXT,
     FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id),
@@ -82,23 +84,40 @@ CREATE INDEX IF NOT EXISTS sessions_workspace_id_idx
     ON sessions(workspace_id);
 "#;
 
-fn ensure_users_column(
+fn ensure_table_column(
     connection: &Connection,
+    table_name: &str,
     column_name: &str,
     column_definition: &str,
 ) -> Result<(), WorkspaceStoreError> {
-    let columns = table_columns(connection, "users")?;
+    let columns = table_columns(connection, table_name)?;
     if columns.iter().any(|column| column == column_name) {
         return Ok(());
     }
 
     connection
         .execute(
-            &format!("ALTER TABLE users ADD COLUMN {column_name} {column_definition}"),
+            &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
             [],
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+fn ensure_users_column(
+    connection: &Connection,
+    column_name: &str,
+    column_definition: &str,
+) -> Result<(), WorkspaceStoreError> {
+    ensure_table_column(connection, "users", column_name, column_definition)
+}
+
+fn ensure_sessions_column(
+    connection: &Connection,
+    column_name: &str,
+    column_definition: &str,
+) -> Result<(), WorkspaceStoreError> {
+    ensure_table_column(connection, "sessions", column_name, column_definition)
 }
 
 pub(in crate::workspace_store) fn initialize_schema(
@@ -109,6 +128,7 @@ pub(in crate::workspace_store) fn initialize_schema(
         .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
         .map_err(database_error)?;
     ensure_user_auth_columns(connection)?;
+    ensure_session_snapshot_columns(connection)?;
     migrate_legacy_auth_schema(connection)?;
     recreate_users_username_index(connection)?;
     Ok(())
@@ -119,6 +139,12 @@ fn ensure_user_auth_columns(connection: &Connection) -> Result<(), WorkspaceStor
     ensure_users_column(connection, "password_hash", "TEXT")?;
     ensure_users_column(connection, "is_admin", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_users_column(connection, "deleted_at", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_session_snapshot_columns(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    ensure_sessions_column(connection, "latest_sequence", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_sessions_column(connection, "messages_json", "TEXT NOT NULL DEFAULT '[]'")?;
     Ok(())
 }
 

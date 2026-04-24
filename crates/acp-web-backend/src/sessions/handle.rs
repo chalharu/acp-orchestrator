@@ -105,6 +105,46 @@ impl SessionHandle {
         }
     }
 
+    pub(super) fn restore(
+        owner: String,
+        snapshot: SessionSnapshot,
+        last_activity_at: DateTime<Utc>,
+        recent_order: u64,
+    ) -> Self {
+        let (sender, _) = broadcast::channel(64);
+        let closed_at = if snapshot.status == SessionStatus::Closed {
+            Some(last_activity_at)
+        } else {
+            None
+        };
+        let title_is_auto = snapshot.title == "New chat"
+            && !snapshot.messages.iter().any(Self::user_message_exists);
+        let restored_prompt_order = Self::restored_prompt_order(&snapshot.messages);
+
+        Self {
+            sender,
+            data: Mutex::new(SessionData {
+                id: snapshot.id,
+                owner,
+                workspace_id: snapshot.workspace_id,
+                title: snapshot.title,
+                title_is_auto,
+                status: snapshot.status,
+                closed_at,
+                last_activity_at,
+                recent_order,
+                latest_sequence: snapshot.latest_sequence,
+                next_prompt_order: restored_prompt_order,
+                next_permission_request_id: 1,
+                next_completion_order: restored_prompt_order,
+                pending_completions: BTreeMap::new(),
+                pending_permissions: HashMap::new(),
+                active_turn: None,
+                messages: snapshot.messages,
+            }),
+        }
+    }
+
     pub(super) async fn owner_matches(&self, owner: &str) -> bool {
         self.data.lock().await.owner == owner
     }
@@ -413,6 +453,17 @@ impl SessionHandle {
 
     pub(super) fn broadcast(&self, event: StreamEvent) {
         let _ = self.sender.send(event);
+    }
+
+    fn user_message_exists(message: &ConversationMessage) -> bool {
+        matches!(message.role, MessageRole::User)
+    }
+
+    fn restored_prompt_order(messages: &[ConversationMessage]) -> u64 {
+        messages
+            .iter()
+            .filter(|message| Self::user_message_exists(message))
+            .count() as u64
     }
 
     fn clear_turn_state_locked(data: &mut SessionData, prompt_order: u64) {

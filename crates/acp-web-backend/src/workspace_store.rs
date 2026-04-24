@@ -15,7 +15,8 @@ use crate::contract_sessions::SessionStatus;
 use crate::contract_sessions::{SessionListItem, SessionSnapshot};
 use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 pub use crate::workspace_records::{
-    SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+    WorkspaceStoreError,
 };
 use crate::workspace_repository::WorkspaceRepository;
 
@@ -34,10 +35,11 @@ use self::ops::{
     bootstrap_workspace_in_transaction, build_session_metadata_record, database_error,
     delete_local_account_in_transaction, ensure_parent_dir, initialize_schema,
     insert_local_account, insert_workspace, join_error, list_local_accounts,
-    list_workspace_sessions, list_workspaces, load_session_metadata_record, load_workspace,
-    local_account_count, local_account_from_user, materialize_bearer_user_in_transaction,
-    materialize_browser_session_user_in_transaction, open_immediate_transaction,
-    soft_delete_browser_session, soft_delete_workspace, update_local_account_in_transaction,
+    list_workspace_sessions, list_workspaces, load_session_metadata_record,
+    load_session_snapshot_record, load_workspace, local_account_count, local_account_from_user,
+    materialize_bearer_user_in_transaction, materialize_browser_session_user_in_transaction,
+    open_immediate_transaction, persist_session_snapshot_payload, soft_delete_browser_session,
+    soft_delete_workspace, update_local_account_in_transaction,
     update_workspace as update_workspace_record, upsert_session_metadata,
 };
 
@@ -250,6 +252,7 @@ impl SqliteWorkspaceRepository {
             existing.as_ref(),
         )?;
         upsert_session_metadata(&tx, &record)?;
+        persist_session_snapshot_payload(&tx, owner_user_id, snapshot)?;
         tx.commit().map_err(database_error)?;
         Ok(())
     }
@@ -261,6 +264,15 @@ impl SqliteWorkspaceRepository {
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
         let connection = self.open_connection()?;
         load_session_metadata_record(&connection, owner_user_id, session_id)
+    }
+
+    fn load_session_snapshot_sync(
+        &self,
+        owner_user_id: &str,
+        session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
+        let connection = self.open_connection()?;
+        load_session_snapshot_record(&connection, owner_user_id, session_id)
     }
 
     fn auth_status_sync(
@@ -731,6 +743,21 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         let session_id = session_id.to_string();
         tokio::task::spawn_blocking(move || {
             repository.load_session_metadata_sync(&owner_user_id, &session_id)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        owner_user_id: &str,
+        session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
+        let repository = self.clone();
+        let owner_user_id = owner_user_id.to_string();
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            repository.load_session_snapshot_sync(&owner_user_id, &session_id)
         })
         .await
         .map_err(join_error)?
@@ -2108,6 +2135,56 @@ mod tests {
         assert_eq!(second.created_at, first.created_at);
         assert_eq!(second.last_activity_at, first.last_activity_at);
         assert_eq!(second.title, "Renamed title");
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_round_trips_messages_for_durable_restore() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
+        let snapshot = SessionSnapshot {
+            latest_sequence: 7,
+            messages: vec![
+                crate::contract_messages::ConversationMessage {
+                    id: "m_user".to_string(),
+                    role: crate::contract_messages::MessageRole::User,
+                    text: "hello".to_string(),
+                    created_at: Utc::now(),
+                },
+                crate::contract_messages::ConversationMessage {
+                    id: "m_assistant".to_string(),
+                    role: crate::contract_messages::MessageRole::Assistant,
+                    text: "world".to_string(),
+                    created_at: Utc::now(),
+                },
+            ],
+            ..snapshot(
+                &workspace.workspace_id,
+                "s_durable_restore",
+                "Round trip",
+                SessionStatus::Active,
+            )
+        };
+
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, true, None)
+            .await
+            .expect("snapshot persistence should succeed");
+
+        let loaded = repository
+            .load_session_snapshot(&user.user_id, &snapshot.id)
+            .await
+            .expect("durable snapshot should load")
+            .expect("durable snapshot should exist");
+
+        assert_eq!(loaded.session, snapshot);
+        assert!(loaded.last_activity_at <= Utc::now());
     }
 
     #[tokio::test]

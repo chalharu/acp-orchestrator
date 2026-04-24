@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::contract_sessions::{SessionSnapshot, SessionStatus};
 use crate::workspace_records::{
-    SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+    WorkspaceStoreError,
 };
 
 use super::{
@@ -96,6 +98,19 @@ SELECT
 FROM sessions
 WHERE owner_user_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
 ORDER BY last_activity_at DESC, session_id ASC
+"#;
+
+const LOAD_SESSION_SNAPSHOT_SQL: &str = r#"
+SELECT
+    session_id,
+    workspace_id,
+    title,
+    status,
+    latest_sequence,
+    messages_json,
+    last_activity_at
+FROM sessions
+WHERE owner_user_id = ?1 AND session_id = ?2 AND deleted_at IS NULL
 "#;
 
 pub(in crate::workspace_store) fn load_user_by_principal(
@@ -339,6 +354,33 @@ pub(in crate::workspace_store) fn load_session_metadata_record(
         .map_err(database_error)
 }
 
+pub(in crate::workspace_store) fn load_session_snapshot_record(
+    connection: &Connection,
+    owner_user_id: &str,
+    session_id: &str,
+) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
+    connection
+        .query_row(
+            LOAD_SESSION_SNAPSHOT_SQL,
+            params![owner_user_id, session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    parse_timestamp_for_row(row.get::<_, String>(6)?, 6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(database_error)?
+        .map(build_session_snapshot_record)
+        .transpose()
+}
+
 pub(in crate::workspace_store) fn list_workspace_sessions(
     connection: &Connection,
     owner_user_id: &str,
@@ -386,6 +428,43 @@ fn load_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMetadata
         closed_at: timing.closed_at,
         deleted_at: timing.deleted_at,
     })
+}
+
+fn build_session_snapshot_record(
+    row: (String, String, String, String, i64, String, DateTime<Utc>),
+) -> Result<DurableSessionSnapshotRecord, WorkspaceStoreError> {
+    let (session_id, workspace_id, title, status, latest_sequence, messages_json, last_activity_at) =
+        row;
+    let latest_sequence = u64::try_from(latest_sequence).map_err(|error| {
+        WorkspaceStoreError::Database(format!(
+            "invalid latest_sequence for session {session_id}: {error}"
+        ))
+    })?;
+    let messages = serde_json::from_str(&messages_json).map_err(|error| {
+        WorkspaceStoreError::Database(format!(
+            "invalid messages_json for session {session_id}: {error}"
+        ))
+    })?;
+
+    Ok(DurableSessionSnapshotRecord {
+        session: SessionSnapshot {
+            id: session_id,
+            workspace_id,
+            title,
+            status: session_status_from_record(&status),
+            latest_sequence,
+            messages,
+            pending_permissions: Vec::new(),
+        },
+        last_activity_at,
+    })
+}
+
+fn session_status_from_record(status: &str) -> SessionStatus {
+    match status {
+        "closed" => SessionStatus::Closed,
+        _ => SessionStatus::Active,
+    }
 }
 
 struct SessionCheckoutFields {

@@ -134,6 +134,29 @@ async fn workspace_session_routes_scope_sessions_to_the_workspace() {
 }
 
 #[tokio::test]
+async fn workspace_session_routes_list_durable_sessions_after_live_state_is_cleared() {
+    let state = workspace_state();
+    let workspace = create_owned_workspace(&state, "Durable").await;
+    let created = create_workspace_session_for(&state, &workspace.workspace_id).await;
+
+    state
+        .store
+        .delete_sessions_for_owners(&["alice".to_string()])
+        .await;
+
+    let response = list_workspace_sessions(
+        State(state),
+        Path(workspace.workspace_id),
+        bearer_principal("alice"),
+    )
+    .await
+    .expect("listing durable workspace sessions should succeed");
+
+    assert_eq!(response.0.sessions.len(), 1);
+    assert_eq!(response.0.sessions[0].id, created.id);
+}
+
+#[tokio::test]
 async fn workspace_updates_require_name_or_default_ref() {
     let state = workspace_state();
     let created = create_owned_workspace(&state, "Repo").await;

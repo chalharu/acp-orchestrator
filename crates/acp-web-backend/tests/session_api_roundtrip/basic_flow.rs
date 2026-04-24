@@ -422,7 +422,7 @@ async fn session_can_be_deleted_and_is_no_longer_accessible() -> Result<()> {
 }
 
 #[tokio::test]
-async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
+async fn retention_prunes_oldest_closed_sessions_from_live_cache_only() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 128,
         acp_server: String::new(),
@@ -455,7 +455,7 @@ async fn retention_prunes_oldest_closed_sessions() -> Result<()> {
         .send()
         .await
         .context("loading the oldest closed session")?;
-    assert_eq!(first_session_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(first_session_response.status(), StatusCode::OK);
 
     let last_session_response = stack
         .client

@@ -1,10 +1,10 @@
 use std::{
     cmp::{Ordering, Reverse},
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     sync::Arc,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
 
@@ -258,6 +258,36 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<SessionSnapshot, SessionStoreError> {
         let handle = self.authorized_handle(owner, session_id).await?;
+        Ok(handle.snapshot().await)
+    }
+
+    pub async fn restore_session(
+        &self,
+        owner: &str,
+        snapshot: SessionSnapshot,
+        last_activity_at: DateTime<Utc>,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
+        let session_id = snapshot.id.clone();
+        let recent_order = self.claim_recent_order().await;
+        let restored = Arc::new(SessionHandle::restore(
+            owner.to_string(),
+            snapshot,
+            last_activity_at,
+            recent_order,
+        ));
+
+        let handle = {
+            let mut sessions = self.sessions.write().await;
+            match sessions.entry(session_id) {
+                Entry::Occupied(entry) => entry.get().clone(),
+                Entry::Vacant(entry) => entry.insert(restored).clone(),
+            }
+        };
+
+        if !handle.owner_matches(owner).await {
+            return Err(SessionStoreError::Forbidden);
+        }
+
         Ok(handle.snapshot().await)
     }
 

@@ -62,6 +62,14 @@ ON CONFLICT(session_id) DO UPDATE SET
     deleted_at = excluded.deleted_at
 "#;
 
+const UPDATE_SESSION_SNAPSHOT_PAYLOAD_SQL: &str = r#"
+UPDATE sessions
+SET
+    latest_sequence = ?3,
+    messages_json = ?4
+WHERE owner_user_id = ?1 AND session_id = ?2
+"#;
+
 const INSERT_WORKSPACE_SQL: &str = r#"
 INSERT INTO workspaces (
     workspace_id,
@@ -163,6 +171,29 @@ pub(in crate::workspace_store) fn upsert_session_metadata(
                 timestamp(&record.last_activity_at),
                 record.closed_at.as_ref().map(timestamp),
                 record.deleted_at.as_ref().map(timestamp)
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+pub(in crate::workspace_store) fn persist_session_snapshot_payload(
+    connection: &Connection,
+    owner_user_id: &str,
+    snapshot: &SessionSnapshot,
+) -> Result<(), WorkspaceStoreError> {
+    let latest_sequence = i64::try_from(snapshot.latest_sequence)
+        .map_err(|error| WorkspaceStoreError::Database(error.to_string()))?;
+    let messages_json = serde_json::to_string(&snapshot.messages)
+        .map_err(|error| WorkspaceStoreError::Database(error.to_string()))?;
+    connection
+        .execute(
+            UPDATE_SESSION_SNAPSHOT_PAYLOAD_SQL,
+            params![
+                owner_user_id,
+                snapshot.id.as_str(),
+                latest_sequence,
+                messages_json,
             ],
         )
         .map_err(database_error)?;

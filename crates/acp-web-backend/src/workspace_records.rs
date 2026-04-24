@@ -1,3 +1,4 @@
+use crate::contract_sessions::SessionSnapshot;
 use chrono::{DateTime, Utc};
 use std::fmt;
 
@@ -46,6 +47,12 @@ pub struct SessionMetadataRecord {
     pub last_activity_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableSessionSnapshotRecord {
+    pub session: SessionSnapshot,
+    pub last_activity_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

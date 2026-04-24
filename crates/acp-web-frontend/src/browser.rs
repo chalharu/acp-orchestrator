@@ -70,14 +70,6 @@ pub(crate) fn store_selected_workspace_id(workspace_id: &str) {
     }
 }
 
-#[allow(unused_variables)]
-pub(crate) fn clear_selected_workspace_id_if_matches(workspace_id: &str) {
-    #[cfg(target_family = "wasm")]
-    if selected_workspace_id().as_deref() == Some(workspace_id) {
-        clear_selected_workspace_id();
-    }
-}
-
 pub(crate) fn clear_selected_workspace_id() {
     #[cfg(target_family = "wasm")]
     if let Some(storage) = session_storage() {
@@ -147,7 +139,6 @@ mod tests {
     fn selected_workspace_helpers_fall_back_without_session_storage() {
         assert_eq!(selected_workspace_id(), None);
         store_selected_workspace_id("workspace-1");
-        clear_selected_workspace_id_if_matches("workspace-1");
         clear_selected_workspace_id();
         assert_eq!(selected_workspace_id(), None);
     }

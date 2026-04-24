@@ -9,3 +9,4 @@ pub use accounts::{AccountsPage, SessionSidebarAuthControls};
 pub use register::RegisterPage;
 pub use sign_in::SignInPage;
 pub use workspaces::WorkspacesPage;
+pub(crate) use workspaces::workspaces_path_with_return_to;

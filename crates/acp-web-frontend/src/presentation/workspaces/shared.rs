@@ -1,13 +1,13 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
+use std::collections::HashMap;
+
+use acp_contracts_sessions::SessionListItem;
 use acp_contracts_workspaces::WorkspaceSummary;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
-use crate::{
-    browser::{clear_selected_workspace_id_if_matches, selected_workspace_id},
-    infrastructure::api,
-};
+use crate::infrastructure::api;
 
 use crate::{
     application::auth::WorkspacesRouteAccess,
@@ -23,6 +23,9 @@ pub(super) struct WorkspacesPageState {
     pub(super) access: RwSignal<Option<WorkspacesRouteAccess>>,
     pub(super) workspaces: RwSignal<Vec<WorkspaceSummary>>,
     pub(super) loading: RwSignal<bool>,
+    /// Sessions keyed by workspace_id; populated after the workspace list loads.
+    pub(super) workspace_sessions: RwSignal<HashMap<String, Vec<SessionListItem>>>,
+    pub(super) show_create_modal: RwSignal<bool>,
     pub(super) create_name: RwSignal<String>,
     pub(super) creating: RwSignal<bool>,
     pub(super) editing_workspace_id: RwSignal<Option<String>>,
@@ -30,7 +33,6 @@ pub(super) struct WorkspacesPageState {
     pub(super) saving_workspace_id: RwSignal<Option<String>>,
     pub(super) deleting_workspace_id: RwSignal<Option<String>>,
     pub(super) opening_chat_workspace_id: RwSignal<Option<String>>,
-    pub(super) selected_workspace_id: RwSignal<Option<String>>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -42,6 +44,8 @@ impl WorkspacesPageState {
             access: RwSignal::new(None::<WorkspacesRouteAccess>),
             workspaces: RwSignal::new(Vec::<WorkspaceSummary>::new()),
             loading: RwSignal::new(true),
+            workspace_sessions: RwSignal::new(HashMap::new()),
+            show_create_modal: RwSignal::new(false),
             create_name: RwSignal::new(String::new()),
             creating: RwSignal::new(false),
             editing_workspace_id: RwSignal::new(None::<String>),
@@ -49,23 +53,12 @@ impl WorkspacesPageState {
             saving_workspace_id: RwSignal::new(None::<String>),
             deleting_workspace_id: RwSignal::new(None::<String>),
             opening_chat_workspace_id: RwSignal::new(None::<String>),
-            selected_workspace_id: RwSignal::new(current_selected_workspace_id()),
             checked: RwSignal::new(false),
         }
     }
 }
 
-#[cfg(target_family = "wasm")]
-fn current_selected_workspace_id() -> Option<String> {
-    selected_workspace_id()
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn current_selected_workspace_id() -> Option<String> {
-    None
-}
-
-pub(in crate::presentation) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
+pub(crate) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
     path_with_return_to("/app/workspaces/", return_to_path)
 }
 
@@ -75,17 +68,6 @@ pub(super) fn workspaces_back_to_chat_path(search: &str) -> Option<String> {
 
 pub(super) fn workspaces_back_to_chat_path_from_location() -> Option<String> {
     session_return_to_path_from_location()
-}
-
-fn retained_selected_workspace_id(
-    workspaces: &[WorkspaceSummary],
-    selected_workspace_id: Option<String>,
-) -> Option<String> {
-    selected_workspace_id.filter(|selected_workspace_id| {
-        workspaces
-            .iter()
-            .any(|workspace| workspace.workspace_id == *selected_workspace_id)
-    })
 }
 
 #[cfg(target_family = "wasm")]
@@ -136,20 +118,31 @@ pub(super) fn initialize_workspaces_page_host(state: WorkspacesPageState) {
 pub(super) fn spawn_workspace_reload(state: WorkspacesPageState) {
     state.loading.set(true);
     state.error.set(None);
+    state.workspace_sessions.set(HashMap::new());
     leptos::task::spawn_local(async move {
         match api::list_workspaces().await {
             Ok(workspaces) => {
-                let previous_selected_workspace_id = state.selected_workspace_id.get_untracked();
-                let next_selected_workspace_id =
-                    retained_selected_workspace_id(&workspaces, previous_selected_workspace_id);
-                if next_selected_workspace_id.is_none() {
-                    if let Some(previous_selected_workspace_id) =
-                        state.selected_workspace_id.get_untracked()
-                    {
-                        clear_selected_workspace_id_if_matches(&previous_selected_workspace_id);
-                    }
+                for workspace in &workspaces {
+                    let workspace_id = workspace.workspace_id.clone();
+                    let workspace_name = workspace.name.clone();
+                    leptos::task::spawn_local(async move {
+                        match api::list_workspace_sessions(&workspace_id).await {
+                            Ok(sessions) => {
+                                state.workspace_sessions.update(|map| {
+                                    map.insert(workspace_id.clone(), sessions);
+                                });
+                            }
+                            Err(message) => {
+                                state.workspace_sessions.update(|map| {
+                                    map.insert(workspace_id.clone(), Vec::new());
+                                });
+                                state.error.set(Some(format!(
+                                    "Failed to load sessions for workspace {workspace_name}: {message}"
+                                )));
+                            }
+                        }
+                    });
                 }
-                state.selected_workspace_id.set(next_selected_workspace_id);
                 state.workspaces.set(workspaces);
                 state.loading.set(false);
             }
@@ -184,6 +177,8 @@ mod tests {
             assert!(state.access.get().is_none());
             assert!(state.workspaces.get().is_empty());
             assert!(state.loading.get());
+            assert!(state.workspace_sessions.get().is_empty());
+            assert!(!state.show_create_modal.get());
             assert!(state.create_name.get().is_empty());
             assert!(!state.creating.get());
             assert!(state.editing_workspace_id.get().is_none());
@@ -191,7 +186,6 @@ mod tests {
             assert!(state.saving_workspace_id.get().is_none());
             assert!(state.deleting_workspace_id.get().is_none());
             assert!(state.opening_chat_workspace_id.get().is_none());
-            assert!(state.selected_workspace_id.get().is_none());
             assert!(!state.checked.get());
         });
     }
@@ -241,29 +235,5 @@ mod tests {
     #[test]
     fn back_to_chat_path_from_location_returns_none_without_browser() {
         assert_eq!(workspaces_back_to_chat_path_from_location(), None);
-    }
-
-    #[test]
-    fn retained_selected_workspace_id_only_keeps_existing_workspaces() {
-        let workspaces = vec![WorkspaceSummary {
-            workspace_id: "w_1".to_string(),
-            name: "Workspace".to_string(),
-            upstream_url: None,
-            default_ref: None,
-            bootstrap_kind: None,
-            status: "active".to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }];
-
-        assert_eq!(
-            retained_selected_workspace_id(&workspaces, Some("w_1".to_string())),
-            Some("w_1".to_string())
-        );
-        assert_eq!(retained_selected_workspace_id(&workspaces, None), None);
-        assert_eq!(
-            retained_selected_workspace_id(&workspaces, Some("w_missing".to_string())),
-            None
-        );
     }
 }

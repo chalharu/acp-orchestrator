@@ -58,6 +58,123 @@ async fn home_route_requires_explicit_workspace_selection() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_shows_create_workspace_button_not_inline_form() -> Result<()> {
+    // Regression: workspace creation must be behind a modal button, not an
+    // always-visible inline form section.
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+
+        // The "+ New workspace" trigger button must be visible.
+        let new_btn_present: bool = browser
+            .evaluate(
+                "return Boolean(document.querySelector('.workspace-dashboard__new-btn'));",
+                "checking create workspace button",
+            )
+            .await?;
+        assert!(new_btn_present, "New workspace button must be present");
+
+        // The modal form must NOT be visible before the button is clicked.
+        let modal_visible: bool = browser
+            .evaluate(
+                "return Boolean(document.querySelector('.workspace-modal-overlay'));",
+                "checking modal is not yet visible",
+            )
+            .await?;
+        assert!(!modal_visible, "Create workspace modal must start hidden");
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_shows_workspace_scoped_sessions() -> Result<()> {
+    // After creating a workspace and starting a chat in it, the workspace card
+    // on the workspaces page must show the session under that workspace.
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+        browser
+            .create_workspace_and_confirm("Session Scope Test Workspace")
+            .await?;
+        browser
+            .open_workspace_chat_and_confirm("Session Scope Test Workspace")
+            .await?;
+
+        // Navigate back to the workspace dashboard.
+        browser.ensure_sidebar_visible().await?;
+        browser.click_workspaces_link().await?;
+        browser.wait_for_workspaces_page().await?;
+
+        // The workspace card should now list the created session.
+        let session_listed: bool = browser
+            .evaluate(
+                "return Array.from(document.querySelectorAll('.workspace-card'))\
+                 .some(card => card.textContent?.includes('Session Scope Test Workspace') \
+                     && card.querySelector('.workspace-card__session-list') !== null);",
+                "checking workspace card session list",
+            )
+            .await?;
+        assert!(
+            session_listed,
+            "Workspace card must show a session list after a session is created"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn session_sidebar_shows_only_current_workspace_sessions() -> Result<()> {
+    // Sessions from other workspaces must not appear in the sidebar of a
+    // workspace-A session.
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+        browser.create_workspace_and_confirm("WS-Alpha").await?;
+        browser.create_workspace_and_confirm("WS-Beta").await?;
+        browser.open_workspace_chat_and_confirm("WS-Alpha").await?;
+        browser.ensure_sidebar_visible().await?;
+
+        // The sidebar of a WS-Alpha session must not contain a WS-Beta marker.
+        // (We verify by checking the sidebar session list has no items whose
+        // link would belong to a WS-Beta session — since WS-Beta has no sessions
+        // yet, the sidebar list should reflect only WS-Alpha sessions.)
+        let beta_present_in_sidebar: bool = browser
+            .evaluate(
+                "return Boolean(document.querySelector('.session-sidebar__workspace')\
+                 ?.textContent?.includes('WS-Beta'));",
+                "checking WS-Beta not in sidebar workspace label",
+            )
+            .await?;
+        assert!(
+            !beta_present_in_sidebar,
+            "WS-Beta must not appear in the WS-Alpha session sidebar"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
 async fn slash_prefix_can_be_removed_without_breaking_prompt_submission() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
@@ -190,22 +307,18 @@ async fn workspaces_page_back_link_returns_to_the_same_session() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
-async fn home_route_recovers_from_a_stale_selected_workspace() -> Result<()> {
+async fn home_route_always_lands_on_workspaces_dashboard() -> Result<()> {
+    // In the new workspace-first UX /app/ always redirects to /app/workspaces/
+    // for signed-in users regardless of any sessionStorage state.
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
         browser.open_app().await?;
+        // Inject a workspace ID that doesn't exist and return to /app/.
         browser
             .inject_selected_workspace_and_return_home("w_missing")
             .await?;
+        // /app/ must still land on the workspaces dashboard.
         browser.wait_for_workspaces_page().await?;
-
-        let selected_workspace: Option<String> = browser
-            .evaluate(
-                "return window.sessionStorage.getItem('acp-selected-workspace-id');",
-                "reading stale selected workspace storage",
-            )
-            .await?;
-        assert!(selected_workspace.is_none());
 
         Ok(())
     }
@@ -241,12 +354,21 @@ async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> 
 
 #[tokio::test]
 #[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
-async fn workspaces_page_can_switch_workspace_for_new_chats() -> Result<()> {
+async fn workspaces_page_can_open_chat_in_specific_workspace() -> Result<()> {
+    // Tests that clicking "New chat" inside a workspace card opens a session
+    // belonging to that workspace — the replacement for the old "Switch here" flow.
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        let original_path = set_up_workspace_switch_scenario(&browser).await?;
-        reopen_home_after_workspace_switch(&browser, "Workspace B").await?;
-        assert_ne!(browser.current_path().await?, original_path);
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+        browser.create_workspace_and_confirm("Workspace A").await?;
+        browser.create_workspace_and_confirm("Workspace B").await?;
+
+        // Open a chat directly from Workspace B's card.
+        browser
+            .open_workspace_chat_and_confirm("Workspace B")
+            .await?;
+        browser.ensure_sidebar_visible().await?;
         assert_session_sidebar_workspace(&browser, "Workspace B").await?;
 
         Ok(())
@@ -277,32 +399,6 @@ async fn sign_out_clears_workspace_and_prepared_session_storage() -> Result<()> 
 
     browser.shutdown().await;
     result
-}
-
-async fn set_up_workspace_switch_scenario(browser: &BrowserHarness) -> Result<String> {
-    browser.open_app().await?;
-    browser.wait_for_workspaces_page().await?;
-    browser.create_workspace_and_confirm("Workspace A").await?;
-    browser.create_workspace_and_confirm("Workspace B").await?;
-    browser
-        .open_workspace_chat_and_confirm("Workspace A")
-        .await?;
-    browser.ensure_sidebar_visible().await?;
-    let original_path = browser.current_path().await?;
-    assert_session_sidebar_workspace(browser, "Workspace A").await?;
-    Ok(original_path)
-}
-
-async fn reopen_home_after_workspace_switch(
-    browser: &BrowserHarness,
-    workspace_name: &str,
-) -> Result<()> {
-    browser.click_workspaces_link().await?;
-    browser.wait_for_workspaces_page().await?;
-    browser.switch_workspace_and_confirm(workspace_name).await?;
-    browser.open_app().await?;
-    browser.wait_for_session_page().await?;
-    browser.ensure_sidebar_visible().await
 }
 
 async fn assert_session_sidebar_workspace(
@@ -713,17 +809,27 @@ impl BrowserHarness {
     }
 
     async fn create_workspace(&self, name: &str) -> Result<()> {
+        // In the new UI, workspace creation is behind a modal triggered by the
+        // "+ New workspace" button.  Open the modal first.
+        self.client
+            .find(Locator::Css(".workspace-dashboard__new-btn"))
+            .await
+            .context("finding the New workspace button")?
+            .click()
+            .await
+            .context("opening the create workspace modal")?;
+
         self.wait_for_condition(
-            "return Boolean(document.querySelector('.account-form input[type=\"text\"]'));",
+            "return Boolean(document.querySelector('.workspace-modal input[type=\"text\"]'));",
             Duration::from_secs(10),
-            "workspace name input",
+            "workspace name input in modal",
         )
         .await?;
         let input = self
             .client
-            .find(Locator::Css(".account-form input[type='text']"))
+            .find(Locator::Css(".workspace-modal input[type='text']"))
             .await
-            .context("finding workspace name input")?;
+            .context("finding workspace name input in modal")?;
         input
             .click()
             .await
@@ -733,9 +839,9 @@ impl BrowserHarness {
             .await
             .context("typing workspace name")?;
         self.client
-            .find(Locator::Css(".account-form__submit"))
+            .find(Locator::Css(".workspace-modal .account-form__submit"))
             .await
-            .context("finding create workspace submit button")?
+            .context("finding create workspace submit button in modal")?
             .click()
             .await
             .context("submitting the create workspace form")
@@ -760,27 +866,6 @@ impl BrowserHarness {
         self.wait_for_session_page().await
     }
 
-    async fn switch_workspace_and_confirm(&self, name: &str) -> Result<()> {
-        self.wait_for_workspace_action_button(
-            ".workspace-action-btn",
-            name,
-            "Switch here",
-            "switch workspace button",
-        )
-        .await?;
-        self.click_workspace_action_button(".workspace-action-btn", name, "Switch here")
-            .await?;
-        self.wait_for_workspace_notice(&format!("New chats will start in {name}."))
-            .await?;
-        self.wait_for_workspace_action_button(
-            ".workspace-action-btn",
-            name,
-            "Selected",
-            "selected workspace button",
-        )
-        .await
-    }
-
     async fn rename_workspace(&self, current_name: &str, new_name: &str) -> Result<()> {
         self.open_workspace_rename(current_name).await?;
         self.clear_workspace_name_input().await?;
@@ -803,7 +888,7 @@ impl BrowserHarness {
         self.wait_for_condition(
             &format!(
                 "return Array.from(document.querySelectorAll('.workspace-action-btn--danger'))\
-                 .some(btn => btn.closest('tr')?.textContent?.includes({name:?}));"
+                 .some(btn => btn.closest('.workspace-card')?.textContent?.includes({name:?}));"
             ),
             Duration::from_secs(10),
             "delete button for workspace",
@@ -814,7 +899,7 @@ impl BrowserHarness {
             .execute(
                 &format!(
                     "const btn = Array.from(document.querySelectorAll('.workspace-action-btn--danger'))\
-                     .find(b => b.closest('tr')?.textContent?.includes({name:?})); \
+                     .find(b => b.closest('.workspace-card')?.textContent?.includes({name:?})); \
                      if (btn) btn.click();"
                 ),
                 Vec::new(),
@@ -1140,15 +1225,15 @@ fn workspaces_path_script() -> &'static str {
 
 fn workspace_row_text_script(name: &str) -> String {
     format!(
-        "return Array.from(document.querySelectorAll('tbody tr'))\
-         .some(row => row.textContent?.includes({name:?}));"
+        "return Array.from(document.querySelectorAll('.workspace-card'))\
+         .some(card => card.textContent?.includes({name:?}));"
     )
 }
 
 fn workspace_action_button_script(selector: &str, row_name: &str, button_label: &str) -> String {
     format!(
         "return Array.from(document.querySelectorAll({selector:?}))\
-         .some(btn => btn.closest('tr')?.textContent?.includes({row_name:?}) \
+         .some(btn => btn.closest('.workspace-card')?.textContent?.includes({row_name:?}) \
                  && btn.textContent?.trim() === {button_label:?});"
     )
 }
@@ -1160,7 +1245,7 @@ fn workspace_action_button_click_script(
 ) -> String {
     format!(
         "const btn = Array.from(document.querySelectorAll({selector:?}))\
-         .find(candidate => candidate.closest('tr')?.textContent?.includes({row_name:?}) \
+         .find(candidate => candidate.closest('.workspace-card')?.textContent?.includes({row_name:?}) \
                  && candidate.textContent?.trim() === {button_label:?}); \
          if (btn) btn.click();"
     )

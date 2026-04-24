@@ -5,7 +5,7 @@ use crate::{application::auth::WorkspacesRouteAccess, components::ErrorBanner};
 #[cfg(target_family = "wasm")]
 use super::shared::workspaces_back_to_chat_path_from_location;
 use super::{
-    create_workspace::CreateWorkspaceSection,
+    create_workspace::{CreateWorkspaceButton, CreateWorkspaceModal},
     registry::WorkspaceRegistrySection,
     shared::{WorkspacesPageState, initialize_workspaces_page},
 };
@@ -27,7 +27,10 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
             <section class="panel account-panel">
                 <div class="account-panel__header">
                     <h1>"Workspaces"</h1>
-                    {workspaces_back_link_view(back_to_chat_path)}
+                    <div class="account-panel__header-actions">
+                        {workspaces_back_link_view(back_to_chat_path)}
+                        <CreateWorkspaceButton state />
+                    </div>
                 </div>
                 <Show when=move || state.notice.get().is_some()>
                     <p class="account-notice" role="status">
@@ -35,6 +38,7 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
                     </p>
                 </Show>
                 <WorkspacesPageContent state />
+                <CreateWorkspaceModal state />
             </section>
         </main>
     }
@@ -64,10 +68,14 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
             <section class="panel account-panel">
                 <div class="account-panel__header">
                     <h1>"Workspaces"</h1>
-                    {workspaces_back_link_view(None)}
+                    <div class="account-panel__header-actions">
+                        {workspaces_back_link_view(None)}
+                        <CreateWorkspaceButton state />
+                    </div>
                 </div>
                 {notice_view}
                 <WorkspacesPageContent state />
+                <CreateWorkspaceModal state />
             </section>
         </main>
     }
@@ -77,9 +85,7 @@ fn workspaces_back_link_view(back_to_chat_path: Option<String>) -> AnyView {
     back_to_chat_path
         .map(|href| {
             view! {
-                <div class="account-panel__header-actions">
-                    <a href=href>"Back to chat"</a>
-                </div>
+                <a href=href>"Back to chat"</a>
             }
             .into_any()
         })
@@ -107,7 +113,6 @@ fn workspaces_page_content_body(
 ) -> AnyView {
     match access {
         Some(WorkspacesRouteAccess::SignedIn) => view! {
-            <CreateWorkspaceSection state />
             <WorkspaceRegistrySection state />
         }
         .into_any(),
@@ -166,6 +171,20 @@ mod tests {
             let _ = workspaces_page_shell(state);
             let _ = workspaces_back_link_view(Some("/app/sessions/abc".to_string()));
             let _ = view! { <WorkspacesPage /> };
+        });
+    }
+
+    #[test]
+    fn workspaces_page_header_includes_create_button() {
+        // Verify that the page shell builds without panicking when the create
+        // modal trigger button is present in the header.
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.access.set(Some(WorkspacesRouteAccess::SignedIn));
+            // Modal is not shown by default.
+            assert!(!state.show_create_modal.get());
+            let _ = workspaces_page_shell(state);
         });
     }
 }

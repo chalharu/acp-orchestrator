@@ -17,14 +17,9 @@ use super::stream::{next_tool_activity_id, push_tool_activity_entry};
 use crate::application::auth::{self, HomeRouteTarget};
 use crate::browser::clear_prepared_session_id;
 #[cfg(target_family = "wasm")]
-use crate::browser::{
-    clear_selected_workspace_id_if_matches, navigate_to, prepared_session_id,
-    selected_workspace_id, store_prepared_session_id,
-};
+use crate::browser::navigate_to;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
-#[cfg(target_family = "wasm")]
-use crate::routing::app_session_path;
 use crate::session_lifecycle::{SessionLifecycle, TurnState};
 use crate::session_page_bootstrap::session_bootstrap_from_snapshot;
 use crate::session_page_entries::{SessionEntry, SessionEntryRole};
@@ -85,22 +80,13 @@ async fn navigate_home_target(target: HomeRouteTarget) -> Result<(), String> {
     match target {
         HomeRouteTarget::Register => navigate_to("/app/register/"),
         HomeRouteTarget::SignIn => navigate_to("/app/sign-in/"),
-        HomeRouteTarget::PrepareSession => navigate_prepared_home_session().await,
+        HomeRouteTarget::PrepareSession => navigate_workspace_home().await,
     }
 }
 
 #[cfg(target_family = "wasm")]
-async fn navigate_prepared_home_session() -> Result<(), String> {
-    match resolve_home_target().await? {
-        HomeNavigation::Session(session_id) => match navigate_to(&app_session_path(&session_id)) {
-            Ok(()) => Ok(()),
-            Err(message) => {
-                clear_prepared_session_id();
-                Err(message)
-            }
-        },
-        HomeNavigation::Workspaces => navigate_to("/app/workspaces/"),
-    }
+async fn navigate_workspace_home() -> Result<(), String> {
+    navigate_to("/app/workspaces/")
 }
 
 fn set_home_redirect_error(
@@ -110,35 +96,6 @@ fn set_home_redirect_error(
 ) {
     error.set(Some(message));
     preparing.set(false);
-}
-
-#[cfg(target_family = "wasm")]
-enum HomeNavigation {
-    Session(String),
-    Workspaces,
-}
-
-#[cfg(target_family = "wasm")]
-async fn resolve_home_target() -> Result<HomeNavigation, String> {
-    if let Some(session_id) = prepared_session_id() {
-        return Ok(HomeNavigation::Session(session_id));
-    }
-
-    let Some(workspace_id) = selected_workspace_id() else {
-        return Ok(HomeNavigation::Workspaces);
-    };
-
-    match api::create_workspace_session(&workspace_id).await {
-        Ok(session_id) => {
-            store_prepared_session_id(&session_id);
-            Ok(HomeNavigation::Session(session_id))
-        }
-        Err(api::WorkspaceSessionCreateError::NotFound(_)) => {
-            clear_selected_workspace_id_if_matches(&workspace_id);
-            Ok(HomeNavigation::Workspaces)
-        }
-        Err(error) => Err(error.into_message()),
-    }
 }
 
 fn should_clear_prepared_session_on_load(
@@ -408,5 +365,23 @@ mod tests {
             Some("Workspace B".to_string())
         );
         assert_eq!(workspace_name_by_id(&workspaces, "missing"), None);
+    }
+
+    #[test]
+    fn home_redirect_goes_to_workspaces_dashboard_for_signed_in_users() {
+        // navigate_workspace_home is wasm-only; on the host we verify the
+        // non-wasm spawn_home_redirect stub compiles and does nothing.
+        let owner = Owner::new();
+        owner.with(|| {
+            let error = RwSignal::new(None::<String>);
+            let preparing = RwSignal::new(true);
+
+            // On host (non-wasm) spawn_home_redirect is a no-op.
+            #[cfg(not(target_family = "wasm"))]
+            super::spawn_home_redirect(error, preparing);
+
+            // We only assert that the function is callable without panic.
+            let _ = (error, preparing);
+        });
     }
 }

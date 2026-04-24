@@ -114,7 +114,13 @@ pub(crate) fn delete_session_callback(
 pub(super) async fn refresh_session_list(signals: SessionSignals) {
     signals.list.error.set(None);
 
-    match api::list_sessions().await {
+    let Some(workspace_id) = signals.current_workspace_id.get_untracked() else {
+        signals.list.items.set(Vec::new());
+        signals.list.loaded.set(true);
+        return;
+    };
+
+    match api::list_workspace_sessions(&workspace_id).await {
         Ok(sessions) => {
             signals.list.items.set(sessions);
             signals.list.loaded.set(true);
@@ -338,6 +344,30 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let signals = session_signals();
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            let mut future = pin!(refresh_session_list(signals));
+
+            assert!(matches!(
+                Future::poll(future.as_mut(), &mut context),
+                Poll::Ready(())
+            ));
+        });
+    }
+
+    #[test]
+    fn host_refresh_uses_workspace_scope_when_workspace_id_is_set() {
+        // On the host target refresh_session_list is a no-op (no browser API),
+        // so it completes immediately regardless of whether a workspace_id is set.
+        // This test confirms the function accepts a workspace-scoped signals context
+        // without panicking.
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals
+                .current_workspace_id
+                .set(Some("workspace-1".to_string()));
+
             let waker = Waker::noop();
             let mut context = Context::from_waker(waker);
             let mut future = pin!(refresh_session_list(signals));

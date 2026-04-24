@@ -51,7 +51,7 @@ pub(crate) fn SessionClosedNotice(
             <div class="session-ended-notice" role="status">
                 <p class="session-ended-notice__text">
                     "This conversation has ended. "
-                    <a href="/app/">"Start a new chat."</a>
+                    <a href="/app/workspaces/">"Open workspaces to start another chat."</a>
                 </p>
             </div>
         </Show>

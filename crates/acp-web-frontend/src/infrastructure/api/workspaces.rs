@@ -1,6 +1,6 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts_sessions::CreateSessionResponse;
+use acp_contracts_sessions::{CreateSessionResponse, SessionListItem, SessionListResponse};
 use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
     UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceDetail, WorkspaceListResponse,
@@ -159,6 +159,33 @@ pub(crate) async fn create_workspace_session(
     )))
 }
 
+#[cfg(target_family = "wasm")]
+pub(crate) async fn list_workspace_sessions(
+    workspace_id: &str,
+) -> Result<Vec<SessionListItem>, String> {
+    let response = Request::get(&workspace_sessions_url(workspace_id))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "List workspace sessions failed").await);
+    }
+
+    let listed: SessionListResponse = response.json().await.map_err(|error| error.to_string())?;
+    Ok(listed.sessions)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn list_workspace_sessions(
+    workspace_id: &str,
+) -> Result<Vec<SessionListItem>, String> {
+    Err(non_wasm_api_error(
+        "GET",
+        &workspace_sessions_url(workspace_id),
+    ))
+}
+
 fn create_workspace_body(name: &str) -> Result<String, String> {
     serde_json::to_string(&CreateWorkspaceRequest {
         name: name.to_string(),
@@ -240,6 +267,10 @@ mod tests {
                 .to_string()
                 .contains("/api/v1/workspaces/w_1/sessions")
         );
+
+        let list_sessions_error = poll_ready(list_workspace_sessions("w_1"))
+            .expect_err("host workspace session list should fail");
+        assert!(list_sessions_error.contains("/api/v1/workspaces/w_1/sessions"));
     }
 
     #[test]

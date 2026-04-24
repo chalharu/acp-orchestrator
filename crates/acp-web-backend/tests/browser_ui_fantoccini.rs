@@ -239,6 +239,97 @@ async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> 
     result
 }
 
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_can_switch_workspace_for_new_chats() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+
+        browser.create_workspace_and_confirm("Workspace A").await?;
+        browser.create_workspace_and_confirm("Workspace B").await?;
+        browser
+            .open_workspace_chat_and_confirm("Workspace A")
+            .await?;
+        browser.ensure_sidebar_visible().await?;
+        let original_path = browser.current_path().await?;
+        assert_eq!(
+            browser.session_sidebar_workspace_label().await?,
+            "Workspace: Workspace A"
+        );
+
+        browser.click_workspaces_link().await?;
+        browser.wait_for_workspaces_page().await?;
+        browser.switch_workspace_and_confirm("Workspace B").await?;
+
+        browser.open_app().await?;
+        browser.wait_for_session_page().await?;
+        browser.ensure_sidebar_visible().await?;
+        assert_ne!(browser.current_path().await?, original_path);
+        assert_eq!(
+            browser.session_sidebar_workspace_label().await?,
+            "Workspace: Workspace B"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn sign_out_clears_workspace_and_prepared_session_storage() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+
+        browser.create_workspace_and_confirm("Workspace A").await?;
+        browser
+            .open_workspace_chat_and_confirm("Workspace A")
+            .await?;
+        browser.ensure_sidebar_visible().await?;
+
+        assert!(
+            browser
+                .session_storage_item("acp-prepared-session-id")
+                .await?
+                .is_some()
+        );
+        assert!(
+            browser
+                .session_storage_item("acp-selected-workspace-id")
+                .await?
+                .is_some()
+        );
+
+        browser.click_sign_out_button().await?;
+        browser.wait_for_sign_in_page().await?;
+        assert_eq!(
+            browser
+                .session_storage_item("acp-prepared-session-id")
+                .await?,
+            None
+        );
+        assert_eq!(
+            browser
+                .session_storage_item("acp-selected-workspace-id")
+                .await?,
+            None
+        );
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
 struct BrowserHarness {
     client: Client,
     stack: TestStack,
@@ -381,6 +472,18 @@ impl BrowserHarness {
              && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
             Duration::from_secs(30),
             "workspaces page",
+        )
+        .await
+    }
+
+    async fn wait_for_sign_in_page(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return (window.location.pathname === '/app/sign-in' \
+             || window.location.pathname === '/app/sign-in/') \
+             && Boolean(document.querySelector('h1')) \
+             && document.querySelector('h1')?.textContent?.trim() === 'Sign in';",
+            Duration::from_secs(30),
+            "sign-in page",
         )
         .await
     }
@@ -651,6 +754,27 @@ impl BrowserHarness {
         self.wait_for_session_page().await
     }
 
+    async fn switch_workspace_and_confirm(&self, name: &str) -> Result<()> {
+        self.wait_for_workspace_action_button(
+            ".workspace-action-btn",
+            name,
+            "Switch here",
+            "switch workspace button",
+        )
+        .await?;
+        self.click_workspace_action_button(".workspace-action-btn", name, "Switch here")
+            .await?;
+        self.wait_for_workspace_notice(&format!("New chats will start in {name}."))
+            .await?;
+        self.wait_for_workspace_action_button(
+            ".workspace-action-btn",
+            name,
+            "Selected",
+            "selected workspace button",
+        )
+        .await
+    }
+
     async fn rename_workspace(&self, current_name: &str, new_name: &str) -> Result<()> {
         self.open_workspace_rename(current_name).await?;
         self.clear_workspace_name_input().await?;
@@ -748,6 +872,26 @@ impl BrowserHarness {
             .execute(&script, Vec::new())
             .await
             .with_context(|| format!("clicking {button_label} button for workspace {row_name}"))?;
+        Ok(())
+    }
+
+    async fn click_sign_out_button(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return Array.from(document.querySelectorAll('.session-sidebar__secondary-button'))\
+             .some(button => button.textContent?.trim() === 'Sign out');",
+            Duration::from_secs(10),
+            "sign out button",
+        )
+        .await?;
+        self.client
+            .execute(
+                "const button = Array.from(document.querySelectorAll('.session-sidebar__secondary-button'))\
+                 .find(candidate => candidate.textContent?.trim() === 'Sign out');\
+                 if (button) button.click();",
+                Vec::new(),
+            )
+            .await
+            .context("clicking the sign out button")?;
         Ok(())
     }
 
@@ -870,6 +1014,15 @@ impl BrowserHarness {
             &format!("return window.location.pathname === {encoded};"),
             Duration::from_secs(15),
             description,
+        )
+        .await
+    }
+
+    async fn session_storage_item(&self, key: &str) -> Result<Option<String>> {
+        let encoded = serde_json::to_string(key).context("encoding sessionStorage key")?;
+        self.evaluate(
+            &format!("return window.sessionStorage.getItem({encoded});"),
+            &format!("reading sessionStorage key {key}"),
         )
         .await
     }

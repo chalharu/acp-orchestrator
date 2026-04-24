@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use web_sys::EventSource;
 
 use crate::{
-    browser::{load_draft, save_draft, store_selected_workspace_id},
+    browser::{load_draft, save_draft, selected_workspace_id, store_selected_workspace_id},
     session_lifecycle::{SessionLifecycle, TurnState},
     session_page_entries::SessionEntry,
 };
@@ -72,8 +72,10 @@ pub(super) fn persist_session_draft(session_id: String, draft: RwSignal<String>)
 
 pub(super) fn set_current_workspace_id(workspace_id: String, signals: SessionSignals) {
     let next_workspace_id = normalized_workspace_value(Some(workspace_id));
-    if let Some(workspace_id) = next_workspace_id.as_deref() {
-        store_selected_workspace_id(workspace_id);
+    if let Some(workspace_id) =
+        selected_workspace_to_store(selected_workspace_id(), next_workspace_id.as_deref())
+    {
+        store_selected_workspace_id(&workspace_id);
     }
     if signals.current_workspace_id.get_untracked() != next_workspace_id {
         signals.current_workspace_name.set(None);
@@ -100,6 +102,13 @@ fn apply_restored_session_draft(draft: RwSignal<String>, stored_draft: String) {
 
 fn normalized_workspace_value(value: Option<String>) -> Option<String> {
     value.and_then(|value| (!value.trim().is_empty()).then_some(value))
+}
+
+fn selected_workspace_to_store(
+    existing_selected_workspace_id: Option<String>,
+    current_workspace_id: Option<&str>,
+) -> Option<String> {
+    existing_selected_workspace_id.or_else(|| current_workspace_id.map(str::to_owned))
 }
 
 fn persist_session_draft_text(session_id: &str, text: &str) {
@@ -142,8 +151,8 @@ mod tests {
     use leptos::prelude::*;
 
     use super::{
-        apply_restored_session_draft, clear_current_workspace, session_signals,
-        set_current_workspace_id, set_current_workspace_name,
+        apply_restored_session_draft, clear_current_workspace, selected_workspace_to_store,
+        session_signals, set_current_workspace_id, set_current_workspace_name,
     };
 
     #[test]
@@ -198,5 +207,18 @@ mod tests {
             assert_eq!(signals.current_workspace_id.get_untracked(), None);
             assert_eq!(signals.current_workspace_name.get_untracked(), None);
         });
+    }
+
+    #[test]
+    fn selected_workspace_to_store_prefers_existing_selection() {
+        assert_eq!(
+            selected_workspace_to_store(Some("workspace-b".to_string()), Some("workspace-a")),
+            Some("workspace-b".to_string())
+        );
+        assert_eq!(
+            selected_workspace_to_store(None, Some("workspace-a")),
+            Some("workspace-a".to_string())
+        );
+        assert_eq!(selected_workspace_to_store(None, None), None);
     }
 }

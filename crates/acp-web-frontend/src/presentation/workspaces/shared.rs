@@ -4,11 +4,16 @@ use acp_contracts_workspaces::WorkspaceSummary;
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
-use crate::infrastructure::api;
+use crate::{
+    browser::{clear_selected_workspace_id_if_matches, selected_workspace_id},
+    infrastructure::api,
+};
 
 use crate::{
     application::auth::WorkspacesRouteAccess,
-    presentation::return_to::{path_with_return_to, session_return_to_path},
+    presentation::return_to::{
+        path_with_return_to, session_return_to_path, session_return_to_path_from_location,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -25,6 +30,7 @@ pub(super) struct WorkspacesPageState {
     pub(super) saving_workspace_id: RwSignal<Option<String>>,
     pub(super) deleting_workspace_id: RwSignal<Option<String>>,
     pub(super) opening_chat_workspace_id: RwSignal<Option<String>>,
+    pub(super) selected_workspace_id: RwSignal<Option<String>>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -43,27 +49,43 @@ impl WorkspacesPageState {
             saving_workspace_id: RwSignal::new(None::<String>),
             deleting_workspace_id: RwSignal::new(None::<String>),
             opening_chat_workspace_id: RwSignal::new(None::<String>),
+            selected_workspace_id: RwSignal::new(current_selected_workspace_id()),
             checked: RwSignal::new(false),
         }
     }
 }
 
-pub(super) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
-    path_with_return_to("/app/workspaces/", return_to_path)
-}
-
 #[cfg(target_family = "wasm")]
-pub(super) fn workspaces_back_to_chat_path_from_location() -> Option<String> {
-    crate::presentation::return_to::session_return_to_path_from_location()
+fn current_selected_workspace_id() -> Option<String> {
+    selected_workspace_id()
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(super) fn workspaces_back_to_chat_path_from_location() -> Option<String> {
+fn current_selected_workspace_id() -> Option<String> {
     None
+}
+
+pub(in crate::presentation) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
+    path_with_return_to("/app/workspaces/", return_to_path)
 }
 
 pub(super) fn workspaces_back_to_chat_path(search: &str) -> Option<String> {
     session_return_to_path(search)
+}
+
+pub(super) fn workspaces_back_to_chat_path_from_location() -> Option<String> {
+    session_return_to_path_from_location()
+}
+
+fn retained_selected_workspace_id(
+    workspaces: &[WorkspaceSummary],
+    selected_workspace_id: Option<String>,
+) -> Option<String> {
+    selected_workspace_id.filter(|selected_workspace_id| {
+        workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == *selected_workspace_id)
+    })
 }
 
 #[cfg(target_family = "wasm")]
@@ -117,6 +139,17 @@ pub(super) fn spawn_workspace_reload(state: WorkspacesPageState) {
     leptos::task::spawn_local(async move {
         match api::list_workspaces().await {
             Ok(workspaces) => {
+                let previous_selected_workspace_id = state.selected_workspace_id.get_untracked();
+                let next_selected_workspace_id =
+                    retained_selected_workspace_id(&workspaces, previous_selected_workspace_id);
+                if next_selected_workspace_id.is_none() {
+                    if let Some(previous_selected_workspace_id) =
+                        state.selected_workspace_id.get_untracked()
+                    {
+                        clear_selected_workspace_id_if_matches(&previous_selected_workspace_id);
+                    }
+                }
+                state.selected_workspace_id.set(next_selected_workspace_id);
                 state.workspaces.set(workspaces);
                 state.loading.set(false);
             }
@@ -158,6 +191,7 @@ mod tests {
             assert!(state.saving_workspace_id.get().is_none());
             assert!(state.deleting_workspace_id.get().is_none());
             assert!(state.opening_chat_workspace_id.get().is_none());
+            assert!(state.selected_workspace_id.get().is_none());
             assert!(!state.checked.get());
         });
     }
@@ -207,5 +241,29 @@ mod tests {
     #[test]
     fn back_to_chat_path_from_location_returns_none_without_browser() {
         assert_eq!(workspaces_back_to_chat_path_from_location(), None);
+    }
+
+    #[test]
+    fn retained_selected_workspace_id_only_keeps_existing_workspaces() {
+        let workspaces = vec![WorkspaceSummary {
+            workspace_id: "w_1".to_string(),
+            name: "Workspace".to_string(),
+            upstream_url: None,
+            default_ref: None,
+            bootstrap_kind: None,
+            status: "active".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        assert_eq!(
+            retained_selected_workspace_id(&workspaces, Some("w_1".to_string())),
+            Some("w_1".to_string())
+        );
+        assert_eq!(retained_selected_workspace_id(&workspaces, None), None);
+        assert_eq!(
+            retained_selected_workspace_id(&workspaces, Some("w_missing".to_string())),
+            None
+        );
     }
 }

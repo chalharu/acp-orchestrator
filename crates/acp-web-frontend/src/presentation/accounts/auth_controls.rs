@@ -4,9 +4,9 @@ use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
-use crate::presentation::return_to::path_with_return_to;
 use crate::routing::app_session_path;
 
+use super::super::workspaces::workspaces_path_with_return_to;
 use super::shared::{accounts_path_with_return_to, sign_out_button_label, sign_out_handler};
 
 #[derive(Clone)]
@@ -29,10 +29,7 @@ pub fn SessionSidebarAuthControls(
     let signing_out = RwSignal::new(false);
     let view_state = SessionSidebarAuthViewState {
         accounts_href: accounts_path_with_return_to(&app_session_path(&current_session_id)),
-        workspaces_href: path_with_return_to(
-            "/app/workspaces/",
-            &app_session_path(&current_session_id),
-        ),
+        workspaces_href: workspaces_path_with_return_to(&app_session_path(&current_session_id)),
         is_admin,
         signed_in,
         signing_out,

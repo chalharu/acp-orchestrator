@@ -8,8 +8,8 @@ use crate::infrastructure::api;
 #[cfg(target_family = "wasm")]
 use crate::{
     browser::{
-        clear_selected_workspace_id_if_matches, store_prepared_session_id,
-        store_selected_workspace_id,
+        clear_prepared_session_id, clear_selected_workspace_id_if_matches,
+        store_prepared_session_id, store_selected_workspace_id,
     },
     routing::app_session_path,
 };
@@ -21,9 +21,14 @@ use super::shared::spawn_workspace_reload;
 #[component]
 #[cfg(target_family = "wasm")]
 pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoView {
-    let workspace_count = Signal::derive(move || state.workspaces.get().len());
+    let summary_text = Signal::derive(move || {
+        workspace_registry_summary(
+            &state.workspaces.get(),
+            state.selected_workspace_id.get().as_deref(),
+        )
+    });
     let summary = view! {
-        <>{move || workspace_count_label(workspace_count.get())}</>
+        <>{move || summary_text.get()}</>
     }
     .into_any();
     let content = view! {
@@ -48,7 +53,10 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoView {
     let loading = state.loading.get_untracked();
-    let summary = workspace_count_label(state.workspaces.get_untracked().len());
+    let summary = workspace_registry_summary(
+        &state.workspaces.get_untracked(),
+        state.selected_workspace_id.get_untracked().as_deref(),
+    );
     let content = if loading {
         workspace_loading_view()
     } else {
@@ -82,7 +90,7 @@ fn workspace_registry_panel(summary: AnyView, content: AnyView) -> impl IntoView
                 <div class="account-panel__section-copy">
                     <h2>"Workspaces"</h2>
                     <p class="muted">
-                        "Manage workspaces. Start a chat, rename, or remove them below."
+                        "Manage workspaces. Switch the default for new chats, start a chat, rename, or remove them below."
                     </p>
                 </div>
                 <p class="account-panel__summary">{summary}</p>
@@ -143,6 +151,10 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
     let is_opening = Signal::derive(move || {
         state.opening_chat_workspace_id.get().as_deref() == Some(&workspace_id_for_open_state)
     });
+    let workspace_id_for_selected_state = workspace_id.clone();
+    let is_selected = Signal::derive(move || {
+        state.selected_workspace_id.get().as_deref() == Some(&workspace_id_for_selected_state)
+    });
 
     view! {
         <tr>
@@ -165,6 +177,7 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
                     is_editing=is_editing
                     is_deleting=is_deleting
                     is_opening=is_opening
+                    is_selected=is_selected
                 />
             </td>
         </tr>
@@ -248,8 +261,10 @@ fn WorkspaceActionCell(
     is_editing: Signal<bool>,
     is_deleting: Signal<bool>,
     is_opening: Signal<bool>,
+    is_selected: Signal<bool>,
 ) -> impl IntoView {
     let on_open_chat = workspace_open_chat_handler(workspace_id.clone(), state);
+    let on_select = workspace_select_handler(workspace_id.clone(), workspace_name.clone(), state);
     let on_edit = workspace_edit_handler(workspace_id.clone(), workspace_name, state);
     let on_delete = workspace_delete_handler(workspace_id, state);
 
@@ -258,7 +273,9 @@ fn WorkspaceActionCell(
             <WorkspaceActionButtons
                 is_deleting=is_deleting
                 is_opening=is_opening
+                is_selected=is_selected
                 on_open_chat=on_open_chat
+                on_select=on_select
                 on_edit=on_edit
                 on_delete=on_delete
             />
@@ -271,7 +288,9 @@ fn WorkspaceActionCell(
 fn WorkspaceActionButtons(
     is_deleting: Signal<bool>,
     is_opening: Signal<bool>,
+    is_selected: Signal<bool>,
     on_open_chat: Callback<web_sys::MouseEvent>,
+    on_select: Callback<web_sys::MouseEvent>,
     on_edit: Callback<web_sys::MouseEvent>,
     on_delete: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
@@ -283,6 +302,11 @@ fn WorkspaceActionButtons(
                 actions_disabled=actions_disabled
                 is_opening=is_opening
                 on_click=on_open_chat
+            />
+            <WorkspaceSelectButton
+                actions_disabled=actions_disabled
+                is_selected=is_selected
+                on_click=on_select
             />
             <WorkspaceRenameButton actions_disabled=actions_disabled on_click=on_edit />
             <WorkspaceDeleteButton
@@ -309,6 +333,25 @@ fn WorkspaceOpenChatButton(
             on:click=move |event| on_click.run(event)
         >
             {move || if is_opening.get() { "Opening…" } else { "New chat" }}
+        </button>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[component]
+fn WorkspaceSelectButton(
+    actions_disabled: Signal<bool>,
+    is_selected: Signal<bool>,
+    on_click: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="workspace-action-btn"
+            prop:disabled=move || actions_disabled.get() || is_selected.get()
+            on:click=move |event| on_click.run(event)
+        >
+            {move || workspace_select_button_label(is_selected.get())}
         </button>
     }
 }
@@ -370,6 +413,7 @@ fn workspace_open_chat_handler(
             match api::create_workspace_session(&workspace_id).await {
                 Ok(session_id) => {
                     store_selected_workspace_id(&workspace_id);
+                    state.selected_workspace_id.set(Some(workspace_id.clone()));
                     store_prepared_session_id(&session_id);
                     if let Err(message) =
                         crate::browser::navigate_to(&app_session_path(&session_id))
@@ -384,6 +428,27 @@ fn workspace_open_chat_handler(
                 }
             }
         });
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_select_handler(
+    workspace_id: String,
+    workspace_name: String,
+    state: WorkspacesPageState,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_| {
+        if state.selected_workspace_id.get_untracked().as_deref() == Some(workspace_id.as_str()) {
+            return;
+        }
+
+        clear_prepared_session_id();
+        store_selected_workspace_id(&workspace_id);
+        state.selected_workspace_id.set(Some(workspace_id.clone()));
+        state.error.set(None);
+        state
+            .notice
+            .set(Some(workspace_selected_notice(&workspace_name)));
     })
 }
 
@@ -478,6 +543,11 @@ fn workspace_delete_handler(
                 Ok(_) => {
                     state.deleting_workspace_id.set(None);
                     clear_selected_workspace_id_if_matches(&workspace_id);
+                    if state.selected_workspace_id.get_untracked().as_deref()
+                        == Some(workspace_id.as_str())
+                    {
+                        state.selected_workspace_id.set(None);
+                    }
                     state.notice.set(Some("Workspace deleted.".to_string()));
                     spawn_workspace_reload(state);
                 }
@@ -512,6 +582,11 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
         .get_untracked()
         .as_deref()
         .is_some_and(|id| id == workspace_id.as_str());
+    let is_selected = state
+        .selected_workspace_id
+        .get_untracked()
+        .as_deref()
+        .is_some_and(|id| id == workspace_id.as_str());
     let is_saving = state
         .saving_workspace_id
         .get_untracked()
@@ -536,6 +611,7 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
                     is_editing=is_editing
                     is_deleting=is_deleting
                     is_opening=is_opening
+                    is_selected=is_selected
                 />
             </td>
         </tr>
@@ -580,18 +656,33 @@ fn WorkspaceRenameFormHost(draft: String, is_saving: bool) -> impl IntoView {
 
 #[component]
 #[cfg(not(target_family = "wasm"))]
-fn WorkspaceActionCellHost(is_editing: bool, is_deleting: bool, is_opening: bool) -> impl IntoView {
+fn WorkspaceActionCellHost(
+    is_editing: bool,
+    is_deleting: bool,
+    is_opening: bool,
+    is_selected: bool,
+) -> impl IntoView {
     if is_editing {
         ().into_any()
     } else {
-        view! { <WorkspaceActionButtonsHost is_deleting=is_deleting is_opening=is_opening /> }
-            .into_any()
+        view! {
+            <WorkspaceActionButtonsHost
+                is_deleting=is_deleting
+                is_opening=is_opening
+                is_selected=is_selected
+            />
+        }
+        .into_any()
     }
 }
 
 #[component]
 #[cfg(not(target_family = "wasm"))]
-fn WorkspaceActionButtonsHost(is_deleting: bool, is_opening: bool) -> impl IntoView {
+fn WorkspaceActionButtonsHost(
+    is_deleting: bool,
+    is_opening: bool,
+    is_selected: bool,
+) -> impl IntoView {
     view! {
         <>
             <button
@@ -601,13 +692,24 @@ fn WorkspaceActionButtonsHost(is_deleting: bool, is_opening: bool) -> impl IntoV
             >
                 {if is_opening { "Opening…" } else { "New chat" }}
             </button>
-            <button type="button" class="workspace-action-btn" prop:disabled=is_deleting>
+            <button
+                type="button"
+                class="workspace-action-btn"
+                prop:disabled=is_deleting || is_opening || is_selected
+            >
+                {workspace_select_button_label(is_selected)}
+            </button>
+            <button
+                type="button"
+                class="workspace-action-btn"
+                prop:disabled=is_deleting || is_opening
+            >
                 "Rename"
             </button>
             <button
                 type="button"
                 class="workspace-action-btn workspace-action-btn--danger"
-                prop:disabled=is_deleting
+                prop:disabled=is_deleting || is_opening
             >
                 {if is_deleting { "Deleting…" } else { "Delete" }}
             </button>
@@ -615,11 +717,48 @@ fn WorkspaceActionButtonsHost(is_deleting: bool, is_opening: bool) -> impl IntoV
     }
 }
 
+fn workspace_select_button_label(is_selected: bool) -> &'static str {
+    if is_selected {
+        "Selected"
+    } else {
+        "Switch here"
+    }
+}
+
+fn workspace_selected_notice(workspace_name: &str) -> String {
+    format!("New chats will start in {workspace_name}.")
+}
+
 fn workspace_count_label(count: usize) -> String {
     match count {
         0 => "No workspaces".to_string(),
         1 => "1 workspace".to_string(),
         n => format!("{n} workspaces"),
+    }
+}
+
+fn selected_workspace_name(
+    workspaces: &[WorkspaceSummary],
+    selected_workspace_id: Option<&str>,
+) -> Option<String> {
+    let selected_workspace_id = selected_workspace_id?;
+    workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == selected_workspace_id)
+        .map(|workspace| workspace.name.clone())
+}
+
+fn workspace_registry_summary(
+    workspaces: &[WorkspaceSummary],
+    selected_workspace_id: Option<&str>,
+) -> String {
+    let count_label = workspace_count_label(workspaces.len());
+    if let Some(selected_workspace_name) =
+        selected_workspace_name(workspaces, selected_workspace_id)
+    {
+        format!("{count_label} · Selected: {selected_workspace_name}")
+    } else {
+        count_label
     }
 }
 
@@ -650,6 +789,37 @@ mod tests {
         assert_eq!(workspace_count_label(0), "No workspaces");
         assert_eq!(workspace_count_label(1), "1 workspace");
         assert_eq!(workspace_count_label(3), "3 workspaces");
+    }
+
+    #[test]
+    fn workspace_selection_helpers_render_expected_labels() {
+        assert_eq!(workspace_select_button_label(false), "Switch here");
+        assert_eq!(workspace_select_button_label(true), "Selected");
+        assert_eq!(
+            workspace_selected_notice("Workspace B"),
+            "New chats will start in Workspace B."
+        );
+    }
+
+    #[test]
+    fn workspace_registry_summary_mentions_the_selected_workspace() {
+        let workspaces = vec![
+            sample_workspace("w_1", "Workspace A"),
+            sample_workspace("w_2", "Workspace B"),
+        ];
+
+        assert_eq!(
+            workspace_registry_summary(&workspaces, Some("w_2")),
+            "2 workspaces · Selected: Workspace B"
+        );
+        assert_eq!(
+            workspace_registry_summary(&workspaces, None),
+            "2 workspaces"
+        );
+        assert_eq!(
+            workspace_registry_summary(&workspaces, Some("w_missing")),
+            "2 workspaces"
+        );
     }
 
     #[test]
@@ -692,6 +862,18 @@ mod tests {
             let state = WorkspacesPageState::new();
             state.editing_workspace_id.set(Some("w_1".to_string()));
             state.edit_name_draft.set("Draft Name".to_string());
+            let workspace = sample_workspace("w_1", "Test Workspace");
+            let _ = view! { <WorkspaceRow workspace=workspace state=state /> };
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_row_builds_with_selected_state_on_host() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.selected_workspace_id.set(Some("w_1".to_string()));
             let workspace = sample_workspace("w_1", "Test Workspace");
             let _ = view! { <WorkspaceRow workspace=workspace state=state /> };
         });

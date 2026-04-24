@@ -5,12 +5,14 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
+#[cfg(target_family = "wasm")]
+use crate::infrastructure::api;
 use crate::{
     application::auth::AccountsRouteAccess,
-    presentation::return_to::{path_with_return_to, session_return_to_path},
+    presentation::return_to::{
+        path_with_return_to, session_return_to_path, session_return_to_path_from_location,
+    },
 };
-#[cfg(target_family = "wasm")]
-use crate::{infrastructure::api, presentation::return_to::session_return_to_path_from_location};
 
 #[derive(Clone, Copy)]
 pub(super) struct AccountsPageState {
@@ -93,18 +95,12 @@ pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
     path_with_return_to("/app/accounts/", return_to_path)
 }
 
-#[cfg(target_family = "wasm")]
-pub(super) fn accounts_back_to_chat_path_from_location() -> String {
-    session_return_to_path_from_location().unwrap_or_else(|| "/app/".to_string())
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub(super) fn accounts_back_to_chat_path_from_location() -> String {
-    "/app/".to_string()
-}
-
 fn accounts_back_to_chat_path(search: &str) -> String {
     session_return_to_path(search).unwrap_or_else(|| "/app/".to_string())
+}
+
+pub(super) fn accounts_back_to_chat_path_from_location() -> String {
+    session_return_to_path_from_location().unwrap_or_else(|| "/app/".to_string())
 }
 
 pub(super) fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) -> bool {

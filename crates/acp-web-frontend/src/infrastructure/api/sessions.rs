@@ -7,9 +7,7 @@ use acp_contracts_sessions::{
     SessionSnapshot,
 };
 #[cfg(target_family = "wasm")]
-use acp_contracts_sessions::{
-    RenameSessionResponse, SessionListResponse, SessionResponse,
-};
+use acp_contracts_sessions::{RenameSessionResponse, SessionListResponse, SessionResponse};
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 

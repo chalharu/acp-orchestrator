@@ -1,11 +1,11 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
+use acp_contracts_sessions::CreateSessionResponse;
 use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
     UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceDetail, WorkspaceListResponse,
     WorkspaceSummary,
 };
-use acp_contracts_sessions::CreateSessionResponse;
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 
@@ -235,8 +235,22 @@ mod tests {
 
         let create_session_error = poll_ready(create_workspace_session("w_1"))
             .expect_err("host workspace session create should fail");
-        assert!(create_session_error
-            .to_string()
-            .contains("/api/v1/workspaces/w_1/sessions"));
+        assert!(
+            create_session_error
+                .to_string()
+                .contains("/api/v1/workspaces/w_1/sessions")
+        );
+    }
+
+    #[test]
+    fn workspace_session_create_errors_preserve_messages() {
+        assert_eq!(
+            WorkspaceSessionCreateError::NotFound("missing".to_string()).into_message(),
+            "missing"
+        );
+        assert_eq!(
+            WorkspaceSessionCreateError::Other("boom".to_string()).into_message(),
+            "boom"
+        );
     }
 }

@@ -2,12 +2,12 @@ use leptos::prelude::*;
 
 use crate::{application::auth::WorkspacesRouteAccess, components::ErrorBanner};
 
+#[cfg(target_family = "wasm")]
+use super::shared::workspaces_back_to_chat_path_from_location;
 use super::{
     create_workspace::CreateWorkspaceSection,
     registry::WorkspaceRegistrySection,
-    shared::{
-        WorkspacesPageState, initialize_workspaces_page, workspaces_back_to_chat_path_from_location,
-    },
+    shared::{WorkspacesPageState, initialize_workspaces_page},
 };
 
 #[component]

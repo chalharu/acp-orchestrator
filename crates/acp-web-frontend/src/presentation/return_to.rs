@@ -75,4 +75,10 @@ mod tests {
             Some("/app/".to_string())
         );
     }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn session_return_to_path_from_location_returns_none_without_browser() {
+        assert_eq!(super::session_return_to_path_from_location(), None);
+    }
 }

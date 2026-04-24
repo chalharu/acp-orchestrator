@@ -91,7 +91,9 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let signals = session_signals();
-            signals.current_workspace_name.set(Some("Workspace A".to_string()));
+            signals
+                .current_workspace_name
+                .set(Some("Workspace A".to_string()));
             signals.list.loaded.set(true);
             signals.list.items.set(vec![sample_session_list_item()]);
 

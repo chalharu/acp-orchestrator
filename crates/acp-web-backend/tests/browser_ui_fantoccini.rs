@@ -375,11 +375,10 @@ impl BrowserHarness {
 
     async fn wait_for_workspaces_page(&self) -> Result<()> {
         self.wait_for_condition(
-            &format!(
-                "{} && Boolean(document.querySelector('h1')) \
-                 && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
-                workspaces_path_script()
-            ),
+            "return (window.location.pathname === '/app/workspaces' \
+             || window.location.pathname === '/app/workspaces/') \
+             && Boolean(document.querySelector('h1')) \
+             && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
             Duration::from_secs(30),
             "workspaces page",
         )

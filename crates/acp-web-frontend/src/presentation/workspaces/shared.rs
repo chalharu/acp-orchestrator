@@ -202,4 +202,10 @@ mod tests {
             assert!(state.error.get().is_none());
         });
     }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn back_to_chat_path_from_location_returns_none_without_browser() {
+        assert_eq!(workspaces_back_to_chat_path_from_location(), None);
+    }
 }

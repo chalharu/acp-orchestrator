@@ -8,7 +8,8 @@ use crate::infrastructure::api;
 #[cfg(target_family = "wasm")]
 use crate::{
     browser::{
-        clear_selected_workspace_id_if_matches, store_prepared_session_id, store_selected_workspace_id,
+        clear_selected_workspace_id_if_matches, store_prepared_session_id,
+        store_selected_workspace_id,
     },
     routing::app_session_path,
 };
@@ -274,33 +275,78 @@ fn WorkspaceActionButtons(
     on_edit: Callback<web_sys::MouseEvent>,
     on_delete: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
+    let actions_disabled = Signal::derive(move || is_deleting.get() || is_opening.get());
+
     view! {
         <>
-            <button
-                type="button"
-                class="workspace-action-btn"
-                prop:disabled=move || is_deleting.get() || is_opening.get()
-                on:click=move |event| on_open_chat.run(event)
-            >
-                {move || if is_opening.get() { "Opening…" } else { "New chat" }}
-            </button>
-            <button
-                type="button"
-                class="workspace-action-btn"
-                prop:disabled=move || is_deleting.get() || is_opening.get()
-                on:click=move |event| on_edit.run(event)
-            >
-                "Rename"
-            </button>
-            <button
-                type="button"
-                class="workspace-action-btn workspace-action-btn--danger"
-                prop:disabled=move || is_deleting.get() || is_opening.get()
-                on:click=move |event| on_delete.run(event)
-            >
-                {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
-            </button>
+            <WorkspaceOpenChatButton
+                actions_disabled=actions_disabled
+                is_opening=is_opening
+                on_click=on_open_chat
+            />
+            <WorkspaceRenameButton actions_disabled=actions_disabled on_click=on_edit />
+            <WorkspaceDeleteButton
+                actions_disabled=actions_disabled
+                is_deleting=is_deleting
+                on_click=on_delete
+            />
         </>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[component]
+fn WorkspaceOpenChatButton(
+    actions_disabled: Signal<bool>,
+    is_opening: Signal<bool>,
+    on_click: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="workspace-action-btn"
+            prop:disabled=move || actions_disabled.get()
+            on:click=move |event| on_click.run(event)
+        >
+            {move || if is_opening.get() { "Opening…" } else { "New chat" }}
+        </button>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[component]
+fn WorkspaceRenameButton(
+    actions_disabled: Signal<bool>,
+    on_click: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="workspace-action-btn"
+            prop:disabled=move || actions_disabled.get()
+            on:click=move |event| on_click.run(event)
+        >
+            "Rename"
+        </button>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[component]
+fn WorkspaceDeleteButton(
+    actions_disabled: Signal<bool>,
+    is_deleting: Signal<bool>,
+    on_click: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="workspace-action-btn workspace-action-btn--danger"
+            prop:disabled=move || actions_disabled.get()
+            on:click=move |event| on_click.run(event)
+        >
+            {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
+        </button>
     }
 }
 
@@ -314,7 +360,9 @@ fn workspace_open_chat_handler(
             return;
         }
 
-        state.opening_chat_workspace_id.set(Some(workspace_id.clone()));
+        state
+            .opening_chat_workspace_id
+            .set(Some(workspace_id.clone()));
         state.error.set(None);
         state.notice.set(None);
         let workspace_id = workspace_id.clone();
@@ -323,7 +371,8 @@ fn workspace_open_chat_handler(
                 Ok(session_id) => {
                     store_selected_workspace_id(&workspace_id);
                     store_prepared_session_id(&session_id);
-                    if let Err(message) = crate::browser::navigate_to(&app_session_path(&session_id))
+                    if let Err(message) =
+                        crate::browser::navigate_to(&app_session_path(&session_id))
                     {
                         state.opening_chat_workspace_id.set(None);
                         state.error.set(Some(message));

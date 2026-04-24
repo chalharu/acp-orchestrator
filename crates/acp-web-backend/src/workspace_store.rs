@@ -2111,6 +2111,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persist_session_snapshot_reuses_existing_workspace_when_snapshot_workspace_id_is_empty()
+     {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
+        let snapshot = snapshot(
+            &workspace.workspace_id,
+            "s_existing_workspace",
+            "Initial title",
+            SessionStatus::Active,
+        );
+
+        repository
+            .persist_session_snapshot(&user.user_id, &snapshot, false, None)
+            .await
+            .expect("initial persistence should succeed");
+
+        repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &SessionSnapshot {
+                    workspace_id: String::new(),
+                    title: "Updated title".to_string(),
+                    ..snapshot.clone()
+                },
+                false,
+                None,
+            )
+            .await
+            .expect("existing workspace metadata should be reused");
+        let loaded = repository
+            .load_session_metadata(&user.user_id, &snapshot.id)
+            .await
+            .expect("updated metadata should load")
+            .expect("updated metadata should exist");
+
+        assert_eq!(loaded.workspace_id, workspace.workspace_id);
+        assert_eq!(loaded.title, "Updated title");
+    }
+
+    #[tokio::test]
+    async fn persist_session_snapshot_rejects_new_sessions_with_empty_workspace_id() {
+        let repository = test_repository();
+        let user = repository
+            .materialize_user(&bearer_principal("developer"))
+            .await
+            .expect("principal materialization should succeed");
+
+        let error = repository
+            .persist_session_snapshot(
+                &user.user_id,
+                &snapshot(
+                    "",
+                    "s_missing_workspace",
+                    "Missing workspace",
+                    SessionStatus::Active,
+                ),
+                false,
+                None,
+            )
+            .await
+            .expect_err("new sessions should require a workspace id");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Validation("session workspace_id must not be empty".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn persist_session_snapshot_updates_activity_without_setting_terminal_timestamps() {
         let repository = test_repository();
         let user = repository

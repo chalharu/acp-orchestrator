@@ -33,6 +33,25 @@ const WEBDRIVER_READY_DELAY: Duration = Duration::from_millis(100);
 const WEBDRIVER_START_RETRIES: usize = 5;
 const BROWSER_WORKSPACE_NAME: &str = "Browser Workspace";
 
+fn mock_reply_for(prompt: &str) -> String {
+    let compact_prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "mock assistant: I received {}. The backend-to-mock ACP round-trip succeeded.",
+        truncate_for_mock_reply(&compact_prompt, 120)
+    )
+}
+
+fn truncate_for_mock_reply(value: &str, max_len: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_len).collect::<String>();
+
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
 async fn home_route_requires_explicit_workspace_selection() -> Result<()> {
@@ -414,33 +433,15 @@ async fn sign_in_restores_the_same_session_after_sign_out() -> Result<()> {
             .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
             .await?;
         let original_path = browser.current_path().await?;
-        let composer = browser.focused_composer().await?;
-        browser.enter_prompt(&composer, prompt).await?;
-        browser.assert_composer_submission_ready().await?;
-        browser.click_submit_button().await?;
         browser
-            .wait_for_body_text(prompt, Duration::from_secs(10))
+            .submit_prompt_and_wait_for_mock_reply(prompt)
             .await?;
-        browser
-            .wait_for_body_text(MOCK_REPLY_TEXT, Duration::from_secs(30))
-            .await?;
-
-        browser.ensure_sidebar_visible().await?;
-        browser.click_sign_out_button().await?;
-        browser.wait_for_sign_in_page().await?;
-        browser.sign_in_as_bootstrap_account().await?;
-        browser
-            .wait_for_path(
-                &original_path,
-                "return to the original session after sign in",
-            )
-            .await?;
-        browser.wait_for_session_page().await?;
+        browser.sign_out_and_restore_session(&original_path).await?;
         browser
             .wait_for_body_text(prompt, Duration::from_secs(30))
             .await?;
         browser
-            .wait_for_body_text(MOCK_REPLY_TEXT, Duration::from_secs(30))
+            .wait_for_body_text(&mock_reply_for(prompt), Duration::from_secs(30))
             .await?;
 
         Ok(())
@@ -593,30 +594,50 @@ impl BrowserHarness {
             .await
     }
 
+    async fn sign_out_and_restore_session(&self, original_path: &str) -> Result<()> {
+        self.ensure_sidebar_visible().await?;
+        self.click_sign_out_button().await?;
+        self.sign_in_as_bootstrap_account().await?;
+        self.wait_for_path(
+            original_path,
+            "return to the original session after sign in",
+        )
+        .await?;
+        self.wait_for_session_page().await
+    }
+
     async fn submit_auth_form(
         &self,
         username: &str,
         password: &str,
         flow_name: &str,
     ) -> Result<()> {
-        let username_input = self
-            .client
-            .find(Locator::Css(REGISTER_USERNAME_SELECTOR))
+        self.fill_auth_input(REGISTER_USERNAME_SELECTOR, username, "username", flow_name)
+            .await?;
+        self.fill_auth_input(REGISTER_PASSWORD_SELECTOR, password, "password", flow_name)
+            .await?;
+        self.click_auth_submit(flow_name).await?;
+        Ok(())
+    }
+
+    async fn fill_auth_input(
+        &self,
+        selector: &str,
+        value: &str,
+        field_name: &str,
+        flow_name: &str,
+    ) -> Result<()> {
+        self.client
+            .find(Locator::Css(selector))
             .await
-            .with_context(|| format!("finding the {flow_name} username input"))?;
-        username_input
-            .send_keys(username)
+            .with_context(|| format!("finding the {flow_name} {field_name} input"))?
+            .send_keys(value)
             .await
-            .with_context(|| format!("typing the {flow_name} username"))?;
-        let password_input = self
-            .client
-            .find(Locator::Css(REGISTER_PASSWORD_SELECTOR))
-            .await
-            .with_context(|| format!("finding the {flow_name} password input"))?;
-        password_input
-            .send_keys(password)
-            .await
-            .with_context(|| format!("typing the {flow_name} password"))?;
+            .with_context(|| format!("typing the {flow_name} {field_name}"))?;
+        Ok(())
+    }
+
+    async fn click_auth_submit(&self, flow_name: &str) -> Result<()> {
         self.client
             .find(Locator::Css(".account-form__submit"))
             .await
@@ -806,6 +827,17 @@ impl BrowserHarness {
             .click()
             .await
             .context("submitting the prompt")
+    }
+
+    async fn submit_prompt_and_wait_for_mock_reply(&self, prompt: &str) -> Result<()> {
+        let composer = self.focused_composer().await?;
+        self.enter_prompt(&composer, prompt).await?;
+        self.assert_composer_submission_ready().await?;
+        self.click_submit_button().await?;
+        self.wait_for_body_text(prompt, Duration::from_secs(10))
+            .await?;
+        self.wait_for_body_text(&mock_reply_for(prompt), Duration::from_secs(30))
+            .await
     }
 
     async fn assert_empty_composer(&self) -> Result<()> {

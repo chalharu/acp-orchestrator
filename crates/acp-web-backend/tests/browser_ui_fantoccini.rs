@@ -112,19 +112,9 @@ async fn workspaces_page_shows_workspace_scoped_sessions() -> Result<()> {
         browser.click_workspaces_link().await?;
         browser.wait_for_workspaces_page().await?;
 
-        // The workspace card should now list the created session.
-        let session_listed: bool = browser
-            .evaluate(
-                "return Array.from(document.querySelectorAll('.workspace-card'))\
-                 .some(card => card.textContent?.includes('Session Scope Test Workspace') \
-                     && card.querySelector('.workspace-card__session-list') !== null);",
-                "checking workspace card session list",
-            )
+        browser
+            .wait_for_workspace_card_session_list("Session Scope Test Workspace")
             .await?;
-        assert!(
-            session_listed,
-            "Workspace card must show a session list after a session is created"
-        );
 
         Ok(())
     }
@@ -607,6 +597,15 @@ impl BrowserHarness {
              && document.querySelector('h1')?.textContent?.trim() === 'Sign in';",
             Duration::from_secs(30),
             "sign-in page",
+        )
+        .await
+    }
+
+    async fn wait_for_workspace_card_session_list(&self, workspace_name: &str) -> Result<()> {
+        self.wait_for_condition(
+            &workspace_card_has_session_list_script(workspace_name),
+            Duration::from_secs(30),
+            "workspace card session list",
         )
         .await
     }
@@ -1248,6 +1247,14 @@ fn workspace_row_text_script(name: &str) -> String {
     format!(
         "return Array.from(document.querySelectorAll('.workspace-card'))\
          .some(card => card.textContent?.includes({name:?}));"
+    )
+}
+
+fn workspace_card_has_session_list_script(name: &str) -> String {
+    format!(
+        "return Array.from(document.querySelectorAll('.workspace-card'))\
+         .some(card => card.textContent?.includes({name:?}) \
+             && card.querySelector('.workspace-card__session-list') !== null);"
     )
 }
 

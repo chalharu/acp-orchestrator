@@ -263,6 +263,41 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    fn begin_workspace_reload_resets_loading_error_and_sessions() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.loading.set(false);
+            state.error.set(Some("old error".to_string()));
+            state.workspace_sessions.update(|sessions| {
+                sessions.insert("workspace-1".to_string(), Vec::new());
+            });
+
+            begin_workspace_reload(state);
+
+            assert!(state.loading.get());
+            assert!(state.error.get().is_none());
+            assert!(state.workspace_sessions.get().is_empty());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn fail_workspace_reload_sets_error_and_clears_loading() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.loading.set(true);
+
+            fail_workspace_reload(state, "reload failed".to_string());
+
+            assert!(!state.loading.get());
+            assert_eq!(state.error.get(), Some("reload failed".to_string()));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
     fn back_to_chat_path_from_location_returns_none_without_browser() {
         assert_eq!(workspaces_back_to_chat_path_from_location(), None);
     }

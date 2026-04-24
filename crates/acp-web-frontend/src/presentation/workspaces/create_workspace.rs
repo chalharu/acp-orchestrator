@@ -78,46 +78,12 @@ fn create_workspace_modal_view(
     view! {
         <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="Create workspace">
             <div class="workspace-modal">
-                <div class="workspace-modal__header">
-                    <h2 class="workspace-modal__title">"Create workspace"</h2>
-                    <button
-                        type="button"
-                        class="workspace-modal__close"
-                        on:click=on_cancel
-                        aria-label="Close"
-                    >
-                        "✕"
-                    </button>
-                </div>
+                {create_workspace_modal_header(on_cancel)}
                 <p class="muted">"Add a new workspace for organising agent sessions."</p>
                 <ErrorBanner message=error />
                 <form class="account-form account-form--create" on:submit=on_submit>
-                    <label class="account-form__field">
-                        <span>"Name"</span>
-                        <input
-                            type="text"
-                            prop:value=create_name
-                            on:input=move |event| state.create_name.set(event_target_value(&event))
-                            autofocus
-                        />
-                    </label>
-                    <div class="workspace-modal__actions">
-                        <button
-                            type="submit"
-                            class="account-form__submit"
-                            prop:disabled=move || creating.get()
-                        >
-                            {move || create_workspace_button_label(creating.get())}
-                        </button>
-                        <button
-                            type="button"
-                            class="account-form__cancel"
-                            on:click=on_cancel
-                            prop:disabled=move || creating.get()
-                        >
-                            "Cancel"
-                        </button>
-                    </div>
+                    {create_workspace_name_field(state, create_name)}
+                    {create_workspace_modal_actions(creating, on_cancel)}
                 </form>
             </div>
         </div>
@@ -175,6 +141,66 @@ fn create_workspace_button_label(creating: bool) -> &'static str {
         "Saving…"
     } else {
         "Create workspace"
+    }
+}
+
+fn create_workspace_modal_header(
+    on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-modal__header">
+            <h2 class="workspace-modal__title">"Create workspace"</h2>
+            <button
+                type="button"
+                class="workspace-modal__close"
+                on:click=on_cancel
+                aria-label="Close"
+            >
+                "✕"
+            </button>
+        </div>
+    }
+}
+
+fn create_workspace_name_field(
+    state: WorkspacesPageState,
+    create_name: Signal<String>,
+) -> impl IntoView {
+    view! {
+        <label class="account-form__field">
+            <span>"Name"</span>
+            <input
+                type="text"
+                prop:value=create_name
+                on:input=move |event| state.create_name.set(event_target_value(&event))
+                autofocus
+            />
+        </label>
+    }
+}
+
+fn create_workspace_modal_actions(
+    creating: Signal<bool>,
+    on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-modal__actions">
+            <button
+                type="submit"
+                class="account-form__submit"
+                prop:disabled=move || creating.get()
+            >
+                {move || create_workspace_button_label(creating.get())}
+            </button>
+            <button
+                type="button"
+                class="account-form__cancel"
+                on:click=on_cancel
+                prop:disabled=move || creating.get()
+            >
+                "Cancel"
+            </button>
+        </div>
     }
 }
 

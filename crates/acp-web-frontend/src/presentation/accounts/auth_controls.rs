@@ -7,7 +7,10 @@ use crate::infrastructure::api;
 use crate::routing::app_session_path;
 
 use super::super::workspaces::workspaces_path_with_return_to;
-use super::shared::{accounts_path_with_return_to, sign_out_button_label, sign_out_handler};
+use super::shared::{
+    accounts_path_with_return_to, sign_in_path_with_return_to, sign_out_button_label,
+    sign_out_handler,
+};
 
 #[derive(Clone)]
 struct SessionSidebarAuthViewState {
@@ -27,6 +30,7 @@ pub fn SessionSidebarAuthControls(
     let signed_in = RwSignal::new(false);
     let checked = RwSignal::new(false);
     let signing_out = RwSignal::new(false);
+    let sign_in_href = sign_in_path_with_return_to(&app_session_path(&current_session_id));
     let view_state = SessionSidebarAuthViewState {
         accounts_href: accounts_path_with_return_to(&app_session_path(&current_session_id)),
         workspaces_href: workspaces_path_with_return_to(&app_session_path(&current_session_id)),
@@ -34,7 +38,7 @@ pub fn SessionSidebarAuthControls(
         signed_in,
         signing_out,
     };
-    let sign_out = sign_out_handler(error, signing_out);
+    let sign_out = sign_out_handler(error, signing_out, sign_in_href);
 
     initialize_session_sidebar_auth_controls(checked, signed_in, is_admin, error);
 

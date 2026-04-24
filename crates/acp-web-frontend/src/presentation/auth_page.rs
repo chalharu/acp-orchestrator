@@ -7,6 +7,7 @@ use crate::{
     browser::navigate_to,
     components::ErrorBanner,
     infrastructure::api,
+    presentation::return_to::session_return_to_path_from_location,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,10 +89,11 @@ pub fn submit_credentials_handler(
         state.error.set(None);
         let username = state.username.get_untracked();
         let password = state.password.get_untracked();
+        let next_path = auth_success_path(session_return_to_path_from_location());
         leptos::task::spawn_local(async move {
             match submit_credentials(kind, &username, &password).await {
                 Ok(()) => {
-                    let _ = navigate_to("/app/");
+                    let _ = navigate_to(&next_path);
                 }
                 Err(message) => {
                     state.submitting.set(false);
@@ -158,10 +160,10 @@ pub fn auth_page_view(
 }
 
 fn handle_auth_status(kind: AuthPageKind, target: HomeRouteTarget, state: AuthPageState) {
-    match auth_page_route(kind, target) {
+    match auth_page_route(kind, target, session_return_to_path_from_location()) {
         AuthPageRoute::Ready => state.loading.set(false),
         AuthPageRoute::Redirect(path) => {
-            let _ = navigate_to(path);
+            let _ = navigate_to(&path);
         }
     }
 }
@@ -209,21 +211,42 @@ fn submit_button_label(kind: AuthPageKind, submitting: bool) -> &'static str {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AuthPageRoute {
     Ready,
-    Redirect(&'static str),
+    Redirect(String),
 }
 
-fn auth_page_route(kind: AuthPageKind, target: HomeRouteTarget) -> AuthPageRoute {
+fn auth_success_path(return_to_path: Option<String>) -> String {
+    return_to_path.unwrap_or_else(|| "/app/".to_string())
+}
+
+fn auth_page_path(base_path: &str, return_to_path: Option<String>) -> String {
+    return_to_path
+        .map(|return_to_path| {
+            format!(
+                "{base_path}?return_to={}",
+                api::encode_component(&return_to_path)
+            )
+        })
+        .unwrap_or_else(|| base_path.to_string())
+}
+
+fn auth_page_route(
+    kind: AuthPageKind,
+    target: HomeRouteTarget,
+    return_to_path: Option<String>,
+) -> AuthPageRoute {
     match (kind, target) {
-        (_, HomeRouteTarget::PrepareSession) => AuthPageRoute::Redirect("/app/"),
+        (_, HomeRouteTarget::PrepareSession) => {
+            AuthPageRoute::Redirect(auth_success_path(return_to_path))
+        }
         (AuthPageKind::Register, HomeRouteTarget::Register) => AuthPageRoute::Ready,
         (AuthPageKind::Register, HomeRouteTarget::SignIn) => {
-            AuthPageRoute::Redirect("/app/sign-in/")
+            AuthPageRoute::Redirect(auth_page_path("/app/sign-in/", return_to_path))
         }
         (AuthPageKind::SignIn, HomeRouteTarget::Register) => {
-            AuthPageRoute::Redirect("/app/register/")
+            AuthPageRoute::Redirect(auth_page_path("/app/register/", return_to_path))
         }
         (AuthPageKind::SignIn, HomeRouteTarget::SignIn) => AuthPageRoute::Ready,
     }
@@ -254,28 +277,65 @@ mod tests {
     #[test]
     fn auth_page_route_redirects_to_the_expected_destination() {
         assert_eq!(
-            auth_page_route(AuthPageKind::Register, HomeRouteTarget::PrepareSession),
-            AuthPageRoute::Redirect("/app/")
+            auth_page_route(
+                AuthPageKind::Register,
+                HomeRouteTarget::PrepareSession,
+                None
+            ),
+            AuthPageRoute::Redirect("/app/".to_string())
         );
         assert_eq!(
-            auth_page_route(AuthPageKind::Register, HomeRouteTarget::SignIn),
-            AuthPageRoute::Redirect("/app/sign-in/")
+            auth_page_route(AuthPageKind::Register, HomeRouteTarget::SignIn, None),
+            AuthPageRoute::Redirect("/app/sign-in/".to_string())
         );
         assert_eq!(
-            auth_page_route(AuthPageKind::SignIn, HomeRouteTarget::Register),
-            AuthPageRoute::Redirect("/app/register/")
+            auth_page_route(AuthPageKind::SignIn, HomeRouteTarget::Register, None),
+            AuthPageRoute::Redirect("/app/register/".to_string())
         );
     }
 
     #[test]
     fn auth_page_route_keeps_matching_pages_ready() {
         assert_eq!(
-            auth_page_route(AuthPageKind::Register, HomeRouteTarget::Register),
+            auth_page_route(AuthPageKind::Register, HomeRouteTarget::Register, None),
             AuthPageRoute::Ready
         );
         assert_eq!(
-            auth_page_route(AuthPageKind::SignIn, HomeRouteTarget::SignIn),
+            auth_page_route(AuthPageKind::SignIn, HomeRouteTarget::SignIn, None),
             AuthPageRoute::Ready
+        );
+    }
+
+    #[test]
+    fn auth_success_path_prefers_return_to_session_when_present() {
+        assert_eq!(
+            auth_success_path(Some("/app/sessions/s%2F1".to_string())),
+            "/app/sessions/s%2F1"
+        );
+        assert_eq!(auth_success_path(None), "/app/");
+    }
+
+    #[test]
+    fn auth_page_route_preserves_return_to_across_auth_page_redirects() {
+        assert_eq!(
+            auth_page_route(
+                AuthPageKind::Register,
+                HomeRouteTarget::SignIn,
+                Some("/app/sessions/s%2F1".to_string()),
+            ),
+            AuthPageRoute::Redirect(
+                "/app/sign-in/?return_to=%2Fapp%2Fsessions%2Fs%252F1".to_string()
+            )
+        );
+        assert_eq!(
+            auth_page_route(
+                AuthPageKind::SignIn,
+                HomeRouteTarget::Register,
+                Some("/app/sessions/s%2F1".to_string()),
+            ),
+            AuthPageRoute::Redirect(
+                "/app/register/?return_to=%2Fapp%2Fsessions%2Fs%252F1".to_string()
+            )
         );
     }
 

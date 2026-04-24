@@ -95,6 +95,10 @@ pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
     path_with_return_to("/app/accounts/", return_to_path)
 }
 
+pub(super) fn sign_in_path_with_return_to(return_to_path: &str) -> String {
+    path_with_return_to("/app/sign-in/", return_to_path)
+}
+
 #[cfg(test)]
 fn accounts_back_to_chat_path(search: &str) -> String {
     session_return_to_path(search).unwrap_or_else(|| "/app/".to_string())
@@ -102,6 +106,12 @@ fn accounts_back_to_chat_path(search: &str) -> String {
 
 pub(super) fn accounts_back_to_chat_path_from_location() -> String {
     session_return_to_path_from_location().unwrap_or_else(|| "/app/".to_string())
+}
+
+pub(super) fn sign_out_redirect_path_from_location() -> String {
+    session_return_to_path_from_location()
+        .map(|return_to_path| sign_in_path_with_return_to(&return_to_path))
+        .unwrap_or_else(|| "/app/sign-in/".to_string())
 }
 
 pub(super) fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) -> bool {
@@ -115,6 +125,7 @@ pub(super) fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) 
 pub(super) fn sign_out_handler(
     error: RwSignal<Option<String>>,
     signing_out: RwSignal<bool>,
+    redirect_path: String,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_event: web_sys::MouseEvent| {
         if signing_out.get_untracked() {
@@ -123,12 +134,13 @@ pub(super) fn sign_out_handler(
 
         signing_out.set(true);
         error.set(None);
+        let redirect_path = redirect_path.clone();
         leptos::task::spawn_local(async move {
             match api::sign_out().await {
                 Ok(()) => {
                     crate::browser::clear_prepared_session_id();
                     crate::browser::clear_selected_workspace_id();
-                    if let Err(message) = crate::browser::navigate_to("/app/sign-in/") {
+                    if let Err(message) = crate::browser::navigate_to(&redirect_path) {
                         signing_out.set(false);
                         error.set(Some(message));
                     }
@@ -146,6 +158,7 @@ pub(super) fn sign_out_handler(
 pub(super) fn sign_out_handler(
     error: RwSignal<Option<String>>,
     signing_out: RwSignal<bool>,
+    _redirect_path: String,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_event: web_sys::MouseEvent| sign_out_host(error, signing_out))
 }
@@ -230,6 +243,10 @@ mod tests {
         assert_eq!(
             accounts_path_with_return_to("/app/sessions/s%2F1"),
             "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+        );
+        assert_eq!(
+            sign_in_path_with_return_to("/app/sessions/s%2F1"),
+            "/app/sign-in/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
         );
         assert_eq!(
             accounts_back_to_chat_path("?return_to=%2Fapp%2Fsessions%2Fs%252F1"),
@@ -334,6 +351,12 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    fn sign_out_redirect_path_defaults_to_plain_sign_in_without_browser() {
+        assert_eq!(sign_out_redirect_path_from_location(), "/app/sign-in/");
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
     fn event_target_checked_returns_false_on_host() {
         assert!(!super::event_target_checked(&()));
     }
@@ -353,7 +376,12 @@ mod tests {
             let signing_out = RwSignal::new(true);
             sign_out_host(state.error, signing_out);
             assert_eq!(state.error.get(), Some("still signing out".to_string()));
-            sign_out_handler(state.error, RwSignal::new(false)).run(fake_mouse_event());
+            sign_out_handler(
+                state.error,
+                RwSignal::new(false),
+                "/app/sign-in/".to_string(),
+            )
+            .run(fake_mouse_event());
         });
     }
 }

@@ -8,6 +8,7 @@ use super::{
     shared::{
         AccountsPageState, accounts_back_to_chat_path_from_location, accounts_page_shows_sign_out,
         initialize_accounts_page, sign_out_button_label, sign_out_handler,
+        sign_out_redirect_path_from_location,
     },
 };
 
@@ -16,7 +17,11 @@ pub fn AccountsPage() -> impl IntoView {
     let state = AccountsPageState::new();
     let back_to_chat_href = accounts_back_to_chat_path_from_location();
     let signing_out = RwSignal::new(false);
-    let sign_out = sign_out_handler(state.error, signing_out);
+    let sign_out = sign_out_handler(
+        state.error,
+        signing_out,
+        sign_out_redirect_path_from_location(),
+    );
     initialize_accounts_page(state);
 
     accounts_page_shell(state, back_to_chat_href, signing_out, sign_out)

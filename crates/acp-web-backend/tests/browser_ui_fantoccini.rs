@@ -26,6 +26,8 @@ const REGISTER_PASSWORD_SELECTOR: &str = ".account-form input[type='password']";
 const SUBMIT_SELECTOR: &str = ".composer__submit";
 const SIDEBAR_TOGGLE_SELECTOR: &str = ".session-sidebar__toggle";
 const MOCK_REPLY_TEXT: &str = "mock assistant: I received test.";
+const TEST_USERNAME: &str = "admin";
+const TEST_PASSWORD: &str = "password123";
 const WEBDRIVER_READY_ATTEMPTS: usize = 50;
 const WEBDRIVER_READY_DELAY: Duration = Duration::from_millis(100);
 const WEBDRIVER_START_RETRIES: usize = 5;
@@ -402,6 +404,53 @@ async fn sign_out_clears_workspace_and_prepared_session_storage() -> Result<()> 
     result
 }
 
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn sign_in_restores_the_same_session_after_sign_out() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        let prompt = "Keep this chat after signing in again.";
+        browser
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
+        let original_path = browser.current_path().await?;
+        let composer = browser.focused_composer().await?;
+        browser.enter_prompt(&composer, prompt).await?;
+        browser.assert_composer_submission_ready().await?;
+        browser.click_submit_button().await?;
+        browser
+            .wait_for_body_text(prompt, Duration::from_secs(10))
+            .await?;
+        browser
+            .wait_for_body_text(MOCK_REPLY_TEXT, Duration::from_secs(30))
+            .await?;
+
+        browser.ensure_sidebar_visible().await?;
+        browser.click_sign_out_button().await?;
+        browser.wait_for_sign_in_page().await?;
+        browser.sign_in_as_bootstrap_account().await?;
+        browser
+            .wait_for_path(
+                &original_path,
+                "return to the original session after sign in",
+            )
+            .await?;
+        browser.wait_for_session_page().await?;
+        browser
+            .wait_for_body_text(prompt, Duration::from_secs(30))
+            .await?;
+        browser
+            .wait_for_body_text(MOCK_REPLY_TEXT, Duration::from_secs(30))
+            .await?;
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
 async fn assert_session_sidebar_workspace(
     browser: &BrowserHarness,
     workspace_name: &str,
@@ -533,32 +582,49 @@ impl BrowserHarness {
             "bootstrap registration form",
         )
         .await?;
-        let username = self
+        self.submit_auth_form(TEST_USERNAME, TEST_PASSWORD, "bootstrap registration")
+            .await?;
+        self.wait_for_workspaces_page().await
+    }
+
+    async fn sign_in_as_bootstrap_account(&self) -> Result<()> {
+        self.wait_for_sign_in_page().await?;
+        self.submit_auth_form(TEST_USERNAME, TEST_PASSWORD, "sign-in")
+            .await
+    }
+
+    async fn submit_auth_form(
+        &self,
+        username: &str,
+        password: &str,
+        flow_name: &str,
+    ) -> Result<()> {
+        let username_input = self
             .client
             .find(Locator::Css(REGISTER_USERNAME_SELECTOR))
             .await
-            .context("finding the bootstrap username input")?;
-        username
-            .send_keys("admin")
+            .with_context(|| format!("finding the {flow_name} username input"))?;
+        username_input
+            .send_keys(username)
             .await
-            .context("typing the bootstrap username")?;
-        let password = self
+            .with_context(|| format!("typing the {flow_name} username"))?;
+        let password_input = self
             .client
             .find(Locator::Css(REGISTER_PASSWORD_SELECTOR))
             .await
-            .context("finding the bootstrap password input")?;
-        password
-            .send_keys("password123")
+            .with_context(|| format!("finding the {flow_name} password input"))?;
+        password_input
+            .send_keys(password)
             .await
-            .context("typing the bootstrap password")?;
+            .with_context(|| format!("typing the {flow_name} password"))?;
         self.client
             .find(Locator::Css(".account-form__submit"))
             .await
-            .context("finding the bootstrap submit button")?
+            .with_context(|| format!("finding the {flow_name} submit button"))?
             .click()
             .await
-            .context("submitting the bootstrap registration form")?;
-        self.wait_for_workspaces_page().await
+            .with_context(|| format!("submitting the {flow_name} form"))?;
+        Ok(())
     }
 
     async fn wait_for_session_page(&self) -> Result<()> {

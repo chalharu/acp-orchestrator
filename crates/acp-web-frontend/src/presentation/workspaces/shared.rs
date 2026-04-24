@@ -116,49 +116,75 @@ pub(super) fn initialize_workspaces_page_host(state: WorkspacesPageState) {
 
 #[cfg(target_family = "wasm")]
 pub(super) fn spawn_workspace_reload(state: WorkspacesPageState) {
-    state.loading.set(true);
-    state.error.set(None);
-    state.workspace_sessions.set(HashMap::new());
+    begin_workspace_reload(state);
     leptos::task::spawn_local(async move {
         match api::list_workspaces().await {
-            Ok(workspaces) => {
-                for workspace in &workspaces {
-                    let workspace_id = workspace.workspace_id.clone();
-                    let workspace_name = workspace.name.clone();
-                    leptos::task::spawn_local(async move {
-                        match api::list_workspace_sessions(&workspace_id).await {
-                            Ok(sessions) => {
-                                state.workspace_sessions.update(|map| {
-                                    map.insert(workspace_id.clone(), sessions);
-                                });
-                            }
-                            Err(message) => {
-                                state.workspace_sessions.update(|map| {
-                                    map.insert(workspace_id.clone(), Vec::new());
-                                });
-                                state.error.set(Some(format!(
-                                    "Failed to load sessions for workspace {workspace_name}: {message}"
-                                )));
-                            }
-                        }
-                    });
-                }
-                state.workspaces.set(workspaces);
-                state.loading.set(false);
-            }
-            Err(message) => {
-                state.loading.set(false);
-                state.error.set(Some(message));
-            }
+            Ok(workspaces) => finish_workspace_reload(state, workspaces),
+            Err(message) => fail_workspace_reload(state, message),
         }
     });
 }
 
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn spawn_workspace_reload(state: WorkspacesPageState) {
+    begin_workspace_reload(state);
+    state.loading.set(false);
+}
+
+fn begin_workspace_reload(state: WorkspacesPageState) {
     state.loading.set(true);
     state.error.set(None);
+    state.workspace_sessions.set(HashMap::new());
+}
+
+fn fail_workspace_reload(state: WorkspacesPageState, message: String) {
     state.loading.set(false);
+    state.error.set(Some(message));
+}
+
+#[cfg(target_family = "wasm")]
+fn finish_workspace_reload(state: WorkspacesPageState, workspaces: Vec<WorkspaceSummary>) {
+    for workspace in &workspaces {
+        spawn_workspace_sessions_reload(state, workspace);
+    }
+    state.workspaces.set(workspaces);
+    state.loading.set(false);
+}
+
+#[cfg(target_family = "wasm")]
+fn spawn_workspace_sessions_reload(state: WorkspacesPageState, workspace: &WorkspaceSummary) {
+    let workspace_id = workspace.workspace_id.clone();
+    let workspace_name = workspace.name.clone();
+    leptos::task::spawn_local(async move {
+        match api::list_workspace_sessions(&workspace_id).await {
+            Ok(sessions) => store_workspace_sessions(state, workspace_id, sessions),
+            Err(message) => store_workspace_sessions_error(state, workspace_id, workspace_name, message),
+        }
+    });
+}
+
+#[cfg(target_family = "wasm")]
+fn store_workspace_sessions(
+    state: WorkspacesPageState,
+    workspace_id: String,
+    sessions: Vec<SessionListItem>,
+) {
+    state.workspace_sessions.update(|map| {
+        map.insert(workspace_id, sessions);
+    });
+}
+
+#[cfg(target_family = "wasm")]
+fn store_workspace_sessions_error(
+    state: WorkspacesPageState,
+    workspace_id: String,
+    workspace_name: String,
+    message: String,
+) {
+    store_workspace_sessions(state, workspace_id, Vec::new());
+    state.error.set(Some(format!(
+        "Failed to load sessions for workspace {workspace_name}: {message}"
+    )));
 }
 
 #[cfg(test)]
@@ -225,9 +251,13 @@ mod tests {
         owner.with(|| {
             let state = WorkspacesPageState::new();
             state.error.set(Some("old error".to_string()));
+            state.workspace_sessions.update(|sessions| {
+                sessions.insert("workspace-1".to_string(), Vec::new());
+            });
             spawn_workspace_reload(state);
             assert!(!state.loading.get());
             assert!(state.error.get().is_none());
+            assert!(state.workspace_sessions.get().is_empty());
         });
     }
 

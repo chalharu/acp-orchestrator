@@ -11,30 +11,31 @@ use super::shared::{WorkspacesPageState, spawn_workspace_reload};
 /// A button that opens the create-workspace modal when clicked.
 #[component]
 pub(super) fn CreateWorkspaceButton(state: WorkspacesPageState) -> impl IntoView {
-    create_workspace_button(state)
+    create_workspace_button_view(create_workspace_button_click_handler(state))
 }
 
 #[cfg(target_family = "wasm")]
-fn create_workspace_button(state: WorkspacesPageState) -> impl IntoView {
-    view! {
-        <button
-            type="button"
-            class="workspace-dashboard__new-btn"
-            on:click=move |_| {
-                state.error.set(None);
-                state.show_create_modal.set(true);
-            }
-        >
-            "+ New workspace"
-        </button>
+fn create_workspace_button_click_handler(
+    state: WorkspacesPageState,
+) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    move |_| {
+        state.error.set(None);
+        state.show_create_modal.set(true);
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn create_workspace_button(state: WorkspacesPageState) -> impl IntoView {
-    let _ = state;
+fn create_workspace_button_click_handler(
+    _state: WorkspacesPageState,
+) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    move |_| {}
+}
+
+fn create_workspace_button_view(
+    on_click: impl Fn(web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
     view! {
-        <button type="button" class="workspace-dashboard__new-btn">
+        <button type="button" class="workspace-dashboard__new-btn" on:click=on_click>
             "+ New workspace"
         </button>
     }
@@ -49,60 +50,9 @@ pub(super) fn CreateWorkspaceModal(state: WorkspacesPageState) -> impl IntoView 
 
 #[cfg(target_family = "wasm")]
 fn create_workspace_modal(state: WorkspacesPageState) -> impl IntoView {
-    let on_submit = create_workspace_submit_handler(state);
-    let on_cancel = move |_: web_sys::MouseEvent| {
-        state.create_name.set(String::new());
-        state.error.set(None);
-        state.show_create_modal.set(false);
-    };
-
     view! {
         <Show when=move || state.show_create_modal.get()>
-            <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="Create workspace">
-                <div class="workspace-modal">
-                    <div class="workspace-modal__header">
-                        <h2 class="workspace-modal__title">"Create workspace"</h2>
-                        <button
-                            type="button"
-                            class="workspace-modal__close"
-                            on:click=on_cancel
-                            aria-label="Close"
-                        >
-                            "✕"
-                        </button>
-                    </div>
-                    <p class="muted">"Add a new workspace for organising agent sessions."</p>
-                    <ErrorBanner message=Signal::derive(move || state.error.get()) />
-                    <form class="account-form account-form--create" on:submit=on_submit>
-                        <label class="account-form__field">
-                            <span>"Name"</span>
-                            <input
-                                type="text"
-                                prop:value=move || state.create_name.get()
-                                on:input=move |event| state.create_name.set(event_target_value(&event))
-                                autofocus
-                            />
-                        </label>
-                        <div class="workspace-modal__actions">
-                            <button
-                                type="submit"
-                                class="account-form__submit"
-                                prop:disabled=move || state.creating.get()
-                            >
-                                {move || create_workspace_button_label(state.creating.get())}
-                            </button>
-                            <button
-                                type="button"
-                                class="account-form__cancel"
-                                on:click=on_cancel
-                                prop:disabled=move || state.creating.get()
-                            >
-                                "Cancel"
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
+            {create_workspace_modal_view(state, create_workspace_submit_handler(state))}
         </Show>
     }
 }
@@ -113,19 +63,34 @@ fn create_workspace_modal(state: WorkspacesPageState) -> impl IntoView {
         return ().into_any();
     }
 
-    let on_submit = create_workspace_submit_handler(state);
-    let creating = state.creating.get_untracked();
-    let create_name = state.create_name.get_untracked();
+    create_workspace_modal_view(state, create_workspace_submit_handler(state)).into_any()
+}
+
+fn create_workspace_modal_view(
+    state: WorkspacesPageState,
+    on_submit: impl Fn(web_sys::SubmitEvent) + Copy + 'static,
+) -> impl IntoView {
+    let on_cancel = create_workspace_modal_cancel_handler(state);
+    let creating = Signal::derive(move || state.creating.get());
+    let create_name = Signal::derive(move || state.create_name.get());
+    let error = Signal::derive(move || state.error.get());
 
     view! {
-        <div class="workspace-modal-overlay" role="dialog" aria-modal="true">
+        <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="Create workspace">
             <div class="workspace-modal">
                 <div class="workspace-modal__header">
                     <h2 class="workspace-modal__title">"Create workspace"</h2>
-                    <button type="button" class="workspace-modal__close">"✕"</button>
+                    <button
+                        type="button"
+                        class="workspace-modal__close"
+                        on:click=on_cancel
+                        aria-label="Close"
+                    >
+                        "✕"
+                    </button>
                 </div>
                 <p class="muted">"Add a new workspace for organising agent sessions."</p>
-                <ErrorBanner message=Signal::derive(move || state.error.get()) />
+                <ErrorBanner message=error />
                 <form class="account-form account-form--create" on:submit=on_submit>
                     <label class="account-form__field">
                         <span>"Name"</span>
@@ -133,13 +98,23 @@ fn create_workspace_modal(state: WorkspacesPageState) -> impl IntoView {
                             type="text"
                             prop:value=create_name
                             on:input=move |event| state.create_name.set(event_target_value(&event))
+                            autofocus
                         />
                     </label>
                     <div class="workspace-modal__actions">
-                        <button type="submit" class="account-form__submit" prop:disabled=creating>
-                            {create_workspace_button_label(creating)}
+                        <button
+                            type="submit"
+                            class="account-form__submit"
+                            prop:disabled=move || creating.get()
+                        >
+                            {move || create_workspace_button_label(creating.get())}
                         </button>
-                        <button type="button" class="account-form__cancel" prop:disabled=creating>
+                        <button
+                            type="button"
+                            class="account-form__cancel"
+                            on:click=on_cancel
+                            prop:disabled=move || creating.get()
+                        >
                             "Cancel"
                         </button>
                     </div>
@@ -147,7 +122,6 @@ fn create_workspace_modal(state: WorkspacesPageState) -> impl IntoView {
             </div>
         </div>
     }
-    .into_any()
 }
 
 #[cfg(target_family = "wasm")]
@@ -204,6 +178,18 @@ fn create_workspace_button_label(creating: bool) -> &'static str {
     }
 }
 
+fn create_workspace_modal_cancel_handler(
+    state: WorkspacesPageState,
+) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    move |_: web_sys::MouseEvent| close_create_workspace_modal(state)
+}
+
+fn close_create_workspace_modal(state: WorkspacesPageState) {
+    state.create_name.set(String::new());
+    state.error.set(None);
+    state.show_create_modal.set(false);
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn create_workspace_submit_host(state: WorkspacesPageState) {
     if state.creating.get_untracked() {
@@ -214,8 +200,7 @@ pub(super) fn create_workspace_submit_host(state: WorkspacesPageState) {
     state.error.set(None);
     state.notice.set(None);
     let _name = state.create_name.get_untracked();
-    state.create_name.set(String::new());
-    state.show_create_modal.set(false);
+    close_create_workspace_modal(state);
     state.notice.set(Some("Workspace created.".to_string()));
     state.creating.set(false);
     spawn_workspace_reload(state);
@@ -281,6 +266,24 @@ mod tests {
             assert!(state.create_name.get().is_empty());
             assert!(!state.show_create_modal.get());
             assert_eq!(state.notice.get(), Some("Workspace created.".to_string()));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn close_create_workspace_modal_clears_form_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.create_name.set("My Workspace".to_string());
+            state.error.set(Some("Create failed".to_string()));
+            state.show_create_modal.set(true);
+
+            close_create_workspace_modal(state);
+
+            assert!(state.create_name.get().is_empty());
+            assert!(state.error.get().is_none());
+            assert!(!state.show_create_modal.get());
         });
     }
 

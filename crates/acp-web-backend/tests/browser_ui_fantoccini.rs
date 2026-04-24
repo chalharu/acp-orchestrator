@@ -20,9 +20,8 @@ use tokio::process::{Child, Command};
 use support::{ServerConfig, TestStack, test_state_dir};
 
 const APP_PATH: &str = "/app/";
-const REGISTER_PATH: &str = "/app/register/";
 const COMPOSER_SELECTOR: &str = "#composer-input";
-const REGISTER_USERNAME_SELECTOR: &str = ".account-form input[type='text']";
+const REGISTER_USERNAME_SELECTOR: &str = ".account-form input[autocomplete='username']";
 const REGISTER_PASSWORD_SELECTOR: &str = ".account-form input[type='password']";
 const SUBMIT_SELECTOR: &str = ".composer__submit";
 const SIDEBAR_TOGGLE_SELECTOR: &str = ".session-sidebar__toggle";
@@ -475,11 +474,13 @@ impl BrowserHarness {
 
         if self
             .wait_for_optional_condition(
-                &format!("return window.location.pathname === {REGISTER_PATH:?};"),
+                "return window.location.pathname === '/app/register' \
+                 || window.location.pathname === '/app/register/';",
                 Duration::from_secs(5),
             )
             .await?
         {
+            self.wait_for_register_page().await?;
             self.complete_bootstrap_registration().await?;
         }
 
@@ -523,6 +524,13 @@ impl BrowserHarness {
     }
 
     async fn complete_bootstrap_registration(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return Boolean(document.querySelector(\".account-form input[autocomplete='username']\")) \
+             && Boolean(document.querySelector(\".account-form input[type='password']\"));",
+            Duration::from_secs(30),
+            "bootstrap registration form",
+        )
+        .await?;
         let username = self
             .client
             .find(Locator::Css(REGISTER_USERNAME_SELECTOR))
@@ -574,6 +582,19 @@ impl BrowserHarness {
              && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
             Duration::from_secs(30),
             "workspaces page",
+        )
+        .await
+    }
+
+    async fn wait_for_register_page(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return (window.location.pathname === '/app/register' \
+             || window.location.pathname === '/app/register/') \
+             && Boolean(document.querySelector('h1')) \
+             && document.querySelector('h1')?.textContent?.trim() === 'Register bootstrap account' \
+             && Boolean(document.querySelector(\".account-form input[autocomplete='username']\"));",
+            Duration::from_secs(30),
+            "register page",
         )
         .await
     }

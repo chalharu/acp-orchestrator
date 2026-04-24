@@ -1,14 +1,61 @@
 use super::*;
 
-#[tokio::test]
-async fn injected_reply_provider_handles_prompt_dispatch() {
+fn state_with_static_reply(reply: &str) -> (Arc<SessionStore>, AppState) {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState::with_dependencies(
         store.clone(),
         Arc::new(StaticReplyProvider {
-            reply: "injected reply".to_string(),
+            reply: reply.to_string(),
         }),
     );
+    (store, state)
+}
+
+async fn create_persisted_workspace_session(
+    state: &AppState,
+    principal: Extension<AuthenticatedPrincipal>,
+) -> crate::contract_sessions::SessionSnapshot {
+    let workspace =
+        create_owned_workspace_for_principal(state, principal.clone(), "Workspace A").await;
+    create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id),
+        principal,
+    )
+    .await
+    .expect("workspace session should create")
+    .1
+    .0
+    .session
+}
+
+async fn wait_for_durable_messages(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+) -> crate::workspace_records::DurableSessionSnapshotRecord {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state
+                .workspace_repository
+                .load_session_snapshot(user_id, session_id)
+                .await
+                .expect("durable snapshot should load");
+            if let Some(snapshot) = snapshot
+                && snapshot.session.messages.len() == 2
+            {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("assistant reply should be durably persisted")
+}
+
+#[tokio::test]
+async fn injected_reply_provider_handles_prompt_dispatch() {
+    let (store, state) = state_with_static_reply("injected reply");
     let session = store
         .create_session("alice", "w_test")
         .await
@@ -44,26 +91,9 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
 
 #[tokio::test]
 async fn get_session_restores_durable_messages_after_live_session_is_cleared() {
-    let store = Arc::new(SessionStore::new(4));
-    let state = AppState::with_dependencies(
-        store.clone(),
-        Arc::new(StaticReplyProvider {
-            reply: "injected reply".to_string(),
-        }),
-    );
+    let (store, state) = state_with_static_reply("injected reply");
     let principal = bearer_principal("alice");
-    let workspace =
-        create_owned_workspace_for_principal(&state, principal.clone(), "Workspace A").await;
-    let created = create_workspace_session(
-        State(state.clone()),
-        Path(workspace.workspace_id),
-        principal.clone(),
-    )
-    .await
-    .expect("workspace session should create")
-    .1
-    .0
-    .session;
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
     let _ = post_message(
         State(state.clone()),
         Path(created.id.clone()),
@@ -76,27 +106,11 @@ async fn get_session_restores_durable_messages_after_live_session_is_cleared() {
     .expect("prompt submission should succeed");
     let durable_user = state
         .workspace_repository
-        .materialize_user(&principal)
+        .materialize_user(&principal.0)
         .await
         .expect("principal materialization should succeed");
 
-    let durable = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let snapshot = state
-                .workspace_repository
-                .load_session_snapshot(&durable_user.user_id, &created.id)
-                .await
-                .expect("durable snapshot should load");
-            if let Some(snapshot) = snapshot
-                && snapshot.session.messages.len() == 2
-            {
-                return snapshot;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("assistant reply should be durably persisted");
+    let durable = wait_for_durable_messages(&state, &durable_user.user_id, &created.id).await;
     assert_eq!(durable.session.messages[1].text, "injected reply");
 
     store

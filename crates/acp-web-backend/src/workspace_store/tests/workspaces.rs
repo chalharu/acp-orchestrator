@@ -335,6 +335,55 @@ async fn deleting_non_empty_workspaces_is_rejected() {
     );
 }
 
+#[tokio::test]
+async fn loading_session_snapshots_rejects_invalid_payload_columns() {
+    let repository = test_repository();
+    let user = materialized_user(&repository).await;
+    let workspace = create_workspace_record(&repository, &user, "Repo").await;
+    persist_workspace_session(
+        &repository,
+        &user,
+        &workspace.workspace_id,
+        "s_invalid_payload",
+        SessionStatus::Active,
+        None,
+    )
+    .await;
+
+    let connection = repository
+        .open_connection()
+        .expect("test repository connection should open");
+    connection
+        .execute(
+            "UPDATE sessions SET latest_sequence = -1 WHERE session_id = 's_invalid_payload'",
+            [],
+        )
+        .expect("corrupt latest_sequence should update");
+    let latest_sequence_error = repository
+        .load_session_snapshot_sync(&user.user_id, "s_invalid_payload")
+        .expect_err("negative latest_sequence should fail to load");
+    assert!(matches!(
+        latest_sequence_error,
+        WorkspaceStoreError::Database(message)
+            if message.contains("invalid latest_sequence for session s_invalid_payload")
+    ));
+
+    connection
+        .execute(
+            "UPDATE sessions SET latest_sequence = 0, messages_json = 'not-json' WHERE session_id = 's_invalid_payload'",
+            [],
+        )
+        .expect("corrupt messages_json should update");
+    let messages_error = repository
+        .load_session_snapshot_sync(&user.user_id, "s_invalid_payload")
+        .expect_err("invalid messages_json should fail to load");
+    assert!(matches!(
+        messages_error,
+        WorkspaceStoreError::Database(message)
+            if message.contains("invalid messages_json for session s_invalid_payload")
+    ));
+}
+
 #[test]
 fn workspace_name_validation_rejects_blank_and_long_values() {
     assert_eq!(

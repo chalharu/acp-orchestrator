@@ -1,5 +1,5 @@
 use super::*;
-use crate::contract_messages::MessageRole;
+use crate::contract_messages::{ConversationMessage, MessageRole};
 use crate::contract_sessions::SessionStatus;
 use crate::contract_stream::StreamEventPayload;
 use chrono::{TimeZone, Utc};
@@ -116,4 +116,37 @@ async fn list_workspace_sessions_filters_by_owner_and_workspace() {
             .iter()
             .all(|session| session.workspace_id == "w_alpha")
     );
+}
+
+#[tokio::test]
+async fn restore_session_rejects_foreign_owners_when_the_live_session_already_exists() {
+    let store = SessionStore::new(4);
+    let existing = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("live session creation should succeed");
+
+    let error = store
+        .restore_session(
+            "bob",
+            SessionSnapshot {
+                id: existing.id,
+                workspace_id: "w_test".to_string(),
+                title: "Restored".to_string(),
+                status: SessionStatus::Active,
+                latest_sequence: 1,
+                messages: vec![ConversationMessage {
+                    id: "m_user".to_string(),
+                    role: MessageRole::User,
+                    text: "hello".to_string(),
+                    created_at: Utc::now(),
+                }],
+                pending_permissions: Vec::new(),
+            },
+            Utc::now(),
+        )
+        .await
+        .expect_err("restoring a foreign-owned live session should fail");
+
+    assert_eq!(error, SessionStoreError::Forbidden);
 }

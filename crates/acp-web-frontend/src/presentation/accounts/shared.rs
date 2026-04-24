@@ -7,11 +7,11 @@ use wasm_bindgen::JsCast;
 
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+#[cfg(test)]
+use crate::presentation::return_to::session_return_to_path;
 use crate::{
     application::auth::AccountsRouteAccess,
-    presentation::return_to::{
-        path_with_return_to, session_return_to_path, session_return_to_path_from_location,
-    },
+    presentation::return_to::{path_with_return_to, session_return_to_path_from_location},
 };
 
 #[derive(Clone, Copy)]
@@ -95,6 +95,7 @@ pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
     path_with_return_to("/app/accounts/", return_to_path)
 }
 
+#[cfg(test)]
 fn accounts_back_to_chat_path(search: &str) -> String {
     session_return_to_path(search).unwrap_or_else(|| "/app/".to_string())
 }

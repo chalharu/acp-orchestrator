@@ -22,13 +22,12 @@ pub(crate) use request::{csrf_token, patch_json_with_csrf, post_json_with_csrf};
 #[cfg(target_family = "wasm")]
 pub(crate) use response::{classify_session_load_failure, response_error_message};
 pub(crate) use sessions::{
-    cancel_turn, delete_session, list_sessions, load_session, rename_session, resolve_permission,
-    send_message,
+    cancel_turn, delete_session, load_session, rename_session, resolve_permission, send_message,
 };
 pub(crate) use stream::{SseItem, open_session_event_stream};
 pub(crate) use workspaces::{
-    WorkspaceSessionCreateError, create_workspace, create_workspace_session, delete_workspace,
-    list_workspace_sessions, list_workspaces, update_workspace,
+    create_workspace, create_workspace_session, delete_workspace, list_workspace_sessions,
+    list_workspaces, update_workspace,
 };
 
 #[cfg(test)]

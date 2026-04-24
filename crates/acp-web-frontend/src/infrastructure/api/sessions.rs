@@ -3,11 +3,10 @@
 use acp_contracts_messages::PromptRequest;
 use acp_contracts_permissions::{PermissionDecision, ResolvePermissionRequest};
 use acp_contracts_sessions::{
-    CancelTurnResponse, DeleteSessionResponse, RenameSessionRequest, SessionListItem,
-    SessionSnapshot,
+    CancelTurnResponse, DeleteSessionResponse, RenameSessionRequest, SessionSnapshot,
 };
 #[cfg(target_family = "wasm")]
-use acp_contracts_sessions::{RenameSessionResponse, SessionListResponse, SessionResponse};
+use acp_contracts_sessions::{RenameSessionResponse, SessionResponse};
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 
@@ -16,8 +15,6 @@ use super::{SessionLoadError, permission_url, session_path};
 use super::{classify_session_load_failure, response_error_message};
 #[cfg(target_family = "wasm")]
 use super::{csrf_token, patch_json_with_csrf, post_json_with_csrf};
-
-const SESSIONS_URL: &str = "/api/v1/sessions";
 
 #[cfg(target_family = "wasm")]
 pub(crate) async fn load_session(session_id: &str) -> Result<SessionSnapshot, SessionLoadError> {
@@ -45,26 +42,6 @@ pub(crate) async fn load_session(session_id: &str) -> Result<SessionSnapshot, Se
         "GET",
         &session_path(session_id),
     )))
-}
-
-#[cfg(target_family = "wasm")]
-pub(crate) async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
-    let response = Request::get(SESSIONS_URL)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-
-    if !response.ok() {
-        return Err(response_error_message(response, "List sessions failed").await);
-    }
-
-    let listed: SessionListResponse = response.json().await.map_err(|error| error.to_string())?;
-    Ok(listed.sessions)
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub(crate) async fn list_sessions() -> Result<Vec<SessionListItem>, String> {
-    Err(non_wasm_session_error("GET", SESSIONS_URL))
 }
 
 #[cfg(target_family = "wasm")]
@@ -224,7 +201,6 @@ mod tests {
 
     #[test]
     fn session_request_urls_encode_session_ids() {
-        assert_eq!(SESSIONS_URL, "/api/v1/sessions");
         assert_eq!(
             session_messages_url("s/1"),
             "/api/v1/sessions/s%2F1/messages"
@@ -255,9 +231,6 @@ mod tests {
             load_error,
             SessionLoadError::Other(message) if message.contains("/api/v1/sessions/s%2F1")
         ));
-
-        let list_error = poll_ready(list_sessions()).expect_err("host list should fail");
-        assert!(list_error.contains(SESSIONS_URL));
 
         let send_error =
             poll_ready(send_message("s/1", "hello")).expect_err("host send should fail");

@@ -953,7 +953,7 @@ textarea:focus-visible {
 }
 
 .account-panel__header-actions a,
-.account-panel__header-actions button {
+.account-panel__header-actions button:not(.workspace-dashboard__new-btn) {
   display: inline-flex;
   align-items: center;
   min-height: 2.25rem;
@@ -1197,13 +1197,24 @@ textarea:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 0.45rem;
   min-height: 2.5rem;
   padding: 0.65rem 0.95rem;
   border: 1px solid var(--accent);
-  border-radius: 10px;
+  border-radius: 999px;
   background: var(--accent);
   color: #fffaf4;
   font-weight: 700;
+  white-space: nowrap;
+}
+
+.workspace-dashboard__new-btn-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.workspace-dashboard__new-btn-label {
+  line-height: 1;
 }
 
 .workspace-card {

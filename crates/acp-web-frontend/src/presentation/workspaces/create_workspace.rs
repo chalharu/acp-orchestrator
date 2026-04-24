@@ -35,10 +35,24 @@ fn create_workspace_button_view(
     on_click: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
     view! {
-        <button type="button" class="workspace-dashboard__new-btn" on:click=on_click>
-            "+ New workspace"
+        <button
+            type="button"
+            class="workspace-dashboard__new-btn"
+            on:click=on_click
+            aria-label=create_workspace_trigger_label()
+        >
+            <span class="workspace-dashboard__new-btn-icon" aria-hidden="true">
+                "+"
+            </span>
+            <span class="workspace-dashboard__new-btn-label">
+                {create_workspace_trigger_label()}
+            </span>
         </button>
     }
+}
+
+fn create_workspace_trigger_label() -> &'static str {
+    "New workspace"
 }
 
 /// The modal overlay + dialog for creating a new workspace. Only rendered when
@@ -260,6 +274,11 @@ mod tests {
     fn create_workspace_button_label_toggles_with_in_progress_state() {
         assert_eq!(create_workspace_button_label(false), "Create workspace");
         assert_eq!(create_workspace_button_label(true), "Saving…");
+    }
+
+    #[test]
+    fn create_workspace_trigger_label_is_stable() {
+        assert_eq!(create_workspace_trigger_label(), "New workspace");
     }
 
     #[test]

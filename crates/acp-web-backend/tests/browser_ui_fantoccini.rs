@@ -65,14 +65,26 @@ async fn workspaces_page_shows_create_workspace_button_not_inline_form() -> Resu
         browser.open_app().await?;
         browser.wait_for_workspaces_page().await?;
 
-        // The "+ New workspace" trigger button must be visible.
+        // The modal trigger must expose a readable label and visible contrast.
         let new_btn_present: bool = browser
             .evaluate(
-                "return Boolean(document.querySelector('.workspace-dashboard__new-btn'));",
+                r#"
+                const button = document.querySelector('.workspace-dashboard__new-btn');
+                if (!button) return false;
+                const label = button.querySelector('.workspace-dashboard__new-btn-label');
+                const icon = button.querySelector('.workspace-dashboard__new-btn-icon');
+                const styles = getComputedStyle(button);
+                return label?.textContent?.trim() === 'New workspace'
+                  && icon?.textContent?.trim() === '+'
+                  && styles.color !== styles.backgroundColor;
+                "#,
                 "checking create workspace button",
             )
             .await?;
-        assert!(new_btn_present, "New workspace button must be present");
+        assert!(
+            new_btn_present,
+            "New workspace button must render readable text and contrast"
+        );
 
         // The modal form must NOT be visible before the button is clicked.
         let modal_visible: bool = browser

@@ -594,10 +594,7 @@ fn workspace_delete_handler(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Summary helpers (kept for tests / any remaining callers)
-// ---------------------------------------------------------------------------
-
+#[cfg(test)]
 fn workspace_count_label(count: usize) -> String {
     match count {
         0 => "No workspaces".to_string(),
@@ -605,10 +602,6 @@ fn workspace_count_label(count: usize) -> String {
         n => format!("{n} workspaces"),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

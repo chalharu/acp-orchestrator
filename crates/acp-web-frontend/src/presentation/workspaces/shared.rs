@@ -9,11 +9,11 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 
+#[cfg(test)]
+use crate::presentation::return_to::session_return_to_path;
 use crate::{
     application::auth::WorkspacesRouteAccess,
-    presentation::return_to::{
-        path_with_return_to, session_return_to_path, session_return_to_path_from_location,
-    },
+    presentation::return_to::{path_with_return_to, session_return_to_path_from_location},
 };
 
 #[derive(Clone, Copy)]
@@ -62,6 +62,7 @@ pub(crate) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
     path_with_return_to("/app/workspaces/", return_to_path)
 }
 
+#[cfg(test)]
 pub(super) fn workspaces_back_to_chat_path(search: &str) -> Option<String> {
     session_return_to_path(search)
 }

@@ -244,33 +244,10 @@ async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> 
 async fn workspaces_page_can_switch_workspace_for_new_chats() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        browser.open_app().await?;
-        browser.wait_for_workspaces_page().await?;
-
-        browser.create_workspace_and_confirm("Workspace A").await?;
-        browser.create_workspace_and_confirm("Workspace B").await?;
-        browser
-            .open_workspace_chat_and_confirm("Workspace A")
-            .await?;
-        browser.ensure_sidebar_visible().await?;
-        let original_path = browser.current_path().await?;
-        assert_eq!(
-            browser.session_sidebar_workspace_label().await?,
-            "Workspace: Workspace A"
-        );
-
-        browser.click_workspaces_link().await?;
-        browser.wait_for_workspaces_page().await?;
-        browser.switch_workspace_and_confirm("Workspace B").await?;
-
-        browser.open_app().await?;
-        browser.wait_for_session_page().await?;
-        browser.ensure_sidebar_visible().await?;
+        let original_path = set_up_workspace_switch_scenario(&browser).await?;
+        reopen_home_after_workspace_switch(&browser, "Workspace B").await?;
         assert_ne!(browser.current_path().await?, original_path);
-        assert_eq!(
-            browser.session_sidebar_workspace_label().await?,
-            "Workspace: Workspace B"
-        );
+        assert_session_sidebar_workspace(&browser, "Workspace B").await?;
 
         Ok(())
     }
@@ -285,42 +262,14 @@ async fn workspaces_page_can_switch_workspace_for_new_chats() -> Result<()> {
 async fn sign_out_clears_workspace_and_prepared_session_storage() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        browser.open_app().await?;
-        browser.wait_for_workspaces_page().await?;
-
-        browser.create_workspace_and_confirm("Workspace A").await?;
-        browser
-            .open_workspace_chat_and_confirm("Workspace A")
-            .await?;
-        browser.ensure_sidebar_visible().await?;
-
-        assert!(
-            browser
-                .session_storage_item("acp-prepared-session-id")
-                .await?
-                .is_some()
-        );
-        assert!(
-            browser
-                .session_storage_item("acp-selected-workspace-id")
-                .await?
-                .is_some()
-        );
+        open_workspace_chat_for_storage_cleanup(&browser).await?;
+        assert_session_storage_present(&browser, "acp-prepared-session-id").await?;
+        assert_session_storage_present(&browser, "acp-selected-workspace-id").await?;
 
         browser.click_sign_out_button().await?;
         browser.wait_for_sign_in_page().await?;
-        assert_eq!(
-            browser
-                .session_storage_item("acp-prepared-session-id")
-                .await?,
-            None
-        );
-        assert_eq!(
-            browser
-                .session_storage_item("acp-selected-workspace-id")
-                .await?,
-            None
-        );
+        assert_session_storage_cleared(&browser, "acp-prepared-session-id").await?;
+        assert_session_storage_cleared(&browser, "acp-selected-workspace-id").await?;
 
         Ok(())
     }
@@ -328,6 +277,63 @@ async fn sign_out_clears_workspace_and_prepared_session_storage() -> Result<()> 
 
     browser.shutdown().await;
     result
+}
+
+async fn set_up_workspace_switch_scenario(browser: &BrowserHarness) -> Result<String> {
+    browser.open_app().await?;
+    browser.wait_for_workspaces_page().await?;
+    browser.create_workspace_and_confirm("Workspace A").await?;
+    browser.create_workspace_and_confirm("Workspace B").await?;
+    browser
+        .open_workspace_chat_and_confirm("Workspace A")
+        .await?;
+    browser.ensure_sidebar_visible().await?;
+    let original_path = browser.current_path().await?;
+    assert_session_sidebar_workspace(browser, "Workspace A").await?;
+    Ok(original_path)
+}
+
+async fn reopen_home_after_workspace_switch(
+    browser: &BrowserHarness,
+    workspace_name: &str,
+) -> Result<()> {
+    browser.click_workspaces_link().await?;
+    browser.wait_for_workspaces_page().await?;
+    browser.switch_workspace_and_confirm(workspace_name).await?;
+    browser.open_app().await?;
+    browser.wait_for_session_page().await?;
+    browser.ensure_sidebar_visible().await
+}
+
+async fn assert_session_sidebar_workspace(
+    browser: &BrowserHarness,
+    workspace_name: &str,
+) -> Result<()> {
+    assert_eq!(
+        browser.session_sidebar_workspace_label().await?,
+        format!("Workspace: {workspace_name}")
+    );
+    Ok(())
+}
+
+async fn open_workspace_chat_for_storage_cleanup(browser: &BrowserHarness) -> Result<()> {
+    browser.open_app().await?;
+    browser.wait_for_workspaces_page().await?;
+    browser.create_workspace_and_confirm("Workspace A").await?;
+    browser
+        .open_workspace_chat_and_confirm("Workspace A")
+        .await?;
+    browser.ensure_sidebar_visible().await
+}
+
+async fn assert_session_storage_present(browser: &BrowserHarness, key: &str) -> Result<()> {
+    assert!(browser.session_storage_item(key).await?.is_some());
+    Ok(())
+}
+
+async fn assert_session_storage_cleared(browser: &BrowserHarness, key: &str) -> Result<()> {
+    assert_eq!(browser.session_storage_item(key).await?, None);
+    Ok(())
 }
 
 struct BrowserHarness {

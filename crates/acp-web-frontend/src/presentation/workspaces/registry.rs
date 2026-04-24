@@ -127,34 +127,99 @@ fn WorkspaceRegistryHead() -> impl IntoView {
     }
 }
 
+#[derive(Clone)]
+struct WorkspaceRowDisplay {
+    workspace_id: String,
+    workspace_name: String,
+    workspace_status: String,
+    created_label: String,
+}
+
+fn workspace_row_display(workspace: &WorkspaceSummary) -> WorkspaceRowDisplay {
+    WorkspaceRowDisplay {
+        workspace_id: workspace.workspace_id.clone(),
+        workspace_name: workspace.name.clone(),
+        workspace_status: workspace.status.clone(),
+        created_label: workspace.created_at.format("%Y-%m-%d").to_string(),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[derive(Clone, Copy)]
+struct WorkspaceRowSignals {
+    is_editing: Signal<bool>,
+    is_saving: Signal<bool>,
+    is_deleting: Signal<bool>,
+    is_opening: Signal<bool>,
+    is_selected: Signal<bool>,
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_row_signal(signal: RwSignal<Option<String>>, workspace_id: &str) -> Signal<bool> {
+    let workspace_id = workspace_id.to_string();
+    Signal::derive(move || signal.get().as_deref() == Some(workspace_id.as_str()))
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_row_signals(state: WorkspacesPageState, workspace_id: &str) -> WorkspaceRowSignals {
+    WorkspaceRowSignals {
+        is_editing: workspace_row_signal(state.editing_workspace_id, workspace_id),
+        is_saving: workspace_row_signal(state.saving_workspace_id, workspace_id),
+        is_deleting: workspace_row_signal(state.deleting_workspace_id, workspace_id),
+        is_opening: workspace_row_signal(state.opening_chat_workspace_id, workspace_id),
+        is_selected: workspace_row_signal(state.selected_workspace_id, workspace_id),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+struct WorkspaceRowFlags {
+    is_editing: bool,
+    is_saving: bool,
+    is_deleting: bool,
+    is_opening: bool,
+    is_selected: bool,
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_row_flag(signal: RwSignal<Option<String>>, workspace_id: &str) -> bool {
+    signal
+        .get_untracked()
+        .as_deref()
+        .is_some_and(|id| id == workspace_id)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_row_flags(state: WorkspacesPageState, workspace_id: &str) -> WorkspaceRowFlags {
+    WorkspaceRowFlags {
+        is_editing: workspace_row_flag(state.editing_workspace_id, workspace_id),
+        is_saving: workspace_row_flag(state.saving_workspace_id, workspace_id),
+        is_deleting: workspace_row_flag(state.deleting_workspace_id, workspace_id),
+        is_opening: workspace_row_flag(state.opening_chat_workspace_id, workspace_id),
+        is_selected: workspace_row_flag(state.selected_workspace_id, workspace_id),
+    }
+}
+
 #[component]
 #[cfg(target_family = "wasm")]
 fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl IntoView {
-    let workspace_id = workspace.workspace_id.clone();
-    let workspace_id_for_edit_state = workspace_id.clone();
-    let workspace_id_for_save_state = workspace_id.clone();
-    let workspace_id_for_delete_state = workspace_id.clone();
-    let workspace_id_for_open_state = workspace_id.clone();
-    let workspace_name = workspace.name.clone();
-    let workspace_status = workspace.status.clone();
-    let created_label = workspace.created_at.format("%Y-%m-%d").to_string();
+    let display = workspace_row_display(&workspace);
+    let row_state = workspace_row_signals(state, &display.workspace_id);
 
-    let is_editing = Signal::derive(move || {
-        state.editing_workspace_id.get().as_deref() == Some(&workspace_id_for_edit_state)
-    });
-    let is_saving = Signal::derive(move || {
-        state.saving_workspace_id.get().as_deref() == Some(&workspace_id_for_save_state)
-    });
-    let is_deleting = Signal::derive(move || {
-        state.deleting_workspace_id.get().as_deref() == Some(&workspace_id_for_delete_state)
-    });
-    let is_opening = Signal::derive(move || {
-        state.opening_chat_workspace_id.get().as_deref() == Some(&workspace_id_for_open_state)
-    });
-    let workspace_id_for_selected_state = workspace_id.clone();
-    let is_selected = Signal::derive(move || {
-        state.selected_workspace_id.get().as_deref() == Some(&workspace_id_for_selected_state)
-    });
+    workspace_row_view(display, state, row_state)
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_row_view(
+    display: WorkspaceRowDisplay,
+    state: WorkspacesPageState,
+    row_state: WorkspaceRowSignals,
+) -> impl IntoView {
+    let WorkspaceRowDisplay {
+        workspace_id,
+        workspace_name,
+        workspace_status,
+        created_label,
+    } = display;
 
     view! {
         <tr>
@@ -163,8 +228,8 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
                     state=state
                     workspace_id=workspace_id.clone()
                     workspace_name=workspace_name.clone()
-                    is_editing=is_editing
-                    is_saving=is_saving
+                    is_editing=row_state.is_editing
+                    is_saving=row_state.is_saving
                 />
             </td>
             <td>{workspace_status}</td>
@@ -174,10 +239,10 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
                     state=state
                     workspace_id=workspace_id
                     workspace_name=workspace_name
-                    is_editing=is_editing
-                    is_deleting=is_deleting
-                    is_opening=is_opening
-                    is_selected=is_selected
+                    is_editing=row_state.is_editing
+                    is_deleting=row_state.is_deleting
+                    is_opening=row_state.is_opening
+                    is_selected=row_state.is_selected
                 />
             </td>
         </tr>
@@ -563,36 +628,25 @@ fn workspace_delete_handler(
 #[component]
 #[cfg(not(target_family = "wasm"))]
 fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl IntoView {
-    let workspace_id = workspace.workspace_id.clone();
-    let workspace_name = workspace.name.clone();
-    let workspace_status = workspace.status.clone();
-    let created_label = workspace.created_at.format("%Y-%m-%d").to_string();
-    let is_editing = state
-        .editing_workspace_id
-        .get_untracked()
-        .as_deref()
-        .is_some_and(|id| id == workspace_id.as_str());
-    let is_deleting = state
-        .deleting_workspace_id
-        .get_untracked()
-        .as_deref()
-        .is_some_and(|id| id == workspace_id.as_str());
-    let is_opening = state
-        .opening_chat_workspace_id
-        .get_untracked()
-        .as_deref()
-        .is_some_and(|id| id == workspace_id.as_str());
-    let is_selected = state
-        .selected_workspace_id
-        .get_untracked()
-        .as_deref()
-        .is_some_and(|id| id == workspace_id.as_str());
-    let is_saving = state
-        .saving_workspace_id
-        .get_untracked()
-        .as_deref()
-        .is_some_and(|id| id == workspace_id.as_str());
+    let display = workspace_row_display(&workspace);
+    let row_state = workspace_row_flags(state, &display.workspace_id);
     let draft = state.edit_name_draft.get_untracked();
+
+    workspace_row_view_host(display, draft, row_state)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_row_view_host(
+    display: WorkspaceRowDisplay,
+    draft: String,
+    row_state: WorkspaceRowFlags,
+) -> impl IntoView {
+    let WorkspaceRowDisplay {
+        workspace_name,
+        workspace_status,
+        created_label,
+        ..
+    } = display;
 
     view! {
         <tr>
@@ -600,18 +654,18 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
                 <WorkspaceNameCellHost
                     workspace_name=workspace_name
                     draft=draft
-                    is_editing=is_editing
-                    is_saving=is_saving
+                    is_editing=row_state.is_editing
+                    is_saving=row_state.is_saving
                 />
             </td>
             <td>{workspace_status}</td>
             <td>{created_label}</td>
             <td>
                 <WorkspaceActionCellHost
-                    is_editing=is_editing
-                    is_deleting=is_deleting
-                    is_opening=is_opening
-                    is_selected=is_selected
+                    is_editing=row_state.is_editing
+                    is_deleting=row_state.is_deleting
+                    is_opening=row_state.is_opening
+                    is_selected=row_state.is_selected
                 />
             </td>
         </tr>

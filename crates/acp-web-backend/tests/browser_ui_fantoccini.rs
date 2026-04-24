@@ -21,7 +21,6 @@ use support::{ServerConfig, TestStack, test_state_dir};
 
 const APP_PATH: &str = "/app/";
 const REGISTER_PATH: &str = "/app/register/";
-const WORKSPACES_PATH: &str = "/app/workspaces/";
 const COMPOSER_SELECTOR: &str = "#composer-input";
 const REGISTER_USERNAME_SELECTOR: &str = ".account-form input[type='text']";
 const REGISTER_PASSWORD_SELECTOR: &str = ".account-form input[type='password']";
@@ -31,13 +30,40 @@ const MOCK_REPLY_TEXT: &str = "mock assistant: I received test.";
 const WEBDRIVER_READY_ATTEMPTS: usize = 50;
 const WEBDRIVER_READY_DELAY: Duration = Duration::from_millis(100);
 const WEBDRIVER_START_RETRIES: usize = 5;
+const BROWSER_WORKSPACE_NAME: &str = "Browser Workspace";
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn home_route_requires_explicit_workspace_selection() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+
+        let composer_present: bool = browser
+            .evaluate(
+                "return Boolean(document.querySelector('#composer-input'));",
+                "checking whether the composer is absent on first visit",
+            )
+            .await?;
+        assert!(!composer_present);
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
 
 #[tokio::test]
 #[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
 async fn slash_prefix_can_be_removed_without_breaking_prompt_submission() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        browser.open_app().await?;
+        browser
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
         browser.run_slash_prefix_submission("test").await?;
 
         Ok(())
@@ -53,7 +79,9 @@ async fn slash_prefix_can_be_removed_without_breaking_prompt_submission() -> Res
 async fn sidebar_shows_activity_metadata_and_closed_state() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        browser.open_app().await?;
+        browser
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
         browser.ensure_sidebar_visible().await?;
         let (activity_label, status_label) = browser.session_sidebar_metadata().await?;
 
@@ -94,12 +122,14 @@ async fn sidebar_shows_activity_metadata_and_closed_state() -> Result<()> {
 async fn sidebar_shows_current_workspace_label() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        browser.open_app().await?;
+        browser
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
         browser.ensure_sidebar_visible().await?;
 
         assert_eq!(
             browser.session_sidebar_workspace_label().await?,
-            "Workspace: Default workspace"
+            format!("Workspace: {BROWSER_WORKSPACE_NAME}")
         );
 
         Ok(())
@@ -115,30 +145,67 @@ async fn sidebar_shows_current_workspace_label() -> Result<()> {
 async fn workspaces_page_is_reachable_via_sidebar_link() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
-        browser.open_app().await?;
+        browser
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
         browser.ensure_sidebar_visible().await?;
 
         browser.click_workspaces_link().await?;
 
+        browser.wait_for_workspaces_page().await?;
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_back_link_returns_to_the_same_session() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
         browser
-            .wait_for_condition(
-                &format!(
-                    "return window.location.pathname === {WORKSPACES_PATH:?} \
-                     || window.location.pathname === '/app/workspaces';",
-                ),
-                Duration::from_secs(10),
-                "workspaces page navigation",
-            )
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
+        browser.ensure_sidebar_visible().await?;
+        let original_path = browser.current_path().await?;
+
+        browser.click_workspaces_link().await?;
+        browser.wait_for_workspaces_page().await?;
+        browser.click_back_to_chat_link().await?;
+        browser
+            .wait_for_path(&original_path, "return to the original session")
             .await?;
 
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn home_route_recovers_from_a_stale_selected_workspace() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
         browser
-            .wait_for_condition(
-                "return Boolean(document.querySelector('h1')) \
-                 && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
-                Duration::from_secs(10),
-                "workspaces page heading",
+            .inject_selected_workspace_and_return_home("w_missing")
+            .await?;
+        browser.wait_for_workspaces_page().await?;
+
+        let selected_workspace: Option<String> = browser
+            .evaluate(
+                "return window.sessionStorage.getItem('acp-selected-workspace-id');",
+                "reading stale selected workspace storage",
             )
             .await?;
+        assert!(selected_workspace.is_none());
 
         Ok(())
     }
@@ -154,7 +221,7 @@ async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> 
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
         browser.open_app().await?;
-        browser.navigate_to_workspaces().await?;
+        browser.wait_for_workspaces_page().await?;
 
         let workspace_name = "Browser-Test Workspace";
         let renamed = "Browser-Test Workspace Renamed";
@@ -223,18 +290,43 @@ impl BrowserHarness {
             self.complete_bootstrap_registration().await?;
         }
 
-        self.wait_for_condition(
-            "return Boolean(document.querySelector('#composer-input'));",
-            Duration::from_secs(30),
-            "composer bootstrap",
-        )
-        .await?;
-        self.wait_for_condition(
-            r#"return /\/app\/sessions\/[^/]+$/.test(window.location.pathname);"#,
-            Duration::from_secs(30),
-            "browser session route",
-        )
-        .await
+        if self
+            .wait_for_optional_condition(workspaces_path_script(), Duration::from_secs(10))
+            .await?
+        {
+            return self.wait_for_workspaces_page().await;
+        }
+
+        if self
+            .wait_for_optional_condition(session_route_script(), Duration::from_secs(10))
+            .await?
+        {
+            return self.wait_for_session_page().await;
+        }
+
+        bail!("app did not reach the workspaces page or a session route after opening /app/")
+    }
+
+    async fn open_app_and_start_chat(&self, workspace_name: &str) -> Result<()> {
+        self.open_app().await?;
+        if self
+            .wait_for_optional_condition(session_route_script(), Duration::from_secs(2))
+            .await?
+        {
+            return self.wait_for_session_page().await;
+        }
+
+        self.wait_for_workspaces_page().await?;
+        if !self
+            .wait_for_optional_condition(
+                &workspace_row_text_script(workspace_name),
+                Duration::from_secs(2),
+            )
+            .await?
+        {
+            self.create_workspace_and_confirm(workspace_name).await?;
+        }
+        self.open_workspace_chat_and_confirm(workspace_name).await
     }
 
     async fn complete_bootstrap_registration(&self) -> Result<()> {
@@ -263,10 +355,33 @@ impl BrowserHarness {
             .click()
             .await
             .context("submitting the bootstrap registration form")?;
+        self.wait_for_workspaces_page().await
+    }
+
+    async fn wait_for_session_page(&self) -> Result<()> {
         self.wait_for_condition(
-            r#"return /\/app\/sessions\/[^/]+$/.test(window.location.pathname);"#,
+            session_route_script(),
             Duration::from_secs(30),
-            "bootstrap registration redirect",
+            "browser session route",
+        )
+        .await?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('#composer-input'));",
+            Duration::from_secs(30),
+            "composer bootstrap",
+        )
+        .await
+    }
+
+    async fn wait_for_workspaces_page(&self) -> Result<()> {
+        self.wait_for_condition(
+            &format!(
+                "{} && Boolean(document.querySelector('h1')) \
+                 && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
+                workspaces_path_script()
+            ),
+            Duration::from_secs(30),
+            "workspaces page",
         )
         .await
     }
@@ -471,32 +586,22 @@ impl BrowserHarness {
 
     async fn click_workspaces_link(&self) -> Result<()> {
         self.wait_for_condition(
-            "return Boolean(document.querySelector('a[href=\"/app/workspaces/\"]'));",
+            "return Array.from(document.querySelectorAll('.session-sidebar__secondary-link'))\
+             .some(link => link.textContent?.trim() === 'Workspaces');",
             Duration::from_secs(10),
             "workspaces sidebar link",
         )
         .await?;
         self.client
-            .find(Locator::Css("a[href='/app/workspaces/']"))
+            .execute(
+                "const link = Array.from(document.querySelectorAll('.session-sidebar__secondary-link'))\
+                 .find(candidate => candidate.textContent?.trim() === 'Workspaces');\
+                 if (link) link.click();",
+                Vec::new(),
+            )
             .await
-            .context("finding the workspaces sidebar link")?
-            .click()
-            .await
-            .context("clicking the workspaces sidebar link")
-    }
-
-    async fn navigate_to_workspaces(&self) -> Result<()> {
-        self.client
-            .goto(&format!("{}{}", self.stack.backend_url, WORKSPACES_PATH))
-            .await
-            .context("navigating to the workspaces page")?;
-        self.wait_for_condition(
-            "return Boolean(document.querySelector('h1')) \
-             && document.querySelector('h1')?.textContent?.trim() === 'Workspaces';",
-            Duration::from_secs(15),
-            "workspaces page heading after direct navigation",
-        )
-        .await
+            .context("clicking the workspaces sidebar link")?;
+        Ok(())
     }
 
     async fn create_workspace(&self, name: &str) -> Result<()> {
@@ -532,6 +637,19 @@ impl BrowserHarness {
         self.create_workspace(name).await?;
         self.wait_for_workspace_notice("Workspace created.").await?;
         self.wait_for_body_text(name, Duration::from_secs(10)).await
+    }
+
+    async fn open_workspace_chat_and_confirm(&self, name: &str) -> Result<()> {
+        self.wait_for_workspace_action_button(
+            ".workspace-action-btn",
+            name,
+            "New chat",
+            "new chat button",
+        )
+        .await?;
+        self.click_workspace_action_button(".workspace-action-btn", name, "New chat")
+            .await?;
+        self.wait_for_session_page().await
     }
 
     async fn rename_workspace(&self, current_name: &str, new_name: &str) -> Result<()> {
@@ -664,6 +782,26 @@ impl BrowserHarness {
             .context("clicking Save button")
     }
 
+    async fn click_back_to_chat_link(&self) -> Result<()> {
+        self.wait_for_condition(
+            "return Array.from(document.querySelectorAll('.account-panel__header-actions a'))\
+             .some(link => link.textContent?.trim() === 'Back to chat');",
+            Duration::from_secs(10),
+            "back to chat link",
+        )
+        .await?;
+        self.client
+            .execute(
+                "const link = Array.from(document.querySelectorAll('.account-panel__header-actions a'))\
+                 .find(candidate => candidate.textContent?.trim() === 'Back to chat');\
+                 if (link) link.click();",
+                Vec::new(),
+            )
+            .await
+            .context("clicking the back to chat link")?;
+        Ok(())
+    }
+
     async fn close_current_session(&self) -> Result<()> {
         let close_result = self.close_current_session_request().await?;
         ensure_close_current_session_succeeded(&close_result)
@@ -716,6 +854,41 @@ impl BrowserHarness {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    async fn current_path(&self) -> Result<String> {
+        self.evaluate(
+            "return window.location.pathname;",
+            "reading current pathname",
+        )
+        .await
+    }
+
+    async fn wait_for_path(&self, expected_path: &str, description: &str) -> Result<()> {
+        let encoded =
+            serde_json::to_string(expected_path).context("encoding expected browser path")?;
+        self.wait_for_condition(
+            &format!("return window.location.pathname === {encoded};"),
+            Duration::from_secs(15),
+            description,
+        )
+        .await
+    }
+
+    async fn inject_selected_workspace_and_return_home(&self, workspace_id: &str) -> Result<()> {
+        let encoded =
+            serde_json::to_string(workspace_id).context("encoding selected workspace id")?;
+        self.client
+            .execute(
+                &format!(
+                    "window.sessionStorage.setItem('acp-selected-workspace-id', {encoded});\
+                     window.location.href = '/app/';"
+                ),
+                Vec::new(),
+            )
+            .await
+            .context("injecting a stale selected workspace and navigating home")?;
+        Ok(())
     }
 
     async fn wait_for_optional_condition(&self, script: &str, timeout: Duration) -> Result<bool> {
@@ -796,6 +969,22 @@ fn ensure_close_current_session_succeeded(close_result: &Value) -> Result<()> {
         "browser close request failed: {close_result}"
     );
     Ok(())
+}
+
+fn session_route_script() -> &'static str {
+    r#"return /\/app\/sessions\/[^/]+$/.test(window.location.pathname);"#
+}
+
+fn workspaces_path_script() -> &'static str {
+    "return window.location.pathname === '/app/workspaces' \
+     || window.location.pathname === '/app/workspaces/';"
+}
+
+fn workspace_row_text_script(name: &str) -> String {
+    format!(
+        "return Array.from(document.querySelectorAll('tbody tr'))\
+         .some(row => row.textContent?.includes({name:?}));"
+    )
 }
 
 fn workspace_action_button_script(selector: &str, row_name: &str, button_label: &str) -> String {

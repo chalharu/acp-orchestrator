@@ -5,7 +5,9 @@ use crate::{application::auth::WorkspacesRouteAccess, components::ErrorBanner};
 use super::{
     create_workspace::CreateWorkspaceSection,
     registry::WorkspaceRegistrySection,
-    shared::{WorkspacesPageState, initialize_workspaces_page},
+    shared::{
+        WorkspacesPageState, initialize_workspaces_page, workspaces_back_to_chat_path_from_location,
+    },
 };
 
 #[component]
@@ -18,15 +20,14 @@ pub fn WorkspacesPage() -> impl IntoView {
 
 #[cfg(target_family = "wasm")]
 fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
+    let back_to_chat_path = workspaces_back_to_chat_path_from_location();
     view! {
         <main class="app-shell account-shell">
             <ErrorBanner message=state.error />
             <section class="panel account-panel">
                 <div class="account-panel__header">
                     <h1>"Workspaces"</h1>
-                    <div class="account-panel__header-actions">
-                        <a href="/app/">"Back to chat"</a>
-                    </div>
+                    {workspaces_back_link_view(back_to_chat_path)}
                 </div>
                 <Show when=move || state.notice.get().is_some()>
                     <p class="account-notice" role="status">
@@ -63,15 +64,26 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
             <section class="panel account-panel">
                 <div class="account-panel__header">
                     <h1>"Workspaces"</h1>
-                    <div class="account-panel__header-actions">
-                        <a href="/app/">"Back to chat"</a>
-                    </div>
+                    {workspaces_back_link_view(None)}
                 </div>
                 {notice_view}
                 <WorkspacesPageContent state />
             </section>
         </main>
     }
+}
+
+fn workspaces_back_link_view(back_to_chat_path: Option<String>) -> AnyView {
+    back_to_chat_path
+        .map(|href| {
+            view! {
+                <div class="account-panel__header-actions">
+                    <a href=href>"Back to chat"</a>
+                </div>
+            }
+            .into_any()
+        })
+        .unwrap_or_else(|| ().into_any())
 }
 
 #[component]
@@ -152,6 +164,7 @@ mod tests {
             state.notice.set(Some("Workspace updated.".to_string()));
             state.access.set(Some(WorkspacesRouteAccess::SignedIn));
             let _ = workspaces_page_shell(state);
+            let _ = workspaces_back_link_view(Some("/app/sessions/abc".to_string()));
             let _ = view! { <WorkspacesPage /> };
         });
     }

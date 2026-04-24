@@ -19,10 +19,6 @@ pub(in crate::server) async fn list_workspaces(
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<WorkspaceListResponse>, AppError> {
     let owner = state.owner_context(principal).await?;
-    let _ = state
-        .workspace_repository
-        .bootstrap_workspace(&owner.user.user_id)
-        .await?;
     let workspaces = state
         .workspace_repository
         .list_workspaces(&owner.user.user_id)

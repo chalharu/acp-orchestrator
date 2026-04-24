@@ -17,7 +17,10 @@ use super::stream::{next_tool_activity_id, push_tool_activity_entry};
 use crate::application::auth::{self, HomeRouteTarget};
 use crate::browser::clear_prepared_session_id;
 #[cfg(target_family = "wasm")]
-use crate::browser::{navigate_to, prepared_session_id, store_prepared_session_id};
+use crate::browser::{
+    clear_selected_workspace_id_if_matches, navigate_to, prepared_session_id,
+    selected_workspace_id, store_prepared_session_id,
+};
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 #[cfg(target_family = "wasm")]
@@ -88,13 +91,15 @@ async fn navigate_home_target(target: HomeRouteTarget) -> Result<(), String> {
 
 #[cfg(target_family = "wasm")]
 async fn navigate_prepared_home_session() -> Result<(), String> {
-    let session_id = resolve_home_session_id().await?;
-    match navigate_to(&app_session_path(&session_id)) {
-        Ok(()) => Ok(()),
-        Err(message) => {
-            clear_prepared_session_id();
-            Err(message)
-        }
+    match resolve_home_target().await? {
+        HomeNavigation::Session(session_id) => match navigate_to(&app_session_path(&session_id)) {
+            Ok(()) => Ok(()),
+            Err(message) => {
+                clear_prepared_session_id();
+                Err(message)
+            }
+        },
+        HomeNavigation::Workspaces => navigate_to("/app/workspaces/"),
     }
 }
 
@@ -108,13 +113,31 @@ fn set_home_redirect_error(
 }
 
 #[cfg(target_family = "wasm")]
-async fn resolve_home_session_id() -> Result<String, String> {
+enum HomeNavigation {
+    Session(String),
+    Workspaces,
+}
+
+#[cfg(target_family = "wasm")]
+async fn resolve_home_target() -> Result<HomeNavigation, String> {
     if let Some(session_id) = prepared_session_id() {
-        Ok(session_id)
-    } else {
-        let session_id = api::create_session().await?;
-        store_prepared_session_id(&session_id);
-        Ok(session_id)
+        return Ok(HomeNavigation::Session(session_id));
+    }
+
+    let Some(workspace_id) = selected_workspace_id() else {
+        return Ok(HomeNavigation::Workspaces);
+    };
+
+    match api::create_workspace_session(&workspace_id).await {
+        Ok(session_id) => {
+            store_prepared_session_id(&session_id);
+            Ok(HomeNavigation::Session(session_id))
+        }
+        Err(api::WorkspaceSessionCreateError::NotFound(_)) => {
+            clear_selected_workspace_id_if_matches(&workspace_id);
+            Ok(HomeNavigation::Workspaces)
+        }
+        Err(error) => Err(error.into_message()),
     }
 }
 

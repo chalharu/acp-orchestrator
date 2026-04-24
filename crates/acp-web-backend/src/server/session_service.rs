@@ -21,11 +21,20 @@ pub(super) async fn create_session_snapshot(
     principal: AuthenticatedPrincipal,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
-    let workspace = state
+    let workspaces = state
         .workspace_repository
-        .bootstrap_workspace(&owner.user.user_id)
+        .list_workspaces(&owner.user.user_id)
         .await?;
-    create_session_snapshot_in_workspace(state, owner, &workspace.workspace_id).await
+    let workspace_id = match workspaces.as_slice() {
+        [workspace] => workspace.workspace_id.clone(),
+        _ => {
+            return Err(AppError::Conflict(
+                "workspace selection required".to_string(),
+            ));
+        }
+    };
+
+    create_session_snapshot_in_workspace(state, owner, &workspace_id).await
 }
 
 pub(super) async fn create_session_snapshot_for_workspace(

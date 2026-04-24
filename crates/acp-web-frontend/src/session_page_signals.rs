@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use web_sys::EventSource;
 
 use crate::{
-    browser::{load_draft, save_draft},
+    browser::{load_draft, save_draft, store_selected_workspace_id},
     session_lifecycle::{SessionLifecycle, TurnState},
     session_page_entries::SessionEntry,
 };
@@ -72,6 +72,9 @@ pub(super) fn persist_session_draft(session_id: String, draft: RwSignal<String>)
 
 pub(super) fn set_current_workspace_id(workspace_id: String, signals: SessionSignals) {
     let next_workspace_id = normalized_workspace_value(Some(workspace_id));
+    if let Some(workspace_id) = next_workspace_id.as_deref() {
+        store_selected_workspace_id(workspace_id);
+    }
     if signals.current_workspace_id.get_untracked() != next_workspace_id {
         signals.current_workspace_name.set(None);
     }

@@ -275,7 +275,7 @@ async fn updating_and_deleting_missing_workspaces_return_not_found() {
 }
 
 #[tokio::test]
-async fn bootstrap_workspaces_are_immutable() {
+async fn bootstrap_workspaces_follow_standard_mutability_rules() {
     let repository = test_repository();
     let user = materialized_user(&repository).await;
     let bootstrap = repository
@@ -283,7 +283,7 @@ async fn bootstrap_workspaces_are_immutable() {
         .await
         .expect("bootstrap should succeed");
 
-    let update_error = repository
+    let updated = repository
         .update_workspace(
             &user.user_id,
             &bootstrap.workspace_id,
@@ -293,19 +293,19 @@ async fn bootstrap_workspaces_are_immutable() {
             },
         )
         .await
-        .expect_err("bootstrap rename should fail");
-    let delete_error = repository
+        .expect("bootstrap rename should succeed");
+    repository
         .delete_workspace(&user.user_id, &bootstrap.workspace_id)
         .await
-        .expect_err("bootstrap deletion should fail");
+        .expect("empty bootstrap workspace should delete");
 
-    assert_eq!(
-        update_error,
-        WorkspaceStoreError::Conflict("bootstrap_workspace_immutable".to_string())
-    );
-    assert_eq!(
-        delete_error,
-        WorkspaceStoreError::Conflict("bootstrap_workspace_immutable".to_string())
+    assert_eq!(updated.name, "Renamed");
+    assert!(
+        repository
+            .load_workspace(&user.user_id, &bootstrap.workspace_id)
+            .await
+            .expect("workspace lookup should succeed")
+            .is_none()
     );
 }
 

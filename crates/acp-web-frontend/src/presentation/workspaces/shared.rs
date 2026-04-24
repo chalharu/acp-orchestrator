@@ -6,7 +6,10 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 
-use crate::application::auth::WorkspacesRouteAccess;
+use crate::{
+    application::auth::WorkspacesRouteAccess,
+    presentation::return_to::{path_with_return_to, session_return_to_path},
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkspacesPageState {
@@ -21,6 +24,7 @@ pub(super) struct WorkspacesPageState {
     pub(super) edit_name_draft: RwSignal<String>,
     pub(super) saving_workspace_id: RwSignal<Option<String>>,
     pub(super) deleting_workspace_id: RwSignal<Option<String>>,
+    pub(super) opening_chat_workspace_id: RwSignal<Option<String>>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -38,9 +42,28 @@ impl WorkspacesPageState {
             edit_name_draft: RwSignal::new(String::new()),
             saving_workspace_id: RwSignal::new(None::<String>),
             deleting_workspace_id: RwSignal::new(None::<String>),
+            opening_chat_workspace_id: RwSignal::new(None::<String>),
             checked: RwSignal::new(false),
         }
     }
+}
+
+pub(super) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
+    path_with_return_to("/app/workspaces/", return_to_path)
+}
+
+#[cfg(target_family = "wasm")]
+pub(super) fn workspaces_back_to_chat_path_from_location() -> Option<String> {
+    crate::presentation::return_to::session_return_to_path_from_location()
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn workspaces_back_to_chat_path_from_location() -> Option<String> {
+    None
+}
+
+pub(super) fn workspaces_back_to_chat_path(search: &str) -> Option<String> {
+    session_return_to_path(search)
 }
 
 #[cfg(target_family = "wasm")]
@@ -134,8 +157,22 @@ mod tests {
             assert!(state.edit_name_draft.get().is_empty());
             assert!(state.saving_workspace_id.get().is_none());
             assert!(state.deleting_workspace_id.get().is_none());
+            assert!(state.opening_chat_workspace_id.get().is_none());
             assert!(!state.checked.get());
         });
+    }
+
+    #[test]
+    fn workspaces_paths_preserve_only_session_routes() {
+        assert_eq!(
+            workspaces_path_with_return_to("/app/sessions/s%2F1"),
+            "/app/workspaces/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+        );
+        assert_eq!(
+            workspaces_back_to_chat_path("?return_to=%2Fapp%2Fsessions%2Fs%252F1"),
+            Some("/app/sessions/s%2F1".to_string())
+        );
+        assert_eq!(workspaces_back_to_chat_path("?return_to=%2Fapp%2F"), None);
     }
 
     #[cfg(not(target_family = "wasm"))]

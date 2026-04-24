@@ -5,7 +5,7 @@ mod session_metadata;
 mod shared;
 
 const BOOTSTRAP_WORKSPACE_KIND: &str = "legacy-session-routes";
-pub(super) const BOOTSTRAP_WORKSPACE_NAME: &str = "Default workspace";
+pub(super) const BOOTSTRAP_WORKSPACE_NAME: &str = "Bootstrap workspace";
 const ACTIVE_WORKSPACE_STATUS: &str = "active";
 pub(super) const LOCAL_ACCOUNT_PRINCIPAL_KIND: &str = "local_account";
 const LEGACY_BROWSER_SESSIONS_TABLE: &str = "legacy_browser_sessions";

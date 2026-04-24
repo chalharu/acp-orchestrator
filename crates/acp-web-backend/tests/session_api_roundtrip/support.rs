@@ -76,17 +76,61 @@ pub(super) async fn create_browser_session(
     backend_url: &str,
     csrf_token: &str,
 ) -> Result<CreateSessionResponse> {
+    let workspace =
+        create_browser_workspace(client, backend_url, csrf_token, "Browser Workspace").await?;
+    create_browser_workspace_session(
+        client,
+        backend_url,
+        csrf_token,
+        &workspace.workspace.workspace_id,
+    )
+    .await
+}
+
+async fn create_browser_workspace(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+    name: &str,
+) -> Result<CreateWorkspaceResponse> {
     client
-        .post(format!("{backend_url}/api/v1/sessions"))
+        .post(format!("{backend_url}/api/v1/workspaces"))
+        .header("x-csrf-token", csrf_token)
+        .json(&CreateWorkspaceRequest {
+            name: name.to_string(),
+            upstream_url: None,
+            default_ref: None,
+            credential_reference_id: None,
+        })
+        .send()
+        .await
+        .context("creating a cookie-authenticated browser workspace")?
+        .error_for_status()
+        .context("cookie-authenticated browser workspace creation returned an error")?
+        .json()
+        .await
+        .context("decoding the created browser workspace")
+}
+
+async fn create_browser_workspace_session(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+    workspace_id: &str,
+) -> Result<CreateSessionResponse> {
+    client
+        .post(format!(
+            "{backend_url}/api/v1/workspaces/{workspace_id}/sessions"
+        ))
         .header("x-csrf-token", csrf_token)
         .send()
         .await
-        .context("creating a cookie-authenticated browser session")?
+        .context("creating a cookie-authenticated browser workspace session")?
         .error_for_status()
-        .context("cookie-authenticated browser session creation returned an error")?
+        .context("cookie-authenticated browser workspace session creation returned an error")?
         .json()
         .await
-        .context("decoding the created browser session")
+        .context("decoding the created browser workspace session")
 }
 
 pub(super) async fn bootstrap_browser_account(
@@ -243,16 +287,28 @@ impl TestStack {
     }
 
     pub(super) async fn create_legacy_session(&self, token: &str) -> Result<CreateSessionResponse> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/sessions", self.backend_url))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("creating legacy test session")?
-            .error_for_status()
-            .context("legacy session creation returned an error")?;
-        response.json().await.context("decoding session response")
+        let workspace_id = self.ensure_primary_workspace(token).await?;
+        self.create_workspace_session(token, &workspace_id).await
+    }
+
+    async fn ensure_primary_workspace(&self, token: &str) -> Result<String> {
+        let listed = self.list_workspaces(token).await?;
+        if let Some(workspace) = listed.workspaces.first() {
+            return Ok(workspace.workspace_id.clone());
+        }
+
+        let created = self
+            .create_workspace(
+                token,
+                &CreateWorkspaceRequest {
+                    name: "Legacy session workspace".to_string(),
+                    upstream_url: None,
+                    default_ref: None,
+                    credential_reference_id: None,
+                },
+            )
+            .await?;
+        Ok(created.workspace.workspace_id)
     }
 
     pub(super) async fn create_workspace(

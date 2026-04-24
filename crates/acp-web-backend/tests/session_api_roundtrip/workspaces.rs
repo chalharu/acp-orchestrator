@@ -34,8 +34,7 @@ async fn workspace_crud_works_over_http() -> Result<()> {
     let stack = workspace_stack().await?;
 
     let initial = stack.list_workspaces("alice").await?;
-    assert_eq!(initial.workspaces.len(), 1);
-    assert_eq!(initial.workspaces[0].name, "Default workspace");
+    assert!(initial.workspaces.is_empty());
 
     let workspace_id = create_repo_workspace(&stack, "Repo").await?;
 
@@ -76,32 +75,38 @@ async fn workspace_crud_works_over_http() -> Result<()> {
 #[tokio::test]
 async fn workspace_sessions_are_scoped_over_http() -> Result<()> {
     let stack = workspace_stack().await?;
-    let initial = stack.list_workspaces("alice").await?;
-    let bootstrap_workspace_id = initial.workspaces[0].workspace_id.clone();
-    let workspace_id = create_repo_workspace(&stack, "Repo").await?;
+    let first_workspace_id = create_repo_workspace(&stack, "Repo").await?;
+    let second_workspace_id = create_repo_workspace(&stack, "Repo Two").await?;
     let first = stack
-        .create_workspace_session("alice", &workspace_id)
+        .create_workspace_session("alice", &first_workspace_id)
         .await?;
-    let _legacy = stack.create_legacy_session("alice").await?;
+    let second = stack
+        .create_workspace_session("alice", &second_workspace_id)
+        .await?;
 
     let listed = stack
-        .list_workspace_sessions("alice", &workspace_id)
+        .list_workspace_sessions("alice", &first_workspace_id)
         .await?;
     assert_eq!(listed.sessions.len(), 1);
     assert_eq!(listed.sessions[0].id, first.session.id);
-    assert_eq!(listed.sessions[0].workspace_id, workspace_id);
+    assert_eq!(listed.sessions[0].workspace_id, first_workspace_id);
 
-    let bootstrap_list = stack
-        .list_workspace_sessions("alice", &bootstrap_workspace_id)
+    let second_list = stack
+        .list_workspace_sessions("alice", &second_workspace_id)
         .await?;
     assert!(
-        bootstrap_list
+        second_list
             .sessions
             .iter()
             .all(|session| session.id != first.session.id)
     );
+    assert_eq!(second_list.sessions[0].id, second.session.id);
 
     stack.delete_session("alice", &first.session.id).await?;
-    stack.delete_workspace("alice", &workspace_id).await?;
+    stack.delete_session("alice", &second.session.id).await?;
+    stack.delete_workspace("alice", &first_workspace_id).await?;
+    stack
+        .delete_workspace("alice", &second_workspace_id)
+        .await?;
     Ok(())
 }

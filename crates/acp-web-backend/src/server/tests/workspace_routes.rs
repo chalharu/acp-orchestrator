@@ -48,19 +48,14 @@ async fn create_workspace_session_for(
 }
 
 #[tokio::test]
-async fn listing_workspaces_bootstraps_the_default_workspace() {
+async fn listing_workspaces_starts_empty_until_a_workspace_is_created() {
     let state = workspace_state();
 
     let response = list_workspaces(State(state), bearer_principal("alice"))
         .await
         .expect("listing workspaces should succeed");
 
-    assert_eq!(response.0.workspaces.len(), 1);
-    assert_eq!(response.0.workspaces[0].name, "Default workspace");
-    assert_eq!(
-        response.0.workspaces[0].bootstrap_kind.as_deref(),
-        Some("legacy-session-routes")
-    );
+    assert!(response.0.workspaces.is_empty());
 }
 
 #[tokio::test]

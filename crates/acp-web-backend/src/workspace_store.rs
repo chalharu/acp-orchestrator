@@ -424,14 +424,9 @@ fn build_workspace_record(
 }
 
 fn validate_workspace_update(
-    existing: &WorkspaceRecord,
+    _existing: &WorkspaceRecord,
     request: &UpdateWorkspaceRequest,
 ) -> Result<(), WorkspaceStoreError> {
-    if existing.bootstrap_kind.is_some() && request.name.is_some() {
-        return Err(WorkspaceStoreError::Conflict(
-            "bootstrap_workspace_immutable".to_string(),
-        ));
-    }
     if request.name.is_none() && request.default_ref.is_none() {
         return Err(WorkspaceStoreError::Validation(
             "workspace update must include name or default_ref".to_string(),
@@ -561,11 +556,6 @@ fn ensure_workspace_can_be_deleted(
     connection: &Connection,
     workspace: &WorkspaceRecord,
 ) -> Result<(), WorkspaceStoreError> {
-    if workspace.bootstrap_kind.is_some() {
-        return Err(WorkspaceStoreError::Conflict(
-            "bootstrap_workspace_immutable".to_string(),
-        ));
-    }
     let active_sessions = connection
         .query_row(
             "SELECT COUNT(1)
@@ -1190,10 +1180,15 @@ mod tests {
             .expect("current local account should insert");
     }
 
-    fn snapshot(id: &str, title: &str, status: SessionStatus) -> SessionSnapshot {
+    fn snapshot(
+        workspace_id: &str,
+        id: &str,
+        title: &str,
+        status: SessionStatus,
+    ) -> SessionSnapshot {
         SessionSnapshot {
             id: id.to_string(),
-            workspace_id: String::new(),
+            workspace_id: workspace_id.to_string(),
             title: title.to_string(),
             status,
             latest_sequence: 0,
@@ -2070,7 +2065,16 @@ mod tests {
             .materialize_user(&bearer_principal("developer"))
             .await
             .expect("principal materialization should succeed");
-        let snapshot = snapshot("s_persisted", "Initial title", SessionStatus::Active);
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
+        let snapshot = snapshot(
+            &workspace.workspace_id,
+            "s_persisted",
+            "Initial title",
+            SessionStatus::Active,
+        );
 
         repository
             .persist_session_snapshot(&user.user_id, &snapshot, false, None)
@@ -2113,7 +2117,16 @@ mod tests {
             .materialize_user(&bearer_principal("developer"))
             .await
             .expect("principal materialization should succeed");
-        let snapshot = snapshot("s_transition", "Transition", SessionStatus::Active);
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
+        let snapshot = snapshot(
+            &workspace.workspace_id,
+            "s_transition",
+            "Transition",
+            SessionStatus::Active,
+        );
 
         repository
             .persist_session_snapshot(&user.user_id, &snapshot, false, None)
@@ -2148,7 +2161,16 @@ mod tests {
             .materialize_user(&bearer_principal("developer"))
             .await
             .expect("principal materialization should succeed");
-        let snapshot = snapshot("s_closed", "Transition", SessionStatus::Active);
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
+        let snapshot = snapshot(
+            &workspace.workspace_id,
+            "s_closed",
+            "Transition",
+            SessionStatus::Active,
+        );
 
         repository
             .persist_session_snapshot(&user.user_id, &snapshot, false, None)
@@ -2186,7 +2208,16 @@ mod tests {
             .materialize_user(&bearer_principal("developer"))
             .await
             .expect("principal materialization should succeed");
-        let snapshot = snapshot("s_deleted", "Transition", SessionStatus::Active);
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
+        let snapshot = snapshot(
+            &workspace.workspace_id,
+            "s_deleted",
+            "Transition",
+            SessionStatus::Active,
+        );
 
         repository
             .persist_session_snapshot(&user.user_id, &snapshot, false, None)
@@ -2216,6 +2247,10 @@ mod tests {
             .materialize_user(&bearer_principal("developer"))
             .await
             .expect("principal materialization should succeed");
+        let workspace = repository
+            .bootstrap_workspace(&user.user_id)
+            .await
+            .expect("workspace bootstrap should succeed");
         repository
             .open_connection()
             .expect("opening the test database should succeed")
@@ -2225,7 +2260,12 @@ mod tests {
         let error = repository
             .persist_session_snapshot(
                 &user.user_id,
-                &snapshot("s_broken", "Broken", SessionStatus::Active),
+                &snapshot(
+                    &workspace.workspace_id,
+                    "s_broken",
+                    "Broken",
+                    SessionStatus::Active,
+                ),
                 false,
                 None,
             )

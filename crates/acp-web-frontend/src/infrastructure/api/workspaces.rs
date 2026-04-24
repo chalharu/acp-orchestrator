@@ -5,6 +5,7 @@ use acp_contracts_workspaces::{
     UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceDetail, WorkspaceListResponse,
     WorkspaceSummary,
 };
+use acp_contracts_sessions::CreateSessionResponse;
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 
@@ -16,6 +17,28 @@ use super::response_error_message;
 use super::{csrf_token, encode_component, patch_json_with_csrf, post_json_with_csrf};
 
 const WORKSPACES_URL: &str = "/api/v1/workspaces";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceSessionCreateError {
+    NotFound(String),
+    Other(String),
+}
+
+impl WorkspaceSessionCreateError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::NotFound(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for WorkspaceSessionCreateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
 
 #[cfg(target_family = "wasm")]
 pub(crate) async fn list_workspaces() -> Result<Vec<WorkspaceSummary>, String> {
@@ -102,6 +125,40 @@ pub(crate) async fn delete_workspace(
     Err(non_wasm_api_error("DELETE", &workspace_url(workspace_id)))
 }
 
+#[cfg(target_family = "wasm")]
+pub(crate) async fn create_workspace_session(
+    workspace_id: &str,
+) -> Result<String, WorkspaceSessionCreateError> {
+    let response = post_json_with_csrf(&workspace_sessions_url(workspace_id), "{}")
+        .await
+        .map_err(WorkspaceSessionCreateError::Other)?;
+    if response.status() == 404 {
+        return Err(WorkspaceSessionCreateError::NotFound(
+            response_error_message(response, "Create workspace session failed").await,
+        ));
+    }
+    if !response.ok() {
+        return Err(WorkspaceSessionCreateError::Other(
+            response_error_message(response, "Create workspace session failed").await,
+        ));
+    }
+    let payload: CreateSessionResponse = response
+        .json()
+        .await
+        .map_err(|error| WorkspaceSessionCreateError::Other(error.to_string()))?;
+    Ok(payload.session.id)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn create_workspace_session(
+    workspace_id: &str,
+) -> Result<String, WorkspaceSessionCreateError> {
+    Err(WorkspaceSessionCreateError::Other(non_wasm_api_error(
+        "POST",
+        &workspace_sessions_url(workspace_id),
+    )))
+}
+
 fn create_workspace_body(name: &str) -> Result<String, String> {
     serde_json::to_string(&CreateWorkspaceRequest {
         name: name.to_string(),
@@ -122,6 +179,10 @@ fn update_workspace_body(name: Option<String>) -> Result<String, String> {
 
 fn workspace_url(workspace_id: &str) -> String {
     format!("{WORKSPACES_URL}/{}", encode_component(workspace_id))
+}
+
+fn workspace_sessions_url(workspace_id: &str) -> String {
+    format!("{}/sessions", workspace_url(workspace_id))
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -148,6 +209,10 @@ mod tests {
     fn workspace_url_appends_workspace_id() {
         assert_eq!(workspace_url("w_123"), "/api/v1/workspaces/w_123");
         assert_eq!(workspace_url("w/1"), "/api/v1/workspaces/w%2F1");
+        assert_eq!(
+            workspace_sessions_url("w/1"),
+            "/api/v1/workspaces/w%2F1/sessions"
+        );
         assert_eq!(WORKSPACES_URL, "/api/v1/workspaces");
     }
 
@@ -167,5 +232,11 @@ mod tests {
         let delete_error =
             poll_ready(delete_workspace("w_1")).expect_err("host delete should fail");
         assert!(delete_error.contains("/api/v1/workspaces/w_1"));
+
+        let create_session_error = poll_ready(create_workspace_session("w_1"))
+            .expect_err("host workspace session create should fail");
+        assert!(create_session_error
+            .to_string()
+            .contains("/api/v1/workspaces/w_1/sessions"));
     }
 }

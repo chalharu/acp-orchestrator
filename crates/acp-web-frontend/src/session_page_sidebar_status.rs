@@ -65,7 +65,7 @@ mod tests {
         owner.with(|| {
             let _ = view! {
                 <SessionSidebarStatus
-                    workspace_message=Signal::derive(|| Some("Default workspace".to_string()))
+                    workspace_message=Signal::derive(|| Some("Workspace A".to_string()))
                     session_list_error=Signal::derive(|| Some("temporary".to_string()))
                     has_session_items=Signal::derive(|| true)
                 />

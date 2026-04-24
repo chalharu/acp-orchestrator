@@ -339,6 +339,12 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
     let state = auth_test_state();
     let browser = BrowserAuthContext::spawn().await;
     bootstrap_admin_account(&state, &browser).await;
+    let _workspace = create_owned_workspace_for_principal(
+        &state,
+        Extension(browser.principal.clone()),
+        "Browser Workspace",
+    )
+    .await;
     let created = create_session(State(state.clone()), Extension(browser.principal.clone()))
         .await
         .expect("session creation should succeed")

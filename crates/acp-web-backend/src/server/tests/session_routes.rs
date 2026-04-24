@@ -54,6 +54,9 @@ async fn create_session_seeds_startup_hints_when_enabled() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
@@ -78,6 +81,9 @@ async fn create_session_skips_startup_hints_when_disabled() {
         startup_hints: false,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
@@ -105,6 +111,9 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
@@ -126,6 +135,9 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("failed startup hint priming should fail the request");
@@ -165,6 +177,9 @@ async fn create_session_reports_rollback_failures() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("rollback failures should surface as internal errors");
@@ -182,6 +197,50 @@ async fn create_session_reports_rollback_failures() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn create_session_requires_explicit_workspace_selection_when_no_workspaces_exist() {
+    let state = AppState::with_dependencies(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+    );
+
+    let error = create_session(State(state), bearer_principal("alice"))
+        .await
+        .expect_err("root create should reject missing workspace selection");
+
+    assert!(matches!(
+        error,
+        AppError::Conflict(message) if message == "workspace selection required"
+    ));
+}
+
+#[tokio::test]
+async fn create_session_requires_explicit_workspace_selection_when_multiple_workspaces_exist() {
+    let state = AppState::with_dependencies(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+    );
+    let _first =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
+    let _second =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace B")
+            .await;
+
+    let error = create_session(State(state), bearer_principal("alice"))
+        .await
+        .expect_err("root create should reject ambiguous workspace selection");
+
+    assert!(matches!(
+        error,
+        AppError::Conflict(message) if message == "workspace selection required"
+    ));
 }
 
 #[tokio::test]

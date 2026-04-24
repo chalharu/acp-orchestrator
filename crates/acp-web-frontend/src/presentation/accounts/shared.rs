@@ -8,7 +8,9 @@ use wasm_bindgen::JsCast;
 use crate::{
     application::auth::AccountsRouteAccess,
     infrastructure::api,
-    routing::{AppRoute, route_from_pathname},
+    presentation::return_to::{
+        path_with_return_to, session_return_to_path, session_return_to_path_from_location,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -89,17 +91,12 @@ pub(super) fn initialize_accounts_page_host(state: AccountsPageState) {
 }
 
 pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
-    format!(
-        "/app/accounts/?return_to={}",
-        api::encode_component(return_to_path)
-    )
+    path_with_return_to("/app/accounts/", return_to_path)
 }
 
 #[cfg(target_family = "wasm")]
 pub(super) fn accounts_back_to_chat_path_from_location() -> String {
-    web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .map(|search| accounts_back_to_chat_path(&search))
+    session_return_to_path_from_location()
         .unwrap_or_else(|| "/app/".to_string())
 }
 
@@ -109,22 +106,8 @@ pub(super) fn accounts_back_to_chat_path_from_location() -> String {
 }
 
 fn accounts_back_to_chat_path(search: &str) -> String {
-    query_param(search, "return_to")
-        .filter(|path| matches!(route_from_pathname(path), AppRoute::Session(_)))
+    session_return_to_path(search)
         .unwrap_or_else(|| "/app/".to_string())
-}
-
-fn query_param(search: &str, name: &str) -> Option<String> {
-    search
-        .trim_start_matches('?')
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == name)
-                .then(|| api::decode_component(value))
-                .flatten()
-        })
 }
 
 pub(super) fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) -> bool {
@@ -150,6 +133,7 @@ pub(super) fn sign_out_handler(
             match api::sign_out().await {
                 Ok(()) => {
                     crate::browser::clear_prepared_session_id();
+                    crate::browser::clear_selected_workspace_id();
                     if let Err(message) = crate::browser::navigate_to("/app/sign-in/") {
                         signing_out.set(false);
                         error.set(Some(message));
@@ -265,12 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn query_param_and_sign_out_visibility_helpers_match_accounts_routes() {
-        assert_eq!(
-            query_param("?return_to=%2Fapp%2Fsessions%2Fabc&x=1", "return_to"),
-            Some("/app/sessions/abc".to_string())
-        );
-        assert_eq!(query_param("?x=1", "return_to"), None);
+    fn sign_out_visibility_helpers_match_accounts_routes() {
         assert!(accounts_page_shows_sign_out(Some(
             AccountsRouteAccess::Forbidden
         )));
@@ -294,13 +273,9 @@ mod tests {
     }
 
     #[test]
-    fn query_param_returns_none_for_missing_key_and_empty_search() {
-        assert_eq!(query_param("", "return_to"), None);
-        assert_eq!(query_param("?a=1&b=2", "return_to"), None);
-        assert_eq!(
-            query_param("return_to=%2Fapp%2F", "return_to"),
-            Some("/app/".to_string())
-        );
+    fn accounts_back_to_chat_defaults_to_home_for_missing_or_invalid_return_to() {
+        assert_eq!(accounts_back_to_chat_path(""), "/app/");
+        assert_eq!(accounts_back_to_chat_path("?a=1&b=2"), "/app/");
     }
 
     #[test]

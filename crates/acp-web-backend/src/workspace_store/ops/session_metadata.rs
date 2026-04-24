@@ -247,7 +247,7 @@ struct SessionLifecycleState {
 }
 
 pub(in crate::workspace_store) fn build_session_metadata_record(
-    connection: &Connection,
+    _connection: &Connection,
     owner_user_id: &str,
     snapshot: &SessionSnapshot,
     touch_activity: bool,
@@ -258,7 +258,7 @@ pub(in crate::workspace_store) fn build_session_metadata_record(
 
     Ok(SessionMetadataRecord {
         session_id: snapshot.id.clone(),
-        workspace_id: resolve_workspace_id(connection, owner_user_id, snapshot, existing)?,
+        workspace_id: resolve_workspace_id(snapshot, existing)?,
         owner_user_id: owner_user_id.to_string(),
         title: snapshot.title.clone(),
         status: lifecycle.status,
@@ -276,8 +276,6 @@ pub(in crate::workspace_store) fn build_session_metadata_record(
 }
 
 fn resolve_workspace_id(
-    connection: &Connection,
-    owner_user_id: &str,
     snapshot: &SessionSnapshot,
     existing: Option<&SessionMetadataRecord>,
 ) -> Result<String, WorkspaceStoreError> {
@@ -286,7 +284,9 @@ fn resolve_workspace_id(
     }
     match existing {
         Some(record) => Ok(record.workspace_id.clone()),
-        None => Ok(bootstrap_workspace_in_transaction(connection, owner_user_id)?.workspace_id),
+        None => Err(WorkspaceStoreError::Validation(
+            "session workspace_id must not be empty".to_string(),
+        )),
     }
 }
 

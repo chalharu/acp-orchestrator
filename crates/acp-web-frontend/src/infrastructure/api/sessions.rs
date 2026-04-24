@@ -8,47 +8,18 @@ use acp_contracts_sessions::{
 };
 #[cfg(target_family = "wasm")]
 use acp_contracts_sessions::{
-    CreateSessionResponse, RenameSessionResponse, SessionListResponse, SessionResponse,
+    RenameSessionResponse, SessionListResponse, SessionResponse,
 };
-use acp_contracts_workspaces::WorkspaceSummary;
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
 
-use super::{SessionLoadError, list_workspaces, permission_url, session_path};
+use super::{SessionLoadError, permission_url, session_path};
 #[cfg(target_family = "wasm")]
 use super::{classify_session_load_failure, response_error_message};
 #[cfg(target_family = "wasm")]
 use super::{csrf_token, patch_json_with_csrf, post_json_with_csrf};
 
 const SESSIONS_URL: &str = "/api/v1/sessions";
-const WORKSPACES_URL: &str = "/api/v1/workspaces";
-const BOOTSTRAP_WORKSPACE_KIND: &str = "legacy-session-routes";
-
-#[cfg(target_family = "wasm")]
-pub(crate) async fn create_session() -> Result<String, String> {
-    let workspace_id = resolve_bootstrap_workspace_id().await?;
-    let csrf = csrf_token();
-    let response = Request::post(&workspace_sessions_url(&workspace_id))
-        .header("x-csrf-token", &csrf)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-
-    if !response.ok() {
-        return Err(response_error_message(response, "Create session failed").await);
-    }
-
-    let created: CreateSessionResponse =
-        response.json().await.map_err(|error| error.to_string())?;
-    Ok(created.session.id)
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub(crate) async fn create_session() -> Result<String, String> {
-    Err(format!(
-        "Browser GET workspaces API is unavailable on non-wasm targets: {WORKSPACES_URL}"
-    ))
-}
 
 #[cfg(target_family = "wasm")]
 pub(crate) async fn load_session(session_id: &str) -> Result<SessionSnapshot, SessionLoadError> {
@@ -224,28 +195,6 @@ fn cancel_turn_url(session_id: &str) -> String {
     format!("{}/cancel", session_path(session_id))
 }
 
-fn workspace_sessions_url(workspace_id: &str) -> String {
-    format!(
-        "/api/v1/workspaces/{}/sessions",
-        crate::infrastructure::api::encode_component(workspace_id)
-    )
-}
-
-#[cfg(target_family = "wasm")]
-async fn resolve_bootstrap_workspace_id() -> Result<String, String> {
-    let workspaces = list_workspaces().await?;
-    select_bootstrap_workspace(&workspaces)
-        .map(|workspace| workspace.workspace_id.clone())
-        .ok_or_else(|| "No workspace available".to_string())
-}
-
-fn select_bootstrap_workspace(workspaces: &[WorkspaceSummary]) -> Option<&WorkspaceSummary> {
-    workspaces
-        .iter()
-        .find(|workspace| workspace.bootstrap_kind.as_deref() == Some(BOOTSTRAP_WORKSPACE_KIND))
-        .or_else(|| workspaces.first())
-}
-
 fn send_message_body(text: &str) -> Result<String, String> {
     serde_json::to_string(&PromptRequest {
         text: text.to_string(),
@@ -279,10 +228,6 @@ mod tests {
     fn session_request_urls_encode_session_ids() {
         assert_eq!(SESSIONS_URL, "/api/v1/sessions");
         assert_eq!(
-            workspace_sessions_url("w/1"),
-            "/api/v1/workspaces/w%2F1/sessions"
-        );
-        assert_eq!(
             session_messages_url("s/1"),
             "/api/v1/sessions/s%2F1/messages"
         );
@@ -307,9 +252,6 @@ mod tests {
 
     #[test]
     fn host_session_api_functions_fail_with_descriptive_errors() {
-        let create_error = poll_ready(create_session()).expect_err("host create should fail");
-        assert!(create_error.contains(WORKSPACES_URL));
-
         let load_error = poll_ready(load_session("s/1")).expect_err("host load should fail");
         assert!(matches!(
             load_error,
@@ -340,35 +282,5 @@ mod tests {
 
         let delete_error = poll_ready(delete_session("s/1")).expect_err("host delete should fail");
         assert!(delete_error.contains("/api/v1/sessions/s%2F1"));
-    }
-
-    #[test]
-    fn bootstrap_workspace_selection_prefers_legacy_route_workspace() {
-        let workspaces = [
-            WorkspaceSummary {
-                workspace_id: "w_other".to_string(),
-                name: "Other".to_string(),
-                upstream_url: None,
-                default_ref: None,
-                bootstrap_kind: None,
-                status: "active".to_string(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-            WorkspaceSummary {
-                workspace_id: "w_bootstrap".to_string(),
-                name: "Default workspace".to_string(),
-                upstream_url: None,
-                default_ref: None,
-                bootstrap_kind: Some(BOOTSTRAP_WORKSPACE_KIND.to_string()),
-                status: "active".to_string(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-        ];
-        let selected = select_bootstrap_workspace(&workspaces)
-            .expect("bootstrap workspace should be selected");
-
-        assert_eq!(selected.workspace_id, "w_bootstrap");
     }
 }

@@ -4,15 +4,15 @@ use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::presentation::return_to::path_with_return_to;
 use crate::routing::app_session_path;
 
 use super::shared::{accounts_path_with_return_to, sign_out_button_label, sign_out_handler};
 
-const WORKSPACES_PATH: &str = "/app/workspaces/";
-
 #[derive(Clone)]
 struct SessionSidebarAuthViewState {
     accounts_href: String,
+    workspaces_href: String,
     is_admin: RwSignal<bool>,
     signed_in: RwSignal<bool>,
     signing_out: RwSignal<bool>,
@@ -29,6 +29,10 @@ pub fn SessionSidebarAuthControls(
     let signing_out = RwSignal::new(false);
     let view_state = SessionSidebarAuthViewState {
         accounts_href: accounts_path_with_return_to(&app_session_path(&current_session_id)),
+        workspaces_href: path_with_return_to(
+            "/app/workspaces/",
+            &app_session_path(&current_session_id),
+        ),
         is_admin,
         signed_in,
         signing_out,
@@ -46,12 +50,13 @@ fn session_sidebar_auth_controls_view(
     sign_out: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
     let accounts_href = state.accounts_href;
+    let workspaces_href = state.workspaces_href;
     let is_admin = state.is_admin;
     let signed_in = state.signed_in;
     let signing_out = state.signing_out;
 
     view! {
-        {move || session_sidebar_workspaces_link_view(signed_in.get())}
+        {move || session_sidebar_workspaces_link_view(&workspaces_href, signed_in.get())}
         {move || session_sidebar_accounts_link_view(&accounts_href, is_admin.get())}
         {move || session_sidebar_sign_out_button_view(sign_out, signed_in.get(), signing_out.get())}
     }
@@ -62,7 +67,10 @@ fn session_sidebar_auth_controls_view(
     state: SessionSidebarAuthViewState,
     sign_out: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
-    let workspaces_link = session_sidebar_workspaces_link_view(state.signed_in.get_untracked());
+    let workspaces_link = session_sidebar_workspaces_link_view(
+        &state.workspaces_href,
+        state.signed_in.get_untracked(),
+    );
     let accounts_link =
         session_sidebar_accounts_link_view(&state.accounts_href, state.is_admin.get_untracked());
     let sign_out_button = session_sidebar_sign_out_button_view(
@@ -74,10 +82,10 @@ fn session_sidebar_auth_controls_view(
     (workspaces_link, accounts_link, sign_out_button)
 }
 
-fn session_sidebar_workspaces_link_view(signed_in: bool) -> AnyView {
+fn session_sidebar_workspaces_link_view(workspaces_href: &str, signed_in: bool) -> AnyView {
     if signed_in {
         view! {
-            <a class="session-sidebar__secondary-link" href=WORKSPACES_PATH>
+            <a class="session-sidebar__secondary-link" href=workspaces_href.to_string()>
                 "Workspaces"
             </a>
         }
@@ -179,6 +187,8 @@ mod tests {
             let _ = session_sidebar_auth_controls_view(
                 SessionSidebarAuthViewState {
                     accounts_href: "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fabc".to_string(),
+                    workspaces_href: "/app/workspaces/?return_to=%2Fapp%2Fsessions%2Fabc"
+                        .to_string(),
                     is_admin: RwSignal::new(true),
                     signed_in: RwSignal::new(true),
                     signing_out: RwSignal::new(false),
@@ -196,6 +206,7 @@ mod tests {
             let _ = session_sidebar_auth_controls_view(
                 SessionSidebarAuthViewState {
                     accounts_href: "/app/accounts/".to_string(),
+                    workspaces_href: "/app/workspaces/".to_string(),
                     is_admin: RwSignal::new(false),
                     signed_in: RwSignal::new(true),
                     signing_out: RwSignal::new(false),
@@ -207,6 +218,7 @@ mod tests {
             let _ = session_sidebar_auth_controls_view(
                 SessionSidebarAuthViewState {
                     accounts_href: "/app/accounts/".to_string(),
+                    workspaces_href: "/app/workspaces/".to_string(),
                     is_admin: RwSignal::new(false),
                     signed_in: RwSignal::new(false),
                     signing_out: RwSignal::new(false),
@@ -222,8 +234,8 @@ mod tests {
         owner.with(|| {
             let sign_out = Callback::new(|_: web_sys::MouseEvent| {});
 
-            let _ = session_sidebar_workspaces_link_view(true);
-            let _ = session_sidebar_workspaces_link_view(false);
+            let _ = session_sidebar_workspaces_link_view("/app/workspaces/", true);
+            let _ = session_sidebar_workspaces_link_view("/app/workspaces/", false);
             let _ = session_sidebar_accounts_link_view("/app/accounts/", true);
             let _ = session_sidebar_accounts_link_view("/app/accounts/", false);
             let _ = session_sidebar_sign_out_button_view(sign_out, true, false);

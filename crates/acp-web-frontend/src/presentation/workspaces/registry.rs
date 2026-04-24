@@ -5,6 +5,13 @@ use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+#[cfg(target_family = "wasm")]
+use crate::{
+    browser::{
+        clear_selected_workspace_id_if_matches, store_prepared_session_id, store_selected_workspace_id,
+    },
+    routing::app_session_path,
+};
 
 use super::shared::WorkspacesPageState;
 #[cfg(target_family = "wasm")]
@@ -73,7 +80,9 @@ fn workspace_registry_panel(summary: AnyView, content: AnyView) -> impl IntoView
             <div class="account-panel__section-heading">
                 <div class="account-panel__section-copy">
                     <h2>"Workspaces"</h2>
-                    <p class="muted">"Manage workspaces. Rename or remove them below."</p>
+                    <p class="muted">
+                        "Manage workspaces. Start a chat, rename, or remove them below."
+                    </p>
                 </div>
                 <p class="account-panel__summary">{summary}</p>
             </div>
@@ -116,6 +125,7 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
     let workspace_id_for_edit_state = workspace_id.clone();
     let workspace_id_for_save_state = workspace_id.clone();
     let workspace_id_for_delete_state = workspace_id.clone();
+    let workspace_id_for_open_state = workspace_id.clone();
     let workspace_name = workspace.name.clone();
     let workspace_status = workspace.status.clone();
     let created_label = workspace.created_at.format("%Y-%m-%d").to_string();
@@ -128,6 +138,9 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
     });
     let is_deleting = Signal::derive(move || {
         state.deleting_workspace_id.get().as_deref() == Some(&workspace_id_for_delete_state)
+    });
+    let is_opening = Signal::derive(move || {
+        state.opening_chat_workspace_id.get().as_deref() == Some(&workspace_id_for_open_state)
     });
 
     view! {
@@ -150,6 +163,7 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
                     workspace_name=workspace_name
                     is_editing=is_editing
                     is_deleting=is_deleting
+                    is_opening=is_opening
                 />
             </td>
         </tr>
@@ -232,7 +246,9 @@ fn WorkspaceActionCell(
     workspace_name: String,
     is_editing: Signal<bool>,
     is_deleting: Signal<bool>,
+    is_opening: Signal<bool>,
 ) -> impl IntoView {
+    let on_open_chat = workspace_open_chat_handler(workspace_id.clone(), state);
     let on_edit = workspace_edit_handler(workspace_id.clone(), workspace_name, state);
     let on_delete = workspace_delete_handler(workspace_id, state);
 
@@ -240,6 +256,8 @@ fn WorkspaceActionCell(
         <Show when=move || !is_editing.get()>
             <WorkspaceActionButtons
                 is_deleting=is_deleting
+                is_opening=is_opening
+                on_open_chat=on_open_chat
                 on_edit=on_edit
                 on_delete=on_delete
             />
@@ -251,6 +269,8 @@ fn WorkspaceActionCell(
 #[cfg(target_family = "wasm")]
 fn WorkspaceActionButtons(
     is_deleting: Signal<bool>,
+    is_opening: Signal<bool>,
+    on_open_chat: Callback<web_sys::MouseEvent>,
     on_edit: Callback<web_sys::MouseEvent>,
     on_delete: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
@@ -259,7 +279,15 @@ fn WorkspaceActionButtons(
             <button
                 type="button"
                 class="workspace-action-btn"
-                prop:disabled=move || is_deleting.get()
+                prop:disabled=move || is_deleting.get() || is_opening.get()
+                on:click=move |event| on_open_chat.run(event)
+            >
+                {move || if is_opening.get() { "Opening…" } else { "New chat" }}
+            </button>
+            <button
+                type="button"
+                class="workspace-action-btn"
+                prop:disabled=move || is_deleting.get() || is_opening.get()
                 on:click=move |event| on_edit.run(event)
             >
                 "Rename"
@@ -267,13 +295,47 @@ fn WorkspaceActionButtons(
             <button
                 type="button"
                 class="workspace-action-btn workspace-action-btn--danger"
-                prop:disabled=move || is_deleting.get()
+                prop:disabled=move || is_deleting.get() || is_opening.get()
                 on:click=move |event| on_delete.run(event)
             >
                 {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
             </button>
         </>
     }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_open_chat_handler(
+    workspace_id: String,
+    state: WorkspacesPageState,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_| {
+        if state.opening_chat_workspace_id.get_untracked().is_some() {
+            return;
+        }
+
+        state.opening_chat_workspace_id.set(Some(workspace_id.clone()));
+        state.error.set(None);
+        state.notice.set(None);
+        let workspace_id = workspace_id.clone();
+        leptos::task::spawn_local(async move {
+            match api::create_workspace_session(&workspace_id).await {
+                Ok(session_id) => {
+                    store_selected_workspace_id(&workspace_id);
+                    store_prepared_session_id(&session_id);
+                    if let Err(message) = crate::browser::navigate_to(&app_session_path(&session_id))
+                    {
+                        state.opening_chat_workspace_id.set(None);
+                        state.error.set(Some(message));
+                    }
+                }
+                Err(error) => {
+                    state.opening_chat_workspace_id.set(None);
+                    state.error.set(Some(error.into_message()));
+                }
+            }
+        });
+    })
 }
 
 #[cfg(target_family = "wasm")]
@@ -366,6 +428,7 @@ fn workspace_delete_handler(
             match api::delete_workspace(&workspace_id).await {
                 Ok(_) => {
                     state.deleting_workspace_id.set(None);
+                    clear_selected_workspace_id_if_matches(&workspace_id);
                     state.notice.set(Some("Workspace deleted.".to_string()));
                     spawn_workspace_reload(state);
                 }
@@ -395,6 +458,11 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
         .get_untracked()
         .as_deref()
         .is_some_and(|id| id == workspace_id.as_str());
+    let is_opening = state
+        .opening_chat_workspace_id
+        .get_untracked()
+        .as_deref()
+        .is_some_and(|id| id == workspace_id.as_str());
     let is_saving = state
         .saving_workspace_id
         .get_untracked()
@@ -414,7 +482,13 @@ fn WorkspaceRow(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl
             </td>
             <td>{workspace_status}</td>
             <td>{created_label}</td>
-            <td><WorkspaceActionCellHost is_editing=is_editing is_deleting=is_deleting /></td>
+            <td>
+                <WorkspaceActionCellHost
+                    is_editing=is_editing
+                    is_deleting=is_deleting
+                    is_opening=is_opening
+                />
+            </td>
         </tr>
     }
 }
@@ -457,19 +531,27 @@ fn WorkspaceRenameFormHost(draft: String, is_saving: bool) -> impl IntoView {
 
 #[component]
 #[cfg(not(target_family = "wasm"))]
-fn WorkspaceActionCellHost(is_editing: bool, is_deleting: bool) -> impl IntoView {
+fn WorkspaceActionCellHost(is_editing: bool, is_deleting: bool, is_opening: bool) -> impl IntoView {
     if is_editing {
         ().into_any()
     } else {
-        view! { <WorkspaceActionButtonsHost is_deleting=is_deleting /> }.into_any()
+        view! { <WorkspaceActionButtonsHost is_deleting=is_deleting is_opening=is_opening /> }
+            .into_any()
     }
 }
 
 #[component]
 #[cfg(not(target_family = "wasm"))]
-fn WorkspaceActionButtonsHost(is_deleting: bool) -> impl IntoView {
+fn WorkspaceActionButtonsHost(is_deleting: bool, is_opening: bool) -> impl IntoView {
     view! {
         <>
+            <button
+                type="button"
+                class="workspace-action-btn"
+                prop:disabled=is_deleting || is_opening
+            >
+                {if is_opening { "Opening…" } else { "New chat" }}
+            </button>
             <button type="button" class="workspace-action-btn" prop:disabled=is_deleting>
                 "Rename"
             </button>

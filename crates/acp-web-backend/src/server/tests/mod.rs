@@ -220,15 +220,47 @@ async fn assert_session_routes_persist_owner_scoped_metadata(context: &MetadataT
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
 }
 
+async fn create_owned_workspace_for_principal(
+    state: &AppState,
+    principal: Extension<AuthenticatedPrincipal>,
+    name: &str,
+) -> crate::contract_workspaces::WorkspaceDetail {
+    create_workspace(
+        State(state.clone()),
+        principal,
+        Json(CreateWorkspaceRequest {
+            name: name.to_string(),
+            upstream_url: None,
+            default_ref: None,
+            credential_reference_id: None,
+        }),
+    )
+    .await
+    .expect("workspace creation should succeed")
+    .1
+    .0
+    .workspace
+}
+
 async fn create_persisted_session(
     context: &MetadataTestContext,
 ) -> (SessionSnapshot, SessionMetadataRecord) {
-    let session = create_session(State(context.state.clone()), context.principal.clone())
-        .await
-        .expect("session creation should succeed")
-        .1
-        .0
-        .session;
+    let workspace = create_owned_workspace_for_principal(
+        &context.state,
+        context.principal.clone(),
+        "Metadata Workspace",
+    )
+    .await;
+    let session = create_workspace_session(
+        State(context.state.clone()),
+        Path(workspace.workspace_id),
+        context.principal.clone(),
+    )
+    .await
+    .expect("session creation should succeed")
+    .1
+    .0
+    .session;
     let metadata = load_session_metadata_or_panic(
         context.workspace_repository.as_ref(),
         &context.user.user_id,
@@ -785,7 +817,7 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         Ok(WorkspaceRecord {
             workspace_id: "w_test".to_string(),
             owner_user_id: owner_user_id.to_string(),
-            name: "Default workspace".to_string(),
+            name: "Workspace A".to_string(),
             upstream_url: None,
             default_ref: None,
             credential_reference_id: None,

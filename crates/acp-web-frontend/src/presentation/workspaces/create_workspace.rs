@@ -144,6 +144,10 @@ fn create_workspace_button_label(creating: bool) -> &'static str {
     }
 }
 
+fn create_workspace_button_label_signal(creating: Signal<bool>) -> Signal<&'static str> {
+    Signal::derive(move || create_workspace_button_label(creating.get()))
+}
+
 fn create_workspace_modal_header(
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
@@ -183,6 +187,8 @@ fn create_workspace_modal_actions(
     creating: Signal<bool>,
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
+    let label = create_workspace_button_label_signal(creating);
+
     view! {
         <div class="workspace-modal__actions">
             <button
@@ -190,7 +196,7 @@ fn create_workspace_modal_actions(
                 class="account-form__submit"
                 prop:disabled=move || creating.get()
             >
-                {move || create_workspace_button_label(creating.get())}
+                {label}
             </button>
             <button
                 type="button"
@@ -245,10 +251,28 @@ mod tests {
         JsValue::NULL.unchecked_into()
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_mouse_event() -> web_sys::MouseEvent {
+        JsValue::NULL.unchecked_into()
+    }
+
     #[test]
     fn create_workspace_button_label_toggles_with_in_progress_state() {
         assert_eq!(create_workspace_button_label(false), "Create workspace");
         assert_eq!(create_workspace_button_label(true), "Saving…");
+    }
+
+    #[test]
+    fn create_workspace_button_label_signal_tracks_creating_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let creating = RwSignal::new(false);
+            let label = create_workspace_button_label_signal(Signal::derive(move || creating.get()));
+
+            assert_eq!(label.get(), "Create workspace");
+            creating.set(true);
+            assert_eq!(label.get(), "Saving…");
+        });
     }
 
     #[test]
@@ -306,6 +330,41 @@ mod tests {
             state.show_create_modal.set(true);
 
             close_create_workspace_modal(state);
+
+            assert!(state.create_name.get().is_empty());
+            assert!(state.error.get().is_none());
+            assert!(!state.show_create_modal.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_button_click_handler_is_a_noop() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.error.set(Some("keep".to_string()));
+            let handler = create_workspace_button_click_handler(state);
+
+            handler(fake_mouse_event());
+
+            assert_eq!(state.error.get(), Some("keep".to_string()));
+            assert!(!state.show_create_modal.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn modal_cancel_handler_closes_modal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.create_name.set("Draft".to_string());
+            state.error.set(Some("Create failed".to_string()));
+            state.show_create_modal.set(true);
+            let handler = create_workspace_modal_cancel_handler(state);
+
+            handler(fake_mouse_event());
 
             assert!(state.create_name.get().is_empty());
             assert!(state.error.get().is_none());

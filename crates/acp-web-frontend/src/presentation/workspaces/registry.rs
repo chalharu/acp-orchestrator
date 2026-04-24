@@ -99,13 +99,7 @@ fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> imp
     let is_deleting = workspace_id_signal(state.deleting_workspace_id, &workspace_id);
     let is_opening = workspace_id_signal(state.opening_chat_workspace_id, &workspace_id);
 
-    let sessions = {
-        let workspace_id = workspace_id.clone();
-        Signal::derive(move || {
-            let sessions_map = state.workspace_sessions.get();
-            sessions_map.get(&workspace_id).cloned()
-        })
-    };
+    let sessions = workspace_sessions_signal(state, &workspace_id);
 
     let on_open_chat = workspace_open_chat_handler(workspace_id.clone(), state);
     let on_edit =
@@ -117,59 +111,25 @@ fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> imp
     view! {
         <div class="workspace-card">
             <div class="workspace-card__header">
-                <div class="workspace-card__meta">
-                    <Show
-                        when=move || is_editing.get()
-                        fallback={
-                            let name = display.workspace_name.clone();
-                            let status = display.workspace_status.clone();
-                            let created = display.created_label.clone();
-                            move || view! {
-                                <h3 class="workspace-card__name">{name.clone()}</h3>
-                                <span class="workspace-card__status">{status.clone()}</span>
-                                <span class="workspace-card__created">"Created "{created.clone()}</span>
-                            }
-                        }
-                    >
-                        <WorkspaceRenameForm
-                            state=state
-                            is_saving=is_saving
-                            on_save=on_save
-                            on_cancel=on_cancel
-                        />
-                    </Show>
-                </div>
-                <div class="workspace-card__actions">
-                    <Show when=move || !is_editing.get()>
-                        <button
-                            type="button"
-                            class="workspace-action-btn"
-                            prop:disabled=move || is_deleting.get() || is_opening.get()
-                            on:click=move |event| on_edit.run(event)
-                        >
-                            "Rename"
-                        </button>
-                        <button
-                            type="button"
-                            class="workspace-action-btn workspace-action-btn--danger"
-                            prop:disabled=move || is_deleting.get() || is_opening.get()
-                            on:click=move |event| on_delete.run(event)
-                        >
-                            {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
-                        </button>
-                    </Show>
-                </div>
+                {workspace_card_meta_view(
+                    display.clone(),
+                    state,
+                    is_editing,
+                    is_saving,
+                    on_save,
+                    on_cancel,
+                )}
+                {workspace_card_actions_view_wasm(
+                    is_editing,
+                    is_deleting,
+                    is_opening,
+                    on_edit,
+                    on_delete,
+                )}
             </div>
             <WorkspaceSessionList sessions=sessions />
             <div class="workspace-card__footer">
-                <button
-                    type="button"
-                    class="workspace-action-btn workspace-action-btn--primary"
-                    prop:disabled=move || is_deleting.get() || is_opening.get()
-                    on:click=move |event| on_open_chat.run(event)
-                >
-                    {move || if is_opening.get() { "Opening…" } else { "New chat" }}
-                </button>
+                {workspace_card_open_button_wasm(is_deleting, is_opening, on_open_chat)}
             </div>
         </div>
     }
@@ -204,7 +164,131 @@ fn workspace_card_view_host(
     is_deleting: bool,
     is_opening: bool,
 ) -> impl IntoView {
-    let name_cell = if is_editing {
+    let name_cell = workspace_card_name_cell_host(display.clone(), draft, is_editing, is_saving);
+    let actions = workspace_card_actions_view_host(is_editing, is_deleting, is_opening);
+    let open_button = workspace_card_open_button_host(is_deleting, is_opening);
+
+    view! {
+        <div class="workspace-card">
+            <div class="workspace-card__header">
+                <div class="workspace-card__meta">{name_cell}</div>
+                <div class="workspace-card__actions">{actions}</div>
+            </div>
+            <WorkspaceSessionListHost sessions=Vec::new() />
+            <div class="workspace-card__footer">
+                {open_button}
+            </div>
+        </div>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_sessions_signal(
+    state: WorkspacesPageState,
+    workspace_id: &str,
+) -> Signal<Option<Vec<SessionListItem>>> {
+    let workspace_id = workspace_id.to_string();
+    Signal::derive(move || {
+        let sessions_map = state.workspace_sessions.get();
+        sessions_map.get(&workspace_id).cloned()
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_card_meta_view(
+    display: WorkspaceCardDisplay,
+    state: WorkspacesPageState,
+    is_editing: Signal<bool>,
+    is_saving: Signal<bool>,
+    on_save: Callback<web_sys::SubmitEvent>,
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-card__meta">
+            <Show
+                when=move || is_editing.get()
+                fallback={
+                    let display = display.clone();
+                    move || workspace_card_summary_view(display.clone())
+                }
+            >
+                <WorkspaceRenameForm
+                    state=state
+                    is_saving=is_saving
+                    on_save=on_save
+                    on_cancel=on_cancel
+                />
+            </Show>
+        </div>
+    }
+}
+
+fn workspace_card_summary_view(display: WorkspaceCardDisplay) -> impl IntoView {
+    view! {
+        <h3 class="workspace-card__name">{display.workspace_name}</h3>
+        <span class="workspace-card__status">{display.workspace_status}</span>
+        <span class="workspace-card__created">"Created "{display.created_label}</span>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_card_actions_view_wasm(
+    is_editing: Signal<bool>,
+    is_deleting: Signal<bool>,
+    is_opening: Signal<bool>,
+    on_edit: Callback<web_sys::MouseEvent>,
+    on_delete: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-card__actions">
+            <Show when=move || !is_editing.get()>
+                <button
+                    type="button"
+                    class="workspace-action-btn"
+                    prop:disabled=move || is_deleting.get() || is_opening.get()
+                    on:click=move |event| on_edit.run(event)
+                >
+                    "Rename"
+                </button>
+                <button
+                    type="button"
+                    class="workspace-action-btn workspace-action-btn--danger"
+                    prop:disabled=move || is_deleting.get() || is_opening.get()
+                    on:click=move |event| on_delete.run(event)
+                >
+                    {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
+                </button>
+            </Show>
+        </div>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_card_open_button_wasm(
+    is_deleting: Signal<bool>,
+    is_opening: Signal<bool>,
+    on_open_chat: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="workspace-action-btn workspace-action-btn--primary"
+            prop:disabled=move || is_deleting.get() || is_opening.get()
+            on:click=move |event| on_open_chat.run(event)
+        >
+            {move || if is_opening.get() { "Opening…" } else { "New chat" }}
+        </button>
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_card_name_cell_host(
+    display: WorkspaceCardDisplay,
+    draft: String,
+    is_editing: bool,
+    is_saving: bool,
+) -> AnyView {
+    if is_editing {
         view! {
             <form class="workspace-inline-form">
                 <input type="text" class="workspace-name-input" prop:value=draft prop:disabled=is_saving />
@@ -218,45 +302,39 @@ fn workspace_card_view_host(
         }
         .into_any()
     } else {
-        view! {
-            <>
-                <h3 class="workspace-card__name">{display.workspace_name}</h3>
-                <span class="workspace-card__status">{display.workspace_status}</span>
-                <span class="workspace-card__created">"Created "{display.created_label}</span>
-            </>
-        }
-        .into_any()
-    };
+        workspace_card_summary_view(display).into_any()
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_card_actions_view_host(
+    is_editing: bool,
+    is_deleting: bool,
+    is_opening: bool,
+) -> AnyView {
+    if is_editing {
+        return ().into_any();
+    }
 
     view! {
-        <div class="workspace-card">
-            <div class="workspace-card__header">
-                <div class="workspace-card__meta">{name_cell}</div>
-                <div class="workspace-card__actions">
-                    {if !is_editing {
-                        view! {
-                            <>
-                                <button type="button" class="workspace-action-btn" prop:disabled=is_deleting || is_opening>
-                                    "Rename"
-                                </button>
-                                <button type="button" class="workspace-action-btn workspace-action-btn--danger" prop:disabled=is_deleting || is_opening>
-                                    {if is_deleting { "Deleting…" } else { "Delete" }}
-                                </button>
-                            </>
-                        }
-                        .into_any()
-                    } else {
-                        ().into_any()
-                    }}
-                </div>
-            </div>
-            <WorkspaceSessionListHost sessions=Vec::new() />
-            <div class="workspace-card__footer">
-                <button type="button" class="workspace-action-btn workspace-action-btn--primary" prop:disabled=is_deleting || is_opening>
-                    {if is_opening { "Opening…" } else { "New chat" }}
-                </button>
-            </div>
-        </div>
+        <>
+            <button type="button" class="workspace-action-btn" prop:disabled=is_deleting || is_opening>
+                "Rename"
+            </button>
+            <button type="button" class="workspace-action-btn workspace-action-btn--danger" prop:disabled=is_deleting || is_opening>
+                {if is_deleting { "Deleting…" } else { "Delete" }}
+            </button>
+        </>
+    }
+    .into_any()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_card_open_button_host(is_deleting: bool, is_opening: bool) -> impl IntoView {
+    view! {
+        <button type="button" class="workspace-action-btn workspace-action-btn--primary" prop:disabled=is_deleting || is_opening>
+            {if is_opening { "Opening…" } else { "New chat" }}
+        </button>
     }
 }
 
@@ -615,6 +693,34 @@ mod tests {
             state.edit_name_draft.set("Draft Name".to_string());
             let workspace = sample_workspace("w_1", "Test Workspace");
             let _ = view! { <WorkspaceCard workspace=workspace state=state /> };
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_card_view_host_builds_both_name_cell_modes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let display = workspace_card_display(&sample_workspace("w_1", "Test Workspace"));
+            let _ = workspace_card_view_host(display.clone(), String::new(), false, false, false, false);
+            let _ = workspace_card_view_host(
+                display,
+                "Draft Name".to_string(),
+                true,
+                true,
+                true,
+                true,
+            );
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_session_list_host_builds_non_empty_session_list() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sessions = vec![sample_session("s_1", "w_1"), sample_session("s_2", "w_1")];
+            let _ = WorkspaceSessionListHost(WorkspaceSessionListHostProps { sessions });
         });
     }
 

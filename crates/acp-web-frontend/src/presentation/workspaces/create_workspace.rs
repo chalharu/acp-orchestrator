@@ -267,7 +267,8 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let creating = RwSignal::new(false);
-            let label = create_workspace_button_label_signal(Signal::derive(move || creating.get()));
+            let label =
+                create_workspace_button_label_signal(Signal::derive(move || creating.get()));
 
             assert_eq!(label.get(), "Create workspace");
             creating.set(true);

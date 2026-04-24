@@ -702,15 +702,16 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let display = workspace_card_display(&sample_workspace("w_1", "Test Workspace"));
-            let _ = workspace_card_view_host(display.clone(), String::new(), false, false, false, false);
             let _ = workspace_card_view_host(
-                display,
-                "Draft Name".to_string(),
-                true,
-                true,
-                true,
-                true,
+                display.clone(),
+                String::new(),
+                false,
+                false,
+                false,
+                false,
             );
+            let _ =
+                workspace_card_view_host(display, "Draft Name".to_string(), true, true, true, true);
         });
     }
 

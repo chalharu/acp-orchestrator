@@ -129,7 +129,7 @@ pub(crate) async fn delete_workspace(
 pub(crate) async fn create_workspace_session(
     workspace_id: &str,
 ) -> Result<String, WorkspaceSessionCreateError> {
-    let response = post_json_with_csrf(&workspace_sessions_url(workspace_id), "{}")
+    let response = post_json_with_csrf(&workspace_sessions_url(workspace_id), "{}".to_string())
         .await
         .map_err(WorkspaceSessionCreateError::Other)?;
     if response.status() == 404 {

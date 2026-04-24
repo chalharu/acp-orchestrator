@@ -200,7 +200,7 @@ async fn create_session_reports_rollback_failures() {
 }
 
 #[tokio::test]
-async fn create_session_requires_explicit_workspace_selection_when_no_workspaces_exist() {
+async fn create_session_creates_a_standard_workspace_when_none_exist() {
     let state = AppState::with_dependencies(
         Arc::new(SessionStore::new(4)),
         Arc::new(StaticReplyProvider {
@@ -208,14 +208,20 @@ async fn create_session_requires_explicit_workspace_selection_when_no_workspaces
         }),
     );
 
-    let error = create_session(State(state), bearer_principal("alice"))
+    let response = create_session(State(state.clone()), bearer_principal("alice"))
         .await
-        .expect_err("root create should reject missing workspace selection");
+        .expect("root create should create a session when no workspaces exist");
+    let listed = list_workspaces(State(state), bearer_principal("alice"))
+        .await
+        .expect("workspace list should succeed after legacy session creation");
 
-    assert!(matches!(
-        error,
-        AppError::Conflict(message) if message == "workspace selection required"
-    ));
+    assert_eq!(response.0, StatusCode::CREATED);
+    assert_eq!(listed.0.workspaces.len(), 1);
+    assert_eq!(listed.0.workspaces[0].name, "Workspace");
+    assert_eq!(
+        response.1.0.session.workspace_id,
+        listed.0.workspaces[0].workspace_id
+    );
 }
 
 #[tokio::test]

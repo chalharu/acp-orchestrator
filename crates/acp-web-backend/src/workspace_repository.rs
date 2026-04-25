@@ -3,11 +3,24 @@ use async_trait::async_trait;
 use crate::auth::AuthenticatedPrincipal;
 use crate::contract_accounts::LocalAccount;
 use crate::contract_sessions::{SessionListItem, SessionSnapshot};
-use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 use crate::workspace_records::{
     DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
     WorkspaceStoreError,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewWorkspace {
+    pub name: String,
+    pub upstream_url: Option<String>,
+    pub default_ref: Option<String>,
+    pub credential_reference_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceUpdatePatch {
+    pub name: Option<String>,
+    pub default_ref: Option<String>,
+}
 
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
@@ -35,14 +48,14 @@ pub trait WorkspaceRepository: Send + Sync {
     async fn create_workspace(
         &self,
         owner_user_id: &str,
-        request: &CreateWorkspaceRequest,
+        workspace: &NewWorkspace,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
 
     async fn update_workspace(
         &self,
         owner_user_id: &str,
         workspace_id: &str,
-        request: &UpdateWorkspaceRequest,
+        update: &WorkspaceUpdatePatch,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
 
     async fn delete_workspace(

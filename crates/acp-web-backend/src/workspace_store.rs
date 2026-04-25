@@ -13,12 +13,11 @@ use crate::contract_accounts::LocalAccount;
 #[cfg(test)]
 use crate::contract_sessions::SessionStatus;
 use crate::contract_sessions::{SessionListItem, SessionSnapshot};
-use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 pub use crate::workspace_records::{
     DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
     WorkspaceStoreError,
 };
-use crate::workspace_repository::WorkspaceRepository;
+use crate::workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUpdatePatch};
 
 mod ops;
 
@@ -133,13 +132,13 @@ impl SqliteWorkspaceRepository {
     fn create_workspace_sync(
         &self,
         owner_user_id: &str,
-        request: &CreateWorkspaceRequest,
+        workspace: &NewWorkspace,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         let mut connection = self.open_connection()?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        let workspace = build_workspace_record(owner_user_id, request)?;
+        let workspace = build_workspace_record(owner_user_id, workspace)?;
         insert_workspace(&tx, &workspace)?;
         tx.commit().map_err(database_error)?;
         Ok(workspace)
@@ -149,7 +148,7 @@ impl SqliteWorkspaceRepository {
         &self,
         owner_user_id: &str,
         workspace_id: &str,
-        request: &UpdateWorkspaceRequest,
+        update: &WorkspaceUpdatePatch,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         let mut connection = self.open_connection()?;
         let tx = connection
@@ -157,16 +156,16 @@ impl SqliteWorkspaceRepository {
             .map_err(database_error)?;
         let existing = load_workspace(&tx, owner_user_id, workspace_id)?
             .ok_or_else(|| WorkspaceStoreError::NotFound("workspace not found".to_string()))?;
-        validate_workspace_update(&existing, request)?;
+        validate_workspace_update(&existing, update)?;
         let updated = WorkspaceRecord {
-            name: request
+            name: update
                 .name
                 .as_deref()
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .unwrap_or(existing.name.as_str())
                 .to_string(),
-            default_ref: request
+            default_ref: update
                 .default_ref
                 .as_deref()
                 .map(str::trim)
@@ -411,13 +410,13 @@ impl SqliteWorkspaceRepository {
 
 fn build_workspace_record(
     owner_user_id: &str,
-    request: &CreateWorkspaceRequest,
+    workspace: &NewWorkspace,
 ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
-    let name = validate_workspace_name(&request.name)?;
-    let upstream_url = validate_workspace_upstream_url(request.upstream_url.as_deref())?;
-    let default_ref = validate_workspace_default_ref(request.default_ref.as_deref())?;
+    let name = validate_workspace_name(&workspace.name)?;
+    let upstream_url = validate_workspace_upstream_url(workspace.upstream_url.as_deref())?;
+    let default_ref = validate_workspace_default_ref(workspace.default_ref.as_deref())?;
     let credential_reference_id =
-        validate_credential_reference_id(request.credential_reference_id.as_deref())?;
+        validate_credential_reference_id(workspace.credential_reference_id.as_deref())?;
     let now = Utc::now();
 
     Ok(WorkspaceRecord {
@@ -437,19 +436,19 @@ fn build_workspace_record(
 
 fn validate_workspace_update(
     _existing: &WorkspaceRecord,
-    request: &UpdateWorkspaceRequest,
+    update: &WorkspaceUpdatePatch,
 ) -> Result<(), WorkspaceStoreError> {
-    if request.name.is_none() && request.default_ref.is_none() {
+    if update.name.is_none() && update.default_ref.is_none() {
         return Err(WorkspaceStoreError::Validation(
             "workspace update must include name or default_ref".to_string(),
         ));
     }
-    request
+    update
         .name
         .as_deref()
         .map(validate_workspace_name)
         .transpose()?;
-    let _ = validate_workspace_default_ref(request.default_ref.as_deref())?;
+    let _ = validate_workspace_default_ref(update.default_ref.as_deref())?;
     Ok(())
 }
 
@@ -640,13 +639,13 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     async fn create_workspace(
         &self,
         owner_user_id: &str,
-        request: &CreateWorkspaceRequest,
+        workspace: &NewWorkspace,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         let repository = self.clone();
         let owner_user_id = owner_user_id.to_string();
-        let request = request.clone();
+        let workspace = workspace.clone();
         tokio::task::spawn_blocking(move || {
-            repository.create_workspace_sync(&owner_user_id, &request)
+            repository.create_workspace_sync(&owner_user_id, &workspace)
         })
         .await
         .map_err(join_error)?
@@ -656,14 +655,14 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         &self,
         owner_user_id: &str,
         workspace_id: &str,
-        request: &UpdateWorkspaceRequest,
+        update: &WorkspaceUpdatePatch,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         let repository = self.clone();
         let owner_user_id = owner_user_id.to_string();
         let workspace_id = workspace_id.to_string();
-        let request = request.clone();
+        let update = update.clone();
         tokio::task::spawn_blocking(move || {
-            repository.update_workspace_sync(&owner_user_id, &workspace_id, &request)
+            repository.update_workspace_sync(&owner_user_id, &workspace_id, &update)
         })
         .await
         .map_err(join_error)?

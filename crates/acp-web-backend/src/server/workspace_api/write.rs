@@ -10,6 +10,7 @@ use crate::{
         CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
         UpdateWorkspaceRequest, UpdateWorkspaceResponse,
     },
+    workspace_repository::{NewWorkspace, WorkspaceUpdatePatch},
 };
 
 use super::super::{
@@ -23,9 +24,15 @@ pub(in crate::server) async fn create_workspace(
     Json(request): Json<CreateWorkspaceRequest>,
 ) -> Result<(axum::http::StatusCode, Json<CreateWorkspaceResponse>), AppError> {
     let owner = state.owner_context(principal).await?;
+    let workspace_request = NewWorkspace {
+        name: request.name,
+        upstream_url: request.upstream_url,
+        default_ref: request.default_ref,
+        credential_reference_id: request.credential_reference_id,
+    };
     let workspace = state
         .workspace_repository
-        .create_workspace(&owner.user.user_id, &request)
+        .create_workspace(&owner.user.user_id, &workspace_request)
         .await?;
 
     Ok((
@@ -43,9 +50,13 @@ pub(in crate::server) async fn update_workspace(
     Json(request): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<UpdateWorkspaceResponse>, AppError> {
     let owner = state.owner_context(principal).await?;
+    let workspace_update = WorkspaceUpdatePatch {
+        name: request.name,
+        default_ref: request.default_ref,
+    };
     let workspace = state
         .workspace_repository
-        .update_workspace(&owner.user.user_id, &workspace_id, &request)
+        .update_workspace(&owner.user.user_id, &workspace_id, &workspace_update)
         .await?;
 
     Ok(Json(UpdateWorkspaceResponse {

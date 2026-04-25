@@ -3,10 +3,10 @@ use std::sync::Arc;
 use crate::{
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::SessionSnapshot,
-    contract_workspaces::CreateWorkspaceRequest,
     mock_client::{ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStoreError},
     workspace_records::UserRecord,
+    workspace_repository::NewWorkspace,
 };
 
 use super::{AppError, AppState};
@@ -31,7 +31,7 @@ pub(super) async fn create_session_snapshot(
         [] => {
             state
                 .workspace_repository
-                .create_workspace(&owner.user.user_id, &legacy_session_workspace_request())
+                .create_workspace(&owner.user.user_id, &legacy_session_workspace())
                 .await?
                 .workspace_id
         }
@@ -45,8 +45,8 @@ pub(super) async fn create_session_snapshot(
     create_session_snapshot_in_workspace(state, owner, &workspace_id).await
 }
 
-fn legacy_session_workspace_request() -> CreateWorkspaceRequest {
-    CreateWorkspaceRequest {
+fn legacy_session_workspace() -> NewWorkspace {
+    NewWorkspace {
         name: "Workspace".to_string(),
         upstream_url: None,
         default_ref: None,

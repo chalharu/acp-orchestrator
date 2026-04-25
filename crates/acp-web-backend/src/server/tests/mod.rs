@@ -5,14 +5,14 @@ use crate::contract_accounts::{
 };
 use crate::contract_messages::PromptRequest;
 use crate::contract_sessions::{SessionSnapshot, SessionStatus};
-use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
+use crate::contract_workspaces::CreateWorkspaceRequest;
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
 use crate::support::frontend::{FrontendBundleAsset, frontend_bundle_file_name};
 use crate::support::http::build_http_client_for_url;
 use crate::workspace_records::{
     DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
 };
-use crate::workspace_repository::WorkspaceRepository;
+use crate::workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUpdatePatch};
 use crate::workspace_store::SqliteWorkspaceRepository;
 use async_trait::async_trait;
 use axum::{
@@ -677,7 +677,7 @@ impl WorkspaceRepository for FailingWorkspaceStore {
     async fn create_workspace(
         &self,
         _owner_user_id: &str,
-        _request: &CreateWorkspaceRequest,
+        _workspace: &NewWorkspace,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         Err(self.error.clone())
     }
@@ -686,7 +686,7 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         &self,
         _owner_user_id: &str,
         _workspace_id: &str,
-        _request: &UpdateWorkspaceRequest,
+        _update: &WorkspaceUpdatePatch,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         Err(self.error.clone())
     }
@@ -858,15 +858,15 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
     async fn create_workspace(
         &self,
         owner_user_id: &str,
-        request: &CreateWorkspaceRequest,
+        workspace: &NewWorkspace,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         Ok(WorkspaceRecord {
             workspace_id: "w_created".to_string(),
             owner_user_id: owner_user_id.to_string(),
-            name: request.name.clone(),
-            upstream_url: request.upstream_url.clone(),
-            default_ref: request.default_ref.clone(),
-            credential_reference_id: request.credential_reference_id.clone(),
+            name: workspace.name.clone(),
+            upstream_url: workspace.upstream_url.clone(),
+            default_ref: workspace.default_ref.clone(),
+            credential_reference_id: workspace.credential_reference_id.clone(),
             bootstrap_kind: None,
             status: "active".to_string(),
             created_at: chrono::Utc::now(),
@@ -879,17 +879,14 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         &self,
         owner_user_id: &str,
         workspace_id: &str,
-        request: &UpdateWorkspaceRequest,
+        update: &WorkspaceUpdatePatch,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
         Ok(WorkspaceRecord {
             workspace_id: workspace_id.to_string(),
             owner_user_id: owner_user_id.to_string(),
-            name: request
-                .name
-                .clone()
-                .unwrap_or_else(|| "updated".to_string()),
+            name: update.name.clone().unwrap_or_else(|| "updated".to_string()),
             upstream_url: None,
-            default_ref: request.default_ref.clone(),
+            default_ref: update.default_ref.clone(),
             credential_reference_id: None,
             bootstrap_kind: None,
             status: "active".to_string(),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::workspace_repository::WorkspaceRepository;
+use crate::workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUpdatePatch};
 
 async fn materialized_user(repository: &SqliteWorkspaceRepository) -> UserRecord {
     repository
@@ -8,8 +8,8 @@ async fn materialized_user(repository: &SqliteWorkspaceRepository) -> UserRecord
         .expect("principal materialization should succeed")
 }
 
-fn workspace_request(name: &str) -> CreateWorkspaceRequest {
-    CreateWorkspaceRequest {
+fn workspace_request(name: &str) -> NewWorkspace {
+    NewWorkspace {
         name: name.to_string(),
         upstream_url: Some("https://example.com/repo.git".to_string()),
         default_ref: Some("refs/heads/main".to_string()),
@@ -88,7 +88,7 @@ async fn workspaces_can_be_updated_and_deleted() {
         .update_workspace(
             &user.user_id,
             &created.workspace_id,
-            &UpdateWorkspaceRequest {
+            &WorkspaceUpdatePatch {
                 name: Some("Renamed repo".to_string()),
                 default_ref: Some("refs/heads/release".to_string()),
             },
@@ -120,7 +120,7 @@ async fn workspace_updates_require_a_mutable_field() {
         .update_workspace(
             &user.user_id,
             &created.workspace_id,
-            &UpdateWorkspaceRequest {
+            &WorkspaceUpdatePatch {
                 name: None,
                 default_ref: None,
             },
@@ -194,7 +194,7 @@ async fn workspace_repository_trait_methods_cover_read_and_write_ops() {
         &repository,
         &user.user_id,
         &created.workspace_id,
-        &UpdateWorkspaceRequest {
+        &WorkspaceUpdatePatch {
             name: Some("Trait rename".to_string()),
             default_ref: Some("refs/heads/release".to_string()),
         },
@@ -252,7 +252,7 @@ async fn updating_and_deleting_missing_workspaces_return_not_found() {
         .update_workspace(
             &user.user_id,
             "w_missing",
-            &UpdateWorkspaceRequest {
+            &WorkspaceUpdatePatch {
                 name: Some("Rename".to_string()),
                 default_ref: None,
             },
@@ -287,7 +287,7 @@ async fn bootstrap_workspaces_follow_standard_mutability_rules() {
         .update_workspace(
             &user.user_id,
             &bootstrap.workspace_id,
-            &UpdateWorkspaceRequest {
+            &WorkspaceUpdatePatch {
                 name: Some("Renamed".to_string()),
                 default_ref: None,
             },

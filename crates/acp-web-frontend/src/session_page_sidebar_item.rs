@@ -591,6 +591,7 @@ pub(super) fn SessionSidebarRenameInput(
     }
 }
 
+#[cfg(target_family = "wasm")]
 #[component]
 pub(super) fn SessionSidebarRenameButtons(
     #[prop(into)] is_saving_rename: Signal<bool>,
@@ -622,6 +623,43 @@ pub(super) fn SessionSidebarRenameButtons(
             class="session-sidebar__action-btn"
             on:click=move |_| on_cancel_rename.run(())
             prop:disabled=move || is_saving_rename.get()
+            aria-label=session_sidebar_cancel_rename_label()
+            title=session_sidebar_cancel_rename_label()
+        >
+            {app_icon_view(AppIcon::Cancel)}
+            <span class="sr-only">{session_sidebar_cancel_rename_label()}</span>
+        </button>
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[component]
+pub(super) fn SessionSidebarRenameButtons(
+    #[prop(into)] is_saving_rename: Signal<bool>,
+    #[prop(into)] save_disabled: Signal<bool>,
+    on_commit_rename: Callback<()>,
+    on_cancel_rename: Callback<()>,
+) -> impl IntoView {
+    let saving_now = is_saving_rename.get_untracked();
+    let save_disabled_now = save_disabled.get_untracked();
+
+    view! {
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            on:click=move |_| on_commit_rename.run(())
+            prop:disabled=save_disabled_now
+            aria-label=session_sidebar_save_title_label(saving_now)
+            title=session_sidebar_save_title_label(saving_now)
+        >
+            {app_icon_view(session_sidebar_save_title_icon(saving_now))}
+            <span class="sr-only">{session_sidebar_save_title_label(saving_now)}</span>
+        </button>
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            on:click=move |_| on_cancel_rename.run(())
+            prop:disabled=saving_now
             aria-label=session_sidebar_cancel_rename_label()
             title=session_sidebar_cancel_rename_label()
         >

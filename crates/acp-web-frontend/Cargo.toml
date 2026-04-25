@@ -27,7 +27,9 @@ console_error_panic_hook = "=0.1.7"
 futures-channel = "=0.3.32"
 futures-util = "=0.3.32"
 gloo-net = { version = "=0.7.0", features = ["http", "json"] }
-icondata = { version = "=0.7.0", default-features = false, features = ["font-awesome"] }
+icondata = { version = "=0.7.0", default-features = false, features = [
+  "font-awesome",
+] }
 leptos = { version = "=0.8.19", features = ["csr"] }
 leptos_icons = "=0.7.1"
 pulldown-cmark = "=0.13.3"

@@ -4,7 +4,7 @@ use leptos_icons::Icon;
 use icondata::{
     FaArrowLeftLongSolid, FaArrowRightFromBracketSolid, FaFloppyDiskSolid, FaFolderPlusSolid,
     FaFolderTreeSolid, FaPenToSquareSolid, FaPlusSolid, FaSpinnerSolid, FaTrashCanSolid,
-    FaUserGearSolid, FaXmarkSolid,
+    FaUserGearSolid, FaXmarkSolid, Icon as IconData,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,57 +23,33 @@ pub(crate) enum AppIcon {
 }
 
 pub(crate) fn app_icon_view(icon: AppIcon) -> AnyView {
-    let class = if matches!(icon, AppIcon::Busy) {
+    app_icon_shell(
+        app_icon_class(icon),
+        view! { <Icon icon=app_icon_data(icon) width="1em" height="1em" /> },
+    )
+}
+
+fn app_icon_class(icon: AppIcon) -> &'static str {
+    if matches!(icon, AppIcon::Busy) {
         "app-icon app-icon--spin"
     } else {
         "app-icon"
-    };
+    }
+}
 
+fn app_icon_data(icon: AppIcon) -> IconData {
     match icon {
-        AppIcon::Accounts => app_icon_shell(
-            class,
-            view! { <Icon icon=FaUserGearSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::BackToChat => app_icon_shell(
-            class,
-            view! { <Icon icon=FaArrowLeftLongSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::Busy => app_icon_shell(
-            class,
-            view! { <Icon icon=FaSpinnerSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::Cancel => app_icon_shell(
-            class,
-            view! { <Icon icon=FaXmarkSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::CreateWorkspace => app_icon_shell(
-            class,
-            view! { <Icon icon=FaFolderPlusSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::Delete => app_icon_shell(
-            class,
-            view! { <Icon icon=FaTrashCanSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::NewChat => app_icon_shell(
-            class,
-            view! { <Icon icon=FaPlusSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::Rename => app_icon_shell(
-            class,
-            view! { <Icon icon=FaPenToSquareSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::Save => app_icon_shell(
-            class,
-            view! { <Icon icon=FaFloppyDiskSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::SignOut => app_icon_shell(
-            class,
-            view! { <Icon icon=FaArrowRightFromBracketSolid width="1em" height="1em" /> },
-        ),
-        AppIcon::Workspaces => app_icon_shell(
-            class,
-            view! { <Icon icon=FaFolderTreeSolid width="1em" height="1em" /> },
-        ),
+        AppIcon::Accounts => FaUserGearSolid,
+        AppIcon::BackToChat => FaArrowLeftLongSolid,
+        AppIcon::Busy => FaSpinnerSolid,
+        AppIcon::Cancel => FaXmarkSolid,
+        AppIcon::CreateWorkspace => FaFolderPlusSolid,
+        AppIcon::Delete => FaTrashCanSolid,
+        AppIcon::NewChat => FaPlusSolid,
+        AppIcon::Rename => FaPenToSquareSolid,
+        AppIcon::Save => FaFloppyDiskSolid,
+        AppIcon::SignOut => FaArrowRightFromBracketSolid,
+        AppIcon::Workspaces => FaFolderTreeSolid,
     }
 }
 

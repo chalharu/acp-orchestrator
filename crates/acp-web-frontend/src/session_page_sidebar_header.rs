@@ -228,6 +228,8 @@ fn session_sidebar_new_chat_button(
     sidebar_error: RwSignal<Option<String>>,
 ) -> AnyView {
     let creating = RwSignal::new(false);
+    let on_click =
+        session_sidebar_new_chat_click_handler(current_workspace_id, sidebar_error, creating);
 
     view! {
         <button
@@ -236,39 +238,7 @@ fn session_sidebar_new_chat_button(
             prop:disabled=move || creating.get()
             aria-label=move || session_sidebar_new_chat_label(creating.get())
             title=move || session_sidebar_new_chat_label(creating.get())
-            on:click=move |_| {
-                if creating.get_untracked() {
-                    return;
-                }
-                let Some(workspace_id) = session_sidebar_begin_new_chat(
-                    current_workspace_id.get_untracked(),
-                    sidebar_error,
-                    creating,
-                ) else {
-                    return;
-                };
-                leptos::task::spawn_local(async move {
-                    match api::create_workspace_session(&workspace_id).await {
-                        Ok(session_id) => {
-                            store_prepared_session_id(&session_id);
-                            if let Err(message) = navigate_to(&app_session_path(&session_id)) {
-                                session_sidebar_finish_new_chat_failure(
-                                    creating,
-                                    sidebar_error,
-                                    message,
-                                );
-                            }
-                        }
-                        Err(create_error) => {
-                            session_sidebar_finish_new_chat_failure(
-                                creating,
-                                sidebar_error,
-                                create_error.into_message(),
-                            );
-                        }
-                    }
-                });
-            }
+            on:click=on_click
         >
             <span class="session-sidebar__new-link-icon" aria-hidden="true">
                 {move || session_sidebar_new_chat_icon(creating.get())}
@@ -279,6 +249,63 @@ fn session_sidebar_new_chat_button(
         </button>
     }
     .into_any()
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_click_handler(
+    current_workspace_id: Signal<Option<String>>,
+    sidebar_error: RwSignal<Option<String>>,
+    creating: RwSignal<bool>,
+) -> impl Fn(web_sys::MouseEvent) {
+    move |_| {
+        if creating.get_untracked() {
+            return;
+        }
+
+        let Some(workspace_id) = session_sidebar_begin_new_chat(
+            current_workspace_id.get_untracked(),
+            sidebar_error,
+            creating,
+        ) else {
+            return;
+        };
+
+        session_sidebar_spawn_new_chat_request(workspace_id, sidebar_error, creating);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_spawn_new_chat_request(
+    workspace_id: String,
+    sidebar_error: RwSignal<Option<String>>,
+    creating: RwSignal<bool>,
+) {
+    leptos::task::spawn_local(async move {
+        match api::create_workspace_session(&workspace_id).await {
+            Ok(session_id) => {
+                session_sidebar_complete_new_chat(session_id, sidebar_error, creating);
+            }
+            Err(create_error) => {
+                session_sidebar_finish_new_chat_failure(
+                    creating,
+                    sidebar_error,
+                    create_error.into_message(),
+                );
+            }
+        }
+    });
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_complete_new_chat(
+    session_id: String,
+    sidebar_error: RwSignal<Option<String>>,
+    creating: RwSignal<bool>,
+) {
+    store_prepared_session_id(&session_id);
+    if let Err(message) = navigate_to(&app_session_path(&session_id)) {
+        session_sidebar_finish_new_chat_failure(creating, sidebar_error, message);
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]

@@ -26,16 +26,20 @@ pub(super) fn SessionSidebar(
 ) -> impl IntoView {
     let current_session_id_for_nav = current_session_id.clone();
     let has_session_items = Signal::derive(move || !shell_signals.sessions.get().is_empty());
+    let sidebar_error = RwSignal::new(None::<String>);
 
     view! {
         <aside class=move || session_sidebar_class(sidebar_open.get())>
             <SessionSidebarHeader
                 current_session_id=current_session_id
+                current_workspace_id=shell_signals.current_workspace_id
                 auth_error=auth_error
+                sidebar_error=sidebar_error
                 sidebar_open=sidebar_open
             />
             <SessionSidebarStatus
                 workspace_message=shell_signals.current_workspace
+                sidebar_error=Signal::derive(move || sidebar_error.get())
                 session_list_error=shell_signals.list.error
                 has_session_items=has_session_items
             />

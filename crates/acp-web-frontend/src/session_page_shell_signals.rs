@@ -9,6 +9,7 @@ pub(crate) struct SessionShellSignals {
     pub(crate) list: SessionListSignals,
     pub(crate) delete_disabled: Signal<bool>,
     pub(crate) current_workspace: Signal<Option<String>>,
+    pub(crate) current_workspace_id: Signal<Option<String>>,
 }
 
 fn current_workspace_label(
@@ -35,6 +36,7 @@ pub(crate) fn session_shell_signals(signals: SessionSignals) -> SessionShellSign
         current_workspace: Signal::derive(move || {
             current_workspace_label(current_workspace_name.get(), current_workspace_id.get())
         }),
+        current_workspace_id: Signal::derive(move || current_workspace_id.get()),
     }
 }
 

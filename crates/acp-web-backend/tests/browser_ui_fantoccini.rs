@@ -303,6 +303,29 @@ async fn workspaces_page_is_reachable_via_sidebar_link() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn session_sidebar_new_chat_button_opens_another_chat_in_the_same_workspace() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser
+            .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
+            .await?;
+        browser.ensure_sidebar_visible().await?;
+        let original_path = browser.current_path().await?;
+
+        browser.click_sidebar_new_chat_button().await?;
+        browser.wait_for_new_session_path(&original_path).await?;
+        assert_session_sidebar_workspace(&browser, BROWSER_WORKSPACE_NAME).await?;
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
 async fn workspaces_page_back_link_returns_to_the_same_session() -> Result<()> {
     let browser = BrowserHarness::spawn((1280, 960)).await?;
     let result = async {
@@ -920,21 +943,44 @@ impl BrowserHarness {
 
     async fn click_workspaces_link(&self) -> Result<()> {
         self.wait_for_condition(
-            "return Array.from(document.querySelectorAll('.session-sidebar__secondary-link'))\
-             .some(link => link.textContent?.trim() === 'Workspaces');",
+            "return Boolean(document.querySelector(\
+             '.session-sidebar__secondary-icon-link[aria-label=\"Workspaces\"]'\
+             ));",
             Duration::from_secs(10),
             "workspaces sidebar link",
         )
         .await?;
         self.client
             .execute(
-                "const link = Array.from(document.querySelectorAll('.session-sidebar__secondary-link'))\
-                 .find(candidate => candidate.textContent?.trim() === 'Workspaces');\
+                "const link = document.querySelector(\
+                 '.session-sidebar__secondary-icon-link[aria-label=\"Workspaces\"]'\
+                 );\
                  if (link) link.click();",
                 Vec::new(),
             )
             .await
             .context("clicking the workspaces sidebar link")?;
+        Ok(())
+    }
+
+    async fn click_sidebar_new_chat_button(&self) -> Result<()> {
+        self.wait_for_condition(
+            "const button = document.querySelector('.session-sidebar__new-link');\
+             return Boolean(button)\
+             && button.getAttribute('aria-label') === 'New chat'\
+             && !button.disabled;",
+            Duration::from_secs(10),
+            "session sidebar new chat button",
+        )
+        .await?;
+        self.client
+            .execute(
+                "const button = document.querySelector('.session-sidebar__new-link');\
+                 if (button) button.click();",
+                Vec::new(),
+            )
+            .await
+            .context("clicking the session sidebar new chat button")?;
         Ok(())
     }
 
@@ -1235,6 +1281,20 @@ impl BrowserHarness {
             &format!("return window.location.pathname === {encoded};"),
             Duration::from_secs(15),
             description,
+        )
+        .await
+    }
+
+    async fn wait_for_new_session_path(&self, previous_path: &str) -> Result<()> {
+        let encoded =
+            serde_json::to_string(previous_path).context("encoding previous browser path")?;
+        self.wait_for_condition(
+            &format!(
+                "return /\\/app\\/sessions\\/[^/]+$/.test(window.location.pathname)\
+                 && window.location.pathname !== {encoded};"
+            ),
+            Duration::from_secs(15),
+            "new browser session route",
         )
         .await
     }

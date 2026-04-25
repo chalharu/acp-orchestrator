@@ -85,12 +85,7 @@ fn session_sidebar_auth_controls_view(
 
 fn session_sidebar_workspaces_link_view(workspaces_href: &str, signed_in: bool) -> AnyView {
     if signed_in {
-        view! {
-            <a class="session-sidebar__secondary-link" href=workspaces_href.to_string()>
-                "Workspaces"
-            </a>
-        }
-        .into_any()
+        session_sidebar_icon_link_view(workspaces_href, "Workspaces", "▦")
     } else {
         ().into_any()
     }
@@ -98,11 +93,27 @@ fn session_sidebar_workspaces_link_view(workspaces_href: &str, signed_in: bool) 
 
 fn session_sidebar_accounts_link_view(accounts_href: &str, is_admin: bool) -> AnyView {
     if is_admin {
-        view! { <a class="session-sidebar__secondary-link" href=accounts_href.to_string()>"Accounts"</a> }
-            .into_any()
+        session_sidebar_icon_link_view(accounts_href, "Accounts", "⚙")
     } else {
         ().into_any()
     }
+}
+
+fn session_sidebar_icon_link_view(href: &str, label: &'static str, icon: &'static str) -> AnyView {
+    view! {
+        <a
+            class="session-sidebar__secondary-link session-sidebar__secondary-icon-link"
+            href=href.to_string()
+            aria-label=label
+            title=label
+        >
+            <span class="session-sidebar__secondary-link-icon" aria-hidden="true">
+                {icon}
+            </span>
+            <span class="sr-only">{label}</span>
+        </a>
+    }
+    .into_any()
 }
 
 fn session_sidebar_sign_out_button_view(

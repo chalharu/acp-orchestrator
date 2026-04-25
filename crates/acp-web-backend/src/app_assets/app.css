@@ -262,6 +262,8 @@ a:hover {
   background: var(--accent);
   color: #fff9f3;
   font-size: 0.875rem;
+  text-decoration: none;
+  cursor: pointer;
 }
 
 .session-sidebar__new-link-icon {
@@ -274,10 +276,21 @@ a:hover {
   white-space: nowrap;
 }
 
-.session-sidebar__new-link:hover {
+button.session-sidebar__new-link {
+  font: inherit;
+}
+
+.session-sidebar__new-link:hover:not(:disabled) {
   border-color: #8d4f30;
   background: #8d4f30;
   color: #fff9f3;
+}
+
+.session-sidebar__new-link:disabled {
+  border-color: #c7b4a4;
+  background: #c7b4a4;
+  cursor: default;
+  opacity: 0.78;
 }
 
 .session-sidebar__secondary-link {
@@ -285,6 +298,29 @@ a:hover {
   align-items: center;
   min-height: 2rem;
   font-size: 0.875rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.session-sidebar__secondary-link:hover {
+  color: #8d4f30;
+}
+
+.session-sidebar__secondary-icon-link {
+  justify-content: center;
+  width: 2rem;
+  min-width: 2rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+}
+
+.session-sidebar__secondary-icon-link:hover {
+  background: rgba(141, 79, 48, 0.08);
+}
+
+.session-sidebar__secondary-link-icon {
+  font-size: 1rem;
+  line-height: 1;
 }
 
 button.session-sidebar__secondary-link {

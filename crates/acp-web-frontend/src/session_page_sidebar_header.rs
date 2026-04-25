@@ -97,8 +97,12 @@ fn session_sidebar_new_chat_workspace_id(current_workspace_id: Option<String>) -
     current_workspace_id.filter(|workspace_id| !workspace_id.trim().is_empty())
 }
 
-fn session_sidebar_new_chat_icon(creating: bool) -> &'static str {
-    if creating { "…" } else { "+" }
+fn session_sidebar_new_chat_icon(creating: bool) -> AppIcon {
+    if creating {
+        AppIcon::Busy
+    } else {
+        AppIcon::NewChat
+    }
 }
 
 fn session_sidebar_new_chat_label(creating: bool) -> &'static str {
@@ -169,7 +173,7 @@ fn session_sidebar_workspaces_href(current_session_id: &str) -> String {
 fn session_sidebar_workspaces_link(href: &str) -> AnyView {
     view! {
         <a
-            class="session-sidebar__new-link"
+            class="session-sidebar__new-link icon-action icon-action--primary"
             href=href.to_string()
             aria-label=session_sidebar_workspaces_label()
             title=session_sidebar_workspaces_label()
@@ -177,9 +181,7 @@ fn session_sidebar_workspaces_link(href: &str) -> AnyView {
             <span class="session-sidebar__new-link-icon" aria-hidden="true">
                 {app_icon_view(session_sidebar_workspaces_icon())}
             </span>
-            <span class="session-sidebar__new-link-label">
-                {session_sidebar_workspaces_label()}
-            </span>
+            <span class="sr-only">{session_sidebar_workspaces_label()}</span>
         </a>
     }
     .into_any()
@@ -236,16 +238,16 @@ fn session_sidebar_new_chat_button(
     view! {
         <button
             type="button"
-            class="session-sidebar__new-link"
+            class="session-sidebar__new-link icon-action icon-action--primary"
             prop:disabled=move || creating.get()
             aria-label=move || session_sidebar_new_chat_label(creating.get())
             title=move || session_sidebar_new_chat_label(creating.get())
             on:click=on_click
         >
             <span class="session-sidebar__new-link-icon" aria-hidden="true">
-                {move || session_sidebar_new_chat_icon(creating.get())}
+                {move || app_icon_view(session_sidebar_new_chat_icon(creating.get()))}
             </span>
-            <span class="session-sidebar__new-link-label">
+            <span class="sr-only">
                 {move || session_sidebar_new_chat_label(creating.get())}
             </span>
         </button>
@@ -314,15 +316,20 @@ fn session_sidebar_complete_new_chat(
 fn session_sidebar_new_chat_button(current_workspace_id: Signal<Option<String>>) -> AnyView {
     let can_create =
         session_sidebar_new_chat_workspace_id(current_workspace_id.get_untracked()).is_some();
+    let label = session_sidebar_new_chat_label(false);
 
     view! {
-        <button type="button" class="session-sidebar__new-link" prop:disabled=!can_create>
+        <button
+            type="button"
+            class="session-sidebar__new-link icon-action icon-action--primary"
+            prop:disabled=!can_create
+            aria-label=label
+            title=label
+        >
             <span class="session-sidebar__new-link-icon" aria-hidden="true">
-                {session_sidebar_new_chat_icon(false)}
+                {app_icon_view(session_sidebar_new_chat_icon(false))}
             </span>
-            <span class="session-sidebar__new-link-label">
-                {session_sidebar_new_chat_label(false)}
-            </span>
+            <span class="sr-only">{label}</span>
         </button>
     }
     .into_any()
@@ -393,8 +400,8 @@ mod tests {
             session_sidebar_primary_action_kind(None),
             SessionSidebarPrimaryActionKind::Workspaces
         );
-        assert_eq!(session_sidebar_new_chat_icon(false), "+");
-        assert_eq!(session_sidebar_new_chat_icon(true), "…");
+        assert_eq!(session_sidebar_new_chat_icon(false), AppIcon::NewChat);
+        assert_eq!(session_sidebar_new_chat_icon(true), AppIcon::Busy);
         assert_eq!(session_sidebar_new_chat_label(false), "New chat");
         assert_eq!(session_sidebar_new_chat_label(true), "Creating…");
         assert_eq!(

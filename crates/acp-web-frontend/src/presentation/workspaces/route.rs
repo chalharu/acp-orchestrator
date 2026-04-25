@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::presentation::{AppIcon, app_icon_view};
 use crate::{application::auth::WorkspacesRouteAccess, components::ErrorBanner};
 
 #[cfg(target_family = "wasm")]
@@ -85,7 +86,15 @@ fn workspaces_back_link_view(back_to_chat_path: Option<String>) -> AnyView {
     back_to_chat_path
         .map(|href| {
             view! {
-                <a href=href>"Back to chat"</a>
+                <a
+                    href=href
+                    class="account-panel__header-action icon-action icon-action--ghost"
+                    aria-label="Back to chat"
+                    title="Back to chat"
+                >
+                    {app_icon_view(AppIcon::BackToChat)}
+                    <span class="sr-only">"Back to chat"</span>
+                </a>
             }
             .into_any()
         })

@@ -8,6 +8,7 @@ use crate::application::auth::{
 };
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::presentation::{AppIcon, app_icon_view};
 
 use super::shared::{AccountsPageState, event_target_checked, spawn_account_reload};
 
@@ -302,21 +303,42 @@ fn AccountRowActions(
 
     view! {
         <div class="account-row__actions">
-            <button
-                type="button"
-                prop:disabled=move || saving.get() || !row_dirty.get()
-                on:click=move |_| save_account.run(())
-            >
-                {move || save_button_label(saving.get())}
-            </button>
-            <button
-                type="button"
-                class="account-row__delete"
-                prop:disabled=move || deleting.get() || !can_modify.get()
-                on:click=move |event| delete_account.run(event)
-            >
-                {move || delete_button_label(deleting.get())}
-            </button>
+            <div class="account-row__actions-toolbar">
+                <button
+                    type="button"
+                    class="account-row__action-btn icon-action"
+                    prop:disabled=move || saving.get() || !row_dirty.get()
+                    on:click=move |_| save_account.run(())
+                    aria-label=move || save_button_label(saving.get())
+                    title=move || save_button_label(saving.get())
+                >
+                    {move || {
+                        if saving.get() {
+                            app_icon_view(AppIcon::Busy)
+                        } else {
+                            app_icon_view(AppIcon::Save)
+                        }
+                    }}
+                    <span class="sr-only">{move || save_button_label(saving.get())}</span>
+                </button>
+                <button
+                    type="button"
+                    class="account-row__action-btn account-row__delete icon-action icon-action--danger"
+                    prop:disabled=move || deleting.get() || !can_modify.get()
+                    on:click=move |event| delete_account.run(event)
+                    aria-label=move || delete_button_label(deleting.get())
+                    title=move || delete_button_label(deleting.get())
+                >
+                    {move || {
+                        if deleting.get() {
+                            app_icon_view(AppIcon::Busy)
+                        } else {
+                            app_icon_view(AppIcon::Delete)
+                        }
+                    }}
+                    <span class="sr-only">{move || delete_button_label(deleting.get())}</span>
+                </button>
+            </div>
             <p class="account-row__hint">{move || hint_text.get()}</p>
         </div>
     }
@@ -347,21 +369,38 @@ fn AccountRowActions(
 
     view! {
         <div class="account-row__actions">
-            <button
-                type="button"
-                prop:disabled=saving_now || !row_dirty_now
-                on:click=move |_| save_account.run(())
-            >
-                {save_button_label(saving_now)}
-            </button>
-            <button
-                type="button"
-                class="account-row__delete"
-                prop:disabled=deleting_now || !can_modify_now
-                on:click=move |event| delete_account.run(event)
-            >
-                {delete_button_label(deleting_now)}
-            </button>
+            <div class="account-row__actions-toolbar">
+                <button
+                    type="button"
+                    class="account-row__action-btn icon-action"
+                    prop:disabled=saving_now || !row_dirty_now
+                    on:click=move |_| save_account.run(())
+                    aria-label=save_button_label(saving_now)
+                    title=save_button_label(saving_now)
+                >
+                    {if saving_now {
+                        app_icon_view(AppIcon::Busy)
+                    } else {
+                        app_icon_view(AppIcon::Save)
+                    }}
+                    <span class="sr-only">{save_button_label(saving_now)}</span>
+                </button>
+                <button
+                    type="button"
+                    class="account-row__action-btn account-row__delete icon-action icon-action--danger"
+                    prop:disabled=deleting_now || !can_modify_now
+                    on:click=move |event| delete_account.run(event)
+                    aria-label=delete_button_label(deleting_now)
+                    title=delete_button_label(deleting_now)
+                >
+                    {if deleting_now {
+                        app_icon_view(AppIcon::Busy)
+                    } else {
+                        app_icon_view(AppIcon::Delete)
+                    }}
+                    <span class="sr-only">{delete_button_label(deleting_now)}</span>
+                </button>
+            </div>
             <p class="account-row__hint">{hint_text}</p>
         </div>
     }

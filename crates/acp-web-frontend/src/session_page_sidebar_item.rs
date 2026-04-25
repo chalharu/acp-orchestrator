@@ -2,6 +2,7 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
+use crate::presentation::{AppIcon, app_icon_view};
 #[cfg(not(target_family = "wasm"))]
 use crate::session_page_sidebar_styles::sidebar_delete_sr_label;
 use crate::session_page_sidebar_styles::{
@@ -363,11 +364,12 @@ pub(super) fn SessionSidebarRenameButton(
         <button
             type="button"
             class="session-sidebar__action-btn"
-            title="Rename"
+            aria-label="Rename session"
+            title="Rename session"
             on:click=move |_| on_begin_rename.run(())
             prop:disabled=move || disabled.get()
         >
-            <span aria-hidden="true">{"✎"}</span>
+            {app_icon_view(AppIcon::Rename)}
             <span class="sr-only">"Rename session"</span>
         </button>
     }
@@ -384,15 +386,16 @@ pub(super) fn SessionSidebarDeleteButton(
         <button
             type="button"
             class="session-sidebar__action-btn session-sidebar__action-btn--danger"
-            title="Delete"
+            aria-label=move || if is_deleting.get() { "Deleting…" } else { "Delete session" }
+            title=move || if is_deleting.get() { "Deleting…" } else { "Delete session" }
             on:click=move |_| on_delete.run(())
             prop:disabled=move || disabled.get()
         >
             <Show
                 when=move || is_deleting.get()
-                fallback=|| view! { <span aria-hidden="true">{"✕"}</span> }
+                fallback=|| app_icon_view(AppIcon::Delete)
             >
-                <span aria-hidden="true">{"…"}</span>
+                {app_icon_view(AppIcon::Busy)}
             </Show>
             <span class="sr-only">
                 {move || if is_deleting.get() { "Deleting…" } else { "Delete session" }}
@@ -415,10 +418,15 @@ pub(super) fn SessionSidebarDeleteButton(
         <button
             type="button"
             class="session-sidebar__action-btn session-sidebar__action-btn--danger"
-            title="Delete"
+            aria-label=if deleting { "Deleting…" } else { "Delete session" }
+            title=if deleting { "Deleting…" } else { "Delete session" }
             prop:disabled=move || disabled.get()
         >
-            <span aria-hidden="true">{if deleting { "…" } else { "✕" }}</span>
+            {if deleting {
+                app_icon_view(AppIcon::Busy)
+            } else {
+                app_icon_view(AppIcon::Delete)
+            }}
             <span class="sr-only">{sidebar_delete_sr_label(deleting)}</span>
         </button>
     }
@@ -571,22 +579,46 @@ pub(super) fn SessionSidebarRenameButtons(
             class="session-sidebar__action-btn"
             on:click=move |_| on_commit_rename.run(())
             prop:disabled=move || save_disabled.get()
+            aria-label=move || {
+                if is_saving_rename.get() {
+                    "Saving…"
+                } else {
+                    "Save session title"
+                }
+            }
+            title=move || {
+                if is_saving_rename.get() {
+                    "Saving…"
+                } else {
+                    "Save session title"
+                }
+            }
         >
             <Show
                 when=move || is_saving_rename.get()
-                fallback=|| view! { <span aria-hidden="true">{"✓"}</span> }
+                fallback=|| app_icon_view(AppIcon::Save)
             >
-                <span aria-hidden="true">{"…"}</span>
+                {app_icon_view(AppIcon::Busy)}
             </Show>
-            <span class="sr-only">"Save title"</span>
+            <span class="sr-only">
+                {move || {
+                    if is_saving_rename.get() {
+                        "Saving…"
+                    } else {
+                        "Save session title"
+                    }
+                }}
+            </span>
         </button>
         <button
             type="button"
             class="session-sidebar__action-btn"
             on:click=move |_| on_cancel_rename.run(())
             prop:disabled=move || is_saving_rename.get()
+            aria-label="Cancel rename"
+            title="Cancel rename"
         >
-            <span aria-hidden="true">{"✕"}</span>
+            {app_icon_view(AppIcon::Cancel)}
             <span class="sr-only">"Cancel rename"</span>
         </button>
     }

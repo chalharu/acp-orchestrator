@@ -5,6 +5,7 @@ use leptos::prelude::*;
 use crate::components::ErrorBanner;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::presentation::{AppIcon, app_icon_view};
 
 use super::shared::{WorkspacesPageState, spawn_workspace_reload};
 
@@ -40,9 +41,10 @@ fn create_workspace_button_view(
             class="workspace-dashboard__new-btn"
             on:click=on_click
             aria-label=create_workspace_trigger_label()
+            title=create_workspace_trigger_label()
         >
             <span class="workspace-dashboard__new-btn-icon" aria-hidden="true">
-                "+"
+                {app_icon_view(AppIcon::CreateWorkspace)}
             </span>
             <span class="workspace-dashboard__new-btn-label">
                 {create_workspace_trigger_label()}
@@ -173,8 +175,10 @@ fn create_workspace_modal_header(
                 class="workspace-modal__close"
                 on:click=on_cancel
                 aria-label="Close"
+                title="Close"
             >
-                "✕"
+                {app_icon_view(AppIcon::Cancel)}
+                <span class="sr-only">"Close"</span>
             </button>
         </div>
     }

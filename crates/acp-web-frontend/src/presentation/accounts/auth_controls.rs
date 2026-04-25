@@ -102,7 +102,7 @@ fn session_sidebar_accounts_link_view(accounts_href: &str, is_admin: bool) -> An
 fn session_sidebar_icon_link_view(href: &str, label: &'static str, icon: AppIcon) -> AnyView {
     view! {
         <a
-            class="session-sidebar__secondary-link session-sidebar__secondary-icon-link"
+            class="session-sidebar__secondary-link session-sidebar__secondary-icon-link icon-action icon-action--ghost"
             href=href.to_string()
             aria-label=label
             title=label

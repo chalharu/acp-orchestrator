@@ -1061,29 +1061,15 @@ impl BrowserHarness {
     }
 
     async fn delete_workspace(&self, name: &str) -> Result<()> {
-        self.wait_for_condition(
-            &format!(
-                "return Array.from(document.querySelectorAll('.workspace-action-btn--danger'))\
-                 .some(btn => btn.closest('.workspace-card')?.textContent?.includes({name:?}));"
-            ),
-            Duration::from_secs(10),
+        self.wait_for_workspace_action_button(
+            ".workspace-action-btn--danger",
+            name,
+            "Delete",
             "delete button for workspace",
         )
         .await?;
-
-        self.client
-            .execute(
-                &format!(
-                    "const btn = Array.from(document.querySelectorAll('.workspace-action-btn--danger'))\
-                     .find(b => b.closest('.workspace-card')?.textContent?.includes({name:?})); \
-                     if (btn) btn.click();"
-                ),
-                Vec::new(),
-            )
+        self.click_workspace_action_button(".workspace-action-btn--danger", name, "Delete")
             .await
-            .context("clicking delete button for workspace")?;
-
-        Ok(())
     }
 
     async fn delete_workspace_and_confirm(&self, name: &str) -> Result<()> {
@@ -1183,7 +1169,7 @@ impl BrowserHarness {
     async fn click_workspace_save_button(&self) -> Result<()> {
         self.client
             .find(Locator::Css(
-                ".workspace-name-input + .workspace-action-btn",
+                ".workspace-inline-form .workspace-action-btn[aria-label='Save']",
             ))
             .await
             .context("finding Save button")?
@@ -1195,7 +1181,7 @@ impl BrowserHarness {
     async fn click_back_to_chat_link(&self) -> Result<()> {
         self.wait_for_condition(
             "return Array.from(document.querySelectorAll('.account-panel__header-actions a'))\
-             .some(link => link.textContent?.trim() === 'Back to chat');",
+             .some(link => link.getAttribute('aria-label') === 'Back to chat');",
             Duration::from_secs(10),
             "back to chat link",
         )
@@ -1203,7 +1189,7 @@ impl BrowserHarness {
         self.client
             .execute(
                 "const link = Array.from(document.querySelectorAll('.account-panel__header-actions a'))\
-                 .find(candidate => candidate.textContent?.trim() === 'Back to chat');\
+                 .find(candidate => candidate.getAttribute('aria-label') === 'Back to chat');\
                  if (link) link.click();",
                 Vec::new(),
             )
@@ -1432,7 +1418,7 @@ fn workspace_action_button_script(selector: &str, row_name: &str, button_label: 
     format!(
         "return Array.from(document.querySelectorAll({selector:?}))\
          .some(btn => btn.closest('.workspace-card')?.textContent?.includes({row_name:?}) \
-                 && btn.textContent?.trim() === {button_label:?});"
+                 && ((btn.getAttribute('aria-label') ?? btn.textContent?.trim()) === {button_label:?}));"
     )
 }
 
@@ -1444,7 +1430,7 @@ fn workspace_action_button_click_script(
     format!(
         "const btn = Array.from(document.querySelectorAll({selector:?}))\
          .find(candidate => candidate.closest('.workspace-card')?.textContent?.includes({row_name:?}) \
-                 && candidate.textContent?.trim() === {button_label:?}); \
+                 && ((candidate.getAttribute('aria-label') ?? candidate.textContent?.trim()) === {button_label:?})); \
          if (btn) btn.click();"
     )
 }

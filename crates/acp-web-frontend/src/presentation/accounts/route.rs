@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::presentation::{AppIcon, app_icon_view};
 use crate::{application::auth::AccountsRouteAccess, components::ErrorBanner};
 
 use super::{
@@ -41,14 +42,32 @@ fn accounts_page_shell(
                 <div class="account-panel__header">
                     <h1>"Accounts"</h1>
                     <div class="account-panel__header-actions">
-                        <a href=back_to_chat_href>"Back to chat"</a>
+                        <a
+                            href=back_to_chat_href
+                            class="account-panel__header-action icon-action icon-action--ghost"
+                            aria-label="Back to chat"
+                            title="Back to chat"
+                        >
+                            {app_icon_view(AppIcon::BackToChat)}
+                            <span class="sr-only">"Back to chat"</span>
+                        </a>
                         <Show when=move || accounts_page_shows_sign_out(state.access.get())>
                             <button
                                 type="button"
+                                class="account-panel__header-action icon-action icon-action--ghost"
                                 on:click=move |event| sign_out.run(event)
                                 prop:disabled=move || signing_out.get()
+                                aria-label=move || sign_out_button_label(signing_out.get())
+                                title=move || sign_out_button_label(signing_out.get())
                             >
-                                {move || sign_out_button_label(signing_out.get())}
+                                {move || {
+                                    if signing_out.get() {
+                                        app_icon_view(AppIcon::Busy)
+                                    } else {
+                                        app_icon_view(AppIcon::SignOut)
+                                    }
+                                }}
+                                <span class="sr-only">{move || sign_out_button_label(signing_out.get())}</span>
                             </button>
                         </Show>
                     </div>
@@ -75,10 +94,18 @@ fn accounts_sign_out_button(
         view! {
             <button
                 type="button"
+                class="account-panel__header-action icon-action icon-action--ghost"
                 on:click=move |event| sign_out.run(event)
                 prop:disabled=signing_out
+                aria-label=label
+                title=label
             >
-                {label}
+                {if signing_out {
+                    app_icon_view(AppIcon::Busy)
+                } else {
+                    app_icon_view(AppIcon::SignOut)
+                }}
+                <span class="sr-only">{label}</span>
             </button>
         }
         .into_any()
@@ -120,7 +147,15 @@ fn accounts_page_shell(
                 <div class="account-panel__header">
                     <h1>"Accounts"</h1>
                     <div class="account-panel__header-actions">
-                        <a href=back_to_chat_href>"Back to chat"</a>
+                        <a
+                            href=back_to_chat_href
+                            class="account-panel__header-action icon-action icon-action--ghost"
+                            aria-label="Back to chat"
+                            title="Back to chat"
+                        >
+                            {app_icon_view(AppIcon::BackToChat)}
+                            <span class="sr-only">"Back to chat"</span>
+                        </a>
                         {sign_out_button}
                     </div>
                 </div>

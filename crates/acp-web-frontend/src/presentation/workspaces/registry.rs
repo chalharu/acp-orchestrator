@@ -6,6 +6,7 @@ use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::presentation::{AppIcon, app_icon_view};
 #[cfg(target_family = "wasm")]
 use crate::{browser::store_prepared_session_id, routing::app_session_path};
 
@@ -231,6 +232,50 @@ fn workspace_card_summary_view(display: WorkspaceCardDisplay) -> impl IntoView {
     }
 }
 
+fn workspace_rename_label() -> &'static str {
+    "Rename"
+}
+
+fn workspace_delete_label(is_deleting: bool) -> &'static str {
+    if is_deleting { "Deleting…" } else { "Delete" }
+}
+
+fn workspace_new_chat_label(is_opening: bool) -> &'static str {
+    if is_opening { "Opening…" } else { "New chat" }
+}
+
+fn workspace_save_label(is_saving: bool) -> &'static str {
+    if is_saving { "Saving…" } else { "Save" }
+}
+
+fn workspace_cancel_label() -> &'static str {
+    "Cancel"
+}
+
+fn workspace_delete_icon(is_deleting: bool) -> AppIcon {
+    if is_deleting {
+        AppIcon::Busy
+    } else {
+        AppIcon::Delete
+    }
+}
+
+fn workspace_new_chat_icon(is_opening: bool) -> AppIcon {
+    if is_opening {
+        AppIcon::Busy
+    } else {
+        AppIcon::NewChat
+    }
+}
+
+fn workspace_save_icon(is_saving: bool) -> AppIcon {
+    if is_saving {
+        AppIcon::Busy
+    } else {
+        AppIcon::Save
+    }
+}
+
 #[cfg(target_family = "wasm")]
 fn workspace_card_actions_view_wasm(
     is_editing: Signal<bool>,
@@ -244,19 +289,25 @@ fn workspace_card_actions_view_wasm(
             <Show when=move || !is_editing.get()>
                 <button
                     type="button"
-                    class="workspace-action-btn"
+                    class="workspace-action-btn icon-action"
                     prop:disabled=move || is_deleting.get() || is_opening.get()
                     on:click=move |event| on_edit.run(event)
+                    aria-label=workspace_rename_label()
+                    title=workspace_rename_label()
                 >
-                    "Rename"
+                    {app_icon_view(AppIcon::Rename)}
+                    <span class="sr-only">{workspace_rename_label()}</span>
                 </button>
                 <button
                     type="button"
-                    class="workspace-action-btn workspace-action-btn--danger"
+                    class="workspace-action-btn workspace-action-btn--danger icon-action icon-action--danger"
                     prop:disabled=move || is_deleting.get() || is_opening.get()
                     on:click=move |event| on_delete.run(event)
+                    aria-label=move || workspace_delete_label(is_deleting.get())
+                    title=move || workspace_delete_label(is_deleting.get())
                 >
-                    {move || if is_deleting.get() { "Deleting…" } else { "Delete" }}
+                    {move || app_icon_view(workspace_delete_icon(is_deleting.get()))}
+                    <span class="sr-only">{move || workspace_delete_label(is_deleting.get())}</span>
                 </button>
             </Show>
         </div>
@@ -272,11 +323,14 @@ fn workspace_card_open_button_wasm(
     view! {
         <button
             type="button"
-            class="workspace-action-btn workspace-action-btn--primary"
+            class="workspace-action-btn workspace-action-btn--primary icon-action icon-action--primary"
             prop:disabled=move || is_deleting.get() || is_opening.get()
             on:click=move |event| on_open_chat.run(event)
+            aria-label=move || workspace_new_chat_label(is_opening.get())
+            title=move || workspace_new_chat_label(is_opening.get())
         >
-            {move || if is_opening.get() { "Opening…" } else { "New chat" }}
+            {move || app_icon_view(workspace_new_chat_icon(is_opening.get()))}
+            <span class="sr-only">{move || workspace_new_chat_label(is_opening.get())}</span>
         </button>
     }
 }
@@ -292,11 +346,25 @@ fn workspace_card_name_cell_host(
         view! {
             <form class="workspace-inline-form">
                 <input type="text" class="workspace-name-input" prop:value=draft prop:disabled=is_saving />
-                <button type="submit" class="workspace-action-btn" prop:disabled=is_saving>
-                    {if is_saving { "Saving…" } else { "Save" }}
+                <button
+                    type="submit"
+                    class="workspace-action-btn icon-action"
+                    prop:disabled=is_saving
+                    aria-label=workspace_save_label(is_saving)
+                    title=workspace_save_label(is_saving)
+                >
+                    {app_icon_view(workspace_save_icon(is_saving))}
+                    <span class="sr-only">{workspace_save_label(is_saving)}</span>
                 </button>
-                <button type="button" class="workspace-action-btn" prop:disabled=is_saving>
-                    "Cancel"
+                <button
+                    type="button"
+                    class="workspace-action-btn icon-action"
+                    prop:disabled=is_saving
+                    aria-label=workspace_cancel_label()
+                    title=workspace_cancel_label()
+                >
+                    {app_icon_view(AppIcon::Cancel)}
+                    <span class="sr-only">{workspace_cancel_label()}</span>
                 </button>
             </form>
         }
@@ -318,11 +386,25 @@ fn workspace_card_actions_view_host(
 
     view! {
         <>
-            <button type="button" class="workspace-action-btn" prop:disabled=is_deleting || is_opening>
-                "Rename"
+            <button
+                type="button"
+                class="workspace-action-btn icon-action"
+                prop:disabled=is_deleting || is_opening
+                aria-label=workspace_rename_label()
+                title=workspace_rename_label()
+            >
+                {app_icon_view(AppIcon::Rename)}
+                <span class="sr-only">{workspace_rename_label()}</span>
             </button>
-            <button type="button" class="workspace-action-btn workspace-action-btn--danger" prop:disabled=is_deleting || is_opening>
-                {if is_deleting { "Deleting…" } else { "Delete" }}
+            <button
+                type="button"
+                class="workspace-action-btn workspace-action-btn--danger icon-action icon-action--danger"
+                prop:disabled=is_deleting || is_opening
+                aria-label=workspace_delete_label(is_deleting)
+                title=workspace_delete_label(is_deleting)
+            >
+                {app_icon_view(workspace_delete_icon(is_deleting))}
+                <span class="sr-only">{workspace_delete_label(is_deleting)}</span>
             </button>
         </>
     }
@@ -332,8 +414,15 @@ fn workspace_card_actions_view_host(
 #[cfg(not(target_family = "wasm"))]
 fn workspace_card_open_button_host(is_deleting: bool, is_opening: bool) -> impl IntoView {
     view! {
-        <button type="button" class="workspace-action-btn workspace-action-btn--primary" prop:disabled=is_deleting || is_opening>
-            {if is_opening { "Opening…" } else { "New chat" }}
+        <button
+            type="button"
+            class="workspace-action-btn workspace-action-btn--primary icon-action icon-action--primary"
+            prop:disabled=is_deleting || is_opening
+            aria-label=workspace_new_chat_label(is_opening)
+            title=workspace_new_chat_label(is_opening)
+        >
+            {app_icon_view(workspace_new_chat_icon(is_opening))}
+            <span class="sr-only">{workspace_new_chat_label(is_opening)}</span>
         </button>
     }
 }
@@ -419,16 +508,26 @@ fn WorkspaceRenameForm(
                 on:input=move |event| { state.edit_name_draft.set(event_target_value(&event)) }
                 prop:disabled=move || is_saving.get()
             />
-            <button type="submit" class="workspace-action-btn" prop:disabled=move || is_saving.get()>
-                {move || if is_saving.get() { "Saving…" } else { "Save" }}
+            <button
+                type="submit"
+                class="workspace-action-btn icon-action"
+                prop:disabled=move || is_saving.get()
+                aria-label=move || workspace_save_label(is_saving.get())
+                title=move || workspace_save_label(is_saving.get())
+            >
+                {move || app_icon_view(workspace_save_icon(is_saving.get()))}
+                <span class="sr-only">{move || workspace_save_label(is_saving.get())}</span>
             </button>
             <button
                 type="button"
-                class="workspace-action-btn"
+                class="workspace-action-btn icon-action"
                 prop:disabled=move || is_saving.get()
                 on:click=move |event| on_cancel.run(event)
+                aria-label=workspace_cancel_label()
+                title=workspace_cancel_label()
             >
-                "Cancel"
+                {app_icon_view(AppIcon::Cancel)}
+                <span class="sr-only">{workspace_cancel_label()}</span>
             </button>
         </form>
     }

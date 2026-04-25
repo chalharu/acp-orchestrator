@@ -10,8 +10,8 @@ use acp_web_backend::contract_messages::PromptRequest;
 pub(super) use acp_web_backend::contract_permissions::PermissionDecision;
 use acp_web_backend::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
 use acp_web_backend::contract_sessions::{
-    CancelTurnResponse, CreateSessionResponse, RenameSessionRequest, RenameSessionResponse,
-    SessionListResponse,
+    CancelTurnResponse, CreateSessionRequest, CreateSessionResponse, RenameSessionRequest,
+    RenameSessionResponse, SessionListResponse,
 };
 pub(super) use acp_web_backend::contract_stream::{StreamEvent, StreamEventPayload};
 use acp_web_backend::contract_workspaces::{
@@ -407,18 +407,29 @@ impl TestStack {
         token: &str,
         workspace_id: &str,
     ) -> Result<CreateSessionResponse> {
-        let response = self
+        self.create_workspace_session_with_request(token, workspace_id, None)
+            .await
+    }
+
+    pub(super) async fn create_workspace_session_with_request(
+        &self,
+        token: &str,
+        workspace_id: &str,
+        request: Option<&CreateSessionRequest>,
+    ) -> Result<CreateSessionResponse> {
+        let builder = self
             .client
             .post(format!(
                 "{}/api/v1/workspaces/{workspace_id}/sessions",
                 self.backend_url
             ))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("creating workspace session")?
-            .error_for_status()
-            .context("workspace session creation returned an error")?;
+            .bearer_auth(token);
+        let builder = match request {
+            Some(request) => builder.json(request),
+            None => builder,
+        };
+        let response = builder.send().await.context("creating workspace session")?;
+        let response = expect_success(response, "workspace session creation").await?;
         response.json().await.context("decoding workspace session")
     }
 
@@ -694,6 +705,19 @@ impl Drop for TestStack {
             let _ = shutdown.send(());
         }
     }
+}
+
+async fn expect_success(response: reqwest::Response, context: &str) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read error body: {error}>"));
+    anyhow::bail!("{context} returned {status}: {body}");
 }
 
 async fn wait_for_stack_health(client: &Client, base_url: &str) -> Result<()> {

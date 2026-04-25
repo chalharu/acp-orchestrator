@@ -1,4 +1,9 @@
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use chrono::Utc;
 
 use crate::{
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
@@ -6,6 +11,7 @@ use crate::{
     mock_client::{ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStoreError},
     workspace_records::UserRecord,
+    workspace_records::{SessionMetadataRecord, WorkspaceRecord},
     workspace_repository::NewWorkspace,
 };
 
@@ -20,6 +26,7 @@ pub(super) struct LiveSessionWriteContext {
 pub(super) async fn create_session_snapshot(
     state: &AppState,
     principal: AuthenticatedPrincipal,
+    checkout_ref_override: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
     let workspaces = state
@@ -42,7 +49,7 @@ pub(super) async fn create_session_snapshot(
         }
     };
 
-    create_session_snapshot_in_workspace(state, owner, &workspace_id).await
+    create_session_snapshot_in_workspace(state, owner, &workspace_id, checkout_ref_override).await
 }
 
 fn legacy_session_workspace() -> NewWorkspace {
@@ -58,17 +65,19 @@ pub(super) async fn create_session_snapshot_for_workspace(
     state: &AppState,
     principal: AuthenticatedPrincipal,
     workspace_id: &str,
+    checkout_ref_override: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
-    create_session_snapshot_in_workspace(state, owner, workspace_id).await
+    create_session_snapshot_in_workspace(state, owner, workspace_id, checkout_ref_override).await
 }
 
 async fn create_session_snapshot_in_workspace(
     state: &AppState,
     owner: super::OwnerContext,
     workspace_id: &str,
+    checkout_ref_override: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
-    state
+    let workspace = state
         .workspace_repository
         .load_workspace(&owner.user.user_id, workspace_id)
         .await?
@@ -78,22 +87,55 @@ async fn create_session_snapshot_in_workspace(
         .create_session(&owner.principal.id, workspace_id)
         .await?;
     let session_id = session.id.clone();
-    let session = match seed_startup_hint(state, &owner.principal.id, session).await {
-        Ok(session) => session,
-        Err(error) => {
-            if let Err(rollback_error) =
-                rollback_failed_session(state, &owner.principal.id, &session_id).await
-            {
-                return Err(AppError::Internal(format!(
+    if let Err(error) = persist_session_lifecycle(
+        state,
+        &owner.user,
+        &workspace,
+        &session,
+        "provisioning",
+        None,
+        None,
+    )
+    .await
+    {
+        rollback_failed_session(state, &owner.principal.id, &session_id)
+            .await
+            .map_err(|rollback_error| {
+                AppError::Internal(format!(
                     "{}; session rollback failed: {}",
                     error.message(),
                     rollback_error.message()
-                )));
-            }
+                ))
+            })?;
+        return Err(error);
+    }
+
+    let (session, checkout) = match prepare_session_startup(
+        state,
+        &owner.principal.id,
+        &owner.user,
+        &workspace,
+        session,
+        checkout_ref_override.as_deref(),
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => {
             return Err(error);
         }
     };
     if let Err(error) = persist_session_metadata(state, &owner.user, &session, true, None).await {
+        cleanup_checkout_path_best_effort(&checkout.working_dir);
+        persist_failed_session_lifecycle(
+            state,
+            &owner.user,
+            &workspace,
+            &session,
+            Some(&checkout),
+            error.message(),
+        )
+        .await;
         if let Err(rollback_error) =
             rollback_failed_session(state, &owner.principal.id, &session_id).await
         {
@@ -143,6 +185,12 @@ pub(super) async fn delete_live_session(
     session_id: &str,
 ) -> Result<(), AppError> {
     let owner = live_session_write_context(state, principal, "delete").await?;
+    let checkout_cleanup_path = match owner.user.as_ref() {
+        Some(user) => {
+            load_checkout_cleanup_path_best_effort(state, user, session_id, "delete").await
+        }
+        None => None,
+    };
     let snapshot = state
         .store
         .session_snapshot(&owner.principal.id, session_id)
@@ -162,6 +210,9 @@ pub(super) async fn delete_live_session(
             "delete",
         )
         .await;
+    }
+    if let Some(path) = checkout_cleanup_path.as_deref() {
+        cleanup_checkout_path_best_effort(path);
     }
 
     Ok(())
@@ -324,29 +375,333 @@ async fn persist_snapshot_result_best_effort(
     }
 }
 
-async fn seed_startup_hint(
+// Session creation eagerly primes ACP so checkout/startup failures surface before the
+// session is reported active. When startup hints are enabled, the priming output is
+// also appended to the transcript as the first assistant message.
+async fn prime_session_startup(
     state: &AppState,
     owner: &str,
-    session: SessionSnapshot,
+    session: &SessionSnapshot,
 ) -> Result<SessionSnapshot, AppError> {
-    if !state.startup_hints {
-        return Ok(session);
-    }
-
     let Some(hint) = state
         .reply_provider
         .prime_session(&session.id)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?
     else {
-        return Ok(session);
+        return Ok(session.clone());
     };
+    if !state.startup_hints {
+        return Ok(session.clone());
+    }
 
     state
         .store
         .append_assistant_message(owner, &session.id, hint)
         .await
         .map_err(AppError::from)
+}
+
+async fn prepare_session_startup(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: SessionSnapshot,
+    checkout_ref_override: Option<&str>,
+) -> Result<
+    (
+        SessionSnapshot,
+        crate::workspace_checkout::PreparedWorkspaceCheckout,
+    ),
+    AppError,
+> {
+    let session_id = session.id.clone();
+    if let Err(error) =
+        persist_session_lifecycle(state, user, workspace, &session, "cloning", None, None).await
+    {
+        persist_failed_session_lifecycle(state, user, workspace, &session, None, error.message())
+            .await;
+        rollback_failed_session(state, live_owner_id, &session_id)
+            .await
+            .map_err(|rollback_error| {
+                AppError::Internal(format!(
+                    "{}; session rollback failed: {}",
+                    error.message(),
+                    rollback_error.message()
+                ))
+            })?;
+        return Err(error);
+    }
+
+    let checkout = match state
+        .checkout_manager
+        .prepare_checkout(workspace, &session.id, checkout_ref_override)
+        .await
+    {
+        Ok(checkout) => checkout,
+        Err(error) => {
+            persist_failed_session_lifecycle(
+                state,
+                user,
+                workspace,
+                &session,
+                None,
+                error.message(),
+            )
+            .await;
+            rollback_failed_session(state, live_owner_id, &session_id)
+                .await
+                .map_err(|rollback_error| {
+                    AppError::Internal(format!(
+                        "{}; session rollback failed: {}",
+                        error,
+                        rollback_error.message()
+                    ))
+                })?;
+            return Err(map_checkout_error(error));
+        }
+    };
+
+    if let Err(error) = persist_session_lifecycle(
+        state,
+        user,
+        workspace,
+        &session,
+        "starting",
+        Some(&checkout),
+        None,
+    )
+    .await
+    {
+        cleanup_checkout_path_best_effort(&checkout.working_dir);
+        persist_failed_session_lifecycle(
+            state,
+            user,
+            workspace,
+            &session,
+            Some(&checkout),
+            error.message(),
+        )
+        .await;
+        rollback_failed_session(state, live_owner_id, &session_id)
+            .await
+            .map_err(|rollback_error| {
+                AppError::Internal(format!(
+                    "{}; session rollback failed: {}",
+                    error.message(),
+                    rollback_error.message()
+                ))
+            })?;
+        return Err(error);
+    }
+
+    if let Err(error) = state
+        .reply_provider
+        .bind_session(&session.id, checkout.working_dir.clone())
+        .await
+    {
+        cleanup_checkout_path_best_effort(&checkout.working_dir);
+        persist_failed_session_lifecycle(state, user, workspace, &session, Some(&checkout), &error)
+            .await;
+        rollback_failed_session(state, live_owner_id, &session_id)
+            .await
+            .map_err(|rollback_error| {
+                AppError::Internal(format!(
+                    "{error}; session rollback failed: {}",
+                    rollback_error.message()
+                ))
+            })?;
+        return Err(AppError::Internal(error));
+    }
+
+    match prime_session_startup(state, live_owner_id, &session).await {
+        Ok(session) => Ok((session, checkout)),
+        Err(error) => {
+            cleanup_checkout_path_best_effort(&checkout.working_dir);
+            persist_failed_session_lifecycle(
+                state,
+                user,
+                workspace,
+                &session,
+                Some(&checkout),
+                error.message(),
+            )
+            .await;
+            rollback_failed_session(state, live_owner_id, &session_id)
+                .await
+                .map_err(|rollback_error| {
+                    AppError::Internal(format!(
+                        "{}; session rollback failed: {}",
+                        error.message(),
+                        rollback_error.message()
+                    ))
+                })?;
+            Err(error)
+        }
+    }
+}
+
+async fn persist_session_lifecycle(
+    state: &AppState,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    snapshot: &SessionSnapshot,
+    status: &str,
+    checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
+    failure_reason: Option<&str>,
+) -> Result<(), AppError> {
+    let existing = state
+        .workspace_repository
+        .load_session_metadata(&user.user_id, &snapshot.id)
+        .await?;
+    let now = Utc::now();
+    let created_at = existing
+        .as_ref()
+        .map(|record| record.created_at)
+        .unwrap_or(now);
+    let record = SessionMetadataRecord {
+        session_id: snapshot.id.clone(),
+        workspace_id: workspace.workspace_id.clone(),
+        owner_user_id: user.user_id.clone(),
+        title: snapshot.title.clone(),
+        status: status.to_string(),
+        checkout_relpath: checkout
+            .map(|prepared| prepared.checkout_relpath.clone())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|record| record.checkout_relpath.clone())
+            }),
+        checkout_ref: checkout
+            .and_then(|prepared| prepared.checkout_ref.clone())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|record| record.checkout_ref.clone())
+            }),
+        checkout_commit_sha: checkout
+            .and_then(|prepared| prepared.checkout_commit_sha.clone())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|record| record.checkout_commit_sha.clone())
+            }),
+        failure_reason: failure_reason.map(str::to_string).or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|record| record.failure_reason.clone())
+        }),
+        detach_deadline_at: existing
+            .as_ref()
+            .and_then(|record| record.detach_deadline_at),
+        restartable_deadline_at: existing
+            .as_ref()
+            .and_then(|record| record.restartable_deadline_at),
+        created_at,
+        last_activity_at: existing
+            .as_ref()
+            .map(|record| record.last_activity_at)
+            .unwrap_or(created_at),
+        closed_at: existing.as_ref().and_then(|record| record.closed_at),
+        deleted_at: existing.as_ref().and_then(|record| record.deleted_at),
+    };
+    state
+        .workspace_repository
+        .save_session_metadata(&record)
+        .await
+        .map_err(AppError::from)
+}
+
+async fn persist_failed_session_lifecycle(
+    state: &AppState,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    snapshot: &SessionSnapshot,
+    checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
+    failure_reason: &str,
+) {
+    if let Err(persist_error) = persist_session_lifecycle(
+        state,
+        user,
+        workspace,
+        snapshot,
+        "failed",
+        checkout,
+        Some(failure_reason),
+    )
+    .await
+    {
+        tracing::warn!(
+            session_id = %snapshot.id,
+            owner_user_id = %user.user_id,
+            error = %persist_error.message(),
+            "failed to persist failed session lifecycle"
+        );
+    }
+}
+
+async fn load_checkout_cleanup_path_best_effort(
+    state: &AppState,
+    user: &UserRecord,
+    session_id: &str,
+    action: &'static str,
+) -> Option<PathBuf> {
+    match state
+        .workspace_repository
+        .load_session_metadata(&user.user_id, session_id)
+        .await
+    {
+        Ok(Some(metadata)) => match metadata.checkout_relpath.as_deref() {
+            Some(checkout_relpath) => match state
+                .checkout_manager
+                .resolve_checkout_path(checkout_relpath)
+            {
+                Some(path) => Some(path),
+                None => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        checkout_relpath,
+                        action,
+                        "persisted checkout path was invalid"
+                    );
+                    None
+                }
+            },
+            None => None,
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                action,
+                "failed to load session metadata for checkout cleanup: {}",
+                error.message()
+            );
+            None
+        }
+    }
+}
+
+fn cleanup_checkout_path_best_effort(path: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), "failed to remove session checkout: {error}");
+    }
+}
+
+fn map_checkout_error(error: crate::workspace_checkout::WorkspaceCheckoutError) -> AppError {
+    match error {
+        crate::workspace_checkout::WorkspaceCheckoutError::Validation(message) => {
+            AppError::BadRequest(message)
+        }
+        crate::workspace_checkout::WorkspaceCheckoutError::Io(message)
+        | crate::workspace_checkout::WorkspaceCheckoutError::Git(message) => {
+            tracing::error!(checkout_error = %message, "workspace checkout failed");
+            AppError::Internal("checkout preparation failed".to_string())
+        }
+    }
 }
 
 async fn rollback_failed_session(

@@ -1030,6 +1030,15 @@ impl BrowserHarness {
     }
 
     async fn open_workspace_chat_and_confirm(&self, name: &str) -> Result<()> {
+        self.open_workspace_chat_and_confirm_with_ref(name, None)
+            .await
+    }
+
+    async fn open_workspace_chat_and_confirm_with_ref(
+        &self,
+        name: &str,
+        checkout_ref: Option<&str>,
+    ) -> Result<()> {
         self.wait_for_workspace_action_button(
             ".workspace-action-btn",
             name,
@@ -1039,6 +1048,34 @@ impl BrowserHarness {
         .await?;
         self.click_workspace_action_button(".workspace-action-btn", name, "New chat")
             .await?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-modal-overlay'));",
+            Duration::from_secs(10),
+            "start chat modal",
+        )
+        .await?;
+        if let Some(checkout_ref) = checkout_ref {
+            let input = self
+                .client
+                .find(Locator::Css(".workspace-modal input[type='text']"))
+                .await
+                .context("finding the start chat branch input")?;
+            input
+                .clear()
+                .await
+                .context("clearing the start chat branch input")?;
+            input
+                .send_keys(checkout_ref)
+                .await
+                .context("typing the start chat branch override")?;
+        }
+        self.client
+            .find(Locator::Css(".workspace-modal .account-form__submit"))
+            .await
+            .context("finding the start chat submit button")?
+            .click()
+            .await
+            .context("submitting the start chat form")?;
         self.wait_for_session_page().await
     }
 

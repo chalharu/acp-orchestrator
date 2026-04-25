@@ -1,11 +1,12 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Extension, Path, State},
 };
 
 use crate::{
     auth::AuthenticatedPrincipal,
-    contract_sessions::CreateSessionResponse,
+    contract_sessions::{CreateSessionRequest, CreateSessionResponse},
     contract_workspaces::{
         CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
         UpdateWorkspaceRequest, UpdateWorkspaceResponse,
@@ -14,8 +15,8 @@ use crate::{
 };
 
 use super::super::{
-    AppError, AppState, session_service::create_session_snapshot_for_workspace,
-    workspace_service::workspace_detail,
+    AppError, AppState, session_api::parse_optional_json_body,
+    session_service::create_session_snapshot_for_workspace, workspace_service::workspace_detail,
 };
 
 pub(in crate::server) async fn create_workspace(
@@ -82,8 +83,16 @@ pub(in crate::server) async fn create_workspace_session(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
+    body: Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateSessionResponse>), AppError> {
-    let session = create_session_snapshot_for_workspace(&state, principal, &workspace_id).await?;
+    let request = parse_optional_json_body::<CreateSessionRequest>(&body)?.unwrap_or_default();
+    let session = create_session_snapshot_for_workspace(
+        &state,
+        principal,
+        &workspace_id,
+        request.checkout_ref,
+    )
+    .await?;
 
     Ok((
         axum::http::StatusCode::CREATED,

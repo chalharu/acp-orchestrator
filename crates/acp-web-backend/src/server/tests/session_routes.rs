@@ -21,6 +21,7 @@ async fn create_persisted_workspace_session(
         State(state.clone()),
         Path(workspace.workspace_id),
         principal,
+        axum::body::Bytes::new(),
     )
     .await
     .expect("workspace session should create")
@@ -135,15 +136,20 @@ async fn create_session_seeds_startup_hints_when_enabled() {
         reply_provider: Arc::new(StartupHintProvider {
             hint: "bundled mock verification ready".to_string(),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
     let _workspace =
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
             .await;
-    let response = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect("session creation should succeed");
+    let response = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("session creation should succeed");
 
     assert_eq!(response.0, StatusCode::CREATED);
     assert_eq!(response.1.0.session.messages.len(), 1);
@@ -162,15 +168,20 @@ async fn create_session_skips_startup_hints_when_disabled() {
         reply_provider: Arc::new(StartupHintProvider {
             hint: "should stay hidden".to_string(),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
     let _workspace =
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
             .await;
-    let response = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect("session creation should succeed");
+    let response = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("session creation should succeed");
 
     assert_eq!(response.0, StatusCode::CREATED);
     assert!(response.1.0.session.messages.is_empty());
@@ -192,15 +203,20 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         store,
         workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(NoStartupHintProvider),
+        checkout_manager: test_checkout_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
     let _workspace =
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
             .await;
-    let response = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect("session creation should succeed");
+    let response = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("session creation should succeed");
 
     assert_eq!(response.0, StatusCode::CREATED);
     assert!(response.1.0.session.messages.is_empty());
@@ -216,15 +232,20 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         reply_provider: Arc::new(FailingStartupHintProvider {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
     let _workspace =
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
             .await;
-    let error = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect_err("failed startup hint priming should fail the request");
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("failed startup hint priming should fail the request");
 
     assert!(
         matches!(error, AppError::Internal(message) if message.contains("startup hint priming failed"))
@@ -258,15 +279,20 @@ async fn create_session_reports_rollback_failures() {
             owner: "alice".to_string(),
             forgotten_sessions: forgotten_sessions.clone(),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
     let _workspace =
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
             .await;
-    let error = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect_err("rollback failures should surface as internal errors");
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("rollback failures should surface as internal errors");
 
     assert!(matches!(
         error,
@@ -292,9 +318,13 @@ async fn create_session_creates_a_standard_workspace_when_none_exist() {
         }),
     );
 
-    let response = create_session(State(state.clone()), bearer_principal("alice"))
-        .await
-        .expect("root create should create a session when no workspaces exist");
+    let response = create_session(
+        State(state.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("root create should create a session when no workspaces exist");
     let listed = list_workspaces(State(state), bearer_principal("alice"))
         .await
         .expect("workspace list should succeed after legacy session creation");
@@ -305,6 +335,181 @@ async fn create_session_creates_a_standard_workspace_when_none_exist() {
     assert_eq!(
         response.1.0.session.workspace_id,
         listed.0.workspaces[0].workspace_id
+    );
+}
+
+#[tokio::test]
+async fn create_session_persists_checkout_metadata_and_binds_before_priming() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state = AppState::with_workspace_repository(
+        store,
+        metadata_test_workspace_store(),
+        reply_provider.clone(),
+    );
+    let workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
+
+    let response = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::from(
+            serde_json::to_vec(&crate::contract_sessions::CreateSessionRequest {
+                checkout_ref: Some("refs/heads/feature".to_string()),
+            })
+            .expect("request should serialize"),
+        ),
+    )
+    .await
+    .expect("session creation should succeed");
+    let session_id = response.1.0.session.id.clone();
+
+    let user = state
+        .workspace_repository
+        .materialize_user(&bearer_principal("alice").0)
+        .await
+        .expect("principal materialization should succeed");
+    let metadata = state
+        .workspace_repository
+        .load_session_metadata(&user.user_id, &session_id)
+        .await
+        .expect("metadata should load")
+        .expect("session metadata should exist");
+    let expected_relpath = format!("session-checkouts/{session_id}");
+
+    assert_eq!(metadata.status, "active");
+    assert_eq!(metadata.checkout_ref.as_deref(), Some("refs/heads/feature"));
+    assert_eq!(metadata.checkout_commit_sha.as_deref(), Some("test-commit"));
+    assert_eq!(
+        metadata.checkout_relpath.as_deref(),
+        Some(expected_relpath.as_str())
+    );
+
+    let calls = reply_provider
+        .calls
+        .lock()
+        .expect("calls should not poison")
+        .clone();
+    assert_eq!(calls, vec!["bind".to_string(), "prime".to_string()]);
+    let bindings = reply_provider
+        .bindings
+        .lock()
+        .expect("bindings should not poison");
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].0, session_id);
+}
+
+#[tokio::test]
+async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        metadata_test_workspace_store(),
+        reply_provider.clone(),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+    let metadata = state
+        .workspace_repository
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("metadata should load")
+        .expect("session metadata should exist");
+    let checkout_path = state
+        .checkout_manager
+        .resolve_checkout_path(
+            metadata
+                .checkout_relpath
+                .as_deref()
+                .expect("checkout relpath should be recorded"),
+        )
+        .expect("checkout relpath should resolve");
+
+    reply_provider
+        .calls
+        .lock()
+        .expect("calls should not poison")
+        .clear();
+    reply_provider
+        .bindings
+        .lock()
+        .expect("bindings should not poison")
+        .clear();
+    store
+        .delete_sessions_for_owners(&["alice".to_string()])
+        .await;
+
+    let restored = get_session(State(state), Path(created.id.clone()), principal)
+        .await
+        .expect("durable session should restore and rebind");
+
+    assert_eq!(restored.0.session.id, created.id);
+    assert_eq!(
+        reply_provider
+            .calls
+            .lock()
+            .expect("calls should not poison")
+            .as_slice(),
+        ["bind"]
+    );
+    assert_eq!(
+        reply_provider
+            .bindings
+            .lock()
+            .expect("bindings should not poison")
+            .as_slice(),
+        &[(created.id, checkout_path)]
+    );
+}
+
+#[tokio::test]
+async fn delete_session_removes_the_persisted_checkout_directory() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state =
+        AppState::with_workspace_repository(store, metadata_test_workspace_store(), reply_provider);
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+    let metadata = state
+        .workspace_repository
+        .load_session_metadata(&user.user_id, &created.id)
+        .await
+        .expect("metadata should load")
+        .expect("session metadata should exist");
+    let checkout_path = state
+        .checkout_manager
+        .resolve_checkout_path(
+            metadata
+                .checkout_relpath
+                .as_deref()
+                .expect("checkout relpath should be recorded"),
+        )
+        .expect("checkout relpath should resolve");
+    assert!(
+        checkout_path.exists(),
+        "session startup should create a checkout"
+    );
+
+    let _ = delete_session(State(state), Path(created.id), principal)
+        .await
+        .expect("session delete should succeed");
+
+    assert!(
+        !checkout_path.exists(),
+        "session deletion should remove the checkout directory"
     );
 }
 
@@ -323,9 +528,13 @@ async fn create_session_requires_explicit_workspace_selection_when_multiple_work
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace B")
             .await;
 
-    let error = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect_err("root create should reject ambiguous workspace selection");
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("root create should reject ambiguous workspace selection");
 
     assert!(matches!(
         error,
@@ -429,9 +638,13 @@ async fn create_session_scrubs_workspace_store_failures() {
         }),
     );
 
-    let error = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect_err("workspace store failures should surface as internal errors");
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("workspace store failures should surface as internal errors");
 
     assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
 }

@@ -524,6 +524,7 @@ fn validate_workspace_default_ref(
         ));
     }
     if default_ref.chars().any(char::is_whitespace)
+        || default_ref.starts_with('-')
         || default_ref.ends_with('.')
         || default_ref.starts_with('/')
         || default_ref.ends_with('/')

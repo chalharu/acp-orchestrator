@@ -27,12 +27,18 @@ pub(super) struct WorkspacesPageState {
     pub(super) workspace_sessions: RwSignal<HashMap<String, Vec<SessionListItem>>>,
     pub(super) show_create_modal: RwSignal<bool>,
     pub(super) create_name: RwSignal<String>,
+    pub(super) create_upstream_url: RwSignal<String>,
+    pub(super) create_default_ref: RwSignal<String>,
     pub(super) creating: RwSignal<bool>,
     pub(super) editing_workspace_id: RwSignal<Option<String>>,
     pub(super) edit_name_draft: RwSignal<String>,
     pub(super) saving_workspace_id: RwSignal<Option<String>>,
     pub(super) deleting_workspace_id: RwSignal<Option<String>>,
     pub(super) opening_chat_workspace_id: RwSignal<Option<String>>,
+    pub(super) show_start_chat_modal: RwSignal<bool>,
+    pub(super) start_chat_workspace_id: RwSignal<Option<String>>,
+    pub(super) start_chat_workspace_name: RwSignal<String>,
+    pub(super) start_chat_checkout_ref: RwSignal<String>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -47,12 +53,18 @@ impl WorkspacesPageState {
             workspace_sessions: RwSignal::new(HashMap::new()),
             show_create_modal: RwSignal::new(false),
             create_name: RwSignal::new(String::new()),
+            create_upstream_url: RwSignal::new(String::new()),
+            create_default_ref: RwSignal::new(String::new()),
             creating: RwSignal::new(false),
             editing_workspace_id: RwSignal::new(None::<String>),
             edit_name_draft: RwSignal::new(String::new()),
             saving_workspace_id: RwSignal::new(None::<String>),
             deleting_workspace_id: RwSignal::new(None::<String>),
             opening_chat_workspace_id: RwSignal::new(None::<String>),
+            show_start_chat_modal: RwSignal::new(false),
+            start_chat_workspace_id: RwSignal::new(None::<String>),
+            start_chat_workspace_name: RwSignal::new(String::new()),
+            start_chat_checkout_ref: RwSignal::new(String::new()),
             checked: RwSignal::new(false),
         }
     }
@@ -209,12 +221,18 @@ mod tests {
             assert!(state.workspace_sessions.get().is_empty());
             assert!(!state.show_create_modal.get());
             assert!(state.create_name.get().is_empty());
+            assert!(state.create_upstream_url.get().is_empty());
+            assert!(state.create_default_ref.get().is_empty());
             assert!(!state.creating.get());
             assert!(state.editing_workspace_id.get().is_none());
             assert!(state.edit_name_draft.get().is_empty());
             assert!(state.saving_workspace_id.get().is_none());
             assert!(state.deleting_workspace_id.get().is_none());
             assert!(state.opening_chat_workspace_id.get().is_none());
+            assert!(!state.show_start_chat_modal.get());
+            assert!(state.start_chat_workspace_id.get().is_none());
+            assert!(state.start_chat_workspace_name.get().is_empty());
+            assert!(state.start_chat_checkout_ref.get().is_empty());
             assert!(!state.checked.get());
         });
     }

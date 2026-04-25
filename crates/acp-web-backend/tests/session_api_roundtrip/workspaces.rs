@@ -1,4 +1,5 @@
 use super::support::*;
+use acp_web_backend::contract_sessions::CreateSessionRequest;
 use acp_web_backend::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
 async fn workspace_stack() -> Result<TestStack> {
@@ -21,9 +22,26 @@ fn repo_workspace_request(name: &str) -> CreateWorkspaceRequest {
     }
 }
 
+fn local_workspace_request(name: &str) -> CreateWorkspaceRequest {
+    CreateWorkspaceRequest {
+        name: name.to_string(),
+        upstream_url: None,
+        default_ref: None,
+        credential_reference_id: None,
+    }
+}
+
 async fn create_repo_workspace(stack: &TestStack, name: &str) -> Result<String> {
     Ok(stack
         .create_workspace("alice", &repo_workspace_request(name))
+        .await?
+        .workspace
+        .workspace_id)
+}
+
+async fn create_local_workspace(stack: &TestStack, name: &str) -> Result<String> {
+    Ok(stack
+        .create_workspace("alice", &local_workspace_request(name))
         .await?
         .workspace
         .workspace_id)
@@ -110,8 +128,8 @@ async fn workspace_crud_works_over_http() -> Result<()> {
 #[tokio::test]
 async fn workspace_sessions_are_scoped_over_http() -> Result<()> {
     let stack = workspace_stack().await?;
-    let first_workspace_id = create_repo_workspace(&stack, "Repo").await?;
-    let second_workspace_id = create_repo_workspace(&stack, "Repo Two").await?;
+    let first_workspace_id = create_local_workspace(&stack, "Repo").await?;
+    let second_workspace_id = create_local_workspace(&stack, "Repo Two").await?;
     let first = stack
         .create_workspace_session("alice", &first_workspace_id)
         .await?;
@@ -139,5 +157,26 @@ async fn workspace_sessions_are_scoped_over_http() -> Result<()> {
         &[&first_workspace_id, &second_workspace_id],
     )
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_session_creation_accepts_empty_and_override_bodies_over_http() -> Result<()> {
+    let stack = workspace_stack().await?;
+    let workspace_id = create_local_workspace(&stack, "Repo").await?;
+
+    let empty = stack
+        .create_workspace_session("alice", &workspace_id)
+        .await?;
+    let override_request = CreateSessionRequest {
+        checkout_ref: Some("HEAD".to_string()),
+    };
+    let overridden = stack
+        .create_workspace_session_with_request("alice", &workspace_id, Some(&override_request))
+        .await?;
+
+    assert_eq!(empty.session.workspace_id, workspace_id);
+    assert_eq!(overridden.session.workspace_id, workspace_id);
+    assert_ne!(empty.session.id, overridden.session.id);
     Ok(())
 }

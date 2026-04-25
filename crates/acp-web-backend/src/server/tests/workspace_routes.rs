@@ -1,4 +1,5 @@
 use super::*;
+use crate::contract_sessions::CreateSessionRequest;
 use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
 fn workspace_state() -> AppState {
@@ -39,12 +40,45 @@ async fn create_workspace_session_for(
         State(state.clone()),
         Path(workspace_id.to_string()),
         bearer_principal("alice"),
+        axum::body::Bytes::new(),
     )
     .await
     .expect("workspace session should create")
     .1
     .0
     .session
+}
+
+#[tokio::test]
+async fn workspace_session_routes_accept_empty_and_override_request_bodies() {
+    let state = workspace_state();
+    let workspace = create_owned_workspace(&state, "Compat").await;
+
+    let empty_body = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("empty session body should remain supported");
+
+    let override_body = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::from(
+            serde_json::to_vec(&CreateSessionRequest {
+                checkout_ref: Some("refs/heads/release".to_string()),
+            })
+            .expect("request should serialize"),
+        ),
+    )
+    .await
+    .expect("override session body should be accepted");
+
+    assert_eq!(empty_body.0, StatusCode::CREATED);
+    assert_eq!(override_body.0, StatusCode::CREATED);
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 use super::support::*;
+use acp_mock::MANUAL_FAILURE_TRIGGER;
 
 async fn assert_invalid_rename_title(title: String, expected_message: &str) -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
@@ -258,7 +259,7 @@ async fn getting_a_session_does_not_reorder_the_owned_session_list() -> Result<(
 async fn prompt_submission_moves_session_to_front_of_list() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        acp_server: "127.0.0.1:9".to_string(),
+        acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,
@@ -287,7 +288,7 @@ async fn prompt_submission_moves_session_to_front_of_list() -> Result<()> {
 async fn session_title_defaults_to_new_chat_and_auto_sets_from_first_prompt() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        acp_server: "127.0.0.1:9".to_string(),
+        acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,
@@ -359,7 +360,7 @@ async fn rename_session_rejects_titles_over_500_characters() -> Result<()> {
 async fn manual_rename_prevents_auto_title_from_first_prompt() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        acp_server: "127.0.0.1:9".to_string(),
+        acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,
@@ -511,7 +512,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
 async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        acp_server: "127.0.0.1:9".to_string(),
+        acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,
@@ -527,7 +528,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
     ));
 
     stack
-        .submit_prompt("alice", &session.session.id, "this will fail")
+        .submit_prompt("alice", &session.session.id, MANUAL_FAILURE_TRIGGER)
         .await?;
 
     let user_message = expect_next_event(&mut events).await?;

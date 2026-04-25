@@ -89,6 +89,10 @@ async fn restore_durable_session(
     owner: &OwnerContext,
     session_id: &str,
 ) -> Result<SessionSnapshot, AppError> {
+    let metadata = state
+        .workspace_repository
+        .load_session_metadata(&owner.user.user_id, session_id)
+        .await?;
     let Some(durable) = state
         .workspace_repository
         .load_session_snapshot(&owner.user.user_id, session_id)
@@ -101,9 +105,52 @@ async fn restore_durable_session(
         last_activity_at,
     } = durable;
 
-    state
+    let restored = state
         .store
         .restore_session(&owner.principal.id, session, last_activity_at)
         .await
-        .map_err(AppError::from)
+        .map_err(AppError::from)?;
+    if let Some(checkout_relpath) = metadata
+        .as_ref()
+        .and_then(|record| record.checkout_relpath.as_deref())
+    {
+        let Some(checkout_path) = state
+            .checkout_manager
+            .resolve_checkout_path(checkout_relpath)
+        else {
+            state.reply_provider.forget_session(&restored.id);
+            state
+                .store
+                .discard_session(&owner.principal.id, &restored.id)
+                .await
+                .map_err(|rollback_error| {
+                    AppError::Internal(format!(
+                        "persisted checkout path is invalid; restored session rollback failed: {}",
+                        rollback_error.message()
+                    ))
+                })?;
+            return Err(AppError::Internal(
+                "persisted checkout path is invalid".to_string(),
+            ));
+        };
+        if let Err(error) = state
+            .reply_provider
+            .bind_session(&restored.id, checkout_path)
+            .await
+        {
+            state.reply_provider.forget_session(&restored.id);
+            state
+                .store
+                .discard_session(&owner.principal.id, &restored.id)
+                .await
+                .map_err(|rollback_error| {
+                    AppError::Internal(format!(
+                        "{error}; restored session rollback failed: {}",
+                        rollback_error.message()
+                    ))
+                })?;
+            return Err(AppError::Internal(error));
+        }
+    }
+    Ok(restored)
 }

@@ -4,6 +4,7 @@ use acp_contracts_sessions::SessionListItem;
 use acp_contracts_workspaces::WorkspaceSummary;
 use leptos::prelude::*;
 
+use crate::components::ErrorBanner;
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 use crate::presentation::{AppIcon, app_icon_view};
@@ -34,6 +35,7 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
                 <Show when=move || state.workspaces.get().is_empty()>
                     <p class="muted">"No workspaces yet. Create one using the button above."</p>
                 </Show>
+                <WorkspaceStartChatModal state />
             </div>
         </Show>
     }
@@ -56,7 +58,10 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
         .into_any();
 
     view! {
-        <div class="workspace-dashboard">{cards}</div>
+        <div class="workspace-dashboard">
+            {cards}
+            <WorkspaceStartChatModal state />
+        </div>
     }
     .into_any()
 }
@@ -76,6 +81,7 @@ fn workspace_loading_view() -> AnyView {
 struct WorkspaceCardDisplay {
     workspace_id: String,
     workspace_name: String,
+    workspace_default_ref: Option<String>,
     workspace_status: String,
     created_label: String,
 }
@@ -84,6 +90,7 @@ fn workspace_card_display(workspace: &WorkspaceSummary) -> WorkspaceCardDisplay 
     WorkspaceCardDisplay {
         workspace_id: workspace.workspace_id.clone(),
         workspace_name: workspace.name.clone(),
+        workspace_default_ref: workspace.default_ref.clone(),
         workspace_status: workspace.status.clone(),
         created_label: workspace.created_at.format("%Y-%m-%d").to_string(),
     }
@@ -102,7 +109,12 @@ fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> imp
 
     let sessions = workspace_sessions_signal(state, &workspace_id);
 
-    let on_open_chat = workspace_open_chat_handler(workspace_id.clone(), state);
+    let on_open_chat = workspace_open_chat_handler(
+        workspace_id.clone(),
+        display.workspace_name.clone(),
+        display.workspace_default_ref.clone(),
+        state,
+    );
     let on_edit =
         workspace_edit_handler(workspace_id.clone(), display.workspace_name.clone(), state);
     let on_save = workspace_save_handler(workspace_id.clone(), state);
@@ -335,6 +347,92 @@ fn workspace_card_open_button_wasm(
     }
 }
 
+#[component]
+fn WorkspaceStartChatModal(state: WorkspacesPageState) -> impl IntoView {
+    workspace_start_chat_modal(state)
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_start_chat_modal(state: WorkspacesPageState) -> impl IntoView {
+    view! {
+        <Show when=move || state.show_start_chat_modal.get()>
+            {workspace_start_chat_modal_view(state, workspace_start_chat_submit_handler(state))}
+        </Show>
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_start_chat_modal(state: WorkspacesPageState) -> impl IntoView {
+    if !state.show_start_chat_modal.get_untracked() {
+        return ().into_any();
+    }
+
+    workspace_start_chat_modal_view(state, workspace_start_chat_submit_handler(state)).into_any()
+}
+
+fn workspace_start_chat_modal_view(
+    state: WorkspacesPageState,
+    on_submit: impl Fn(web_sys::SubmitEvent) + Copy + 'static,
+) -> impl IntoView {
+    let workspace_name = Signal::derive(move || state.start_chat_workspace_name.get());
+    let checkout_ref = Signal::derive(move || state.start_chat_checkout_ref.get());
+    let opening = Signal::derive(move || state.opening_chat_workspace_id.get().is_some());
+    let error = Signal::derive(move || state.error.get());
+    let on_cancel = workspace_start_chat_cancel_handler(state);
+
+    view! {
+        <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="Start workspace chat">
+            <div class="workspace-modal">
+                <div class="workspace-modal__header">
+                    <h2 class="workspace-modal__title">
+                        "Start chat in " {move || workspace_name.get()}
+                    </h2>
+                    <button
+                        type="button"
+                        class="workspace-modal__close"
+                        on:click=on_cancel
+                        aria-label="Close"
+                        title="Close"
+                    >
+                        {app_icon_view(AppIcon::Cancel)}
+                        <span class="sr-only">"Close"</span>
+                    </button>
+                </div>
+                <p class="muted">"Optionally override the checkout branch or ref for this chat."</p>
+                <ErrorBanner message=error />
+                <form class="account-form account-form--create" on:submit=on_submit>
+                    <label class="account-form__field">
+                        <span>"Branch / ref (optional)"</span>
+                        <input
+                            type="text"
+                            prop:value=checkout_ref
+                            on:input=move |event| state.start_chat_checkout_ref.set(event_target_value(&event))
+                            placeholder="refs/heads/main"
+                        />
+                    </label>
+                    <div class="workspace-modal__actions">
+                        <button
+                            type="submit"
+                            class="account-form__submit"
+                            prop:disabled=move || opening.get()
+                        >
+                            {move || workspace_new_chat_label(opening.get())}
+                        </button>
+                        <button
+                            type="button"
+                            class="account-form__cancel"
+                            on:click=on_cancel
+                            prop:disabled=move || opening.get()
+                        >
+                            "Cancel"
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn workspace_card_name_cell_host(
     display: WorkspaceCardDisplay,
@@ -558,6 +656,8 @@ fn workspace_id_flag(signal: RwSignal<Option<String>>, workspace_id: &str) -> bo
 #[cfg(target_family = "wasm")]
 fn workspace_open_chat_handler(
     workspace_id: String,
+    workspace_name: String,
+    default_ref: Option<String>,
     state: WorkspacesPageState,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_| {
@@ -565,14 +665,44 @@ fn workspace_open_chat_handler(
             return;
         }
 
+        state.error.set(None);
+        state.notice.set(None);
+        state
+            .start_chat_workspace_id
+            .set(Some(workspace_id.clone()));
+        state.start_chat_workspace_name.set(workspace_name.clone());
+        state
+            .start_chat_checkout_ref
+            .set(default_ref.clone().unwrap_or_default());
+        state.show_start_chat_modal.set(true);
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_start_chat_submit_handler(
+    state: WorkspacesPageState,
+) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
+    move |event: web_sys::SubmitEvent| {
+        event.prevent_default();
+        if state.opening_chat_workspace_id.get_untracked().is_some() {
+            return;
+        }
+
+        let Some(workspace_id) = state.start_chat_workspace_id.get_untracked() else {
+            state.error.set(Some(
+                "Choose a workspace before starting a chat.".to_string(),
+            ));
+            return;
+        };
+
         state
             .opening_chat_workspace_id
             .set(Some(workspace_id.clone()));
         state.error.set(None);
         state.notice.set(None);
-        let workspace_id = workspace_id.clone();
+        let checkout_ref = state.start_chat_checkout_ref.get_untracked();
         leptos::task::spawn_local(async move {
-            match api::create_workspace_session(&workspace_id).await {
+            match api::create_workspace_session(&workspace_id, Some(checkout_ref)).await {
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
                     if let Err(message) =
@@ -580,7 +710,10 @@ fn workspace_open_chat_handler(
                     {
                         state.opening_chat_workspace_id.set(None);
                         state.error.set(Some(message));
+                        return;
                     }
+                    close_workspace_start_chat_modal(state);
+                    state.opening_chat_workspace_id.set(None);
                 }
                 Err(error) => {
                     state.opening_chat_workspace_id.set(None);
@@ -588,7 +721,28 @@ fn workspace_open_chat_handler(
                 }
             }
         });
-    })
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_start_chat_submit_handler(
+    state: WorkspacesPageState,
+) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
+    move |_event: web_sys::SubmitEvent| close_workspace_start_chat_modal(state)
+}
+
+fn workspace_start_chat_cancel_handler(
+    state: WorkspacesPageState,
+) -> impl Fn(web_sys::MouseEvent) + Copy + 'static {
+    move |_| close_workspace_start_chat_modal(state)
+}
+
+fn close_workspace_start_chat_modal(state: WorkspacesPageState) {
+    state.show_start_chat_modal.set(false);
+    state.start_chat_workspace_id.set(None);
+    state.start_chat_workspace_name.set(String::new());
+    state.start_chat_checkout_ref.set(String::new());
+    state.error.set(None);
 }
 
 #[cfg(target_family = "wasm")]

@@ -5,7 +5,7 @@ use std::time::Duration;
 async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
-        acp_server: "127.0.0.1:9".to_string(),
+        acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
         frontend_dist: None,

@@ -285,7 +285,7 @@ fn session_sidebar_spawn_new_chat_request(
     creating: RwSignal<bool>,
 ) {
     leptos::task::spawn_local(async move {
-        match api::create_workspace_session(&workspace_id).await {
+        match api::create_workspace_session(&workspace_id, None).await {
             Ok(session_id) => {
                 session_sidebar_complete_new_chat(session_id, sidebar_error, creating);
             }

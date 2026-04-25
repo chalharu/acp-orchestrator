@@ -1,5 +1,25 @@
 use super::*;
 
+#[derive(Debug)]
+struct FailingCheckoutManager;
+
+#[async_trait::async_trait]
+impl crate::workspace_checkout::WorkspaceCheckoutManager for FailingCheckoutManager {
+    async fn prepare_checkout(
+        &self,
+        _workspace: &WorkspaceRecord,
+        _session_id: &str,
+        _checkout_ref_override: Option<&str>,
+    ) -> Result<
+        crate::workspace_checkout::PreparedWorkspaceCheckout,
+        crate::workspace_checkout::WorkspaceCheckoutError,
+    > {
+        Err(crate::workspace_checkout::WorkspaceCheckoutError::Git(
+            "sensitive git detail".to_string(),
+        ))
+    }
+}
+
 #[test]
 fn app_state_build_errors_format_and_expose_sources() {
     let reply_error = AppStateBuildError::from(MockClientError::TurnRuntime {
@@ -133,13 +153,18 @@ async fn create_session_reports_metadata_rollback_failures() {
         reply_provider: Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
 
-    let error = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect_err("metadata rollback failures should surface as internal errors");
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("metadata rollback failures should surface as internal errors");
 
     assert!(matches!(
         error,
@@ -163,13 +188,18 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         reply_provider: Arc::new(TrackingReplyProvider {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
 
-    let error = create_session(State(state), bearer_principal("alice"))
-        .await
-        .expect_err("metadata persistence failures should roll back the session");
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("metadata persistence failures should roll back the session");
 
     assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
     let snapshot_error = store
@@ -177,6 +207,82 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         .await
         .expect_err("failed creations should be rolled back");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+#[tokio::test]
+async fn create_session_marks_provisioning_rows_failed_when_cloning_persistence_fails() {
+    let store = Arc::new(SessionStore::new(1));
+    let workspace_repository = Arc::new(
+        RollbackFailingMetadataWorkspaceStore::with_save_failure_on_attempt(
+            store.clone(),
+            "alice",
+            "cloning lifecycle failed",
+            2,
+        ),
+    );
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository: workspace_repository.clone(),
+        reply_provider: Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+        checkout_manager: test_checkout_manager(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let error = create_session(
+        State(state),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("cloning lifecycle persistence failures should fail the request");
+
+    assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
+    let saved_metadata = workspace_repository
+        .saved_metadata
+        .lock()
+        .expect("saved metadata should not poison")
+        .clone();
+    assert_eq!(saved_metadata.len(), 2);
+    assert_eq!(saved_metadata[0].status, "provisioning");
+    assert_eq!(saved_metadata[1].status, "failed");
+    assert_eq!(saved_metadata[0].session_id, saved_metadata[1].session_id);
+    let snapshot_error = store
+        .session_snapshot("alice", &saved_metadata[0].session_id)
+        .await
+        .expect_err("failed creations should be rolled back");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+#[tokio::test]
+async fn create_session_sanitizes_checkout_failures() {
+    let state = AppState::with_workspace_repository_and_checkout_manager(
+        Arc::new(SessionStore::new(4)),
+        metadata_test_workspace_store(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(FailingCheckoutManager),
+    );
+    let workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
+
+    let error = create_workspace_session(
+        State(state),
+        Path(workspace.workspace_id),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("checkout failures should surface as internal errors");
+
+    assert!(matches!(
+        error,
+        AppError::Internal(message) if message == "checkout preparation failed"
+    ));
 }
 
 #[tokio::test]

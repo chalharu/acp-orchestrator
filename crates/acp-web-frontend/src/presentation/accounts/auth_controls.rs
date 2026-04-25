@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use crate::infrastructure::api;
 use crate::routing::app_session_path;
 
-use super::super::workspaces::workspaces_path_with_return_to;
+use super::super::{AppIcon, app_icon_view, workspaces_path_with_return_to};
 use super::shared::{
     accounts_path_with_return_to, sign_in_path_with_return_to, sign_out_button_label,
     sign_out_handler,
@@ -85,7 +85,7 @@ fn session_sidebar_auth_controls_view(
 
 fn session_sidebar_workspaces_link_view(workspaces_href: &str, signed_in: bool) -> AnyView {
     if signed_in {
-        session_sidebar_icon_link_view(workspaces_href, "Workspaces", "▦")
+        session_sidebar_icon_link_view(workspaces_href, "Workspaces", AppIcon::Workspaces)
     } else {
         ().into_any()
     }
@@ -93,13 +93,13 @@ fn session_sidebar_workspaces_link_view(workspaces_href: &str, signed_in: bool) 
 
 fn session_sidebar_accounts_link_view(accounts_href: &str, is_admin: bool) -> AnyView {
     if is_admin {
-        session_sidebar_icon_link_view(accounts_href, "Accounts", "⚙")
+        session_sidebar_icon_link_view(accounts_href, "Accounts", AppIcon::Accounts)
     } else {
         ().into_any()
     }
 }
 
-fn session_sidebar_icon_link_view(href: &str, label: &'static str, icon: &'static str) -> AnyView {
+fn session_sidebar_icon_link_view(href: &str, label: &'static str, icon: AppIcon) -> AnyView {
     view! {
         <a
             class="session-sidebar__secondary-link session-sidebar__secondary-icon-link"
@@ -108,7 +108,7 @@ fn session_sidebar_icon_link_view(href: &str, label: &'static str, icon: &'stati
             title=label
         >
             <span class="session-sidebar__secondary-link-icon" aria-hidden="true">
-                {icon}
+                {app_icon_view(icon)}
             </span>
             <span class="sr-only">{label}</span>
         </a>

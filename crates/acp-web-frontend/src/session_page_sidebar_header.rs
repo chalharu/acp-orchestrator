@@ -6,7 +6,9 @@ use crate::{
     infrastructure::api,
 };
 use crate::{
-    presentation::{SessionSidebarAuthControls, workspaces_path_with_return_to},
+    presentation::{
+        AppIcon, SessionSidebarAuthControls, app_icon_view, workspaces_path_with_return_to,
+    },
     routing::app_session_path,
 };
 
@@ -152,8 +154,8 @@ fn session_sidebar_finish_new_chat_failure(
     sidebar_error.set(Some(message));
 }
 
-fn session_sidebar_workspaces_icon() -> &'static str {
-    "▦"
+fn session_sidebar_workspaces_icon() -> AppIcon {
+    AppIcon::Workspaces
 }
 
 fn session_sidebar_workspaces_label() -> &'static str {
@@ -173,7 +175,7 @@ fn session_sidebar_workspaces_link(href: &str) -> AnyView {
             title=session_sidebar_workspaces_label()
         >
             <span class="session-sidebar__new-link-icon" aria-hidden="true">
-                {session_sidebar_workspaces_icon()}
+                {app_icon_view(session_sidebar_workspaces_icon())}
             </span>
             <span class="session-sidebar__new-link-label">
                 {session_sidebar_workspaces_label()}
@@ -399,7 +401,7 @@ mod tests {
             session_sidebar_new_chat_unavailable_message(),
             "Current workspace is unavailable. Open Workspaces to choose another workspace."
         );
-        assert_eq!(session_sidebar_workspaces_icon(), "▦");
+        assert_eq!(session_sidebar_workspaces_icon(), AppIcon::Workspaces);
         assert_eq!(session_sidebar_workspaces_label(), "Workspaces");
         assert_eq!(
             session_sidebar_workspaces_href("session-1"),

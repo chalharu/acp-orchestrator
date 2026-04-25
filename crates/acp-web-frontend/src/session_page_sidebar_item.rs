@@ -813,18 +813,15 @@ mod tests {
 
     #[test]
     fn sidebar_action_labels_and_icons_track_progress_state() {
+        let delete_label = session_sidebar_delete_session_label(false);
+        let save_label = session_sidebar_save_title_label(false);
+
         assert_eq!(session_sidebar_rename_session_label(), "Rename session");
-        assert_eq!(
-            session_sidebar_delete_session_label(false),
-            "Delete session"
-        );
+        assert_eq!(delete_label, "Delete session");
         assert_eq!(session_sidebar_delete_session_label(true), "Deleting…");
         assert_eq!(session_sidebar_delete_session_icon(false), AppIcon::Delete);
         assert_eq!(session_sidebar_delete_session_icon(true), AppIcon::Busy);
-        assert_eq!(
-            session_sidebar_save_title_label(false),
-            "Save session title"
-        );
+        assert_eq!(save_label, "Save session title");
         assert_eq!(session_sidebar_save_title_label(true), "Saving…");
         assert_eq!(session_sidebar_save_title_icon(false), AppIcon::Save);
         assert_eq!(session_sidebar_save_title_icon(true), AppIcon::Busy);

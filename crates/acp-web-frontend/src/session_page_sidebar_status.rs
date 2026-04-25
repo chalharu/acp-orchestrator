@@ -75,7 +75,7 @@ fn sidebar_status_message(
     session_list_error: Option<String>,
     has_session_items: bool,
 ) -> Option<String> {
-    sidebar_error.or_else(|| {
+    sidebar_error.or({
         if has_session_items {
             session_list_error
         } else {
@@ -116,17 +116,16 @@ mod tests {
     #[test]
     fn sidebar_status_message_prefers_sidebar_errors() {
         assert_eq!(
-            sidebar_status_message(
-                Some("sidebar".to_string()),
-                Some("list".to_string()),
-                true,
-            ),
+            sidebar_status_message(Some("sidebar".to_string()), Some("list".to_string()), true,),
             Some("sidebar".to_string())
         );
         assert_eq!(
             sidebar_status_message(None, Some("list".to_string()), true),
             Some("list".to_string())
         );
-        assert_eq!(sidebar_status_message(None, Some("list".to_string()), false), None);
+        assert_eq!(
+            sidebar_status_message(None, Some("list".to_string()), false),
+            None
+        );
     }
 }

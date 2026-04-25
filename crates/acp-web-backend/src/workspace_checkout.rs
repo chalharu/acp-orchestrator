@@ -149,64 +149,17 @@ impl FsWorkspaceCheckoutManager {
         checkout_relpath: String,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
         validate_https_upstream_url(upstream_url)?;
-        let requested_ref = override_ref.or(default_ref);
-        let checkout_path_string = checkout_path.to_string_lossy().to_string();
-        let resolved_ref = match requested_ref {
-            Some(reference) => Some(reference.to_string()),
-            None => resolve_remote_head_ref(upstream_url, &self.state_dir)?,
-        };
-
-        run_git(
-            None,
-            &self.state_dir,
-            GitMode::Https,
-            ["init", checkout_path_string.as_str()].as_slice(),
-        )?;
-        run_git(
-            Some(checkout_path),
-            &self.state_dir,
-            GitMode::Https,
-            ["remote", "add", "origin", upstream_url].as_slice(),
-        )?;
-        if let Some(reference) = resolved_ref.as_deref() {
-            run_git(
-                Some(checkout_path),
-                &self.state_dir,
-                GitMode::Https,
-                ["fetch", "--depth", "1", "origin", reference].as_slice(),
-            )?;
-        } else {
-            run_git(
-                Some(checkout_path),
-                &self.state_dir,
-                GitMode::Https,
-                ["fetch", "--depth", "1", "origin", "HEAD"].as_slice(),
-            )?;
-        }
-        run_git(
-            Some(checkout_path),
-            &self.state_dir,
-            GitMode::Https,
-            ["checkout", "--detach", "FETCH_HEAD"].as_slice(),
-        )?;
-
-        let checkout_commit_sha = Some(
-            run_git(
-                Some(checkout_path),
-                &self.state_dir,
-                GitMode::Https,
-                ["rev-parse", "HEAD"].as_slice(),
-            )?
-            .trim()
-            .to_string(),
-        );
-
-        Ok(PreparedWorkspaceCheckout {
+        let resolved_ref =
+            resolve_https_checkout_ref(upstream_url, default_ref, override_ref, &self.state_dir)?;
+        initialize_https_checkout(checkout_path, upstream_url, &self.state_dir)?;
+        fetch_https_checkout(checkout_path, resolved_ref.as_deref(), &self.state_dir)?;
+        checkout_fetch_head(checkout_path, &self.state_dir, GitMode::Https)?;
+        Ok(build_prepared_checkout(
             checkout_relpath,
-            checkout_ref: resolved_ref,
-            checkout_commit_sha,
-            working_dir: checkout_path.to_path_buf(),
-        })
+            resolved_ref,
+            checkout_head_commit(checkout_path, &self.state_dir, GitMode::Https)?,
+            checkout_path,
+        ))
     }
 
     fn clone_local_workspace(
@@ -216,63 +169,17 @@ impl FsWorkspaceCheckoutManager {
         checkout_path: &Path,
         checkout_relpath: String,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
-        let current_dir = env::current_dir().map_err(|error| {
-            WorkspaceCheckoutError::Io(format!(
-                "reading the current working directory failed: {error}"
-            ))
-        })?;
-        let source_root = run_git(
-            Some(&current_dir),
-            &self.state_dir,
-            GitMode::Local,
-            ["rev-parse", "--show-toplevel"].as_slice(),
-        )?;
-        let source_root = PathBuf::from(source_root.trim());
-        let source_root_string = source_root.to_string_lossy().to_string();
-        let checkout_path_string = checkout_path.to_string_lossy().to_string();
-        let resolved_ref = match override_ref.or(default_ref) {
-            Some(reference) => Some(reference.to_string()),
-            None => git_symbolic_ref(&source_root, &self.state_dir, GitMode::Local)?,
-        };
-
-        run_git(
-            None,
-            &self.state_dir,
-            GitMode::Local,
-            [
-                "clone",
-                "--no-local",
-                source_root_string.as_str(),
-                checkout_path_string.as_str(),
-            ]
-            .as_slice(),
-        )?;
-        if let Some(reference) = resolved_ref.as_deref() {
-            run_git(
-                Some(checkout_path),
-                &self.state_dir,
-                GitMode::Local,
-                ["checkout", "--detach", reference].as_slice(),
-            )?;
-        }
-
-        let checkout_commit_sha = Some(
-            run_git(
-                Some(checkout_path),
-                &self.state_dir,
-                GitMode::Local,
-                ["rev-parse", "HEAD"].as_slice(),
-            )?
-            .trim()
-            .to_string(),
-        );
-
-        Ok(PreparedWorkspaceCheckout {
+        let source_root = local_source_root(&self.state_dir)?;
+        let resolved_ref =
+            resolve_local_checkout_ref(&source_root, default_ref, override_ref, &self.state_dir)?;
+        clone_local_repository(&source_root, checkout_path, &self.state_dir)?;
+        checkout_local_ref_if_needed(checkout_path, resolved_ref.as_deref(), &self.state_dir)?;
+        Ok(build_prepared_checkout(
             checkout_relpath,
-            checkout_ref: resolved_ref,
-            checkout_commit_sha,
-            working_dir: checkout_path.to_path_buf(),
-        })
+            resolved_ref,
+            checkout_head_commit(checkout_path, &self.state_dir, GitMode::Local)?,
+            checkout_path,
+        ))
     }
 }
 
@@ -367,6 +274,68 @@ fn resolve_remote_head_ref(
     Ok(output.lines().find_map(parse_symref_line))
 }
 
+fn resolve_https_checkout_ref(
+    upstream_url: &str,
+    default_ref: Option<&str>,
+    override_ref: Option<&str>,
+    state_dir: &Path,
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    match override_ref.or(default_ref) {
+        Some(reference) => Ok(Some(reference.to_string())),
+        None => resolve_remote_head_ref(upstream_url, state_dir),
+    }
+}
+
+fn initialize_https_checkout(
+    checkout_path: &Path,
+    upstream_url: &str,
+    state_dir: &Path,
+) -> Result<(), WorkspaceCheckoutError> {
+    let checkout_path_string = checkout_path.to_string_lossy().to_string();
+    run_git(
+        None,
+        state_dir,
+        GitMode::Https,
+        ["init", checkout_path_string.as_str()].as_slice(),
+    )?;
+    run_git(
+        Some(checkout_path),
+        state_dir,
+        GitMode::Https,
+        ["remote", "add", "origin", upstream_url].as_slice(),
+    )?;
+    Ok(())
+}
+
+fn fetch_https_checkout(
+    checkout_path: &Path,
+    resolved_ref: Option<&str>,
+    state_dir: &Path,
+) -> Result<(), WorkspaceCheckoutError> {
+    let fetch_target = resolved_ref.unwrap_or("HEAD");
+    run_git(
+        Some(checkout_path),
+        state_dir,
+        GitMode::Https,
+        ["fetch", "--depth", "1", "origin", fetch_target].as_slice(),
+    )?;
+    Ok(())
+}
+
+fn checkout_fetch_head(
+    checkout_path: &Path,
+    state_dir: &Path,
+    mode: GitMode,
+) -> Result<(), WorkspaceCheckoutError> {
+    run_git(
+        Some(checkout_path),
+        state_dir,
+        mode,
+        ["checkout", "--detach", "FETCH_HEAD"].as_slice(),
+    )?;
+    Ok(())
+}
+
 fn parse_symref_line(line: &str) -> Option<String> {
     let line = line.strip_prefix("ref: ")?;
     let (reference, target) = line.split_once('\t')?;
@@ -387,6 +356,103 @@ fn git_symbolic_ref(
         Ok(output) => Ok(Some(output.trim().to_string())),
         Err(WorkspaceCheckoutError::Git(_)) => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+fn local_source_root(state_dir: &Path) -> Result<PathBuf, WorkspaceCheckoutError> {
+    let current_dir = env::current_dir().map_err(|error| {
+        WorkspaceCheckoutError::Io(format!(
+            "reading the current working directory failed: {error}"
+        ))
+    })?;
+    let source_root = run_git(
+        Some(&current_dir),
+        state_dir,
+        GitMode::Local,
+        ["rev-parse", "--show-toplevel"].as_slice(),
+    )?;
+    Ok(PathBuf::from(source_root.trim()))
+}
+
+fn resolve_local_checkout_ref(
+    source_root: &Path,
+    default_ref: Option<&str>,
+    override_ref: Option<&str>,
+    state_dir: &Path,
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    match override_ref.or(default_ref) {
+        Some(reference) => Ok(Some(reference.to_string())),
+        None => git_symbolic_ref(source_root, state_dir, GitMode::Local),
+    }
+}
+
+fn clone_local_repository(
+    source_root: &Path,
+    checkout_path: &Path,
+    state_dir: &Path,
+) -> Result<(), WorkspaceCheckoutError> {
+    let source_root_string = source_root.to_string_lossy().to_string();
+    let checkout_path_string = checkout_path.to_string_lossy().to_string();
+    run_git(
+        None,
+        state_dir,
+        GitMode::Local,
+        [
+            "clone",
+            "--no-local",
+            source_root_string.as_str(),
+            checkout_path_string.as_str(),
+        ]
+        .as_slice(),
+    )?;
+    Ok(())
+}
+
+fn checkout_local_ref_if_needed(
+    checkout_path: &Path,
+    resolved_ref: Option<&str>,
+    state_dir: &Path,
+) -> Result<(), WorkspaceCheckoutError> {
+    let Some(reference) = resolved_ref else {
+        return Ok(());
+    };
+    run_git(
+        Some(checkout_path),
+        state_dir,
+        GitMode::Local,
+        ["checkout", "--detach", reference].as_slice(),
+    )?;
+    Ok(())
+}
+
+fn checkout_head_commit(
+    checkout_path: &Path,
+    state_dir: &Path,
+    mode: GitMode,
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    Ok(Some(
+        run_git(
+            Some(checkout_path),
+            state_dir,
+            mode,
+            ["rev-parse", "HEAD"].as_slice(),
+        )?
+        .trim()
+        .to_string(),
+    ))
+}
+
+fn build_prepared_checkout(
+    checkout_relpath: String,
+    checkout_ref: Option<String>,
+    checkout_commit_sha: Option<String>,
+    checkout_path: &Path,
+) -> PreparedWorkspaceCheckout {
+    PreparedWorkspaceCheckout {
+        checkout_relpath,
+        checkout_ref,
+        checkout_commit_sha,
+        working_dir: checkout_path.to_path_buf(),
     }
 }
 

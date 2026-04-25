@@ -383,52 +383,79 @@ fn workspace_start_chat_modal_view(
     view! {
         <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="Start workspace chat">
             <div class="workspace-modal">
-                <div class="workspace-modal__header">
-                    <h2 class="workspace-modal__title">
-                        "Start chat in " {move || workspace_name.get()}
-                    </h2>
-                    <button
-                        type="button"
-                        class="workspace-modal__close"
-                        on:click=on_cancel
-                        aria-label="Close"
-                        title="Close"
-                    >
-                        {app_icon_view(AppIcon::Cancel)}
-                        <span class="sr-only">"Close"</span>
-                    </button>
-                </div>
+                {workspace_start_chat_modal_header(workspace_name, on_cancel)}
                 <p class="muted">"Optionally override the checkout branch or ref for this chat."</p>
                 <ErrorBanner message=error />
-                <form class="account-form account-form--create" on:submit=on_submit>
-                    <label class="account-form__field">
-                        <span>"Branch / ref (optional)"</span>
-                        <input
-                            type="text"
-                            prop:value=checkout_ref
-                            on:input=move |event| state.start_chat_checkout_ref.set(event_target_value(&event))
-                            placeholder="refs/heads/main"
-                        />
-                    </label>
-                    <div class="workspace-modal__actions">
-                        <button
-                            type="submit"
-                            class="account-form__submit"
-                            prop:disabled=move || opening.get()
-                        >
-                            {move || workspace_new_chat_label(opening.get())}
-                        </button>
-                        <button
-                            type="button"
-                            class="account-form__cancel"
-                            on:click=on_cancel
-                            prop:disabled=move || opening.get()
-                        >
-                            "Cancel"
-                        </button>
-                    </div>
+                <form class="account-form workspace-modal__form" on:submit=on_submit>
+                    {workspace_start_chat_checkout_ref_field(state, checkout_ref)}
+                    {workspace_start_chat_modal_actions(opening, on_cancel)}
                 </form>
             </div>
+        </div>
+    }
+}
+
+fn workspace_start_chat_modal_header(
+    workspace_name: Signal<String>,
+    on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-modal__header">
+            <h2 class="workspace-modal__title">
+                "Start chat in " {move || workspace_name.get()}
+            </h2>
+            <button
+                type="button"
+                class="workspace-modal__close"
+                on:click=on_cancel
+                aria-label="Close"
+                title="Close"
+            >
+                {app_icon_view(AppIcon::Cancel)}
+                <span class="sr-only">"Close"</span>
+            </button>
+        </div>
+    }
+}
+
+fn workspace_start_chat_checkout_ref_field(
+    state: WorkspacesPageState,
+    checkout_ref: Signal<String>,
+) -> impl IntoView {
+    view! {
+        <label class="account-form__field">
+            <span>"Branch / ref (optional)"</span>
+            <input
+                type="text"
+                prop:value=checkout_ref
+                on:input=move |event| state.start_chat_checkout_ref.set(event_target_value(&event))
+                placeholder="refs/heads/main"
+            />
+        </label>
+    }
+}
+
+fn workspace_start_chat_modal_actions(
+    opening: Signal<bool>,
+    on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-modal__actions">
+            <button
+                type="submit"
+                class="account-form__submit"
+                prop:disabled=move || opening.get()
+            >
+                {move || workspace_new_chat_label(opening.get())}
+            </button>
+            <button
+                type="button"
+                class="account-form__cancel"
+                on:click=on_cancel
+                prop:disabled=move || opening.get()
+            >
+                "Cancel"
+            </button>
         </div>
     }
 }

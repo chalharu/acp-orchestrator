@@ -77,40 +77,13 @@ async fn create_session_snapshot_in_workspace(
     workspace_id: &str,
     checkout_ref_override: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
-    let workspace = state
-        .workspace_repository
-        .load_workspace(&owner.user.user_id, workspace_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("workspace not found".to_string()))?;
+    let workspace = load_workspace_for_session(state, &owner.user.user_id, workspace_id).await?;
     let session = state
         .store
         .create_session(&owner.principal.id, workspace_id)
         .await?;
-    let session_id = session.id.clone();
-    if let Err(error) = persist_session_lifecycle(
-        state,
-        &owner.user,
-        &workspace,
-        &session,
-        "provisioning",
-        None,
-        None,
-    )
-    .await
-    {
-        rollback_failed_session(state, &owner.principal.id, &session_id)
-            .await
-            .map_err(|rollback_error| {
-                AppError::Internal(format!(
-                    "{}; session rollback failed: {}",
-                    error.message(),
-                    rollback_error.message()
-                ))
-            })?;
-        return Err(error);
-    }
-
-    let (session, checkout) = match prepare_session_startup(
+    persist_provisioning_session_lifecycle(state, &owner, &workspace, &session).await?;
+    let (session, checkout) = prepare_session_startup(
         state,
         &owner.principal.id,
         &owner.user,
@@ -118,37 +91,68 @@ async fn create_session_snapshot_in_workspace(
         session,
         checkout_ref_override.as_deref(),
     )
+    .await?;
+    persist_started_session_metadata(state, &owner, &workspace, &session, &checkout).await?;
+    Ok(session)
+}
+
+async fn load_workspace_for_session(
+    state: &AppState,
+    user_id: &str,
+    workspace_id: &str,
+) -> Result<WorkspaceRecord, AppError> {
+    state
+        .workspace_repository
+        .load_workspace(user_id, workspace_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("workspace not found".to_string()))
+}
+
+async fn persist_provisioning_session_lifecycle(
+    state: &AppState,
+    owner: &super::OwnerContext,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+) -> Result<(), AppError> {
+    if let Err(error) = persist_session_lifecycle(
+        state,
+        &owner.user,
+        workspace,
+        session,
+        "provisioning",
+        None,
+        None,
+    )
     .await
     {
-        Ok(session) => session,
-        Err(error) => {
-            return Err(error);
-        }
-    };
-    if let Err(error) = persist_session_metadata(state, &owner.user, &session, true, None).await {
+        rollback_session_creation(state, &owner.principal.id, &session.id, error.message()).await?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn persist_started_session_metadata(
+    state: &AppState,
+    owner: &super::OwnerContext,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+) -> Result<(), AppError> {
+    if let Err(error) = persist_session_metadata(state, &owner.user, session, true, None).await {
         cleanup_checkout_path_best_effort(&checkout.working_dir);
         persist_failed_session_lifecycle(
             state,
             &owner.user,
-            &workspace,
-            &session,
-            Some(&checkout),
+            workspace,
+            session,
+            Some(checkout),
             error.message(),
         )
         .await;
-        if let Err(rollback_error) =
-            rollback_failed_session(state, &owner.principal.id, &session_id).await
-        {
-            return Err(AppError::Internal(format!(
-                "{}; session rollback failed: {}",
-                error.message(),
-                rollback_error.message()
-            )));
-        }
+        rollback_session_creation(state, &owner.principal.id, &session.id, error.message()).await?;
         return Err(error);
     }
-
-    Ok(session)
+    Ok(())
 }
 
 pub(super) async fn rename_session_title(
@@ -416,60 +420,94 @@ async fn prepare_session_startup(
     ),
     AppError,
 > {
-    let session_id = session.id.clone();
+    persist_cloning_session_lifecycle(state, live_owner_id, user, workspace, &session).await?;
+    let checkout = prepare_workspace_checkout(
+        state,
+        live_owner_id,
+        user,
+        workspace,
+        &session,
+        checkout_ref_override,
+    )
+    .await?;
+    persist_starting_session_lifecycle(state, live_owner_id, user, workspace, &session, &checkout)
+        .await?;
+    bind_session_checkout(state, live_owner_id, user, workspace, &session, &checkout).await?;
+    let session = prime_session_startup_or_rollback(
+        state,
+        live_owner_id,
+        user,
+        workspace,
+        &session,
+        &checkout,
+    )
+    .await?;
+    Ok((session, checkout))
+}
+
+async fn persist_cloning_session_lifecycle(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+) -> Result<(), AppError> {
     if let Err(error) =
-        persist_session_lifecycle(state, user, workspace, &session, "cloning", None, None).await
+        persist_session_lifecycle(state, user, workspace, session, "cloning", None, None).await
     {
-        persist_failed_session_lifecycle(state, user, workspace, &session, None, error.message())
+        persist_failed_session_lifecycle(state, user, workspace, session, None, error.message())
             .await;
-        rollback_failed_session(state, live_owner_id, &session_id)
-            .await
-            .map_err(|rollback_error| {
-                AppError::Internal(format!(
-                    "{}; session rollback failed: {}",
-                    error.message(),
-                    rollback_error.message()
-                ))
-            })?;
+        rollback_session_creation(state, live_owner_id, &session.id, error.message()).await?;
         return Err(error);
     }
+    Ok(())
+}
 
-    let checkout = match state
+async fn prepare_workspace_checkout(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout_ref_override: Option<&str>,
+) -> Result<crate::workspace_checkout::PreparedWorkspaceCheckout, AppError> {
+    match state
         .checkout_manager
         .prepare_checkout(workspace, &session.id, checkout_ref_override)
         .await
     {
-        Ok(checkout) => checkout,
+        Ok(checkout) => Ok(checkout),
         Err(error) => {
             persist_failed_session_lifecycle(
                 state,
                 user,
                 workspace,
-                &session,
+                session,
                 None,
                 error.message(),
             )
             .await;
-            rollback_failed_session(state, live_owner_id, &session_id)
-                .await
-                .map_err(|rollback_error| {
-                    AppError::Internal(format!(
-                        "{}; session rollback failed: {}",
-                        error,
-                        rollback_error.message()
-                    ))
-                })?;
-            return Err(map_checkout_error(error));
+            rollback_session_creation(state, live_owner_id, &session.id, error.message()).await?;
+            Err(map_checkout_error(error))
         }
-    };
+    }
+}
 
+async fn persist_starting_session_lifecycle(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+) -> Result<(), AppError> {
     if let Err(error) = persist_session_lifecycle(
         state,
         user,
         workspace,
-        &session,
+        session,
         "starting",
-        Some(&checkout),
+        Some(checkout),
         None,
     )
     .await
@@ -479,64 +517,61 @@ async fn prepare_session_startup(
             state,
             user,
             workspace,
-            &session,
-            Some(&checkout),
+            session,
+            Some(checkout),
             error.message(),
         )
         .await;
-        rollback_failed_session(state, live_owner_id, &session_id)
-            .await
-            .map_err(|rollback_error| {
-                AppError::Internal(format!(
-                    "{}; session rollback failed: {}",
-                    error.message(),
-                    rollback_error.message()
-                ))
-            })?;
+        rollback_session_creation(state, live_owner_id, &session.id, error.message()).await?;
         return Err(error);
     }
+    Ok(())
+}
 
+async fn bind_session_checkout(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+) -> Result<(), AppError> {
     if let Err(error) = state
         .reply_provider
         .bind_session(&session.id, checkout.working_dir.clone())
         .await
     {
         cleanup_checkout_path_best_effort(&checkout.working_dir);
-        persist_failed_session_lifecycle(state, user, workspace, &session, Some(&checkout), &error)
+        persist_failed_session_lifecycle(state, user, workspace, session, Some(checkout), &error)
             .await;
-        rollback_failed_session(state, live_owner_id, &session_id)
-            .await
-            .map_err(|rollback_error| {
-                AppError::Internal(format!(
-                    "{error}; session rollback failed: {}",
-                    rollback_error.message()
-                ))
-            })?;
+        rollback_session_creation(state, live_owner_id, &session.id, &error).await?;
         return Err(AppError::Internal(error));
     }
+    Ok(())
+}
 
-    match prime_session_startup(state, live_owner_id, &session).await {
-        Ok(session) => Ok((session, checkout)),
+async fn prime_session_startup_or_rollback(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+) -> Result<SessionSnapshot, AppError> {
+    match prime_session_startup(state, live_owner_id, session).await {
+        Ok(session) => Ok(session),
         Err(error) => {
             cleanup_checkout_path_best_effort(&checkout.working_dir);
             persist_failed_session_lifecycle(
                 state,
                 user,
                 workspace,
-                &session,
-                Some(&checkout),
+                session,
+                Some(checkout),
                 error.message(),
             )
             .await;
-            rollback_failed_session(state, live_owner_id, &session_id)
-                .await
-                .map_err(|rollback_error| {
-                    AppError::Internal(format!(
-                        "{}; session rollback failed: {}",
-                        error.message(),
-                        rollback_error.message()
-                    ))
-                })?;
+            rollback_session_creation(state, live_owner_id, &session.id, error.message()).await?;
             Err(error)
         }
     }
@@ -555,62 +590,88 @@ async fn persist_session_lifecycle(
         .workspace_repository
         .load_session_metadata(&user.user_id, &snapshot.id)
         .await?;
-    let now = Utc::now();
-    let created_at = existing
-        .as_ref()
-        .map(|record| record.created_at)
-        .unwrap_or(now);
-    let record = SessionMetadataRecord {
-        session_id: snapshot.id.clone(),
-        workspace_id: workspace.workspace_id.clone(),
-        owner_user_id: user.user_id.clone(),
-        title: snapshot.title.clone(),
-        status: status.to_string(),
-        checkout_relpath: checkout
-            .map(|prepared| prepared.checkout_relpath.clone())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|record| record.checkout_relpath.clone())
-            }),
-        checkout_ref: checkout
-            .and_then(|prepared| prepared.checkout_ref.clone())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|record| record.checkout_ref.clone())
-            }),
-        checkout_commit_sha: checkout
-            .and_then(|prepared| prepared.checkout_commit_sha.clone())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|record| record.checkout_commit_sha.clone())
-            }),
-        failure_reason: failure_reason.map(str::to_string).or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|record| record.failure_reason.clone())
-        }),
-        detach_deadline_at: existing
-            .as_ref()
-            .and_then(|record| record.detach_deadline_at),
-        restartable_deadline_at: existing
-            .as_ref()
-            .and_then(|record| record.restartable_deadline_at),
-        created_at,
-        last_activity_at: existing
-            .as_ref()
-            .map(|record| record.last_activity_at)
-            .unwrap_or(created_at),
-        closed_at: existing.as_ref().and_then(|record| record.closed_at),
-        deleted_at: existing.as_ref().and_then(|record| record.deleted_at),
-    };
+    let record = build_session_lifecycle_record(
+        existing.as_ref(),
+        user,
+        workspace,
+        snapshot,
+        status,
+        checkout,
+        failure_reason,
+    );
     state
         .workspace_repository
         .save_session_metadata(&record)
         .await
         .map_err(AppError::from)
+}
+
+fn build_session_lifecycle_record(
+    existing: Option<&SessionMetadataRecord>,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    snapshot: &SessionSnapshot,
+    status: &str,
+    checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
+    failure_reason: Option<&str>,
+) -> SessionMetadataRecord {
+    let now = Utc::now();
+    let created_at = existing.map(|record| record.created_at).unwrap_or(now);
+    SessionMetadataRecord {
+        session_id: snapshot.id.clone(),
+        workspace_id: workspace.workspace_id.clone(),
+        owner_user_id: user.user_id.clone(),
+        title: snapshot.title.clone(),
+        status: status.to_string(),
+        checkout_relpath: merged_checkout_relpath(existing, checkout),
+        checkout_ref: merged_checkout_ref(existing, checkout),
+        checkout_commit_sha: merged_checkout_commit_sha(existing, checkout),
+        failure_reason: merged_failure_reason(existing, failure_reason),
+        detach_deadline_at: existing.and_then(|record| record.detach_deadline_at),
+        restartable_deadline_at: existing.and_then(|record| record.restartable_deadline_at),
+        created_at,
+        last_activity_at: existing
+            .map(|record| record.last_activity_at)
+            .unwrap_or(created_at),
+        closed_at: existing.and_then(|record| record.closed_at),
+        deleted_at: existing.and_then(|record| record.deleted_at),
+    }
+}
+
+fn merged_checkout_relpath(
+    existing: Option<&SessionMetadataRecord>,
+    checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
+) -> Option<String> {
+    checkout
+        .map(|prepared| prepared.checkout_relpath.clone())
+        .or_else(|| existing.and_then(|record| record.checkout_relpath.clone()))
+}
+
+fn merged_checkout_ref(
+    existing: Option<&SessionMetadataRecord>,
+    checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
+) -> Option<String> {
+    checkout
+        .and_then(|prepared| prepared.checkout_ref.clone())
+        .or_else(|| existing.and_then(|record| record.checkout_ref.clone()))
+}
+
+fn merged_checkout_commit_sha(
+    existing: Option<&SessionMetadataRecord>,
+    checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
+) -> Option<String> {
+    checkout
+        .and_then(|prepared| prepared.checkout_commit_sha.clone())
+        .or_else(|| existing.and_then(|record| record.checkout_commit_sha.clone()))
+}
+
+fn merged_failure_reason(
+    existing: Option<&SessionMetadataRecord>,
+    failure_reason: Option<&str>,
+) -> Option<String> {
+    failure_reason
+        .map(str::to_string)
+        .or_else(|| existing.and_then(|record| record.failure_reason.clone()))
 }
 
 async fn persist_failed_session_lifecycle(
@@ -715,6 +776,22 @@ async fn rollback_failed_session(
         .discard_session(owner, session_id)
         .await
         .map_err(|error| AppError::Internal(error.message().to_string()))
+}
+
+async fn rollback_session_creation(
+    state: &AppState,
+    owner_id: &str,
+    session_id: &str,
+    error_message: &str,
+) -> Result<(), AppError> {
+    rollback_failed_session(state, owner_id, session_id)
+        .await
+        .map_err(|rollback_error| {
+            AppError::Internal(format!(
+                "{error_message}; session rollback failed: {}",
+                rollback_error.message()
+            ))
+        })
 }
 
 fn dispatch_assistant_request(

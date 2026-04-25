@@ -1423,6 +1423,11 @@ textarea:focus-visible {
   box-shadow: 0 22px 48px rgba(20, 12, 5, 0.2);
 }
 
+.workspace-modal__form {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
 .workspace-modal__title {
   margin: 0;
   font-size: 1.1rem;

@@ -54,6 +54,92 @@ async fn wait_for_durable_messages(
     .expect("assistant reply should be durably persisted")
 }
 
+async fn durable_user_for_principal(
+    state: &AppState,
+    principal: &Extension<AuthenticatedPrincipal>,
+) -> UserRecord {
+    state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed")
+}
+
+async fn session_metadata_for_user(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+) -> SessionMetadataRecord {
+    state
+        .workspace_repository
+        .load_session_metadata(user_id, session_id)
+        .await
+        .expect("metadata should load")
+        .expect("session metadata should exist")
+}
+
+fn checkout_path_from_metadata(
+    state: &AppState,
+    metadata: &SessionMetadataRecord,
+) -> std::path::PathBuf {
+    state
+        .checkout_manager
+        .resolve_checkout_path(
+            metadata
+                .checkout_relpath
+                .as_deref()
+                .expect("checkout relpath should be recorded"),
+        )
+        .expect("checkout relpath should resolve")
+}
+
+fn assert_checkout_metadata(
+    metadata: &SessionMetadataRecord,
+    session_id: &str,
+    expected_ref: Option<&str>,
+    expected_commit_sha: Option<&str>,
+) {
+    let expected_relpath = format!("session-checkouts/{session_id}");
+    assert_eq!(metadata.status, "active");
+    assert_eq!(metadata.checkout_ref.as_deref(), expected_ref);
+    assert_eq!(metadata.checkout_commit_sha.as_deref(), expected_commit_sha);
+    assert_eq!(
+        metadata.checkout_relpath.as_deref(),
+        Some(expected_relpath.as_str())
+    );
+}
+
+fn reset_binding_tracking(reply_provider: &BindingTrackingReplyProvider) {
+    reply_provider
+        .calls
+        .lock()
+        .expect("calls should not poison")
+        .clear();
+    reply_provider
+        .bindings
+        .lock()
+        .expect("bindings should not poison")
+        .clear();
+}
+
+fn assert_binding_calls(
+    reply_provider: &BindingTrackingReplyProvider,
+    expected_calls: &[&str],
+    expected_bindings: &[(String, std::path::PathBuf)],
+) {
+    let actual_calls = reply_provider
+        .calls
+        .lock()
+        .expect("calls should not poison")
+        .clone();
+    assert_eq!(actual_calls, expected_calls);
+    let bindings = reply_provider
+        .bindings
+        .lock()
+        .expect("bindings should not poison");
+    assert_eq!(bindings.as_slice(), expected_bindings);
+}
+
 #[tokio::test]
 async fn injected_reply_provider_handles_prompt_dispatch() {
     let (store, state) = state_with_static_reply("injected reply");
@@ -365,40 +451,21 @@ async fn create_session_persists_checkout_metadata_and_binds_before_priming() {
     .await
     .expect("session creation should succeed");
     let session_id = response.1.0.session.id.clone();
+    let principal = bearer_principal("alice");
+    let user = durable_user_for_principal(&state, &principal).await;
+    let metadata = session_metadata_for_user(&state, &user.user_id, &session_id).await;
 
-    let user = state
-        .workspace_repository
-        .materialize_user(&bearer_principal("alice").0)
-        .await
-        .expect("principal materialization should succeed");
-    let metadata = state
-        .workspace_repository
-        .load_session_metadata(&user.user_id, &session_id)
-        .await
-        .expect("metadata should load")
-        .expect("session metadata should exist");
-    let expected_relpath = format!("session-checkouts/{session_id}");
-
-    assert_eq!(metadata.status, "active");
-    assert_eq!(metadata.checkout_ref.as_deref(), Some("refs/heads/feature"));
-    assert_eq!(metadata.checkout_commit_sha.as_deref(), Some("test-commit"));
-    assert_eq!(
-        metadata.checkout_relpath.as_deref(),
-        Some(expected_relpath.as_str())
+    assert_checkout_metadata(
+        &metadata,
+        &session_id,
+        Some("refs/heads/feature"),
+        Some("test-commit"),
     );
-
-    let calls = reply_provider
-        .calls
-        .lock()
-        .expect("calls should not poison")
-        .clone();
-    assert_eq!(calls, vec!["bind".to_string(), "prime".to_string()]);
-    let bindings = reply_provider
-        .bindings
-        .lock()
-        .expect("bindings should not poison");
-    assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0].0, session_id);
+    assert_binding_calls(
+        &reply_provider,
+        &["bind", "prime"],
+        &[(session_id, checkout_path_from_metadata(&state, &metadata))],
+    );
 }
 
 #[tokio::test]
@@ -412,37 +479,11 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
     );
     let principal = bearer_principal("alice");
     let created = create_persisted_workspace_session(&state, principal.clone()).await;
-    let user = state
-        .workspace_repository
-        .materialize_user(&principal.0)
-        .await
-        .expect("principal materialization should succeed");
-    let metadata = state
-        .workspace_repository
-        .load_session_metadata(&user.user_id, &created.id)
-        .await
-        .expect("metadata should load")
-        .expect("session metadata should exist");
-    let checkout_path = state
-        .checkout_manager
-        .resolve_checkout_path(
-            metadata
-                .checkout_relpath
-                .as_deref()
-                .expect("checkout relpath should be recorded"),
-        )
-        .expect("checkout relpath should resolve");
+    let user = durable_user_for_principal(&state, &principal).await;
+    let metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
+    let checkout_path = checkout_path_from_metadata(&state, &metadata);
 
-    reply_provider
-        .calls
-        .lock()
-        .expect("calls should not poison")
-        .clear();
-    reply_provider
-        .bindings
-        .lock()
-        .expect("bindings should not poison")
-        .clear();
+    reset_binding_tracking(&reply_provider);
     store
         .delete_sessions_for_owners(&["alice".to_string()])
         .await;
@@ -452,22 +493,7 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
         .expect("durable session should restore and rebind");
 
     assert_eq!(restored.0.session.id, created.id);
-    assert_eq!(
-        reply_provider
-            .calls
-            .lock()
-            .expect("calls should not poison")
-            .as_slice(),
-        ["bind"]
-    );
-    assert_eq!(
-        reply_provider
-            .bindings
-            .lock()
-            .expect("bindings should not poison")
-            .as_slice(),
-        &[(created.id, checkout_path)]
-    );
+    assert_binding_calls(&reply_provider, &["bind"], &[(created.id, checkout_path)]);
 }
 
 #[tokio::test]

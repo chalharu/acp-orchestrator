@@ -99,7 +99,7 @@ fn create_workspace_modal_view(
                 {create_workspace_modal_header(on_cancel)}
                 <p class="muted">"Add a new workspace for organising agent sessions."</p>
                 <ErrorBanner message=error />
-                <form class="account-form account-form--create" on:submit=on_submit>
+                <form class="account-form workspace-modal__form" on:submit=on_submit>
                     {create_workspace_name_field(state, create_name)}
                     {create_workspace_upstream_field(state, create_upstream_url)}
                     {create_workspace_default_ref_field(state, create_default_ref)}

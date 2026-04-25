@@ -46,6 +46,75 @@ impl crate::workspace_checkout::WorkspaceCheckoutManager for FailingCheckoutMana
     }
 }
 
+fn first_forgotten_session_id(forgotten_sessions: &StdArc<Mutex<Vec<String>>>) -> String {
+    forgotten_sessions
+        .lock()
+        .expect("cleanup tracking should not poison")
+        .first()
+        .cloned()
+        .expect("binding failures should forget the provisional session")
+}
+
+fn assert_checkout_relpath_removed(checkout_relpath: &str, message: &str) {
+    let checkout_path = test_checkout_path(checkout_relpath);
+    assert!(!checkout_path.exists(), "{message}");
+}
+
+async fn assert_failed_session_rolled_back(store: &SessionStore, session_id: &str) {
+    let snapshot_error = store
+        .session_snapshot("alice", session_id)
+        .await
+        .expect_err("failed creations should be rolled back");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+fn assert_saved_status_sequence(
+    saved_metadata: &[SessionMetadataRecord],
+    expected_statuses: &[&str],
+) {
+    assert_eq!(saved_metadata.len(), expected_statuses.len());
+    assert_eq!(
+        saved_metadata
+            .iter()
+            .map(|record| record.status.as_str())
+            .collect::<Vec<_>>(),
+        expected_statuses
+    );
+}
+
+async fn assert_checkout_binding_failure_cleanup(
+    state: &AppState,
+    forgotten_sessions: &StdArc<Mutex<Vec<String>>>,
+) {
+    let failed_session_id = first_forgotten_session_id(forgotten_sessions);
+    let user = state
+        .workspace_repository
+        .materialize_user(&bearer_principal("alice").0)
+        .await
+        .expect("principal materialization should succeed");
+    let failed_metadata = state
+        .workspace_repository
+        .load_session_metadata(&user.user_id, &failed_session_id)
+        .await
+        .expect("failed metadata should load")
+        .expect("failed metadata should exist");
+    assert_eq!(failed_metadata.status, "failed");
+    assert_checkout_relpath_removed(
+        failed_metadata
+            .checkout_relpath
+            .as_deref()
+            .expect("failed metadata should retain the checkout path"),
+        "binding failures should clean up the prepared checkout",
+    );
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .clone(),
+        vec![failed_metadata.session_id.clone()]
+    );
+}
+
 #[test]
 fn app_state_build_errors_format_and_expose_sources() {
     let reply_error = AppStateBuildError::from(MockClientError::TurnRuntime {
@@ -359,29 +428,15 @@ async fn create_session_marks_starting_rows_failed_when_starting_persistence_fai
         .lock()
         .expect("saved metadata should not poison")
         .clone();
-    assert_eq!(saved_metadata.len(), 3);
-    assert_eq!(
-        saved_metadata
-            .iter()
-            .map(|record| record.status.as_str())
-            .collect::<Vec<_>>(),
-        vec!["provisioning", "cloning", "failed"]
-    );
-    let checkout_path = test_checkout_path(
+    assert_saved_status_sequence(&saved_metadata, &["provisioning", "cloning", "failed"]);
+    assert_checkout_relpath_removed(
         saved_metadata[2]
             .checkout_relpath
             .as_deref()
             .expect("failed metadata should retain the checkout path"),
+        "failed starting persistence should clean up the prepared checkout",
     );
-    assert!(
-        !checkout_path.exists(),
-        "failed starting persistence should clean up the prepared checkout"
-    );
-    let snapshot_error = store
-        .session_snapshot("alice", &saved_metadata[0].session_id)
-        .await
-        .expect_err("failed creations should be rolled back");
-    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+    assert_failed_session_rolled_back(&store, &saved_metadata[0].session_id).await;
 }
 
 #[tokio::test]
@@ -399,7 +454,7 @@ async fn create_session_sanitizes_checkout_failures() {
             .await;
 
     let error = create_workspace_session(
-        State(state),
+        State(state.clone()),
         Path(workspace.workspace_id),
         bearer_principal("alice"),
         axum::body::Bytes::new(),
@@ -433,7 +488,7 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
             .await;
 
     let error = create_workspace_session(
-        State(state),
+        State(state.clone()),
         Path(workspace.workspace_id),
         bearer_principal("alice"),
         axum::body::Bytes::new(),
@@ -442,44 +497,9 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
     .expect_err("binding failures should fail session creation");
 
     assert!(matches!(error, AppError::Internal(message) if message == "binding checkout failed"));
-    let failed_session_id = forgotten_sessions
-        .lock()
-        .expect("cleanup tracking should not poison")
-        .first()
-        .cloned()
-        .expect("binding failures should forget the provisional session");
-    let user = workspace_repository
-        .materialize_user(&bearer_principal("alice").0)
-        .await
-        .expect("principal materialization should succeed");
-    let failed_metadata = workspace_repository
-        .load_session_metadata(&user.user_id, &failed_session_id)
-        .await
-        .expect("failed metadata should load")
-        .expect("failed metadata should exist");
-    assert_eq!(failed_metadata.status, "failed");
-    let checkout_path = test_checkout_path(
-        failed_metadata
-            .checkout_relpath
-            .as_deref()
-            .expect("failed metadata should retain the checkout path"),
-    );
-    assert!(
-        !checkout_path.exists(),
-        "binding failures should clean up the prepared checkout"
-    );
-    assert_eq!(
-        forgotten_sessions
-            .lock()
-            .expect("cleanup tracking should not poison")
-            .clone(),
-        vec![failed_metadata.session_id.clone()]
-    );
-    let snapshot_error = store
-        .session_snapshot("alice", &failed_metadata.session_id)
-        .await
-        .expect_err("failed creations should be rolled back");
-    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+    assert_checkout_binding_failure_cleanup(&state, &forgotten_sessions).await;
+    assert_failed_session_rolled_back(&store, &first_forgotten_session_id(&forgotten_sessions))
+        .await;
 }
 
 #[tokio::test]

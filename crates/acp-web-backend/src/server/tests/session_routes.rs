@@ -188,6 +188,25 @@ fn assert_binding_calls(
     assert_eq!(bindings.as_slice(), expected_bindings);
 }
 
+async fn assert_restored_session_cleanup(
+    store: &SessionStore,
+    forgotten_sessions: &StdArc<Mutex<Vec<String>>>,
+    session_id: &str,
+) {
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .clone(),
+        vec![session_id.to_string()]
+    );
+    let snapshot_error = store
+        .session_snapshot("alice", session_id)
+        .await
+        .expect_err("failed restores should be discarded from the live store");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
 #[tokio::test]
 async fn injected_reply_provider_handles_prompt_dispatch() {
     let (store, state) = state_with_static_reply("injected reply");
@@ -587,18 +606,7 @@ async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() 
     assert!(
         matches!(error, AppError::Internal(message) if message == "persisted checkout path is invalid")
     );
-    assert_eq!(
-        forgotten_sessions
-            .lock()
-            .expect("cleanup tracking should not poison")
-            .clone(),
-        vec![created.id.clone()]
-    );
-    let snapshot_error = store
-        .session_snapshot("alice", &created.id)
-        .await
-        .expect_err("failed restores should be discarded from the live store");
-    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+    assert_restored_session_cleanup(&store, &forgotten_sessions, &created.id).await;
 }
 
 #[tokio::test]

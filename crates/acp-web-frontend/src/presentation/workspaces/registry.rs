@@ -943,6 +943,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_card_display_preserves_default_refs_and_dates() {
+        let mut workspace = sample_workspace("w_1", "Test Workspace");
+        workspace.default_ref = Some("refs/heads/main".to_string());
+
+        let display = workspace_card_display(&workspace);
+
+        assert_eq!(display.workspace_id, "w_1");
+        assert_eq!(display.workspace_name, "Test Workspace");
+        assert_eq!(
+            display.workspace_default_ref.as_deref(),
+            Some("refs/heads/main")
+        );
+        assert_eq!(display.workspace_status, "active");
+        assert_eq!(display.created_label, "2026-04-17");
+    }
+
+    #[test]
     fn workspace_registry_section_builds_without_panicking() {
         let owner = Owner::new();
         owner.with(|| {
@@ -1008,9 +1025,83 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    fn workspace_start_chat_modal_helpers_build_and_clear_host_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.show_start_chat_modal.set(true);
+            state.start_chat_workspace_id.set(Some("w_1".to_string()));
+            state
+                .start_chat_workspace_name
+                .set("Test Workspace".to_string());
+            state
+                .start_chat_checkout_ref
+                .set("refs/heads/feature".to_string());
+            state.error.set(Some("existing error".to_string()));
+
+            let workspace_name = Signal::derive(move || state.start_chat_workspace_name.get());
+            let checkout_ref = Signal::derive(move || state.start_chat_checkout_ref.get());
+            let opening = Signal::derive(move || state.opening_chat_workspace_id.get().is_some());
+            let _ = workspace_start_chat_modal(state);
+            let _ = workspace_start_chat_modal_view(state, |_event: web_sys::SubmitEvent| {});
+            let _ =
+                workspace_start_chat_modal_header(workspace_name, |_event: web_sys::MouseEvent| {});
+            let _ = workspace_start_chat_checkout_ref_field(state, checkout_ref);
+            let _ = workspace_start_chat_modal_actions(opening, |_event: web_sys::MouseEvent| {});
+
+            close_workspace_start_chat_modal(state);
+
+            assert!(!state.show_start_chat_modal.get());
+            assert!(state.start_chat_workspace_id.get().is_none());
+            assert!(state.start_chat_workspace_name.get().is_empty());
+            assert!(state.start_chat_checkout_ref.get().is_empty());
+            assert!(state.error.get().is_none());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_id_flag_matches_only_the_selected_workspace() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.editing_workspace_id.set(Some("w_1".to_string()));
+
+            assert!(workspace_id_flag(state.editing_workspace_id, "w_1"));
+            assert!(!workspace_id_flag(state.editing_workspace_id, "w_2"));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_loading_and_host_action_helpers_build_all_branches() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let display = workspace_card_display(&sample_workspace("w_1", "Test Workspace"));
+            let _ = workspace_loading_view();
+            let _ = workspace_card_summary_view(display.clone());
+            let _ = workspace_card_name_cell_host(display.clone(), String::new(), false, false);
+            let _ = workspace_card_name_cell_host(
+                display.clone(),
+                "Draft Name".to_string(),
+                true,
+                true,
+            );
+            let _ = workspace_card_actions_view_host(false, false, false);
+            let _ = workspace_card_actions_view_host(true, true, true);
+            let _ = workspace_card_open_button_host(false, false);
+            let _ = workspace_card_open_button_host(true, true);
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
     fn workspace_session_list_host_builds_non_empty_session_list() {
         let owner = Owner::new();
         owner.with(|| {
+            let _ = WorkspaceSessionListHost(WorkspaceSessionListHostProps {
+                sessions: Vec::new(),
+            });
             let sessions = vec![sample_session("s_1", "w_1"), sample_session("s_2", "w_1")];
             let _ = WorkspaceSessionListHost(WorkspaceSessionListHostProps { sessions });
         });

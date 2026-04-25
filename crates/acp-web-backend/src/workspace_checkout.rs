@@ -597,6 +597,134 @@ mod tests {
     }
 
     #[test]
+    fn workspace_checkout_errors_expose_messages_through_display() {
+        let errors = [
+            WorkspaceCheckoutError::Validation("validation failed".to_string()),
+            WorkspaceCheckoutError::Io("io failed".to_string()),
+            WorkspaceCheckoutError::Git("git failed".to_string()),
+        ];
+
+        for error in errors {
+            assert_eq!(error.message(), error.to_string());
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    #[test]
+    fn workspace_checkout_manager_defaults_to_unresolved_paths() {
+        #[derive(Debug)]
+        struct NoopCheckoutManager;
+
+        #[async_trait]
+        impl WorkspaceCheckoutManager for NoopCheckoutManager {
+            async fn prepare_checkout(
+                &self,
+                _workspace: &WorkspaceRecord,
+                _session_id: &str,
+                _checkout_ref_override: Option<&str>,
+            ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+                unreachable!("path resolution does not require checkout preparation");
+            }
+        }
+
+        assert_eq!(
+            NoopCheckoutManager.resolve_checkout_path("session-checkouts/s_test"),
+            None
+        );
+    }
+
+    #[test]
+    fn https_upstream_validation_rejects_non_https_and_embedded_credentials() {
+        assert_eq!(
+            validate_https_upstream_url("not a url").expect_err("invalid URLs should fail"),
+            WorkspaceCheckoutError::Validation("upstream_url must be a valid URL".to_string())
+        );
+        assert_eq!(
+            validate_https_upstream_url("http://example.com/repo.git")
+                .expect_err("non-https URLs should fail"),
+            WorkspaceCheckoutError::Validation("upstream_url must use https".to_string())
+        );
+        assert_eq!(
+            validate_https_upstream_url("https://alice:secret@example.com/repo.git")
+                .expect_err("embedded credentials should fail"),
+            WorkspaceCheckoutError::Validation(
+                "upstream_url must not embed credentials".to_string()
+            )
+        );
+        validate_https_upstream_url("https://example.com/repo.git")
+            .expect("plain https URLs should validate");
+    }
+
+    #[test]
+    fn checkout_ref_resolution_prefers_override_then_default() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-workspace-checkout-ref-resolution-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+
+        assert_eq!(
+            resolve_https_checkout_ref(
+                "https://example.com/repo.git",
+                Some("refs/heads/main"),
+                Some("refs/tags/v1"),
+                &state_dir,
+            )
+            .expect("override should short-circuit"),
+            Some("refs/tags/v1".to_string())
+        );
+        assert_eq!(
+            resolve_https_checkout_ref(
+                "https://example.com/repo.git",
+                Some("refs/heads/main"),
+                None,
+                &state_dir,
+            )
+            .expect("default should short-circuit"),
+            Some("refs/heads/main".to_string())
+        );
+        assert_eq!(
+            resolve_local_checkout_ref(
+                Path::new("/workspace"),
+                Some("refs/heads/main"),
+                Some("refs/tags/v1"),
+                &state_dir,
+            )
+            .expect("override should short-circuit"),
+            Some("refs/tags/v1".to_string())
+        );
+        assert_eq!(
+            resolve_local_checkout_ref(
+                Path::new("/workspace"),
+                Some("refs/heads/main"),
+                None,
+                &state_dir
+            )
+            .expect("default should short-circuit"),
+            Some("refs/heads/main".to_string())
+        );
+    }
+
+    #[test]
+    fn build_prepared_checkout_preserves_supplied_fields() {
+        let checkout_path = Path::new("/workspace/session-checkouts/s_test");
+
+        assert_eq!(
+            build_prepared_checkout(
+                "session-checkouts/s_test".to_string(),
+                Some("refs/heads/main".to_string()),
+                Some("deadbeef".to_string()),
+                checkout_path,
+            ),
+            PreparedWorkspaceCheckout {
+                checkout_relpath: "session-checkouts/s_test".to_string(),
+                checkout_ref: Some("refs/heads/main".to_string()),
+                checkout_commit_sha: Some("deadbeef".to_string()),
+                working_dir: checkout_path.to_path_buf(),
+            }
+        );
+    }
+
+    #[test]
     fn resolved_checkout_paths_stay_within_the_checkout_root() {
         let state_dir = std::env::temp_dir().join(format!(
             "acp-workspace-checkout-resolve-{}",

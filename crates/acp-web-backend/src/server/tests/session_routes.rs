@@ -1,5 +1,53 @@
 use super::*;
 
+#[derive(Debug)]
+struct InvalidRestoredCheckoutManager;
+
+#[async_trait::async_trait]
+impl crate::workspace_checkout::WorkspaceCheckoutManager for InvalidRestoredCheckoutManager {
+    async fn prepare_checkout(
+        &self,
+        _workspace: &WorkspaceRecord,
+        _session_id: &str,
+        _checkout_ref_override: Option<&str>,
+    ) -> Result<
+        crate::workspace_checkout::PreparedWorkspaceCheckout,
+        crate::workspace_checkout::WorkspaceCheckoutError,
+    > {
+        unreachable!("restoration tests only resolve persisted checkout paths");
+    }
+
+    fn resolve_checkout_path(&self, _checkout_relpath: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+#[derive(Debug)]
+struct BindFailingReplyProvider {
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+}
+
+impl ReplyProvider for BindFailingReplyProvider {
+    fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn bind_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _working_dir: std::path::PathBuf,
+    ) -> BindSessionFuture<'a> {
+        Box::pin(async { Err("failed to rebind restored checkout".to_string()) })
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        self.forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .push(session_id.to_string());
+    }
+}
+
 fn state_with_static_reply(reply: &str) -> (Arc<SessionStore>, AppState) {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState::with_dependencies(
@@ -494,6 +542,113 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
 
     assert_eq!(restored.0.session.id, created.id);
     assert_binding_calls(&reply_provider, &["bind"], &[(created.id, checkout_path)]);
+}
+
+#[tokio::test]
+async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = durable_user_for_principal(&state, &principal).await;
+    let mut metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
+    metadata.checkout_relpath = Some("../escape".to_string());
+    workspace_repository
+        .save_session_metadata(&metadata)
+        .await
+        .expect("metadata mutation should persist");
+    store
+        .delete_sessions_for_owners(&["alice".to_string()])
+        .await;
+
+    let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository,
+        reply_provider: Arc::new(TrackingReplyProvider {
+            forgotten_sessions: forgotten_sessions.clone(),
+        }),
+        checkout_manager: Arc::new(InvalidRestoredCheckoutManager),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let error = get_session(State(state), Path(created.id.clone()), principal)
+        .await
+        .expect_err("invalid persisted checkout paths should roll back restored sessions");
+
+    assert!(
+        matches!(error, AppError::Internal(message) if message == "persisted checkout path is invalid")
+    );
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .clone(),
+        vec![created.id.clone()]
+    );
+    let snapshot_error = store
+        .session_snapshot("alice", &created.id)
+        .await
+        .expect_err("failed restores should be discarded from the live store");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+#[tokio::test]
+async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    store
+        .delete_sessions_for_owners(&["alice".to_string()])
+        .await;
+
+    let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository,
+        reply_provider: Arc::new(BindFailingReplyProvider {
+            forgotten_sessions: forgotten_sessions.clone(),
+        }),
+        checkout_manager: test_checkout_manager(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let error = get_session(State(state), Path(created.id.clone()), principal)
+        .await
+        .expect_err("rebind failures should roll back restored sessions");
+
+    assert!(
+        matches!(error, AppError::Internal(message) if message == "failed to rebind restored checkout")
+    );
+    assert_eq!(
+        forgotten_sessions
+            .lock()
+            .expect("cleanup tracking should not poison")
+            .clone(),
+        vec![created.id.clone()]
+    );
+    let snapshot_error = store
+        .session_snapshot("alice", &created.id)
+        .await
+        .expect_err("failed restores should be discarded from the live store");
+    assert_eq!(snapshot_error, SessionStoreError::NotFound);
 }
 
 #[tokio::test]

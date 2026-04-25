@@ -37,40 +37,29 @@ struct SessionSidebarItemCallbacks {
     delete_session: Callback<()>,
 }
 
+const SESSION_SIDEBAR_DELETE_SESSION_LABELS: [&str; 2] = ["Delete session", "Deleting…"];
+const SESSION_SIDEBAR_DELETE_SESSION_ICONS: [AppIcon; 2] = [AppIcon::Delete, AppIcon::Busy];
+const SESSION_SIDEBAR_SAVE_TITLE_LABELS: [&str; 2] = ["Save session title", "Saving…"];
+const SESSION_SIDEBAR_SAVE_TITLE_ICONS: [AppIcon; 2] = [AppIcon::Save, AppIcon::Busy];
+
 fn session_sidebar_rename_session_label() -> &'static str {
     "Rename session"
 }
 
 fn session_sidebar_delete_session_label(is_deleting: bool) -> &'static str {
-    if is_deleting {
-        "Deleting…"
-    } else {
-        "Delete session"
-    }
+    SESSION_SIDEBAR_DELETE_SESSION_LABELS[usize::from(is_deleting)]
 }
 
 fn session_sidebar_delete_session_icon(is_deleting: bool) -> AppIcon {
-    if is_deleting {
-        AppIcon::Busy
-    } else {
-        AppIcon::Delete
-    }
+    SESSION_SIDEBAR_DELETE_SESSION_ICONS[usize::from(is_deleting)]
 }
 
 fn session_sidebar_save_title_label(is_saving_rename: bool) -> &'static str {
-    if is_saving_rename {
-        "Saving…"
-    } else {
-        "Save session title"
-    }
+    SESSION_SIDEBAR_SAVE_TITLE_LABELS[usize::from(is_saving_rename)]
 }
 
 fn session_sidebar_save_title_icon(is_saving_rename: bool) -> AppIcon {
-    if is_saving_rename {
-        AppIcon::Busy
-    } else {
-        AppIcon::Save
-    }
+    SESSION_SIDEBAR_SAVE_TITLE_ICONS[usize::from(is_saving_rename)]
 }
 
 fn session_sidebar_cancel_rename_label() -> &'static str {

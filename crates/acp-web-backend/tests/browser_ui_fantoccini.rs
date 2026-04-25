@@ -96,7 +96,7 @@ async fn workspaces_page_shows_create_workspace_button_not_inline_form() -> Resu
                 const icon = button.querySelector('.workspace-dashboard__new-btn-icon');
                 const styles = getComputedStyle(button);
                 return label?.textContent?.trim() === 'New workspace'
-                  && icon?.textContent?.trim() === '+'
+                  && Boolean(icon?.querySelector('svg'))
                   && styles.color !== styles.backgroundColor;
                 "#,
                 "checking create workspace button",

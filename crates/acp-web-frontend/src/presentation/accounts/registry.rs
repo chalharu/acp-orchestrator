@@ -312,13 +312,7 @@ fn AccountRowActions(
                     aria-label=move || save_button_label(saving.get())
                     title=move || save_button_label(saving.get())
                 >
-                    {move || {
-                        if saving.get() {
-                            app_icon_view(AppIcon::Busy)
-                        } else {
-                            app_icon_view(AppIcon::Save)
-                        }
-                    }}
+                    {move || app_icon_view(save_button_icon(saving.get()))}
                     <span class="sr-only">{move || save_button_label(saving.get())}</span>
                 </button>
                 <button
@@ -329,13 +323,7 @@ fn AccountRowActions(
                     aria-label=move || delete_button_label(deleting.get())
                     title=move || delete_button_label(deleting.get())
                 >
-                    {move || {
-                        if deleting.get() {
-                            app_icon_view(AppIcon::Busy)
-                        } else {
-                            app_icon_view(AppIcon::Delete)
-                        }
-                    }}
+                    {move || app_icon_view(delete_button_icon(deleting.get()))}
                     <span class="sr-only">{move || delete_button_label(deleting.get())}</span>
                 </button>
             </div>
@@ -378,11 +366,7 @@ fn AccountRowActions(
                     aria-label=save_button_label(saving_now)
                     title=save_button_label(saving_now)
                 >
-                    {if saving_now {
-                        app_icon_view(AppIcon::Busy)
-                    } else {
-                        app_icon_view(AppIcon::Save)
-                    }}
+                    {app_icon_view(save_button_icon(saving_now))}
                     <span class="sr-only">{save_button_label(saving_now)}</span>
                 </button>
                 <button
@@ -393,11 +377,7 @@ fn AccountRowActions(
                     aria-label=delete_button_label(deleting_now)
                     title=delete_button_label(deleting_now)
                 >
-                    {if deleting_now {
-                        app_icon_view(AppIcon::Busy)
-                    } else {
-                        app_icon_view(AppIcon::Delete)
-                    }}
+                    {app_icon_view(delete_button_icon(deleting_now))}
                     <span class="sr-only">{delete_button_label(deleting_now)}</span>
                 </button>
             </div>
@@ -547,6 +527,18 @@ fn save_button_label(saving: bool) -> &'static str {
 
 fn delete_button_label(deleting: bool) -> &'static str {
     if deleting { "Deleting…" } else { "Delete" }
+}
+
+fn save_button_icon(saving: bool) -> AppIcon {
+    if saving { AppIcon::Busy } else { AppIcon::Save }
+}
+
+fn delete_button_icon(deleting: bool) -> AppIcon {
+    if deleting {
+        AppIcon::Busy
+    } else {
+        AppIcon::Delete
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -732,6 +724,10 @@ mod tests {
         assert_eq!(save_button_label(true), "Saving…");
         assert_eq!(delete_button_label(false), "Delete");
         assert_eq!(delete_button_label(true), "Deleting…");
+        assert_eq!(save_button_icon(false), AppIcon::Save);
+        assert_eq!(save_button_icon(true), AppIcon::Busy);
+        assert_eq!(delete_button_icon(false), AppIcon::Delete);
+        assert_eq!(delete_button_icon(true), AppIcon::Busy);
     }
 
     #[test]

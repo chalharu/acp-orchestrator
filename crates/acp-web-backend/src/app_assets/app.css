@@ -919,7 +919,7 @@ button:hover:not(:disabled) {
 .icon-action--primary:disabled {
   border-color: #c7b4a4;
   background: #c7b4a4;
-  color: #5f4638;
+  color: var(--ink);
 }
 
 .icon-action--ghost {

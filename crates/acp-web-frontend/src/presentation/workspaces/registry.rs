@@ -744,6 +744,24 @@ mod tests {
     }
 
     #[test]
+    fn workspace_action_labels_and_icons_cover_busy_states() {
+        assert_eq!(workspace_rename_label(), "Rename");
+        assert_eq!(workspace_delete_label(false), "Delete");
+        assert_eq!(workspace_delete_label(true), "Deleting…");
+        assert_eq!(workspace_new_chat_label(false), "New chat");
+        assert_eq!(workspace_new_chat_label(true), "Opening…");
+        assert_eq!(workspace_save_label(false), "Save");
+        assert_eq!(workspace_save_label(true), "Saving…");
+        assert_eq!(workspace_cancel_label(), "Cancel");
+        assert_eq!(workspace_delete_icon(false), AppIcon::Delete);
+        assert_eq!(workspace_delete_icon(true), AppIcon::Busy);
+        assert_eq!(workspace_new_chat_icon(false), AppIcon::NewChat);
+        assert_eq!(workspace_new_chat_icon(true), AppIcon::Busy);
+        assert_eq!(workspace_save_icon(false), AppIcon::Save);
+        assert_eq!(workspace_save_icon(true), AppIcon::Busy);
+    }
+
+    #[test]
     fn workspace_registry_section_builds_without_panicking() {
         let owner = Owner::new();
         owner.with(|| {

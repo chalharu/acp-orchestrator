@@ -399,10 +399,11 @@ fn workspace_start_chat_modal_header(
     workspace_name: Signal<String>,
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
+    let title = workspace_start_chat_title_signal(workspace_name);
     view! {
         <div class="workspace-modal__header">
             <h2 class="workspace-modal__title">
-                "Start chat in " {move || workspace_name.get()}
+                "Start chat in " {title}
             </h2>
             <button
                 type="button"
@@ -439,6 +440,7 @@ fn workspace_start_chat_modal_actions(
     opening: Signal<bool>,
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
+    let submit_label = workspace_new_chat_label_signal(opening);
     view! {
         <div class="workspace-modal__actions">
             <button
@@ -446,7 +448,7 @@ fn workspace_start_chat_modal_actions(
                 class="account-form__submit"
                 prop:disabled=move || opening.get()
             >
-                {move || workspace_new_chat_label(opening.get())}
+                {submit_label}
             </button>
             <button
                 type="button"
@@ -764,6 +766,18 @@ fn workspace_start_chat_cancel_handler(
     move |_| close_workspace_start_chat_modal(state)
 }
 
+fn workspace_start_chat_title_signal(
+    workspace_name: Signal<String>,
+) -> impl Fn() -> String + Copy + 'static {
+    move || workspace_name.get()
+}
+
+fn workspace_new_chat_label_signal(
+    opening: Signal<bool>,
+) -> impl Fn() -> &'static str + Copy + 'static {
+    move || workspace_new_chat_label(opening.get())
+}
+
 fn close_workspace_start_chat_modal(state: WorkspacesPageState) {
     state.show_start_chat_modal.set(false);
     state.start_chat_workspace_id.set(None);
@@ -889,9 +903,20 @@ mod tests {
     use acp_contracts_workspaces::WorkspaceSummary;
     use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
+    use wasm_bindgen::{JsCast, JsValue};
 
     use super::*;
     use crate::presentation::workspaces::shared::WorkspacesPageState;
+
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_submit_event() -> web_sys::SubmitEvent {
+        JsValue::NULL.unchecked_into()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn fake_mouse_event() -> web_sys::MouseEvent {
+        JsValue::NULL.unchecked_into()
+    }
 
     fn sample_workspace(id: &str, name: &str) -> WorkspaceSummary {
         WorkspaceSummary {
@@ -1042,12 +1067,16 @@ mod tests {
             let workspace_name = Signal::derive(move || state.start_chat_workspace_name.get());
             let checkout_ref = Signal::derive(move || state.start_chat_checkout_ref.get());
             let opening = Signal::derive(move || state.opening_chat_workspace_id.get().is_some());
+            let title = workspace_start_chat_title_signal(workspace_name);
+            let submit_label = workspace_new_chat_label_signal(opening);
             let _ = workspace_start_chat_modal(state);
             let _ = workspace_start_chat_modal_view(state, |_event: web_sys::SubmitEvent| {});
             let _ =
                 workspace_start_chat_modal_header(workspace_name, |_event: web_sys::MouseEvent| {});
             let _ = workspace_start_chat_checkout_ref_field(state, checkout_ref);
             let _ = workspace_start_chat_modal_actions(opening, |_event: web_sys::MouseEvent| {});
+            assert_eq!(title(), "Test Workspace");
+            assert_eq!(submit_label(), "New chat");
 
             close_workspace_start_chat_modal(state);
 
@@ -1056,6 +1085,35 @@ mod tests {
             assert!(state.start_chat_workspace_name.get().is_empty());
             assert!(state.start_chat_checkout_ref.get().is_empty());
             assert!(state.error.get().is_none());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_start_chat_host_handlers_close_the_modal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.show_start_chat_modal.set(true);
+            state.start_chat_workspace_id.set(Some("w_1".to_string()));
+            state
+                .start_chat_workspace_name
+                .set("Test Workspace".to_string());
+            state
+                .start_chat_checkout_ref
+                .set("refs/heads/feature".to_string());
+
+            workspace_start_chat_submit_handler(state)(fake_submit_event());
+            assert!(!state.show_start_chat_modal.get());
+
+            state.show_start_chat_modal.set(true);
+            state.start_chat_workspace_id.set(Some("w_1".to_string()));
+            state
+                .start_chat_workspace_name
+                .set("Test Workspace".to_string());
+
+            workspace_start_chat_cancel_handler(state)(fake_mouse_event());
+            assert!(!state.show_start_chat_modal.get());
         });
     }
 

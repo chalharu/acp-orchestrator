@@ -217,6 +217,48 @@ async fn test_checkout_manager_recreates_existing_checkout_directories() {
     );
 }
 
+#[test]
+fn reset_test_checkout_dir_surfaces_cleanup_failures() {
+    let path = std::env::current_dir()
+        .expect("tests should start in a readable directory")
+        .join(".tmp")
+        .join(format!(
+            "acp-web-backend-reset-checkout-cleanup-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    std::fs::create_dir_all(path.parent().expect("checkout path should have a parent"))
+        .expect("parent dir should be creatable");
+    std::fs::write(&path, "stale file").expect("stale file should be writable");
+
+    let error = reset_test_checkout_dir(&path)
+        .expect_err("file-backed stale checkouts should fail cleanup");
+
+    assert!(
+        matches!(error, WorkspaceCheckoutError::Io(message) if message.contains("clearing test checkout directory failed"))
+    );
+}
+
+#[test]
+fn reset_test_checkout_dir_surfaces_creation_failures() {
+    let blocker = std::env::current_dir()
+        .expect("tests should start in a readable directory")
+        .join(".tmp")
+        .join(format!(
+            "acp-web-backend-reset-checkout-create-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    std::fs::create_dir_all(blocker.parent().expect("blocker path should have a parent"))
+        .expect("parent dir should be creatable");
+    std::fs::write(&blocker, "blocker").expect("blocking file should be writable");
+
+    let error = reset_test_checkout_dir(&blocker.join("child"))
+        .expect_err("files on the checkout parent path should fail creation");
+
+    assert!(
+        matches!(error, WorkspaceCheckoutError::Io(message) if message.contains("creating test checkout directory failed"))
+    );
+}
+
 #[tokio::test]
 async fn owner_context_surfaces_workspace_storage_failures() {
     let state = AppState::with_workspace_repository(

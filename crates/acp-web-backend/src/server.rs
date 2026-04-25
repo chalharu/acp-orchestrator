@@ -358,6 +358,19 @@ fn test_checkout_path(checkout_relpath: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+fn reset_test_checkout_dir(working_dir: &std::path::Path) -> Result<(), WorkspaceCheckoutError> {
+    if working_dir.exists() {
+        std::fs::remove_dir_all(working_dir).map_err(|error| {
+            WorkspaceCheckoutError::Io(format!("clearing test checkout directory failed: {error}"))
+        })?;
+    }
+    std::fs::create_dir_all(working_dir).map_err(|error| {
+        WorkspaceCheckoutError::Io(format!("creating test checkout directory failed: {error}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
 #[async_trait::async_trait]
 impl WorkspaceCheckoutManager for TestWorkspaceCheckoutManager {
     async fn prepare_checkout(
@@ -368,16 +381,7 @@ impl WorkspaceCheckoutManager for TestWorkspaceCheckoutManager {
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
         let checkout_relpath = format!("session-checkouts/{session_id}");
         let working_dir = test_checkout_path(&checkout_relpath);
-        if working_dir.exists() {
-            std::fs::remove_dir_all(&working_dir).map_err(|error| {
-                WorkspaceCheckoutError::Io(format!(
-                    "clearing test checkout directory failed: {error}"
-                ))
-            })?;
-        }
-        std::fs::create_dir_all(&working_dir).map_err(|error| {
-            WorkspaceCheckoutError::Io(format!("creating test checkout directory failed: {error}"))
-        })?;
+        reset_test_checkout_dir(&working_dir)?;
         Ok(PreparedWorkspaceCheckout {
             checkout_relpath,
             checkout_ref: checkout_ref_override.map(str::to_string),

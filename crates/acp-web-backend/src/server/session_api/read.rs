@@ -193,3 +193,65 @@ async fn rollback_restored_session(
             ))
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        contract_sessions::SessionStatus,
+        mock_client::{ReplyFuture, ReplyProvider, ReplyResult},
+        sessions::SessionStore,
+    };
+
+    #[derive(Debug)]
+    struct NoopReplyProvider;
+
+    impl ReplyProvider for NoopReplyProvider {
+        fn request_reply<'a>(&'a self, _turn: crate::sessions::TurnHandle) -> ReplyFuture<'a> {
+            Box::pin(async { Ok(ReplyResult::NoOutput) })
+        }
+    }
+
+    fn sample_session_snapshot(session_id: &str) -> SessionSnapshot {
+        SessionSnapshot {
+            id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            title: "Test session".to_string(),
+            status: SessionStatus::Active,
+            latest_sequence: 0,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_sessions_skip_rebinding_without_a_persisted_checkout_path() {
+        let state = AppState::with_dependencies(
+            Arc::new(SessionStore::new(4)),
+            Arc::new(NoopReplyProvider),
+        );
+        let restored = sample_session_snapshot("s_restore");
+
+        bind_restored_session_to_checkout(&state, "alice", &restored, None)
+            .await
+            .expect("missing checkout metadata should skip rebinding");
+    }
+
+    #[tokio::test]
+    async fn rollback_restored_session_reports_discard_failures_with_context() {
+        let state = AppState::with_dependencies(
+            Arc::new(SessionStore::new(4)),
+            Arc::new(NoopReplyProvider),
+        );
+
+        let error =
+            rollback_restored_session(&state, "alice", "missing", "binding checkout failed")
+                .await
+                .expect_err("missing restored sessions should surface rollback failures");
+
+        assert!(matches!(error, AppError::Internal(message)
+                if message == "binding checkout failed; restored session rollback failed: session not found"));
+    }
+}

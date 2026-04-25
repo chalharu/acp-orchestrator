@@ -215,8 +215,15 @@ async fn post_message_keeps_working_when_workspace_materialization_fails() {
         .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        Arc::new(FailingWorkspaceStore::new("metadata unavailable")),
+        Arc::new(StaticReplyProvider {
+            reply: "assistant reply despite metadata failure".to_string(),
+        }),
+    );
     let response = post_message(
-        State(failing_workspace_state(store)),
+        State(state),
         Path(session.id.clone()),
         bearer_principal("alice"),
         Json(PromptRequest {
@@ -227,6 +234,24 @@ async fn post_message_keeps_working_when_workspace_materialization_fails() {
     .expect("live prompt submission should still succeed");
 
     assert!(response.0.accepted);
+    timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let snapshot = store
+                .session_snapshot("alice", &session.id)
+                .await
+                .expect("live session should stay accessible");
+            if snapshot.messages.len() == 2 {
+                assert_eq!(
+                    snapshot.messages[1].text,
+                    "assistant reply despite metadata failure"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("assistant completion should finish");
 }
 
 #[tokio::test]

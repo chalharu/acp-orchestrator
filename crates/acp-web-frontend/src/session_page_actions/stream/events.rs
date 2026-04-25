@@ -7,11 +7,15 @@ use acp_contracts_slash::CompletionCandidate;
 use acp_contracts_stream::{StreamEvent, StreamEventPayload};
 use leptos::prelude::*;
 
+#[cfg(target_family = "wasm")]
+use super::super::bootstrap::sync_current_workspace_name;
+#[cfg(target_family = "wasm")]
+use super::super::shared::spawn_browser_task;
 use crate::session_activity::tool_activity_text;
 use crate::session_lifecycle::{SessionLifecycle, TurnState, session_end_message};
 use crate::session_page_bootstrap::session_bootstrap_from_snapshot;
 use crate::session_page_entries::SessionEntry;
-use crate::session_page_signals::SessionSignals;
+use crate::session_page_signals::{SessionSignals, set_current_workspace_id};
 use crate::session_state::{
     should_apply_snapshot_turn_state, should_release_turn_state, turn_state_for_snapshot,
 };
@@ -35,7 +39,14 @@ pub(super) fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
 }
 
 fn apply_session_snapshot(session: SessionSnapshot, signals: SessionSignals) {
+    #[cfg(target_family = "wasm")]
+    let previous_workspace_id = signals.current_workspace_id.get_untracked();
     let bootstrap = session_bootstrap_from_snapshot(session);
+    set_current_workspace_id(bootstrap.workspace_id, signals);
+    #[cfg(target_family = "wasm")]
+    if previous_workspace_id != signals.current_workspace_id.get_untracked() {
+        spawn_browser_task(sync_current_workspace_name(signals));
+    }
     signals.session_status.set(bootstrap.session_status);
     if should_apply_snapshot_turn_state(signals.turn_state.get_untracked()) {
         signals
@@ -214,6 +225,7 @@ mod tests {
     fn snapshot(status: SessionStatus, permissions: Vec<PermissionRequest>) -> SessionSnapshot {
         SessionSnapshot {
             id: "session-1".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "Session".to_string(),
             status,
             latest_sequence: 4,
@@ -225,6 +237,7 @@ mod tests {
     fn list_item(id: &str) -> SessionListItem {
         SessionListItem {
             id: id.to_string(),
+            workspace_id: "w_test".to_string(),
             title: id.to_string(),
             status: SessionStatus::Active,
             last_activity_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
@@ -259,6 +272,10 @@ mod tests {
             assert_eq!(signals.turn_state.get(), TurnState::AwaitingPermission);
             assert_eq!(signals.entries.get().len(), 1);
             assert_eq!(signals.pending_permissions.get().len(), 1);
+            assert_eq!(
+                signals.current_workspace_id.get(),
+                Some("w_test".to_string())
+            );
         });
     }
 

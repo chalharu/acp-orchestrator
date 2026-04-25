@@ -13,6 +13,8 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub id: String,
+    #[serde(default)]
+    pub workspace_id: String,
     #[serde(default = "default_session_title")]
     pub title: String,
     pub status: SessionStatus,
@@ -25,6 +27,8 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionListItem {
     pub id: String,
+    #[serde(default)]
+    pub workspace_id: String,
     #[serde(default = "default_session_title")]
     pub title: String,
     pub status: SessionStatus,
@@ -80,10 +84,10 @@ pub struct CloseSessionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionSnapshot;
+    use super::{SessionListItem, SessionSnapshot};
 
     #[test]
-    fn session_snapshots_deserialize_default_titles_and_empty_permissions() {
+    fn session_snapshots_deserialize_default_titles_empty_permissions_and_workspace() {
         let snapshot: SessionSnapshot = serde_json::from_value(serde_json::json!({
             "id": "s_test",
             "status": "active",
@@ -92,7 +96,21 @@ mod tests {
         }))
         .expect("session snapshots should deserialize");
 
+        assert!(snapshot.workspace_id.is_empty());
         assert_eq!(snapshot.title, "New chat");
         assert!(snapshot.pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn session_list_items_deserialize_default_title_and_workspace() {
+        let item: SessionListItem = serde_json::from_value(serde_json::json!({
+            "id": "s_test",
+            "status": "active",
+            "last_activity_at": "2026-04-17T01:00:00Z"
+        }))
+        .expect("session list items should deserialize");
+
+        assert!(item.workspace_id.is_empty());
+        assert_eq!(item.title, "New chat");
     }
 }

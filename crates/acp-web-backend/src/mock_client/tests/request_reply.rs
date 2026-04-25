@@ -15,7 +15,7 @@ async fn permission_roundtrip_context() -> (
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let (_snapshot, receiver) = store
@@ -93,7 +93,7 @@ async fn prime_session_hint_collects_startup_hints_without_polluting_prompt_repl
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
 
@@ -130,7 +130,7 @@ async fn request_reply_reuses_upstream_sessions_for_the_same_backend_session() {
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let first = store
@@ -142,7 +142,7 @@ async fn request_reply_reuses_upstream_sessions_for_the_same_backend_session() {
         .await
         .expect("second prompt should submit");
     let other_session = store
-        .create_session("bob")
+        .create_session("bob", "w_test")
         .await
         .expect("second session should succeed");
     let other_session_id = other_session.id.clone();
@@ -182,7 +182,7 @@ async fn forgetting_sessions_clears_cached_upstream_state() {
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -247,7 +247,7 @@ async fn request_reply_returns_cancelled_status_when_turns_are_cancelled() {
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
@@ -329,7 +329,7 @@ async fn request_reply_continues_when_the_cancel_watch_is_replaced_without_cance
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let first = store
@@ -371,7 +371,7 @@ async fn request_reply_reports_session_runtime_failures_after_sessions_close() {
     let client = MockClient::new(mock_address).expect("client construction should succeed");
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store

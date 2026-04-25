@@ -5,3 +5,4 @@ pub use acp_contracts_permissions as permissions;
 pub use acp_contracts_sessions as sessions;
 pub use acp_contracts_slash as slash;
 pub use acp_contracts_stream as stream;
+pub use acp_contracts_workspaces as workspaces;

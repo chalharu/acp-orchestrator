@@ -39,7 +39,7 @@ async fn spawn_mock_server_with_config(config: MockConfig) -> (String, oneshot::
 async fn test_pending_prompt(owner: &str, prompt: &str) -> PendingPrompt {
     let store = SessionStore::new(4);
     let session = store
-        .create_session(owner)
+        .create_session(owner, "w_test")
         .await
         .expect("session creation should succeed");
     store

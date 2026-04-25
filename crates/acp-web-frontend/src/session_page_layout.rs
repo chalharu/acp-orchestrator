@@ -11,7 +11,7 @@ use crate::session_page_actions::{bind_slash_completion, spawn_session_bootstrap
 use crate::session_page_composer_signals::{SessionComposerSignals, session_composer_signals};
 use crate::session_page_main::SessionMain;
 use crate::session_page_main_signals::{SessionMainSignals, session_main_signals};
-use crate::session_page_sidebar::SessionSidebar;
+use crate::session_page_sidebar::{SessionSidebar, SessionSidebarListControls};
 use crate::session_page_signals::{
     SessionSignals, current_session_deleting_signal, persist_session_draft, restore_session_draft,
     session_signals,
@@ -80,23 +80,22 @@ pub(crate) fn SessionShell(
         delete_session: on_delete_session,
         ..
     } = callbacks;
+    let sidebar_list_controls = SessionSidebarListControls {
+        renaming_session_id: shell_signals.list.renaming_id,
+        saving_rename_session_id: shell_signals.list.saving_rename_id,
+        rename_draft: shell_signals.list.rename_draft,
+        on_rename_session,
+        on_delete_session,
+    };
 
     view! {
         <div class=move || session_layout_class(sidebar_open.get())>
             <SessionSidebar
                 current_session_id=current_session_id
                 auth_error=auth_error
-                sessions=shell_signals.sessions
-                session_list_loaded=shell_signals.list.loaded
-                session_list_error=shell_signals.list.error
+                shell_signals=shell_signals
                 sidebar_open=sidebar_open
-                deleting_session_id=shell_signals.list.deleting_id
-                delete_disabled=shell_signals.delete_disabled
-                renaming_session_id=shell_signals.list.renaming_id
-                saving_rename_session_id=shell_signals.list.saving_rename_id
-                rename_draft=shell_signals.list.rename_draft
-                on_rename_session=on_rename_session
-                on_delete_session=on_delete_session
+                list_controls=sidebar_list_controls
             />
             <SessionMain
                 main_signals=main_signals

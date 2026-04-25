@@ -1,16 +1,63 @@
 use super::*;
 
-#[tokio::test]
-async fn injected_reply_provider_handles_prompt_dispatch() {
+fn state_with_static_reply(reply: &str) -> (Arc<SessionStore>, AppState) {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState::with_dependencies(
         store.clone(),
         Arc::new(StaticReplyProvider {
-            reply: "injected reply".to_string(),
+            reply: reply.to_string(),
         }),
     );
+    (store, state)
+}
+
+async fn create_persisted_workspace_session(
+    state: &AppState,
+    principal: Extension<AuthenticatedPrincipal>,
+) -> crate::contract_sessions::SessionSnapshot {
+    let workspace =
+        create_owned_workspace_for_principal(state, principal.clone(), "Workspace A").await;
+    create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id),
+        principal,
+    )
+    .await
+    .expect("workspace session should create")
+    .1
+    .0
+    .session
+}
+
+async fn wait_for_durable_messages(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+) -> crate::workspace_records::DurableSessionSnapshotRecord {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state
+                .workspace_repository
+                .load_session_snapshot(user_id, session_id)
+                .await
+                .expect("durable snapshot should load");
+            if let Some(snapshot) = snapshot
+                && snapshot.session.messages.len() == 2
+            {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("assistant reply should be durably persisted")
+}
+
+#[tokio::test]
+async fn injected_reply_provider_handles_prompt_dispatch() {
+    let (store, state) = state_with_static_reply("injected reply");
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let _ = post_message(
@@ -43,6 +90,43 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
 }
 
 #[tokio::test]
+async fn get_session_restores_durable_messages_after_live_session_is_cleared() {
+    let (store, state) = state_with_static_reply("injected reply");
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    let _ = post_message(
+        State(state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+        Json(PromptRequest {
+            text: "hello".to_string(),
+        }),
+    )
+    .await
+    .expect("prompt submission should succeed");
+    let durable_user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+
+    let durable = wait_for_durable_messages(&state, &durable_user.user_id, &created.id).await;
+    assert_eq!(durable.session.messages[1].text, "injected reply");
+
+    store
+        .delete_sessions_for_owners(&["alice".to_string()])
+        .await;
+
+    let restored = get_session(State(state), Path(created.id), principal)
+        .await
+        .expect("durably persisted sessions should restore");
+
+    assert_eq!(restored.0.session.messages.len(), 2);
+    assert_eq!(restored.0.session.messages[0].text, "hello");
+    assert_eq!(restored.0.session.messages[1].text, "injected reply");
+}
+
+#[tokio::test]
 async fn create_session_seeds_startup_hints_when_enabled() {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState {
@@ -54,6 +138,9 @@ async fn create_session_seeds_startup_hints_when_enabled() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
@@ -78,6 +165,9 @@ async fn create_session_skips_startup_hints_when_disabled() {
         startup_hints: false,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
@@ -105,6 +195,9 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let response = create_session(State(state), bearer_principal("alice"))
         .await
         .expect("session creation should succeed");
@@ -126,6 +219,9 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("failed startup hint priming should fail the request");
@@ -145,7 +241,7 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         .expect_err("rolled back sessions should be removed");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
     store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("rollback should free the session cap");
 }
@@ -165,6 +261,9 @@ async fn create_session_reports_rollback_failures() {
         startup_hints: true,
         frontend_dist: None,
     };
+    let _workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
     let error = create_session(State(state), bearer_principal("alice"))
         .await
         .expect_err("rollback failures should surface as internal errors");
@@ -185,6 +284,56 @@ async fn create_session_reports_rollback_failures() {
 }
 
 #[tokio::test]
+async fn create_session_creates_a_standard_workspace_when_none_exist() {
+    let state = AppState::with_dependencies(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+    );
+
+    let response = create_session(State(state.clone()), bearer_principal("alice"))
+        .await
+        .expect("root create should create a session when no workspaces exist");
+    let listed = list_workspaces(State(state), bearer_principal("alice"))
+        .await
+        .expect("workspace list should succeed after legacy session creation");
+
+    assert_eq!(response.0, StatusCode::CREATED);
+    assert_eq!(listed.0.workspaces.len(), 1);
+    assert_eq!(listed.0.workspaces[0].name, "Workspace");
+    assert_eq!(
+        response.1.0.session.workspace_id,
+        listed.0.workspaces[0].workspace_id
+    );
+}
+
+#[tokio::test]
+async fn create_session_requires_explicit_workspace_selection_when_multiple_workspaces_exist() {
+    let state = AppState::with_dependencies(
+        Arc::new(SessionStore::new(4)),
+        Arc::new(StaticReplyProvider {
+            reply: String::new(),
+        }),
+    );
+    let _first =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
+    let _second =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace B")
+            .await;
+
+    let error = create_session(State(state), bearer_principal("alice"))
+        .await
+        .expect_err("root create should reject ambiguous workspace selection");
+
+    assert!(matches!(
+        error,
+        AppError::Conflict(message) if message == "workspace selection required"
+    ));
+}
+
+#[tokio::test]
 async fn closing_sessions_notifies_reply_provider_cleanup() {
     let store = Arc::new(SessionStore::new(4));
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -195,7 +344,7 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
         }),
     );
     let session = store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = close_session(

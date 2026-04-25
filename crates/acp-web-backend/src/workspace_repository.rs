@@ -2,10 +2,25 @@ use async_trait::async_trait;
 
 use crate::auth::AuthenticatedPrincipal;
 use crate::contract_accounts::LocalAccount;
-use crate::contract_sessions::SessionSnapshot;
+use crate::contract_sessions::{SessionListItem, SessionSnapshot};
 use crate::workspace_records::{
-    SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+    WorkspaceStoreError,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewWorkspace {
+    pub name: String,
+    pub upstream_url: Option<String>,
+    pub default_ref: Option<String>,
+    pub credential_reference_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceUpdatePatch {
+    pub name: Option<String>,
+    pub default_ref: Option<String>,
+}
 
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
@@ -18,6 +33,42 @@ pub trait WorkspaceRepository: Send + Sync {
         &self,
         owner_user_id: &str,
     ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
+
+    async fn list_workspaces(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError>;
+
+    async fn load_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError>;
+
+    async fn create_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace: &NewWorkspace,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
+
+    async fn update_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+        update: &WorkspaceUpdatePatch,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError>;
+
+    async fn delete_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), WorkspaceStoreError>;
+
+    async fn list_workspace_sessions(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<SessionListItem>, WorkspaceStoreError>;
 
     async fn save_session_metadata(
         &self,
@@ -37,6 +88,12 @@ pub trait WorkspaceRepository: Send + Sync {
         owner_user_id: &str,
         session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError>;
+
+    async fn load_session_snapshot(
+        &self,
+        owner_user_id: &str,
+        session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError>;
 
     async fn auth_status(
         &self,

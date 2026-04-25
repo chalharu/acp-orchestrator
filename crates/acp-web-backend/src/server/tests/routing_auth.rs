@@ -200,6 +200,18 @@ async fn app_accounts_entrypoint_reuses_the_app_shell() {
 }
 
 #[tokio::test]
+async fn app_workspaces_entrypoint_reuses_the_app_shell() {
+    let response = app_workspaces_entrypoint(HeaderMap::new()).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("entrypoint body should be readable");
+    let body = String::from_utf8(body.to_vec()).expect("entrypoint body should be UTF-8");
+
+    assert!(body.contains("id=\"app-root\""));
+    assert!(body.contains("wasm-init.js"));
+}
+
+#[tokio::test]
 async fn bootstrap_registration_changes_auth_status_for_the_browser_session() {
     let state = AppState::with_workspace_repository(
         Arc::new(SessionStore::new(4)),
@@ -327,6 +339,12 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
     let state = auth_test_state();
     let browser = BrowserAuthContext::spawn().await;
     bootstrap_admin_account(&state, &browser).await;
+    let _workspace = create_owned_workspace_for_principal(
+        &state,
+        Extension(browser.principal.clone()),
+        "Browser Workspace",
+    )
+    .await;
     let created = create_session(State(state.clone()), Extension(browser.principal.clone()))
         .await
         .expect("session creation should succeed")
@@ -363,12 +381,12 @@ async fn list_sessions_returns_owned_sessions_for_the_authenticated_principal() 
     let state = auth_test_state();
     let session = state
         .store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
     state
         .store
-        .create_session("bob")
+        .create_session("bob", "w_test")
         .await
         .expect("other session creation should succeed");
 
@@ -387,7 +405,7 @@ async fn get_session_returns_the_requested_owned_session() {
     let state = auth_test_state();
     let session = state
         .store
-        .create_session("alice")
+        .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
 
@@ -495,7 +513,7 @@ async fn admin_account_deletions_forget_live_sessions() {
     sign_in_browser_account(&state, &member_browser, "member", "password123").await;
     let live_session = state
         .store
-        .create_session(&member_browser.principal.id)
+        .create_session(&member_browser.principal.id, "w_test")
         .await
         .expect("member live session should create");
 

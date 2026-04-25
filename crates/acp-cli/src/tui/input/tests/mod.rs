@@ -50,6 +50,7 @@ fn active_session(requests: Vec<PermissionRequest>) -> CreateSessionResponse {
     CreateSessionResponse {
         session: SessionSnapshot {
             id: "s_test".to_string(),
+            workspace_id: "w_test".to_string(),
             title: "New chat".to_string(),
             status: SessionStatus::Active,
             latest_sequence: 1,

@@ -2,6 +2,7 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
+use crate::presentation::{AppIcon, app_icon_view};
 #[cfg(not(target_family = "wasm"))]
 use crate::session_page_sidebar_styles::sidebar_delete_sr_label;
 use crate::session_page_sidebar_styles::{
@@ -34,6 +35,35 @@ struct SessionSidebarItemCallbacks {
     cancel_rename: Callback<()>,
     commit_rename: Callback<()>,
     delete_session: Callback<()>,
+}
+
+const SESSION_SIDEBAR_DELETE_SESSION_LABELS: [&str; 2] = ["Delete session", "Deleting…"];
+const SESSION_SIDEBAR_DELETE_SESSION_ICONS: [AppIcon; 2] = [AppIcon::Delete, AppIcon::Busy];
+const SESSION_SIDEBAR_SAVE_TITLE_LABELS: [&str; 2] = ["Save session title", "Saving…"];
+const SESSION_SIDEBAR_SAVE_TITLE_ICONS: [AppIcon; 2] = [AppIcon::Save, AppIcon::Busy];
+
+fn session_sidebar_rename_session_label() -> &'static str {
+    "Rename session"
+}
+
+fn session_sidebar_delete_session_label(is_deleting: bool) -> &'static str {
+    SESSION_SIDEBAR_DELETE_SESSION_LABELS[usize::from(is_deleting)]
+}
+
+fn session_sidebar_delete_session_icon(is_deleting: bool) -> AppIcon {
+    SESSION_SIDEBAR_DELETE_SESSION_ICONS[usize::from(is_deleting)]
+}
+
+fn session_sidebar_save_title_label(is_saving_rename: bool) -> &'static str {
+    SESSION_SIDEBAR_SAVE_TITLE_LABELS[usize::from(is_saving_rename)]
+}
+
+fn session_sidebar_save_title_icon(is_saving_rename: bool) -> AppIcon {
+    SESSION_SIDEBAR_SAVE_TITLE_ICONS[usize::from(is_saving_rename)]
+}
+
+fn session_sidebar_cancel_rename_label() -> &'static str {
+    "Cancel rename"
 }
 
 #[component]
@@ -363,12 +393,13 @@ pub(super) fn SessionSidebarRenameButton(
         <button
             type="button"
             class="session-sidebar__action-btn"
-            title="Rename"
+            aria-label=session_sidebar_rename_session_label()
+            title=session_sidebar_rename_session_label()
             on:click=move |_| on_begin_rename.run(())
             prop:disabled=move || disabled.get()
         >
-            <span aria-hidden="true">{"✎"}</span>
-            <span class="sr-only">"Rename session"</span>
+            {app_icon_view(AppIcon::Rename)}
+            <span class="sr-only">{session_sidebar_rename_session_label()}</span>
         </button>
     }
 }
@@ -384,18 +415,19 @@ pub(super) fn SessionSidebarDeleteButton(
         <button
             type="button"
             class="session-sidebar__action-btn session-sidebar__action-btn--danger"
-            title="Delete"
+            aria-label=move || session_sidebar_delete_session_label(is_deleting.get())
+            title=move || session_sidebar_delete_session_label(is_deleting.get())
             on:click=move |_| on_delete.run(())
             prop:disabled=move || disabled.get()
         >
             <Show
                 when=move || is_deleting.get()
-                fallback=|| view! { <span aria-hidden="true">{"✕"}</span> }
+                fallback=|| app_icon_view(session_sidebar_delete_session_icon(false))
             >
-                <span aria-hidden="true">{"…"}</span>
+                {app_icon_view(session_sidebar_delete_session_icon(true))}
             </Show>
             <span class="sr-only">
-                {move || if is_deleting.get() { "Deleting…" } else { "Delete session" }}
+                {move || session_sidebar_delete_session_label(is_deleting.get())}
             </span>
         </button>
     }
@@ -415,10 +447,11 @@ pub(super) fn SessionSidebarDeleteButton(
         <button
             type="button"
             class="session-sidebar__action-btn session-sidebar__action-btn--danger"
-            title="Delete"
+            aria-label=session_sidebar_delete_session_label(deleting)
+            title=session_sidebar_delete_session_label(deleting)
             prop:disabled=move || disabled.get()
         >
-            <span aria-hidden="true">{if deleting { "…" } else { "✕" }}</span>
+            {app_icon_view(session_sidebar_delete_session_icon(deleting))}
             <span class="sr-only">{sidebar_delete_sr_label(deleting)}</span>
         </button>
     }
@@ -558,6 +591,7 @@ pub(super) fn SessionSidebarRenameInput(
     }
 }
 
+#[cfg(target_family = "wasm")]
 #[component]
 pub(super) fn SessionSidebarRenameButtons(
     #[prop(into)] is_saving_rename: Signal<bool>,
@@ -571,23 +605,66 @@ pub(super) fn SessionSidebarRenameButtons(
             class="session-sidebar__action-btn"
             on:click=move |_| on_commit_rename.run(())
             prop:disabled=move || save_disabled.get()
+            aria-label=move || session_sidebar_save_title_label(is_saving_rename.get())
+            title=move || session_sidebar_save_title_label(is_saving_rename.get())
         >
             <Show
                 when=move || is_saving_rename.get()
-                fallback=|| view! { <span aria-hidden="true">{"✓"}</span> }
+                fallback=|| app_icon_view(session_sidebar_save_title_icon(false))
             >
-                <span aria-hidden="true">{"…"}</span>
+                {app_icon_view(session_sidebar_save_title_icon(true))}
             </Show>
-            <span class="sr-only">"Save title"</span>
+            <span class="sr-only">
+                {move || session_sidebar_save_title_label(is_saving_rename.get())}
+            </span>
         </button>
         <button
             type="button"
             class="session-sidebar__action-btn"
             on:click=move |_| on_cancel_rename.run(())
             prop:disabled=move || is_saving_rename.get()
+            aria-label=session_sidebar_cancel_rename_label()
+            title=session_sidebar_cancel_rename_label()
         >
-            <span aria-hidden="true">{"✕"}</span>
-            <span class="sr-only">"Cancel rename"</span>
+            {app_icon_view(AppIcon::Cancel)}
+            <span class="sr-only">{session_sidebar_cancel_rename_label()}</span>
+        </button>
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[component]
+pub(super) fn SessionSidebarRenameButtons(
+    #[prop(into)] is_saving_rename: Signal<bool>,
+    #[prop(into)] save_disabled: Signal<bool>,
+    on_commit_rename: Callback<()>,
+    on_cancel_rename: Callback<()>,
+) -> impl IntoView {
+    let saving_now = is_saving_rename.get_untracked();
+    let save_disabled_now = save_disabled.get_untracked();
+
+    view! {
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            on:click=move |_| on_commit_rename.run(())
+            prop:disabled=save_disabled_now
+            aria-label=session_sidebar_save_title_label(saving_now)
+            title=session_sidebar_save_title_label(saving_now)
+        >
+            {app_icon_view(session_sidebar_save_title_icon(saving_now))}
+            <span class="sr-only">{session_sidebar_save_title_label(saving_now)}</span>
+        </button>
+        <button
+            type="button"
+            class="session-sidebar__action-btn"
+            on:click=move |_| on_cancel_rename.run(())
+            prop:disabled=saving_now
+            aria-label=session_sidebar_cancel_rename_label()
+            title=session_sidebar_cancel_rename_label()
+        >
+            {app_icon_view(AppIcon::Cancel)}
+            <span class="sr-only">{session_sidebar_cancel_rename_label()}</span>
         </button>
     }
 }
@@ -770,6 +847,23 @@ mod tests {
 
             assert_eq!(deleted_id.get(), "s1");
         });
+    }
+
+    #[test]
+    fn sidebar_action_labels_and_icons_track_progress_state() {
+        let delete_label = session_sidebar_delete_session_label(false);
+        let save_label = session_sidebar_save_title_label(false);
+
+        assert_eq!(session_sidebar_rename_session_label(), "Rename session");
+        assert_eq!(delete_label, "Delete session");
+        assert_eq!(session_sidebar_delete_session_label(true), "Deleting…");
+        assert_eq!(session_sidebar_delete_session_icon(false), AppIcon::Delete);
+        assert_eq!(session_sidebar_delete_session_icon(true), AppIcon::Busy);
+        assert_eq!(save_label, "Save session title");
+        assert_eq!(session_sidebar_save_title_label(true), "Saving…");
+        assert_eq!(session_sidebar_save_title_icon(false), AppIcon::Save);
+        assert_eq!(session_sidebar_save_title_icon(true), AppIcon::Busy);
+        assert_eq!(session_sidebar_cancel_rename_label(), "Cancel rename");
     }
 
     #[test]

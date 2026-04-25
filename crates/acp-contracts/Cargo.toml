@@ -12,3 +12,4 @@ acp-contracts-permissions.workspace = true
 acp-contracts-sessions.workspace = true
 acp-contracts-slash.workspace = true
 acp-contracts-stream.workspace = true
+acp-contracts-workspaces.workspace = true

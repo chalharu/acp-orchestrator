@@ -7,6 +7,7 @@ pub mod contract_permissions;
 pub mod contract_sessions;
 pub mod contract_slash;
 pub mod contract_stream;
+pub mod contract_workspaces;
 mod mock_client;
 pub mod runtime;
 pub mod server;

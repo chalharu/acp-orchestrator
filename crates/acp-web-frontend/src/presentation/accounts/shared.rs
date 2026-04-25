@@ -5,10 +5,13 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
+#[cfg(target_family = "wasm")]
+use crate::infrastructure::api;
+#[cfg(test)]
+use crate::presentation::return_to::session_return_to_path;
 use crate::{
     application::auth::AccountsRouteAccess,
-    infrastructure::api,
-    routing::{AppRoute, route_from_pathname},
+    presentation::return_to::{path_with_return_to, session_return_to_path_from_location},
 };
 
 #[derive(Clone, Copy)]
@@ -89,42 +92,26 @@ pub(super) fn initialize_accounts_page_host(state: AccountsPageState) {
 }
 
 pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
-    format!(
-        "/app/accounts/?return_to={}",
-        api::encode_component(return_to_path)
-    )
+    path_with_return_to("/app/accounts/", return_to_path)
 }
 
-#[cfg(target_family = "wasm")]
-pub(super) fn accounts_back_to_chat_path_from_location() -> String {
-    web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .map(|search| accounts_back_to_chat_path(&search))
-        .unwrap_or_else(|| "/app/".to_string())
+pub(super) fn sign_in_path_with_return_to(return_to_path: &str) -> String {
+    path_with_return_to("/app/sign-in/", return_to_path)
 }
 
-#[cfg(not(target_family = "wasm"))]
-pub(super) fn accounts_back_to_chat_path_from_location() -> String {
-    "/app/".to_string()
-}
-
+#[cfg(test)]
 fn accounts_back_to_chat_path(search: &str) -> String {
-    query_param(search, "return_to")
-        .filter(|path| matches!(route_from_pathname(path), AppRoute::Session(_)))
-        .unwrap_or_else(|| "/app/".to_string())
+    session_return_to_path(search).unwrap_or_else(|| "/app/".to_string())
 }
 
-fn query_param(search: &str, name: &str) -> Option<String> {
-    search
-        .trim_start_matches('?')
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == name)
-                .then(|| api::decode_component(value))
-                .flatten()
-        })
+pub(super) fn accounts_back_to_chat_path_from_location() -> String {
+    session_return_to_path_from_location().unwrap_or_else(|| "/app/".to_string())
+}
+
+pub(super) fn sign_out_redirect_path_from_location() -> String {
+    session_return_to_path_from_location()
+        .map(|return_to_path| sign_in_path_with_return_to(&return_to_path))
+        .unwrap_or_else(|| "/app/sign-in/".to_string())
 }
 
 pub(super) fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) -> bool {
@@ -138,6 +125,7 @@ pub(super) fn accounts_page_shows_sign_out(access: Option<AccountsRouteAccess>) 
 pub(super) fn sign_out_handler(
     error: RwSignal<Option<String>>,
     signing_out: RwSignal<bool>,
+    redirect_path: String,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_event: web_sys::MouseEvent| {
         if signing_out.get_untracked() {
@@ -146,11 +134,13 @@ pub(super) fn sign_out_handler(
 
         signing_out.set(true);
         error.set(None);
+        let redirect_path = redirect_path.clone();
         leptos::task::spawn_local(async move {
             match api::sign_out().await {
                 Ok(()) => {
                     crate::browser::clear_prepared_session_id();
-                    if let Err(message) = crate::browser::navigate_to("/app/sign-in/") {
+                    crate::browser::clear_selected_workspace_id();
+                    if let Err(message) = crate::browser::navigate_to(&redirect_path) {
                         signing_out.set(false);
                         error.set(Some(message));
                     }
@@ -168,6 +158,7 @@ pub(super) fn sign_out_handler(
 pub(super) fn sign_out_handler(
     error: RwSignal<Option<String>>,
     signing_out: RwSignal<bool>,
+    _redirect_path: String,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_event: web_sys::MouseEvent| sign_out_host(error, signing_out))
 }
@@ -254,6 +245,10 @@ mod tests {
             "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
         );
         assert_eq!(
+            sign_in_path_with_return_to("/app/sessions/s%2F1"),
+            "/app/sign-in/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+        );
+        assert_eq!(
             accounts_back_to_chat_path("?return_to=%2Fapp%2Fsessions%2Fs%252F1"),
             "/app/sessions/s%2F1"
         );
@@ -265,12 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn query_param_and_sign_out_visibility_helpers_match_accounts_routes() {
-        assert_eq!(
-            query_param("?return_to=%2Fapp%2Fsessions%2Fabc&x=1", "return_to"),
-            Some("/app/sessions/abc".to_string())
-        );
-        assert_eq!(query_param("?x=1", "return_to"), None);
+    fn sign_out_visibility_helpers_match_accounts_routes() {
         assert!(accounts_page_shows_sign_out(Some(
             AccountsRouteAccess::Forbidden
         )));
@@ -294,13 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn query_param_returns_none_for_missing_key_and_empty_search() {
-        assert_eq!(query_param("", "return_to"), None);
-        assert_eq!(query_param("?a=1&b=2", "return_to"), None);
-        assert_eq!(
-            query_param("return_to=%2Fapp%2F", "return_to"),
-            Some("/app/".to_string())
-        );
+    fn accounts_back_to_chat_defaults_to_home_for_missing_or_invalid_return_to() {
+        assert_eq!(accounts_back_to_chat_path(""), "/app/");
+        assert_eq!(accounts_back_to_chat_path("?a=1&b=2"), "/app/");
     }
 
     #[test]
@@ -365,6 +351,12 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    fn sign_out_redirect_path_defaults_to_plain_sign_in_without_browser() {
+        assert_eq!(sign_out_redirect_path_from_location(), "/app/sign-in/");
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
     fn event_target_checked_returns_false_on_host() {
         assert!(!super::event_target_checked(&()));
     }
@@ -384,7 +376,12 @@ mod tests {
             let signing_out = RwSignal::new(true);
             sign_out_host(state.error, signing_out);
             assert_eq!(state.error.get(), Some("still signing out".to_string()));
-            sign_out_handler(state.error, RwSignal::new(false)).run(fake_mouse_event());
+            sign_out_handler(
+                state.error,
+                RwSignal::new(false),
+                "/app/sign-in/".to_string(),
+            )
+            .run(fake_mouse_event());
         });
     }
 }

@@ -1,6 +1,10 @@
-use std::{cmp::Reverse, collections::HashMap, sync::Arc};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{HashMap, hash_map::Entry},
+    sync::Arc,
+};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use uuid::Uuid;
 
@@ -199,7 +203,11 @@ impl SessionStore {
         }
     }
 
-    pub async fn create_session(&self, owner: &str) -> Result<SessionSnapshot, SessionStoreError> {
+    pub async fn create_session(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
         let _guard = self.create_session_lock.lock().await;
         let handles = {
             let sessions = self.sessions.read().await;
@@ -223,6 +231,7 @@ impl SessionStore {
         let handle = Arc::new(SessionHandle::new(
             session_id.clone(),
             owner.to_string(),
+            workspace_id.to_string(),
             last_activity_at,
             recent_order,
         ));
@@ -252,6 +261,36 @@ impl SessionStore {
         Ok(handle.snapshot().await)
     }
 
+    pub async fn restore_session(
+        &self,
+        owner: &str,
+        snapshot: SessionSnapshot,
+        last_activity_at: DateTime<Utc>,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
+        let session_id = snapshot.id.clone();
+        let recent_order = self.claim_recent_order().await;
+        let restored = Arc::new(SessionHandle::restore(
+            owner.to_string(),
+            snapshot,
+            last_activity_at,
+            recent_order,
+        ));
+
+        let handle = {
+            let mut sessions = self.sessions.write().await;
+            match sessions.entry(session_id) {
+                Entry::Occupied(entry) => entry.get().clone(),
+                Entry::Vacant(entry) => entry.insert(restored).clone(),
+            }
+        };
+
+        if !handle.owner_matches(owner).await {
+            return Err(SessionStoreError::Forbidden);
+        }
+
+        Ok(handle.snapshot().await)
+    }
+
     pub async fn list_owned_sessions(&self, owner: &str) -> Vec<SessionListItem> {
         let handles = {
             let sessions = self.sessions.read().await;
@@ -266,15 +305,35 @@ impl SessionStore {
             }
         }
 
-        owned_sessions.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
-                .then_with(|| left.1.id.cmp(&right.1.id))
-        });
+        sort_session_entries(&mut owned_sessions);
 
         owned_sessions.into_iter().map(|(_, item)| item).collect()
+    }
+
+    pub async fn list_workspace_sessions(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Vec<SessionListItem> {
+        let handles = {
+            let sessions = self.sessions.read().await;
+            sessions.values().cloned().collect::<Vec<_>>()
+        };
+
+        let mut workspace_sessions = Vec::new();
+        for handle in handles {
+            if handle.owner_matches(owner).await && handle.workspace_matches(workspace_id).await {
+                let (item, recent_order) = handle.session_list_item_with_order().await;
+                workspace_sessions.push((recent_order, item));
+            }
+        }
+
+        sort_session_entries(&mut workspace_sessions);
+
+        workspace_sessions
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect()
     }
 
     pub async fn session_history(
@@ -505,4 +564,19 @@ impl SessionStore {
             sessions.remove(&session_id);
         }
     }
+}
+
+fn sort_session_entries(entries: &mut [(u64, SessionListItem)]) {
+    entries.sort_by(compare_session_entries);
+}
+
+fn compare_session_entries(
+    left: &(u64, SessionListItem),
+    right: &(u64, SessionListItem),
+) -> Ordering {
+    right
+        .0
+        .cmp(&left.0)
+        .then_with(|| right.1.last_activity_at.cmp(&left.1.last_activity_at))
+        .then_with(|| left.1.id.cmp(&right.1.id))
 }

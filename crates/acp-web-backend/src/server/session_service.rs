@@ -6,6 +6,7 @@ use crate::{
     mock_client::{ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStoreError},
     workspace_records::UserRecord,
+    workspace_repository::NewWorkspace,
 };
 
 use super::{AppError, AppState};
@@ -21,7 +22,61 @@ pub(super) async fn create_session_snapshot(
     principal: AuthenticatedPrincipal,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
-    let session = state.store.create_session(&owner.principal.id).await?;
+    let workspaces = state
+        .workspace_repository
+        .list_workspaces(&owner.user.user_id)
+        .await?;
+    let workspace_id = match workspaces.as_slice() {
+        [workspace] => workspace.workspace_id.clone(),
+        [] => {
+            state
+                .workspace_repository
+                .create_workspace(&owner.user.user_id, &legacy_session_workspace())
+                .await?
+                .workspace_id
+        }
+        _ => {
+            return Err(AppError::Conflict(
+                "workspace selection required".to_string(),
+            ));
+        }
+    };
+
+    create_session_snapshot_in_workspace(state, owner, &workspace_id).await
+}
+
+fn legacy_session_workspace() -> NewWorkspace {
+    NewWorkspace {
+        name: "Workspace".to_string(),
+        upstream_url: None,
+        default_ref: None,
+        credential_reference_id: None,
+    }
+}
+
+pub(super) async fn create_session_snapshot_for_workspace(
+    state: &AppState,
+    principal: AuthenticatedPrincipal,
+    workspace_id: &str,
+) -> Result<SessionSnapshot, AppError> {
+    let owner = state.owner_context(principal).await?;
+    create_session_snapshot_in_workspace(state, owner, workspace_id).await
+}
+
+async fn create_session_snapshot_in_workspace(
+    state: &AppState,
+    owner: super::OwnerContext,
+    workspace_id: &str,
+) -> Result<SessionSnapshot, AppError> {
+    state
+        .workspace_repository
+        .load_workspace(&owner.user.user_id, workspace_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("workspace not found".to_string()))?;
+    let session = state
+        .store
+        .create_session(&owner.principal.id, workspace_id)
+        .await?;
     let session_id = session.id.clone();
     let session = match seed_startup_hint(state, &owner.principal.id, session).await {
         Ok(session) => session,
@@ -130,7 +185,13 @@ pub(super) async fn submit_prompt(
     if let Some(user) = owner.user.as_ref() {
         persist_prompt_snapshot_best_effort(state, user, session_id, snapshot_result).await;
     }
-    dispatch_assistant_request(state.reply_provider.clone(), pending);
+    dispatch_assistant_request(
+        state.clone(),
+        state.reply_provider.clone(),
+        owner.principal.id.clone(),
+        owner.user,
+        pending,
+    );
 
     Ok(())
 }
@@ -237,23 +298,27 @@ pub(super) async fn persist_prompt_snapshot_best_effort(
     session_id: &str,
     snapshot_result: Result<SessionSnapshot, SessionStoreError>,
 ) {
+    persist_snapshot_result_best_effort(state, user, session_id, snapshot_result, "submit_prompt")
+        .await;
+}
+
+async fn persist_snapshot_result_best_effort(
+    state: &AppState,
+    user: &UserRecord,
+    session_id: &str,
+    snapshot_result: Result<SessionSnapshot, SessionStoreError>,
+    action: &'static str,
+) {
     match snapshot_result {
         Ok(snapshot) => {
-            persist_session_metadata_best_effort(
-                state,
-                user,
-                &snapshot,
-                true,
-                None,
-                "submit_prompt",
-            )
-            .await;
+            persist_session_metadata_best_effort(state, user, &snapshot, true, None, action).await;
         }
         Err(error) => {
             let error_message = error.message();
             tracing::warn!(
                 session_id = %session_id,
-                "failed to snapshot session metadata after prompt submission: {error_message}"
+                action,
+                "failed to snapshot session metadata after action: {error_message}"
             );
         }
     }
@@ -297,8 +362,15 @@ async fn rollback_failed_session(
         .map_err(|error| AppError::Internal(error.message().to_string()))
 }
 
-fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: PendingPrompt) {
+fn dispatch_assistant_request(
+    state: AppState,
+    reply_provider: Arc<dyn ReplyProvider>,
+    live_owner_id: String,
+    durable_user: Option<UserRecord>,
+    pending: PendingPrompt,
+) {
     tokio::spawn(async move {
+        let session_id = pending.session_id().to_string();
         match reply_provider.request_reply(pending.turn_handle()).await {
             Ok(ReplyResult::Reply(reply)) => pending.complete_with_reply(reply).await,
             Ok(ReplyResult::Status(message)) => pending.complete_with_status(message).await,
@@ -308,6 +380,21 @@ fn dispatch_assistant_request(reply_provider: Arc<dyn ReplyProvider>, pending: P
                     .complete_with_status(format!("ACP request failed: {error}"))
                     .await;
             }
+        }
+
+        if let Some(user) = durable_user.as_ref() {
+            let snapshot_result = state
+                .store
+                .session_snapshot(&live_owner_id, &session_id)
+                .await;
+            persist_snapshot_result_best_effort(
+                &state,
+                user,
+                &session_id,
+                snapshot_result,
+                "complete_prompt",
+            )
+            .await;
         }
     });
 }

@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::presentation::{AppIcon, app_icon_view};
 use crate::{application::auth::AccountsRouteAccess, components::ErrorBanner};
 
 use super::{
@@ -8,15 +9,47 @@ use super::{
     shared::{
         AccountsPageState, accounts_back_to_chat_path_from_location, accounts_page_shows_sign_out,
         initialize_accounts_page, sign_out_button_label, sign_out_handler,
+        sign_out_redirect_path_from_location,
     },
 };
+
+fn accounts_back_to_chat_label() -> &'static str {
+    "Back to chat"
+}
+
+fn accounts_back_link_view(back_to_chat_href: &str) -> AnyView {
+    view! {
+        <a
+            href=back_to_chat_href.to_string()
+            class="account-panel__header-action icon-action icon-action--ghost"
+            aria-label=accounts_back_to_chat_label()
+            title=accounts_back_to_chat_label()
+        >
+            {app_icon_view(AppIcon::BackToChat)}
+            <span class="sr-only">{accounts_back_to_chat_label()}</span>
+        </a>
+    }
+    .into_any()
+}
+
+fn accounts_sign_out_icon(signing_out: bool) -> AppIcon {
+    if signing_out {
+        AppIcon::Busy
+    } else {
+        AppIcon::SignOut
+    }
+}
 
 #[component]
 pub fn AccountsPage() -> impl IntoView {
     let state = AccountsPageState::new();
     let back_to_chat_href = accounts_back_to_chat_path_from_location();
     let signing_out = RwSignal::new(false);
-    let sign_out = sign_out_handler(state.error, signing_out);
+    let sign_out = sign_out_handler(
+        state.error,
+        signing_out,
+        sign_out_redirect_path_from_location(),
+    );
     initialize_accounts_page(state);
 
     accounts_page_shell(state, back_to_chat_href, signing_out, sign_out)
@@ -36,14 +69,18 @@ fn accounts_page_shell(
                 <div class="account-panel__header">
                     <h1>"Accounts"</h1>
                     <div class="account-panel__header-actions">
-                        <a href=back_to_chat_href>"Back to chat"</a>
+                        {accounts_back_link_view(&back_to_chat_href)}
                         <Show when=move || accounts_page_shows_sign_out(state.access.get())>
                             <button
                                 type="button"
+                                class="account-panel__header-action icon-action icon-action--ghost"
                                 on:click=move |event| sign_out.run(event)
                                 prop:disabled=move || signing_out.get()
+                                aria-label=move || sign_out_button_label(signing_out.get())
+                                title=move || sign_out_button_label(signing_out.get())
                             >
-                                {move || sign_out_button_label(signing_out.get())}
+                                {move || app_icon_view(accounts_sign_out_icon(signing_out.get()))}
+                                <span class="sr-only">{move || sign_out_button_label(signing_out.get())}</span>
                             </button>
                         </Show>
                     </div>
@@ -70,10 +107,14 @@ fn accounts_sign_out_button(
         view! {
             <button
                 type="button"
+                class="account-panel__header-action icon-action icon-action--ghost"
                 on:click=move |event| sign_out.run(event)
                 prop:disabled=signing_out
+                aria-label=label
+                title=label
             >
-                {label}
+                {app_icon_view(accounts_sign_out_icon(signing_out))}
+                <span class="sr-only">{label}</span>
             </button>
         }
         .into_any()
@@ -115,7 +156,7 @@ fn accounts_page_shell(
                 <div class="account-panel__header">
                     <h1>"Accounts"</h1>
                     <div class="account-panel__header-actions">
-                        <a href=back_to_chat_href>"Back to chat"</a>
+                        {accounts_back_link_view(&back_to_chat_href)}
                         {sign_out_button}
                     </div>
                 </div>
@@ -231,6 +272,25 @@ mod tests {
                 Callback::new(|_: web_sys::MouseEvent| {}),
             );
             let _ = view! { <AccountsPage /> };
+        });
+    }
+
+    #[test]
+    fn account_header_labels_and_icons_are_stable() {
+        assert_eq!(accounts_back_to_chat_label(), "Back to chat");
+        assert_eq!(accounts_sign_out_icon(false), AppIcon::SignOut);
+        assert_eq!(accounts_sign_out_icon(true), AppIcon::Busy);
+    }
+
+    #[test]
+    fn account_header_helpers_build_host_safe_views() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sign_out = Callback::new(|_: web_sys::MouseEvent| {});
+            let _ = accounts_back_link_view("/app/sessions/demo");
+            let _ = accounts_sign_out_button(true, false, sign_out);
+            let _ = accounts_sign_out_button(true, true, sign_out);
+            let _ = accounts_sign_out_button(false, false, sign_out);
         });
     }
 }

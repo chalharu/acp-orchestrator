@@ -8,3 +8,5 @@ mod permissions;
 mod support;
 #[path = "session_api_roundtrip/web_browser.rs"]
 mod web_browser;
+#[path = "session_api_roundtrip/workspaces.rs"]
+mod workspaces;

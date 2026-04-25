@@ -118,6 +118,7 @@ dependencies = [
  "acp-contracts-sessions",
  "acp-contracts-slash",
  "acp-contracts-stream",
+ "acp-contracts-workspaces",
 ]
 
 [[package]]
@@ -177,6 +178,15 @@ dependencies = [
  "acp-contracts-permissions",
  "acp-contracts-sessions",
  "serde",
+]
+
+[[package]]
+name = "acp-contracts-workspaces"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -241,6 +251,7 @@ dependencies = [
  "acp-contracts-sessions",
  "acp-contracts-slash",
  "acp-contracts-stream",
+ "acp-contracts-workspaces",
  "acp-mock",
  "agent-client-protocol",
  "anyhow",

@@ -99,7 +99,7 @@ async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()>
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
 
     let response = stack
         .client
@@ -128,7 +128,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
         frontend_dist: None,
     })
     .await?;
-    let session = stack.create_session("alice").await?;
+    let session = stack.create_legacy_session("alice").await?;
     let session_id = session.session.id.clone();
     let mut events = stack.open_events("alice", &session_id).await?;
 

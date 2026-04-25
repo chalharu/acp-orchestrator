@@ -41,6 +41,8 @@ mod assets;
 mod connection;
 mod session_api;
 mod session_service;
+mod workspace_api;
+mod workspace_service;
 
 use self::account_api::{
     auth_status, bootstrap_register, create_account, delete_account, list_accounts, sign_in,
@@ -56,6 +58,10 @@ use self::session_api::{
 #[cfg(test)]
 use self::session_service::{
     persist_prompt_snapshot_best_effort, persist_session_metadata_best_effort,
+};
+use self::workspace_api::{
+    create_workspace, create_workspace_session, delete_workspace, get_workspace,
+    list_workspace_sessions, list_workspaces, update_workspace,
 };
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -232,6 +238,12 @@ fn read_api_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/accounts", get(list_accounts))
         .route("/api/v1/sessions", get(list_sessions))
+        .route("/api/v1/workspaces", get(list_workspaces))
+        .route("/api/v1/workspaces/{workspace_id}", get(get_workspace))
+        .route(
+            "/api/v1/workspaces/{workspace_id}/sessions",
+            get(list_workspace_sessions),
+        )
         .route("/api/v1/sessions/{session_id}", get(get_session))
         .route(
             "/api/v1/sessions/{session_id}/history",
@@ -251,10 +263,19 @@ fn write_api_routes() -> Router<AppState> {
         .route("/api/v1/auth/sign-out", post(sign_out))
         .route("/api/v1/bootstrap/register", post(bootstrap_register))
         .route("/api/v1/sessions", post(create_session))
+        .route("/api/v1/workspaces", post(create_workspace))
         .route("/api/v1/accounts", post(create_account))
         .route(
             "/api/v1/accounts/{user_id}",
             patch(update_account).delete(delete_account),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}",
+            patch(update_workspace).delete(delete_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/sessions",
+            post(create_workspace_session),
         )
         .route(
             "/api/v1/sessions/{session_id}",

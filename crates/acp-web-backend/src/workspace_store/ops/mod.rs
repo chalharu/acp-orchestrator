@@ -5,7 +5,7 @@ mod session_metadata;
 mod shared;
 
 const BOOTSTRAP_WORKSPACE_KIND: &str = "legacy-session-routes";
-pub(super) const BOOTSTRAP_WORKSPACE_NAME: &str = "Default workspace";
+pub(super) const BOOTSTRAP_WORKSPACE_NAME: &str = "Bootstrap workspace";
 const ACTIVE_WORKSPACE_STATUS: &str = "active";
 pub(super) const LOCAL_ACCOUNT_PRINCIPAL_KIND: &str = "local_account";
 const LEGACY_BROWSER_SESSIONS_TABLE: &str = "legacy_browser_sessions";
@@ -23,10 +23,13 @@ pub(super) use accounts::{
     durable_local_account_subject, encode_password_salt, hash_password, map_account_write_error,
     next_password_hash, validate_password, validate_username, verify_password,
 };
-pub(super) use queries::load_session_metadata_record;
+pub(super) use queries::{list_workspace_sessions, list_workspaces, load_workspace};
+pub(super) use queries::{load_session_metadata_record, load_session_snapshot_record};
 pub(super) use schema::initialize_schema;
 pub(super) use session_metadata::{
-    bootstrap_workspace_in_transaction, build_session_metadata_record, upsert_session_metadata,
+    bootstrap_workspace_in_transaction, build_session_metadata_record, insert_workspace,
+    persist_session_snapshot_payload, soft_delete_workspace, update_workspace,
+    upsert_session_metadata,
 };
 pub(super) use shared::{
     database_error, ensure_parent_dir, join_error, open_immediate_transaction,

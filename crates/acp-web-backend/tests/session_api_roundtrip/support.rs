@@ -14,6 +14,10 @@ use acp_web_backend::contract_sessions::{
     SessionListResponse,
 };
 pub(super) use acp_web_backend::contract_stream::{StreamEvent, StreamEventPayload};
+use acp_web_backend::contract_workspaces::{
+    CreateWorkspaceRequest, CreateWorkspaceResponse, UpdateWorkspaceRequest,
+    UpdateWorkspaceResponse, WorkspaceListResponse, WorkspaceResponse,
+};
 use acp_web_backend::support::http::{
     build_http_client_for_url, wait_for_health, wait_for_tcp_connect,
 };
@@ -72,17 +76,61 @@ pub(super) async fn create_browser_session(
     backend_url: &str,
     csrf_token: &str,
 ) -> Result<CreateSessionResponse> {
+    let workspace =
+        create_browser_workspace(client, backend_url, csrf_token, "Browser Workspace").await?;
+    create_browser_workspace_session(
+        client,
+        backend_url,
+        csrf_token,
+        &workspace.workspace.workspace_id,
+    )
+    .await
+}
+
+async fn create_browser_workspace(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+    name: &str,
+) -> Result<CreateWorkspaceResponse> {
     client
-        .post(format!("{backend_url}/api/v1/sessions"))
+        .post(format!("{backend_url}/api/v1/workspaces"))
+        .header("x-csrf-token", csrf_token)
+        .json(&CreateWorkspaceRequest {
+            name: name.to_string(),
+            upstream_url: None,
+            default_ref: None,
+            credential_reference_id: None,
+        })
+        .send()
+        .await
+        .context("creating a cookie-authenticated browser workspace")?
+        .error_for_status()
+        .context("cookie-authenticated browser workspace creation returned an error")?
+        .json()
+        .await
+        .context("decoding the created browser workspace")
+}
+
+async fn create_browser_workspace_session(
+    client: &Client,
+    backend_url: &str,
+    csrf_token: &str,
+    workspace_id: &str,
+) -> Result<CreateSessionResponse> {
+    client
+        .post(format!(
+            "{backend_url}/api/v1/workspaces/{workspace_id}/sessions"
+        ))
         .header("x-csrf-token", csrf_token)
         .send()
         .await
-        .context("creating a cookie-authenticated browser session")?
+        .context("creating a cookie-authenticated browser workspace session")?
         .error_for_status()
-        .context("cookie-authenticated browser session creation returned an error")?
+        .context("cookie-authenticated browser workspace session creation returned an error")?
         .json()
         .await
-        .context("decoding the created browser session")
+        .context("decoding the created browser workspace session")
 }
 
 pub(super) async fn bootstrap_browser_account(
@@ -238,17 +286,163 @@ impl TestStack {
         })
     }
 
-    pub(super) async fn create_session(&self, token: &str) -> Result<CreateSessionResponse> {
+    pub(super) async fn create_legacy_session(&self, token: &str) -> Result<CreateSessionResponse> {
+        let workspace_id = self.ensure_primary_workspace(token).await?;
+        self.create_workspace_session(token, &workspace_id).await
+    }
+
+    async fn ensure_primary_workspace(&self, token: &str) -> Result<String> {
+        let listed = self.list_workspaces(token).await?;
+        if let Some(workspace) = listed.workspaces.first() {
+            return Ok(workspace.workspace_id.clone());
+        }
+
+        let created = self
+            .create_workspace(
+                token,
+                &CreateWorkspaceRequest {
+                    name: "Legacy session workspace".to_string(),
+                    upstream_url: None,
+                    default_ref: None,
+                    credential_reference_id: None,
+                },
+            )
+            .await?;
+        Ok(created.workspace.workspace_id)
+    }
+
+    pub(super) async fn create_workspace(
+        &self,
+        token: &str,
+        request: &CreateWorkspaceRequest,
+    ) -> Result<CreateWorkspaceResponse> {
         let response = self
             .client
-            .post(format!("{}/api/v1/sessions", self.backend_url))
+            .post(format!("{}/api/v1/workspaces", self.backend_url))
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await
+            .context("creating test workspace")?
+            .error_for_status()
+            .context("workspace creation returned an error")?;
+        response.json().await.context("decoding workspace response")
+    }
+
+    pub(super) async fn list_workspaces(&self, token: &str) -> Result<WorkspaceListResponse> {
+        let response = self
+            .client
+            .get(format!("{}/api/v1/workspaces", self.backend_url))
             .bearer_auth(token)
             .send()
             .await
-            .context("creating test session")?
+            .context("listing test workspaces")?
             .error_for_status()
-            .context("session creation returned an error")?;
-        response.json().await.context("decoding session response")
+            .context("workspace list returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding workspace list response")
+    }
+
+    pub(super) async fn get_workspace(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<WorkspaceResponse> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("loading test workspace")?
+            .error_for_status()
+            .context("workspace lookup returned an error")?;
+        response.json().await.context("decoding workspace detail")
+    }
+
+    pub(super) async fn update_workspace(
+        &self,
+        token: &str,
+        workspace_id: &str,
+        request: &UpdateWorkspaceRequest,
+    ) -> Result<UpdateWorkspaceResponse> {
+        let response = self
+            .client
+            .patch(format!(
+                "{}/api/v1/workspaces/{workspace_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await
+            .context("updating test workspace")?
+            .error_for_status()
+            .context("workspace update returned an error")?;
+        response.json().await.context("decoding workspace update")
+    }
+
+    pub(super) async fn delete_workspace(&self, token: &str, workspace_id: &str) -> Result<()> {
+        self.client
+            .delete(format!(
+                "{}/api/v1/workspaces/{workspace_id}",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("deleting test workspace")?
+            .error_for_status()
+            .context("workspace delete returned an error")?;
+        Ok(())
+    }
+
+    pub(super) async fn create_workspace_session(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<CreateSessionResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/v1/workspaces/{workspace_id}/sessions",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("creating workspace session")?
+            .error_for_status()
+            .context("workspace session creation returned an error")?;
+        response.json().await.context("decoding workspace session")
+    }
+
+    pub(super) async fn list_workspace_sessions(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<SessionListResponse> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}/sessions",
+                self.backend_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("listing workspace sessions")?
+            .error_for_status()
+            .context("workspace session list returned an error")?;
+        response
+            .json()
+            .await
+            .context("decoding workspace session list")
     }
 
     pub(super) async fn submit_prompt(

@@ -5,11 +5,14 @@ use crate::contract_accounts::{
 };
 use crate::contract_messages::PromptRequest;
 use crate::contract_sessions::{SessionSnapshot, SessionStatus};
+use crate::contract_workspaces::CreateWorkspaceRequest;
 use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
 use crate::support::frontend::{FrontendBundleAsset, frontend_bundle_file_name};
 use crate::support::http::build_http_client_for_url;
-use crate::workspace_records::{SessionMetadataRecord, UserRecord, WorkspaceRecord};
-use crate::workspace_repository::WorkspaceRepository;
+use crate::workspace_records::{
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+};
+use crate::workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUpdatePatch};
 use crate::workspace_store::SqliteWorkspaceRepository;
 use async_trait::async_trait;
 use axum::{
@@ -32,6 +35,7 @@ mod connections;
 mod routing_auth;
 mod session_routes;
 mod support_behaviors;
+mod workspace_routes;
 
 fn write_temp_frontend_dist() -> std::path::PathBuf {
     write_temp_frontend_dist_with(true, true)
@@ -218,15 +222,47 @@ async fn assert_session_routes_persist_owner_scoped_metadata(context: &MetadataT
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
 }
 
+async fn create_owned_workspace_for_principal(
+    state: &AppState,
+    principal: Extension<AuthenticatedPrincipal>,
+    name: &str,
+) -> crate::contract_workspaces::WorkspaceDetail {
+    create_workspace(
+        State(state.clone()),
+        principal,
+        Json(CreateWorkspaceRequest {
+            name: name.to_string(),
+            upstream_url: None,
+            default_ref: None,
+            credential_reference_id: None,
+        }),
+    )
+    .await
+    .expect("workspace creation should succeed")
+    .1
+    .0
+    .workspace
+}
+
 async fn create_persisted_session(
     context: &MetadataTestContext,
 ) -> (SessionSnapshot, SessionMetadataRecord) {
-    let session = create_session(State(context.state.clone()), context.principal.clone())
-        .await
-        .expect("session creation should succeed")
-        .1
-        .0
-        .session;
+    let workspace = create_owned_workspace_for_principal(
+        &context.state,
+        context.principal.clone(),
+        "Metadata Workspace",
+    )
+    .await;
+    let session = create_workspace_session(
+        State(context.state.clone()),
+        Path(workspace.workspace_id),
+        context.principal.clone(),
+    )
+    .await
+    .expect("session creation should succeed")
+    .1
+    .0
+    .session;
     let metadata = load_session_metadata_or_panic(
         context.workspace_repository.as_ref(),
         &context.user.user_id,
@@ -530,6 +566,7 @@ fn sample_user_record() -> UserRecord {
 fn sample_snapshot(session_id: &str) -> SessionSnapshot {
     SessionSnapshot {
         id: session_id.to_string(),
+        workspace_id: "w_test".to_string(),
         title: "Test session".to_string(),
         status: SessionStatus::Active,
         latest_sequence: 0,
@@ -622,6 +659,54 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         Err(self.error.clone())
     }
 
+    async fn list_workspaces(
+        &self,
+        _owner_user_id: &str,
+    ) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn load_workspace(
+        &self,
+        _owner_user_id: &str,
+        _workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn create_workspace(
+        &self,
+        _owner_user_id: &str,
+        _workspace: &NewWorkspace,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn update_workspace(
+        &self,
+        _owner_user_id: &str,
+        _workspace_id: &str,
+        _update: &WorkspaceUpdatePatch,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn delete_workspace(
+        &self,
+        _owner_user_id: &str,
+        _workspace_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn list_workspace_sessions(
+        &self,
+        _owner_user_id: &str,
+        _workspace_id: &str,
+    ) -> Result<Vec<crate::contract_sessions::SessionListItem>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
     async fn save_session_metadata(
         &self,
         _record: &SessionMetadataRecord,
@@ -644,6 +729,14 @@ impl WorkspaceRepository for FailingWorkspaceStore {
         _owner_user_id: &str,
         _session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        _owner_user_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
         Err(self.error.clone())
     }
 
@@ -734,12 +827,95 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         Ok(WorkspaceRecord {
             workspace_id: "w_test".to_string(),
             owner_user_id: owner_user_id.to_string(),
-            name: "Default workspace".to_string(),
+            name: "Workspace A".to_string(),
+            upstream_url: None,
+            default_ref: None,
+            credential_reference_id: None,
+            bootstrap_kind: None,
             status: "active".to_string(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             deleted_at: None,
         })
+    }
+
+    async fn list_workspaces(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError> {
+        Ok(vec![self.bootstrap_workspace(owner_user_id).await?])
+    }
+
+    async fn load_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
+        let workspace = self.bootstrap_workspace(owner_user_id).await?;
+        Ok((workspace.workspace_id == workspace_id).then_some(workspace))
+    }
+
+    async fn create_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace: &NewWorkspace,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        Ok(WorkspaceRecord {
+            workspace_id: "w_created".to_string(),
+            owner_user_id: owner_user_id.to_string(),
+            name: workspace.name.clone(),
+            upstream_url: workspace.upstream_url.clone(),
+            default_ref: workspace.default_ref.clone(),
+            credential_reference_id: workspace.credential_reference_id.clone(),
+            bootstrap_kind: None,
+            status: "active".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        })
+    }
+
+    async fn update_workspace(
+        &self,
+        owner_user_id: &str,
+        workspace_id: &str,
+        update: &WorkspaceUpdatePatch,
+    ) -> Result<WorkspaceRecord, WorkspaceStoreError> {
+        Ok(WorkspaceRecord {
+            workspace_id: workspace_id.to_string(),
+            owner_user_id: owner_user_id.to_string(),
+            name: update.name.clone().unwrap_or_else(|| "updated".to_string()),
+            upstream_url: None,
+            default_ref: update.default_ref.clone(),
+            credential_reference_id: None,
+            bootstrap_kind: None,
+            status: "active".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        })
+    }
+
+    async fn delete_workspace(
+        &self,
+        _owner_user_id: &str,
+        _workspace_id: &str,
+    ) -> Result<(), WorkspaceStoreError> {
+        Ok(())
+    }
+
+    async fn list_workspace_sessions(
+        &self,
+        _owner_user_id: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<crate::contract_sessions::SessionListItem>, WorkspaceStoreError> {
+        Ok(vec![crate::contract_sessions::SessionListItem {
+            id: "s_test".to_string(),
+            workspace_id: workspace_id.to_string(),
+            title: "Session".to_string(),
+            status: SessionStatus::Active,
+            last_activity_at: chrono::Utc::now(),
+        }])
     }
 
     async fn save_session_metadata(
@@ -770,6 +946,14 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
         _owner_user_id: &str,
         _session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
+        Ok(None)
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        _owner_user_id: &str,
+        _session_id: &str,
+    ) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
         Ok(None)
     }
 

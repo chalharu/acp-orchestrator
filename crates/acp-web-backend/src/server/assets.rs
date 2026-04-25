@@ -38,6 +38,8 @@ pub(super) fn install_frontend_routes(router: Router<AppState>) -> Router<AppSta
         .route("/app/sign-in/", get(app_sign_in_entrypoint))
         .route("/app/accounts", get(redirect_to_accounts))
         .route("/app/accounts/", get(app_accounts_entrypoint))
+        .route("/app/workspaces", get(redirect_to_workspaces))
+        .route("/app/workspaces/", get(app_workspaces_entrypoint))
         .route("/app/assets/app.css", get(app_stylesheet))
         .route("/app/assets/fonts/{font_name}", get(app_font_asset))
         .route("/app/assets/wasm-init.js", get(wasm_init_script))
@@ -73,6 +75,10 @@ pub(super) async fn redirect_to_accounts() -> Redirect {
     Redirect::permanent("/app/accounts/")
 }
 
+pub(super) async fn redirect_to_workspaces() -> Redirect {
+    Redirect::permanent("/app/workspaces/")
+}
+
 pub(super) async fn app_entrypoint(headers: HeaderMap) -> Response {
     app_shell_response(&headers)
 }
@@ -86,6 +92,10 @@ pub(super) async fn app_sign_in_entrypoint(headers: HeaderMap) -> Response {
 }
 
 pub(super) async fn app_accounts_entrypoint(headers: HeaderMap) -> Response {
+    app_shell_response(&headers)
+}
+
+pub(super) async fn app_workspaces_entrypoint(headers: HeaderMap) -> Response {
     app_shell_response(&headers)
 }
 

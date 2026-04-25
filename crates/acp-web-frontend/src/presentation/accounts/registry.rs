@@ -8,6 +8,7 @@ use crate::application::auth::{
 };
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
+use crate::presentation::{AppIcon, app_icon_view};
 
 use super::shared::{AccountsPageState, event_target_checked, spawn_account_reload};
 
@@ -286,6 +287,94 @@ fn AccountAdminToggle(admin_checked: RwSignal<bool>, can_modify: Signal<bool>) -
     }
 }
 
+const ACCOUNT_SAVE_BUTTON_CLASS: &str = "account-row__action-btn icon-action";
+const ACCOUNT_DELETE_BUTTON_CLASS: &str =
+    "account-row__action-btn account-row__delete icon-action icon-action--danger";
+
+#[component]
+#[cfg(target_family = "wasm")]
+fn AccountSaveButton(
+    saving: RwSignal<bool>,
+    row_dirty: Signal<bool>,
+    save_account: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class=ACCOUNT_SAVE_BUTTON_CLASS
+            prop:disabled=move || saving.get() || !row_dirty.get()
+            on:click=move |_| save_account.run(())
+            aria-label=move || save_button_label(saving.get())
+            title=move || save_button_label(saving.get())
+        >
+            {move || app_icon_view(save_button_icon(saving.get()))}
+            <span class="sr-only">{move || save_button_label(saving.get())}</span>
+        </button>
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn AccountSaveButton(saving: bool, row_dirty: bool, save_account: Callback<()>) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class=ACCOUNT_SAVE_BUTTON_CLASS
+            prop:disabled=saving || !row_dirty
+            on:click=move |_| save_account.run(())
+            aria-label=save_button_label(saving)
+            title=save_button_label(saving)
+        >
+            {app_icon_view(save_button_icon(saving))}
+            <span class="sr-only">{save_button_label(saving)}</span>
+        </button>
+    }
+}
+
+#[component]
+#[cfg(target_family = "wasm")]
+fn AccountDeleteButton(
+    deleting: RwSignal<bool>,
+    can_modify: Signal<bool>,
+    delete_account: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class=ACCOUNT_DELETE_BUTTON_CLASS
+            prop:disabled=move || deleting.get() || !can_modify.get()
+            on:click=move |event| delete_account.run(event)
+            aria-label=move || delete_button_label(deleting.get())
+            title=move || delete_button_label(deleting.get())
+        >
+            {move || app_icon_view(delete_button_icon(deleting.get()))}
+            <span class="sr-only">{move || delete_button_label(deleting.get())}</span>
+        </button>
+    }
+}
+
+#[component]
+#[cfg(not(target_family = "wasm"))]
+fn AccountDeleteButton(
+    deleting: bool,
+    can_modify: bool,
+    delete_account: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class=ACCOUNT_DELETE_BUTTON_CLASS
+            prop:disabled=deleting || !can_modify
+            on:click=move |event| delete_account.run(event)
+            aria-label=delete_button_label(deleting)
+            title=delete_button_label(deleting)
+        >
+            {app_icon_view(delete_button_icon(deleting))}
+            <span class="sr-only">{delete_button_label(deleting)}</span>
+        </button>
+    }
+}
+
 #[component]
 #[cfg(target_family = "wasm")]
 fn AccountRowActions(
@@ -302,21 +391,10 @@ fn AccountRowActions(
 
     view! {
         <div class="account-row__actions">
-            <button
-                type="button"
-                prop:disabled=move || saving.get() || !row_dirty.get()
-                on:click=move |_| save_account.run(())
-            >
-                {move || save_button_label(saving.get())}
-            </button>
-            <button
-                type="button"
-                class="account-row__delete"
-                prop:disabled=move || deleting.get() || !can_modify.get()
-                on:click=move |event| delete_account.run(event)
-            >
-                {move || delete_button_label(deleting.get())}
-            </button>
+            <div class="account-row__actions-toolbar">
+                <AccountSaveButton saving row_dirty save_account />
+                <AccountDeleteButton deleting can_modify delete_account />
+            </div>
             <p class="account-row__hint">{move || hint_text.get()}</p>
         </div>
     }
@@ -347,21 +425,18 @@ fn AccountRowActions(
 
     view! {
         <div class="account-row__actions">
-            <button
-                type="button"
-                prop:disabled=saving_now || !row_dirty_now
-                on:click=move |_| save_account.run(())
-            >
-                {save_button_label(saving_now)}
-            </button>
-            <button
-                type="button"
-                class="account-row__delete"
-                prop:disabled=deleting_now || !can_modify_now
-                on:click=move |event| delete_account.run(event)
-            >
-                {delete_button_label(deleting_now)}
-            </button>
+            <div class="account-row__actions-toolbar">
+                <AccountSaveButton
+                    saving=saving_now
+                    row_dirty=row_dirty_now
+                    save_account=save_account
+                />
+                <AccountDeleteButton
+                    deleting=deleting_now
+                    can_modify=can_modify_now
+                    delete_account=delete_account
+                />
+            </div>
             <p class="account-row__hint">{hint_text}</p>
         </div>
     }
@@ -508,6 +583,18 @@ fn save_button_label(saving: bool) -> &'static str {
 
 fn delete_button_label(deleting: bool) -> &'static str {
     if deleting { "Deleting…" } else { "Delete" }
+}
+
+fn save_button_icon(saving: bool) -> AppIcon {
+    if saving { AppIcon::Busy } else { AppIcon::Save }
+}
+
+fn delete_button_icon(deleting: bool) -> AppIcon {
+    if deleting {
+        AppIcon::Busy
+    } else {
+        AppIcon::Delete
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -693,6 +780,10 @@ mod tests {
         assert_eq!(save_button_label(true), "Saving…");
         assert_eq!(delete_button_label(false), "Delete");
         assert_eq!(delete_button_label(true), "Deleting…");
+        assert_eq!(save_button_icon(false), AppIcon::Save);
+        assert_eq!(save_button_icon(true), AppIcon::Busy);
+        assert_eq!(delete_button_icon(false), AppIcon::Delete);
+        assert_eq!(delete_button_icon(true), AppIcon::Busy);
     }
 
     #[test]

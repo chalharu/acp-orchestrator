@@ -2,6 +2,8 @@
 
 #[allow(dead_code)]
 const PREPARED_SESSION_STORAGE_KEY: &str = "acp-prepared-session-id";
+#[allow(dead_code)]
+const SELECTED_WORKSPACE_STORAGE_KEY: &str = "acp-selected-workspace-id";
 #[cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
 const DRAFT_STORAGE_KEY_PREFIX: &str = "acp-draft-";
 
@@ -48,6 +50,30 @@ pub(crate) fn clear_prepared_session_id() {
     #[cfg(target_family = "wasm")]
     if let Some(storage) = session_storage() {
         let _ = storage.remove_item(PREPARED_SESSION_STORAGE_KEY);
+    }
+}
+
+pub(crate) fn selected_workspace_id() -> Option<String> {
+    #[cfg(not(target_family = "wasm"))]
+    return None;
+    #[cfg(target_family = "wasm")]
+    return session_storage()
+        .and_then(|s| s.get_item(SELECTED_WORKSPACE_STORAGE_KEY).ok().flatten())
+        .filter(|id| !id.is_empty());
+}
+
+#[allow(unused_variables)]
+pub(crate) fn store_selected_workspace_id(workspace_id: &str) {
+    #[cfg(target_family = "wasm")]
+    if let Some(storage) = session_storage() {
+        let _ = storage.set_item(SELECTED_WORKSPACE_STORAGE_KEY, workspace_id);
+    }
+}
+
+pub(crate) fn clear_selected_workspace_id() {
+    #[cfg(target_family = "wasm")]
+    if let Some(storage) = session_storage() {
+        let _ = storage.remove_item(SELECTED_WORKSPACE_STORAGE_KEY);
     }
 }
 
@@ -107,6 +133,14 @@ mod tests {
         clear_prepared_session_id_if_matches("session-1");
         clear_prepared_session_id();
         assert_eq!(prepared_session_id(), None);
+    }
+
+    #[test]
+    fn selected_workspace_helpers_fall_back_without_session_storage() {
+        assert_eq!(selected_workspace_id(), None);
+        store_selected_workspace_id("workspace-1");
+        clear_selected_workspace_id();
+        assert_eq!(selected_workspace_id(), None);
     }
 
     #[test]

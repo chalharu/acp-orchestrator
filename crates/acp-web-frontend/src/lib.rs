@@ -38,7 +38,7 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
-use crate::presentation::{AccountsPage, RegisterPage, SignInPage};
+use crate::presentation::{AccountsPage, RegisterPage, SignInPage, WorkspacesPage};
 use crate::routing::{AppRoute, current_route};
 use crate::session_page::{HomePage, SessionView};
 
@@ -71,6 +71,10 @@ fn accounts_route_view() -> AnyView {
     view! { <AccountsPage /> }.into_any()
 }
 
+fn workspaces_route_view() -> AnyView {
+    view! { <WorkspacesPage /> }.into_any()
+}
+
 fn session_route_view(session_id: String) -> AnyView {
     view! { <SessionView session_id=session_id /> }.into_any()
 }
@@ -81,6 +85,7 @@ fn dispatch_route(route: AppRoute) -> AnyView {
         AppRoute::Register => register_route_view(),
         AppRoute::SignIn => sign_in_route_view(),
         AppRoute::Accounts => accounts_route_view(),
+        AppRoute::Workspaces => workspaces_route_view(),
         AppRoute::Session(session_id) => session_route_view(session_id),
         AppRoute::NotFound => not_found_view().into_any(),
     }
@@ -142,6 +147,7 @@ mod tests {
             let _ = dispatch_route(AppRoute::Register);
             let _ = dispatch_route(AppRoute::SignIn);
             let _ = dispatch_route(AppRoute::Accounts);
+            let _ = dispatch_route(AppRoute::Workspaces);
             let _ = dispatch_route(AppRoute::Session("s1".to_string()));
             let _ = dispatch_route(AppRoute::NotFound);
         });

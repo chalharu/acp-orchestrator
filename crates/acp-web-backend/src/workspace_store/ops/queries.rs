@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::contract_sessions::{SessionSnapshot, SessionStatus};
 use crate::workspace_records::{
-    SessionMetadataRecord, UserRecord, WorkspaceRecord, WorkspaceStoreError,
+    DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
+    WorkspaceStoreError,
 };
 
 use super::{
@@ -11,9 +13,58 @@ use super::{
 };
 
 const LOAD_BOOTSTRAP_WORKSPACE_SQL: &str = r#"
-SELECT workspace_id, owner_user_id, name, status, created_at, updated_at, deleted_at
+SELECT
+    workspace_id,
+    owner_user_id,
+    name,
+    upstream_url,
+    default_ref,
+    credential_reference_id,
+    bootstrap_kind,
+    status,
+    created_at,
+    updated_at,
+    deleted_at
 FROM workspaces
-WHERE owner_user_id = ?1 AND bootstrap_kind = ?2
+WHERE owner_user_id = ?1 AND bootstrap_kind = ?2 AND deleted_at IS NULL
+"#;
+
+const LOAD_WORKSPACE_SQL: &str = r#"
+SELECT
+    workspace_id,
+    owner_user_id,
+    name,
+    upstream_url,
+    default_ref,
+    credential_reference_id,
+    bootstrap_kind,
+    status,
+    created_at,
+    updated_at,
+    deleted_at
+FROM workspaces
+WHERE owner_user_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
+"#;
+
+const LIST_WORKSPACES_SQL: &str = r#"
+SELECT
+    workspace_id,
+    owner_user_id,
+    name,
+    upstream_url,
+    default_ref,
+    credential_reference_id,
+    bootstrap_kind,
+    status,
+    created_at,
+    updated_at,
+    deleted_at
+FROM workspaces
+WHERE owner_user_id = ?1 AND deleted_at IS NULL
+ORDER BY
+    CASE WHEN bootstrap_kind IS NULL THEN 1 ELSE 0 END,
+    updated_at DESC,
+    workspace_id ASC
 "#;
 
 const LOAD_SESSION_METADATA_SQL: &str = r#"
@@ -35,6 +86,31 @@ SELECT
     deleted_at
 FROM sessions
 WHERE owner_user_id = ?1 AND session_id = ?2
+"#;
+
+const LIST_WORKSPACE_SESSIONS_SQL: &str = r#"
+SELECT
+    session_id,
+    workspace_id,
+    title,
+    status,
+    last_activity_at
+FROM sessions
+WHERE owner_user_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
+ORDER BY last_activity_at DESC, session_id ASC
+"#;
+
+const LOAD_SESSION_SNAPSHOT_SQL: &str = r#"
+SELECT
+    session_id,
+    workspace_id,
+    title,
+    status,
+    latest_sequence,
+    messages_json,
+    last_activity_at
+FROM sessions
+WHERE owner_user_id = ?1 AND session_id = ?2 AND deleted_at IS NULL
 "#;
 
 pub(in crate::workspace_store) fn load_user_by_principal(
@@ -162,14 +238,48 @@ pub(in crate::workspace_store) fn load_bootstrap_workspace(
         .map_err(database_error)
 }
 
+pub(in crate::workspace_store) fn list_workspaces(
+    connection: &Connection,
+    owner_user_id: &str,
+) -> Result<Vec<WorkspaceRecord>, WorkspaceStoreError> {
+    let mut statement = connection
+        .prepare(LIST_WORKSPACES_SQL)
+        .map_err(database_error)?;
+    statement
+        .query_map(params![owner_user_id], load_workspace_row)
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+}
+
+pub(in crate::workspace_store) fn load_workspace(
+    connection: &Connection,
+    owner_user_id: &str,
+    workspace_id: &str,
+) -> Result<Option<WorkspaceRecord>, WorkspaceStoreError> {
+    connection
+        .query_row(
+            LOAD_WORKSPACE_SQL,
+            params![owner_user_id, workspace_id],
+            load_workspace_row,
+        )
+        .optional()
+        .map_err(database_error)
+}
+
 fn load_workspace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
     let identity = load_workspace_identity_fields(row)?;
+    let repository = load_workspace_repository_fields(row)?;
     let timestamps = load_workspace_timestamp_fields(row)?;
 
     Ok(WorkspaceRecord {
         workspace_id: identity.workspace_id,
         owner_user_id: identity.owner_user_id,
         name: identity.name,
+        upstream_url: repository.upstream_url,
+        default_ref: repository.default_ref,
+        credential_reference_id: repository.credential_reference_id,
+        bootstrap_kind: repository.bootstrap_kind,
         status: identity.status,
         created_at: timestamps.created_at,
         updated_at: timestamps.updated_at,
@@ -191,7 +301,25 @@ fn load_workspace_identity_fields(
         workspace_id: row.get(0)?,
         owner_user_id: row.get(1)?,
         name: row.get(2)?,
-        status: row.get(3)?,
+        status: row.get(7)?,
+    })
+}
+
+struct WorkspaceRepositoryFields {
+    upstream_url: Option<String>,
+    default_ref: Option<String>,
+    credential_reference_id: Option<String>,
+    bootstrap_kind: Option<String>,
+}
+
+fn load_workspace_repository_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceRepositoryFields> {
+    Ok(WorkspaceRepositoryFields {
+        upstream_url: row.get(3)?,
+        default_ref: row.get(4)?,
+        credential_reference_id: row.get(5)?,
+        bootstrap_kind: row.get(6)?,
     })
 }
 
@@ -205,9 +333,9 @@ fn load_workspace_timestamp_fields(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<WorkspaceTimestampFields> {
     Ok(WorkspaceTimestampFields {
-        created_at: parse_timestamp_for_row(row.get::<_, String>(4)?, 4)?,
-        updated_at: parse_timestamp_for_row(row.get::<_, String>(5)?, 5)?,
-        deleted_at: parse_optional_timestamp_for_row(row.get(6)?, 6)?,
+        created_at: parse_timestamp_for_row(row.get::<_, String>(8)?, 8)?,
+        updated_at: parse_timestamp_for_row(row.get::<_, String>(9)?, 9)?,
+        deleted_at: parse_optional_timestamp_for_row(row.get(10)?, 10)?,
     })
 }
 
@@ -223,6 +351,59 @@ pub(in crate::workspace_store) fn load_session_metadata_record(
             load_session_row,
         )
         .optional()
+        .map_err(database_error)
+}
+
+pub(in crate::workspace_store) fn load_session_snapshot_record(
+    connection: &Connection,
+    owner_user_id: &str,
+    session_id: &str,
+) -> Result<Option<DurableSessionSnapshotRecord>, WorkspaceStoreError> {
+    connection
+        .query_row(
+            LOAD_SESSION_SNAPSHOT_SQL,
+            params![owner_user_id, session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    parse_timestamp_for_row(row.get::<_, String>(6)?, 6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(database_error)?
+        .map(build_session_snapshot_record)
+        .transpose()
+}
+
+pub(in crate::workspace_store) fn list_workspace_sessions(
+    connection: &Connection,
+    owner_user_id: &str,
+    workspace_id: &str,
+) -> Result<Vec<crate::contract_sessions::SessionListItem>, WorkspaceStoreError> {
+    let mut statement = connection
+        .prepare(LIST_WORKSPACE_SESSIONS_SQL)
+        .map_err(database_error)?;
+    statement
+        .query_map(params![owner_user_id, workspace_id], |row| {
+            Ok(crate::contract_sessions::SessionListItem {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                title: row.get(2)?,
+                status: match row.get::<_, String>(3)?.as_str() {
+                    "closed" => crate::contract_sessions::SessionStatus::Closed,
+                    _ => crate::contract_sessions::SessionStatus::Active,
+                },
+                last_activity_at: parse_timestamp_for_row(row.get::<_, String>(4)?, 4)?,
+            })
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)
 }
 
@@ -247,6 +428,43 @@ fn load_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMetadata
         closed_at: timing.closed_at,
         deleted_at: timing.deleted_at,
     })
+}
+
+fn build_session_snapshot_record(
+    row: (String, String, String, String, i64, String, DateTime<Utc>),
+) -> Result<DurableSessionSnapshotRecord, WorkspaceStoreError> {
+    let (session_id, workspace_id, title, status, latest_sequence, messages_json, last_activity_at) =
+        row;
+    let latest_sequence = u64::try_from(latest_sequence).map_err(|error| {
+        WorkspaceStoreError::Database(format!(
+            "invalid latest_sequence for session {session_id}: {error}"
+        ))
+    })?;
+    let messages = serde_json::from_str(&messages_json).map_err(|error| {
+        WorkspaceStoreError::Database(format!(
+            "invalid messages_json for session {session_id}: {error}"
+        ))
+    })?;
+
+    Ok(DurableSessionSnapshotRecord {
+        session: SessionSnapshot {
+            id: session_id,
+            workspace_id,
+            title,
+            status: session_status_from_record(&status),
+            latest_sequence,
+            messages,
+            pending_permissions: Vec::new(),
+        },
+        last_activity_at,
+    })
+}
+
+fn session_status_from_record(status: &str) -> SessionStatus {
+    match status {
+        "closed" => SessionStatus::Closed,
+        _ => SessionStatus::Active,
+    }
 }
 
 struct SessionCheckoutFields {

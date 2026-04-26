@@ -479,6 +479,9 @@ async fn assert_session_sidebar_workspace(
     browser: &BrowserHarness,
     workspace_name: &str,
 ) -> Result<()> {
+    browser
+        .wait_for_session_sidebar_workspace_label(workspace_name, Duration::from_secs(30))
+        .await?;
     assert_eq!(
         browser.session_sidebar_workspace_label().await?,
         format!("Workspace: {workspace_name}")
@@ -937,6 +940,24 @@ impl BrowserHarness {
             "return document.querySelector('.session-sidebar__workspace')\
              ?.textContent?.trim() ?? '';",
             "reading workspace label",
+        )
+        .await
+    }
+
+    async fn wait_for_session_sidebar_workspace_label(
+        &self,
+        workspace_name: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let expected = serde_json::to_string(&format!("Workspace: {workspace_name}"))
+            .context("encoding workspace label")?;
+        self.wait_for_condition(
+            &format!(
+                "return document.querySelector('.session-sidebar__workspace')\
+                 ?.textContent?.trim() === {expected};"
+            ),
+            timeout,
+            &format!("workspace label for {workspace_name}"),
         )
         .await
     }

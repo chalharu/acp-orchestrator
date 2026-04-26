@@ -1056,8 +1056,25 @@ impl BrowserHarness {
     }
 
     async fn create_workspace(&self, name: &str) -> Result<()> {
-        // In the new UI, workspace creation is behind a modal triggered by the
-        // "+ New workspace" button.  Open the modal first.
+        self.open_create_workspace_modal().await?;
+        self.fill_create_workspace_input(
+            ".workspace-modal input[type='text']",
+            name,
+            "workspace name input in modal",
+            "workspace name",
+        )
+        .await?;
+        self.fill_create_workspace_input(
+            ".workspace-modal input[type='url']",
+            BROWSER_WORKSPACE_REPOSITORY_URL,
+            "workspace repository url input in modal",
+            "workspace repository url",
+        )
+        .await?;
+        self.submit_create_workspace_form().await
+    }
+
+    async fn open_create_workspace_modal(&self) -> Result<()> {
         self.client
             .find(Locator::Css(".workspace-dashboard__new-btn"))
             .await
@@ -1071,33 +1088,33 @@ impl BrowserHarness {
             Duration::from_secs(10),
             "workspace name input in modal",
         )
-        .await?;
+        .await
+    }
+
+    async fn fill_create_workspace_input(
+        &self,
+        selector: &'static str,
+        value: &str,
+        field_context: &str,
+        field_label: &str,
+    ) -> Result<()> {
         let input = self
             .client
-            .find(Locator::Css(".workspace-modal input[type='text']"))
+            .find(Locator::Css(selector))
             .await
-            .context("finding workspace name input in modal")?;
+            .with_context(|| format!("finding {field_context}"))?;
         input
             .click()
             .await
-            .context("focusing workspace name input")?;
+            .with_context(|| format!("focusing {field_label}"))?;
         input
-            .send_keys(name)
+            .send_keys(value)
             .await
-            .context("typing workspace name")?;
-        let repo_input = self
-            .client
-            .find(Locator::Css(".workspace-modal input[type='url']"))
-            .await
-            .context("finding workspace repository url input in modal")?;
-        repo_input
-            .click()
-            .await
-            .context("focusing workspace repository url input")?;
-        repo_input
-            .send_keys(BROWSER_WORKSPACE_REPOSITORY_URL)
-            .await
-            .context("typing workspace repository url")?;
+            .with_context(|| format!("typing {field_label}"))?;
+        Ok(())
+    }
+
+    async fn submit_create_workspace_form(&self) -> Result<()> {
         self.client
             .find(Locator::Css(".workspace-modal .account-form__submit"))
             .await

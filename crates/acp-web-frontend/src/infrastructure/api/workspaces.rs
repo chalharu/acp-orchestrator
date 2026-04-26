@@ -5,8 +5,8 @@ use acp_contracts_sessions::{
 };
 use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
-    UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceBranch,
-    WorkspaceBranchListResponse, WorkspaceDetail, WorkspaceListResponse, WorkspaceSummary,
+    UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceBranch, WorkspaceBranchListResponse,
+    WorkspaceDetail, WorkspaceListResponse, WorkspaceSummary,
 };
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
@@ -196,7 +196,10 @@ pub(crate) async fn list_workspace_branches(
 pub(crate) async fn list_workspace_branches(
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceBranch>, String> {
-    Err(non_wasm_api_error("GET", &workspace_branches_url(workspace_id)))
+    Err(non_wasm_api_error(
+        "GET",
+        &workspace_branches_url(workspace_id),
+    ))
 }
 
 #[cfg(target_family = "wasm")]
@@ -243,10 +246,7 @@ fn create_workspace_session_body(checkout_ref: Option<String>) -> Result<String,
 }
 
 fn update_workspace_body(name: Option<String>) -> Result<String, String> {
-    serde_json::to_string(&UpdateWorkspaceRequest {
-        name,
-    })
-    .map_err(|error| error.to_string())
+    serde_json::to_string(&UpdateWorkspaceRequest { name }).map_err(|error| error.to_string())
 }
 
 fn workspace_url(workspace_id: &str) -> String {

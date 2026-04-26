@@ -117,11 +117,8 @@ fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> imp
 
     let sessions = workspace_sessions_signal(state, &workspace_id);
 
-    let on_open_chat = workspace_open_chat_handler(
-        workspace_id.clone(),
-        display.workspace_name.clone(),
-        state,
-    );
+    let on_open_chat =
+        workspace_open_chat_handler(workspace_id.clone(), display.workspace_name.clone(), state);
     let on_edit =
         workspace_edit_handler(workspace_id.clone(), display.workspace_name.clone(), state);
     let on_save = workspace_save_handler(workspace_id.clone(), state);
@@ -695,12 +692,7 @@ fn WorkspaceRenameForm(
     on_cancel: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
     let form_ref = NodeRef::new();
-    bind_workspace_rename_pointer_cancel_listener(
-        form_ref,
-        workspace_id.clone(),
-        state,
-        is_saving,
-    );
+    bind_workspace_rename_pointer_cancel_listener(form_ref, workspace_id.clone(), state, is_saving);
     let on_focusout = workspace_rename_focusout_handler(workspace_id, state, is_saving);
     view! {
         <form
@@ -709,35 +701,62 @@ fn WorkspaceRenameForm(
             on:submit=move |event| on_save.run(event)
             on:focusout=on_focusout
         >
-            <input
-                type="text"
-                class="workspace-name-input"
-                prop:value=move || state.edit_name_draft.get()
-                on:input=move |event| { state.edit_name_draft.set(event_target_value(&event)) }
-                prop:disabled=move || is_saving.get()
-            />
-            <button
-                type="submit"
-                class="workspace-action-btn icon-action"
-                prop:disabled=move || is_saving.get()
-                aria-label=move || workspace_save_label(is_saving.get())
-                title=move || workspace_save_label(is_saving.get())
-            >
-                {move || app_icon_view(workspace_save_icon(is_saving.get()))}
-                <span class="sr-only">{move || workspace_save_label(is_saving.get())}</span>
-            </button>
-            <button
-                type="button"
-                class="workspace-action-btn icon-action"
-                prop:disabled=move || is_saving.get()
-                on:click=move |event| on_cancel.run(event)
-                aria-label=workspace_cancel_label()
-                title=workspace_cancel_label()
-            >
-                {app_icon_view(AppIcon::Cancel)}
-                <span class="sr-only">{workspace_cancel_label()}</span>
-            </button>
+            {workspace_rename_name_input(state.edit_name_draft, is_saving)}
+            {workspace_rename_save_button(is_saving)}
+            {workspace_rename_cancel_button(is_saving, on_cancel)}
         </form>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_rename_name_input(
+    edit_name_draft: RwSignal<String>,
+    is_saving: Signal<bool>,
+) -> impl IntoView {
+    view! {
+        <input
+            type="text"
+            class="workspace-name-input"
+            prop:value=move || edit_name_draft.get()
+            on:input=move |event| { edit_name_draft.set(event_target_value(&event)) }
+            prop:disabled=move || is_saving.get()
+        />
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_rename_save_button(is_saving: Signal<bool>) -> impl IntoView {
+    view! {
+        <button
+            type="submit"
+            class="workspace-action-btn icon-action"
+            prop:disabled=move || is_saving.get()
+            aria-label=move || workspace_save_label(is_saving.get())
+            title=move || workspace_save_label(is_saving.get())
+        >
+            {move || app_icon_view(workspace_save_icon(is_saving.get()))}
+            <span class="sr-only">{move || workspace_save_label(is_saving.get())}</span>
+        </button>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_rename_cancel_button(
+    is_saving: Signal<bool>,
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="workspace-action-btn icon-action"
+            prop:disabled=move || is_saving.get()
+            on:click=move |event| on_cancel.run(event)
+            aria-label=workspace_cancel_label()
+            title=workspace_cancel_label()
+        >
+            {app_icon_view(AppIcon::Cancel)}
+            <span class="sr-only">{workspace_cancel_label()}</span>
+        </button>
     }
 }
 
@@ -797,19 +816,18 @@ fn attach_workspace_rename_pointer_cancel_listener(
     is_saving: Signal<bool>,
 ) {
     let form_node = form_node.clone();
-    let listener = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::PointerEvent| {
-        cancel_workspace_edit_when_target_leaves_form(
-            event.target(),
-            &form_node,
-            &workspace_id,
-            state,
-            is_saving,
-        );
-    }) as Box<dyn FnMut(web_sys::PointerEvent)>);
-    let _ = document.add_event_listener_with_callback(
-        "pointerdown",
-        listener.as_ref().unchecked_ref(),
-    );
+    let listener =
+        wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::PointerEvent| {
+            cancel_workspace_edit_when_target_leaves_form(
+                event.target(),
+                &form_node,
+                &workspace_id,
+                state,
+                is_saving,
+            );
+        }) as Box<dyn FnMut(web_sys::PointerEvent)>);
+    let _ =
+        document.add_event_listener_with_callback("pointerdown", listener.as_ref().unchecked_ref());
     listener.forget();
 }
 
@@ -827,7 +845,9 @@ fn cancel_workspace_edit_when_target_leaves_form(
     if state.editing_workspace_id.get_untracked().as_deref() != Some(workspace_id) {
         return;
     }
-    let Some(target_node) = target.as_ref().and_then(|target| target.dyn_ref::<web_sys::Node>())
+    let Some(target_node) = target
+        .as_ref()
+        .and_then(|target| target.dyn_ref::<web_sys::Node>())
     else {
         cancel_workspace_edit(workspace_id, state);
         return;
@@ -955,9 +975,9 @@ fn workspace_start_chat_submit_handler(
         state.notice.set(None);
         let selected_branch = state.start_chat_selected_branch.get_untracked();
         if selected_branch.trim().is_empty() {
-            state.error.set(Some(
-                "Choose a branch before starting a chat.".to_string(),
-            ));
+            state
+                .error
+                .set(Some("Choose a branch before starting a chat.".to_string()));
             return;
         }
         leptos::task::spawn_local(async move {
@@ -1164,6 +1184,28 @@ mod tests {
         }
     }
 
+    fn sample_workspace_branch() -> WorkspaceBranch {
+        WorkspaceBranch {
+            name: "feature".to_string(),
+            ref_name: "refs/heads/feature".to_string(),
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn seed_workspace_start_chat_state(state: WorkspacesPageState) {
+        state.show_start_chat_modal.set(true);
+        state.start_chat_workspace_id.set(Some("w_1".to_string()));
+        state
+            .start_chat_workspace_name
+            .set("Test Workspace".to_string());
+        state
+            .start_chat_branches
+            .set(vec![sample_workspace_branch()]);
+        state
+            .start_chat_selected_branch
+            .set("refs/heads/feature".to_string());
+    }
+
     #[test]
     fn workspace_count_label_pluralises_correctly() {
         assert_eq!(workspace_count_label(0), "No workspaces");
@@ -1270,23 +1312,11 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
-    fn workspace_start_chat_modal_helpers_build_and_clear_host_state() {
+    fn workspace_start_chat_modal_helpers_build_on_host() {
         let owner = Owner::new();
         owner.with(|| {
             let state = WorkspacesPageState::new();
-            state.show_start_chat_modal.set(true);
-            state.start_chat_workspace_id.set(Some("w_1".to_string()));
-            state
-                .start_chat_workspace_name
-                .set("Test Workspace".to_string());
-            state.start_chat_branches.set(vec![WorkspaceBranch {
-                name: "feature".to_string(),
-                ref_name: "refs/heads/feature".to_string(),
-            }]);
-            state
-                .start_chat_selected_branch
-                .set("refs/heads/feature".to_string());
-            state.error.set(Some("existing error".to_string()));
+            seed_workspace_start_chat_state(state);
 
             let workspace_name = Signal::derive(move || state.start_chat_workspace_name.get());
             let branches = Signal::derive(move || state.start_chat_branches.get());
@@ -1314,7 +1344,17 @@ mod tests {
             );
             assert_eq!(title(), "Test Workspace");
             assert_eq!(submit_label(), "New chat");
+        });
+    }
 
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn close_workspace_start_chat_modal_clears_host_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            seed_workspace_start_chat_state(state);
+            state.error.set(Some("existing error".to_string()));
             close_workspace_start_chat_modal(state);
 
             assert!(!state.show_start_chat_modal.get());
@@ -1333,27 +1373,12 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let state = WorkspacesPageState::new();
-            state.show_start_chat_modal.set(true);
-            state.start_chat_workspace_id.set(Some("w_1".to_string()));
-            state
-                .start_chat_workspace_name
-                .set("Test Workspace".to_string());
-            state.start_chat_branches.set(vec![WorkspaceBranch {
-                name: "feature".to_string(),
-                ref_name: "refs/heads/feature".to_string(),
-            }]);
-            state
-                .start_chat_selected_branch
-                .set("refs/heads/feature".to_string());
+            seed_workspace_start_chat_state(state);
 
             workspace_start_chat_submit_handler(state)(fake_submit_event());
             assert!(!state.show_start_chat_modal.get());
 
-            state.show_start_chat_modal.set(true);
-            state.start_chat_workspace_id.set(Some("w_1".to_string()));
-            state
-                .start_chat_workspace_name
-                .set("Test Workspace".to_string());
+            seed_workspace_start_chat_state(state);
 
             workspace_start_chat_cancel_handler(state)(fake_mouse_event());
             assert!(!state.show_start_chat_modal.get());

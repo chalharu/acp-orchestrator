@@ -1,34 +1,25 @@
-#[cfg(test)]
-use std::cell::RefCell;
-#[cfg(test)]
-use std::ffi::OsString;
 use std::{
     env,
     ffi::OsStr,
     fs,
     path::{Component, Path, PathBuf},
-    process::Command,
     sync::Arc,
 };
 
 use async_trait::async_trait;
+use git2::{
+    Direction, ErrorCode, FetchOptions, ProxyOptions, RemoteCallbacks, RemoteRedirect, Repository,
+    RepositoryInitOptions,
+    build::{CheckoutBuilder, CloneLocal, RepoBuilder},
+};
 use reqwest::Url;
 
 use crate::workspace_records::WorkspaceRecord;
 
 const CHECKOUTS_DIR_NAME: &str = "session-checkouts";
-
-#[cfg(test)]
-#[derive(Clone)]
-struct TestGitCommand {
-    program: PathBuf,
-    prefix_args: Vec<OsString>,
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_GIT_BIN_OVERRIDE: RefCell<Option<TestGitCommand>> = const { RefCell::new(None) };
-}
+const GIT_FETCH_HEAD: &str = "FETCH_HEAD";
+const GIT_HOME_DIR_NAME: &str = "git-home";
+const GIT_REMOTE_NAME: &str = "origin";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedWorkspaceCheckout {
@@ -163,11 +154,12 @@ impl FsWorkspaceCheckoutManager {
         validate_https_upstream_url(upstream_url)?;
         let resolved_ref =
             resolve_https_checkout_ref(upstream_url, default_ref, override_ref, &self.state_dir)?;
-        initialize_https_checkout(checkout_path, upstream_url, &self.state_dir)?;
-        fetch_https_checkout(checkout_path, resolved_ref.as_deref(), &self.state_dir)?;
-        checkout_fetch_head(checkout_path, &self.state_dir, GitMode::Https)?;
-        let checkout_commit_sha =
-            checkout_head_commit(checkout_path, &self.state_dir, GitMode::Https)?;
+        let checkout_commit_sha = clone_remote_workspace(
+            upstream_url,
+            resolved_ref.as_deref(),
+            checkout_path,
+            &self.state_dir,
+        )?;
         Ok(build_prepared_checkout(
             checkout_relpath,
             resolved_ref,
@@ -191,7 +183,7 @@ impl FsWorkspaceCheckoutManager {
         Ok(build_prepared_checkout(
             checkout_relpath,
             resolved_ref,
-            checkout_head_commit(checkout_path, &self.state_dir, GitMode::Local)?,
+            checkout_head_commit(checkout_path, &self.state_dir)?,
             checkout_path,
         ))
     }
@@ -233,12 +225,6 @@ fn checkout_parent_dir(checkout_path: &Path) -> Result<&Path, WorkspaceCheckoutE
     checkout_path.parent().ok_or_else(|| {
         WorkspaceCheckoutError::Io("session checkout path must have a parent directory".to_string())
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitMode {
-    Https,
-    Local,
 }
 
 fn validate_checkout_ref(
@@ -290,13 +276,17 @@ fn resolve_remote_head_ref(
     upstream_url: &str,
     state_dir: &Path,
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
-    let output = run_git(
-        None,
-        state_dir,
-        GitMode::Https,
-        ["ls-remote", "--symref", upstream_url, "HEAD"].as_slice(),
-    )?;
-    Ok(output.lines().find_map(parse_symref_line))
+    with_probe_repository(state_dir, "remote-head", |repo| {
+        let mut remote = repo.remote_anonymous(upstream_url).map_err(map_git_error)?;
+        let connection = remote
+            .connect_auth(
+                Direction::Fetch,
+                Some(git_remote_callbacks()),
+                Some(git_proxy_options()),
+            )
+            .map_err(map_git_error)?;
+        parse_remote_default_branch(connection.default_branch().map_err(map_git_error)?)
+    })
 }
 
 fn resolve_https_checkout_ref(
@@ -311,60 +301,55 @@ fn resolve_https_checkout_ref(
     }
 }
 
-fn initialize_https_checkout(
-    checkout_path: &Path,
+fn clone_remote_workspace(
     upstream_url: &str,
-    state_dir: &Path,
-) -> Result<(), WorkspaceCheckoutError> {
-    let checkout_path_string = checkout_path.to_string_lossy().to_string();
-    let init_args = ["init", checkout_path_string.as_str()];
-    run_git(None, state_dir, GitMode::Https, &init_args)?;
-    let remote_args = ["remote", "add", "origin", upstream_url];
-    run_git(Some(checkout_path), state_dir, GitMode::Https, &remote_args)?;
-    Ok(())
-}
-
-fn fetch_https_checkout(
-    checkout_path: &Path,
     resolved_ref: Option<&str>,
+    checkout_path: &Path,
     state_dir: &Path,
-) -> Result<(), WorkspaceCheckoutError> {
-    let fetch_target = resolved_ref.unwrap_or("HEAD");
-    let fetch_args = ["fetch", "--depth", "1", "origin", fetch_target];
-    run_git(Some(checkout_path), state_dir, GitMode::Https, &fetch_args)?;
-    Ok(())
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    let _git_home = ensure_git_home(state_dir)?;
+    let repo = init_repository(checkout_path)?;
+    repo.remote(GIT_REMOTE_NAME, upstream_url)
+        .map_err(map_git_error)?;
+    {
+        let mut remote = repo.find_remote(GIT_REMOTE_NAME).map_err(map_git_error)?;
+        let mut fetch_options = git_fetch_options(upstream_url);
+        remote
+            .fetch(
+                &[resolved_ref.unwrap_or("HEAD")],
+                Some(&mut fetch_options),
+                None,
+            )
+            .map_err(map_git_error)?;
+    }
+    checkout_fetch_head(checkout_path, state_dir)?;
+    checkout_head_commit(checkout_path, state_dir)
 }
 
 fn checkout_fetch_head(
     checkout_path: &Path,
     state_dir: &Path,
-    mode: GitMode,
 ) -> Result<(), WorkspaceCheckoutError> {
-    let checkout_args = ["checkout", "--detach", "FETCH_HEAD"];
-    run_git(Some(checkout_path), state_dir, mode, &checkout_args)?;
-    Ok(())
-}
-
-fn parse_symref_line(line: &str) -> Option<String> {
-    let line = line.strip_prefix("ref: ")?;
-    let (reference, target) = line.split_once('\t')?;
-    (target == "HEAD").then(|| reference.to_string())
+    let _git_home = ensure_git_home(state_dir)?;
+    let repo = Repository::open(checkout_path).map_err(map_git_error)?;
+    checkout_revision(&repo, GIT_FETCH_HEAD)
 }
 
 fn git_symbolic_ref(
     cwd: &Path,
     state_dir: &Path,
-    mode: GitMode,
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
-    match run_git(
-        Some(cwd),
-        state_dir,
-        mode,
-        ["symbolic-ref", "-q", "HEAD"].as_slice(),
-    ) {
-        Ok(output) => Ok(Some(output.trim().to_string())),
-        Err(WorkspaceCheckoutError::Git(_)) => Ok(None),
-        Err(error) => Err(error),
+    let _git_home = ensure_git_home(state_dir)?;
+    let repo = Repository::discover(cwd).map_err(map_git_error)?;
+    if repo.head_detached().map_err(map_git_error)? {
+        return Ok(None);
+    }
+    match repo.head() {
+        Ok(head) => Ok(head.name().map(str::to_string)),
+        Err(error) if matches!(error.code(), ErrorCode::NotFound | ErrorCode::UnbornBranch) => {
+            Ok(None)
+        }
+        Err(error) => Err(map_git_error(error)),
     }
 }
 
@@ -381,13 +366,11 @@ fn local_source_root_from(
     current_dir: &Path,
     state_dir: &Path,
 ) -> Result<PathBuf, WorkspaceCheckoutError> {
-    let source_root = run_git(
-        Some(current_dir),
-        state_dir,
-        GitMode::Local,
-        &["rev-parse", "--show-toplevel"],
-    )?;
-    Ok(PathBuf::from(source_root.trim()))
+    let _git_home = ensure_git_home(state_dir)?;
+    let repo = Repository::discover(current_dir).map_err(map_git_error)?;
+    repo.workdir().map(Path::to_path_buf).ok_or_else(|| {
+        WorkspaceCheckoutError::Git("repository root has no working directory".to_string())
+    })
 }
 
 fn resolve_local_checkout_ref(
@@ -398,7 +381,7 @@ fn resolve_local_checkout_ref(
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
     match override_ref.or(default_ref) {
         Some(reference) => Ok(Some(reference.to_string())),
-        None => git_symbolic_ref(source_root, state_dir, GitMode::Local),
+        None => git_symbolic_ref(source_root, state_dir),
     }
 }
 
@@ -407,15 +390,14 @@ fn clone_local_repository(
     checkout_path: &Path,
     state_dir: &Path,
 ) -> Result<(), WorkspaceCheckoutError> {
-    let source_root_string = source_root.to_string_lossy().to_string();
-    let checkout_path_string = checkout_path.to_string_lossy().to_string();
-    let clone_args = [
-        "clone",
-        "--no-local",
-        source_root_string.as_str(),
-        checkout_path_string.as_str(),
-    ];
-    run_git(None, state_dir, GitMode::Local, &clone_args)?;
+    let _git_home = ensure_git_home(state_dir)?;
+    let source_root = source_root.to_string_lossy().to_string();
+    let mut builder = RepoBuilder::new();
+    builder.clone_local(CloneLocal::None);
+    builder.with_checkout(checkout_builder());
+    builder
+        .clone(&source_root, checkout_path)
+        .map_err(map_git_error)?;
     Ok(())
 }
 
@@ -424,26 +406,21 @@ fn checkout_local_ref_if_needed(
     resolved_ref: Option<&str>,
     state_dir: &Path,
 ) -> Result<(), WorkspaceCheckoutError> {
+    let _git_home = ensure_git_home(state_dir)?;
     let Some(reference) = resolved_ref else {
         return Ok(());
     };
-    let checkout_args = ["checkout", "--detach", reference];
-    run_git(
-        Some(checkout_path),
-        state_dir,
-        GitMode::Local,
-        &checkout_args,
-    )?;
-    Ok(())
+    let repo = Repository::open(checkout_path).map_err(map_git_error)?;
+    checkout_revision(&repo, reference)
 }
 
 fn checkout_head_commit(
     checkout_path: &Path,
     state_dir: &Path,
-    mode: GitMode,
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
-    let head = run_git(Some(checkout_path), state_dir, mode, &["rev-parse", "HEAD"])?;
-    Ok(Some(head.trim().to_string()))
+    let _git_home = ensure_git_home(state_dir)?;
+    let repo = Repository::open(checkout_path).map_err(map_git_error)?;
+    current_head_commit(&repo)
 }
 
 fn build_prepared_checkout(
@@ -460,110 +437,125 @@ fn build_prepared_checkout(
     }
 }
 
-fn run_git(
-    cwd: Option<&Path>,
+fn with_probe_repository<T>(
     state_dir: &Path,
-    mode: GitMode,
-    args: &[&str],
-) -> Result<String, WorkspaceCheckoutError> {
-    let git_home = state_dir.join("git-home");
+    prefix: &str,
+    operation: impl FnOnce(&Repository) -> Result<T, WorkspaceCheckoutError>,
+) -> Result<T, WorkspaceCheckoutError> {
+    let git_home = ensure_git_home(state_dir)?;
+    let probe_dir = git_home.join(format!("{prefix}-{}", uuid::Uuid::new_v4().simple()));
+    fs::create_dir_all(&probe_dir).map_err(|error| {
+        WorkspaceCheckoutError::Io(format!("creating git home failed: {error}"))
+    })?;
+    let repo = init_bare_repository(&probe_dir)?;
+    let result = operation(&repo);
+    let _ = fs::remove_dir_all(&probe_dir);
+    result
+}
+
+fn ensure_git_home(state_dir: &Path) -> Result<PathBuf, WorkspaceCheckoutError> {
+    let git_home = state_dir.join(GIT_HOME_DIR_NAME);
     fs::create_dir_all(&git_home).map_err(|error| {
         WorkspaceCheckoutError::Io(format!("creating git home failed: {error}"))
     })?;
-
-    let mut command = git_command();
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    command.args(safe_git_config_args(mode));
-    command.args(args);
-    command.env_clear();
-    if let Some(path) = env::var_os("PATH") {
-        command.env("PATH", path);
-    }
-    if let Some(lang) = env::var_os("LANG") {
-        command.env("LANG", lang);
-    }
-    if let Some(tmpdir) = env::var_os("TMPDIR") {
-        command.env("TMPDIR", tmpdir);
-    }
-    command.env("HOME", git_home);
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env("GIT_CONFIG_NOSYSTEM", "1");
-    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-
-    let output = command
-        .output()
-        .map_err(|error| WorkspaceCheckoutError::Io(format!("running git failed: {error}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() {
-            format!("git exited with status {}", output.status)
-        } else {
-            stderr
-        };
-        return Err(WorkspaceCheckoutError::Git(detail));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(git_home)
 }
 
-#[cfg(test)]
-fn git_command() -> Command {
-    TEST_GIT_BIN_OVERRIDE.with(|override_path| {
-        if let Some(override_path) = override_path.borrow().as_ref().cloned() {
-            let mut command = Command::new(override_path.program);
-            command.args(override_path.prefix_args);
-            command
-        } else {
-            Command::new("git")
+fn init_repository(path: &Path) -> Result<Repository, WorkspaceCheckoutError> {
+    let mut options = RepositoryInitOptions::new();
+    options.external_template(false);
+    options.no_reinit(true);
+    Repository::init_opts(path, &options).map_err(map_git_error)
+}
+
+fn init_bare_repository(path: &Path) -> Result<Repository, WorkspaceCheckoutError> {
+    let mut options = RepositoryInitOptions::new();
+    options.bare(true);
+    options.external_template(false);
+    options.no_reinit(true);
+    Repository::init_opts(path, &options).map_err(map_git_error)
+}
+
+fn git_fetch_options(remote_url: &str) -> FetchOptions<'static> {
+    let mut options = FetchOptions::new();
+    if supports_shallow_fetch(remote_url) {
+        options.depth(1);
+    }
+    options.follow_redirects(RemoteRedirect::None);
+    options.proxy_options(git_proxy_options());
+    options.remote_callbacks(git_remote_callbacks());
+    options
+}
+
+fn supports_shallow_fetch(remote_url: &str) -> bool {
+    !remote_url.starts_with("file://") && !Path::new(remote_url).is_absolute()
+}
+
+fn git_remote_callbacks() -> RemoteCallbacks<'static> {
+    let mut callbacks = RemoteCallbacks::new();
+    callbacks.credentials(|_url, _username_from_url, _allowed| {
+        Err(git2::Error::from_str(
+            "credentialed git transports are not supported",
+        ))
+    });
+    callbacks
+}
+
+fn git_proxy_options() -> ProxyOptions<'static> {
+    ProxyOptions::new()
+}
+
+fn parse_remote_default_branch(
+    default_branch: git2::Buf,
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    default_branch
+        .as_str()
+        .map(|reference| Some(reference.to_string()))
+        .ok_or_else(|| {
+            WorkspaceCheckoutError::Git("remote default branch is not valid UTF-8".to_string())
+        })
+}
+
+fn checkout_builder() -> CheckoutBuilder<'static> {
+    let mut builder = CheckoutBuilder::new();
+    builder.force();
+    builder.disable_filters(true);
+    builder
+}
+
+fn checkout_revision(repo: &Repository, spec: &str) -> Result<(), WorkspaceCheckoutError> {
+    let object = repo.revparse_single(spec).map_err(map_git_error)?;
+    let commit = object.peel_to_commit().map_err(map_git_error)?;
+    let mut builder = checkout_builder();
+    repo.checkout_tree(commit.as_object(), Some(&mut builder))
+        .map_err(map_git_error)?;
+    repo.set_head_detached(commit.id()).map_err(map_git_error)?;
+    Ok(())
+}
+
+fn current_head_commit(repo: &Repository) -> Result<Option<String>, WorkspaceCheckoutError> {
+    match repo.head() {
+        Ok(head) => match head.peel_to_commit() {
+            Ok(commit) => Ok(Some(commit.id().to_string())),
+            Err(error) if matches!(error.code(), ErrorCode::NotFound | ErrorCode::UnbornBranch) => {
+                Ok(None)
+            }
+            Err(error) => Err(map_git_error(error)),
+        },
+        Err(error) if matches!(error.code(), ErrorCode::NotFound | ErrorCode::UnbornBranch) => {
+            Ok(None)
         }
-    })
-}
-
-#[cfg(not(test))]
-fn git_command() -> Command {
-    Command::new("git")
-}
-
-fn safe_git_config_args(mode: GitMode) -> Vec<String> {
-    let mut configs = vec![
-        ("core.fsmonitor", "false"),
-        ("core.attributesFile", "/dev/null"),
-        ("credential.helper", ""),
-        ("core.sshCommand", ""),
-        ("protocol.allow", "never"),
-        ("protocol.https.allow", "always"),
-        ("protocol.git.allow", "never"),
-        ("protocol.ssh.allow", "never"),
-        ("protocol.ext.allow", "never"),
-        ("http.followRedirects", "false"),
-        ("transfer.bundleURI", "false"),
-        ("submodule.recurse", "false"),
-        ("commit.gpgSign", "false"),
-        ("tag.gpgSign", "false"),
-        ("diff.submodule", "false"),
-        ("status.submoduleSummary", "false"),
-    ];
-    if should_disable_repo_hooks(
-        env::var_os("CONTROL_PLANE_FAST_EXECUTION_GIT_HOOKS_SOURCE").as_deref(),
-    ) {
-        configs.push(("core.hooksPath", "/dev/null"));
+        Err(error) => Err(map_git_error(error)),
     }
-    if mode == GitMode::Local {
-        configs.push(("protocol.file.allow", "always"));
+}
+
+fn map_git_error(error: git2::Error) -> WorkspaceCheckoutError {
+    let message = error.message().trim();
+    if message.is_empty() {
+        WorkspaceCheckoutError::Git(format!("git operation failed ({:?})", error.code()))
     } else {
-        configs.push(("protocol.file.allow", "never"));
+        WorkspaceCheckoutError::Git(message.to_string())
     }
-
-    configs
-        .into_iter()
-        .flat_map(|(key, value)| ["-c".to_string(), format!("{key}={value}")])
-        .collect()
-}
-
-fn should_disable_repo_hooks(control_plane_hooks_source: Option<&OsStr>) -> bool {
-    control_plane_hooks_source.is_none()
 }
 
 #[cfg(test)]

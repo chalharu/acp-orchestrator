@@ -2,14 +2,18 @@ use super::super::{
     CHECKOUTS_DIR_NAME, FsWorkspaceCheckoutManager, GIT_REMOTE_NAME, PreparedWorkspaceCheckout,
     WorkspaceCheckoutError, WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout,
     checkout_fetch_head, checkout_head_commit, checkout_parent_dir, clone_local_repository,
-    clone_remote_workspace, git_fetch_options, git_symbolic_ref, local_source_root,
-    local_source_root_from, resolve_https_checkout_ref, resolve_local_checkout_ref,
-    validate_checkout_ref, validate_https_upstream_url,
+    clone_remote_workspace, current_head_commit, git_fetch_options, git_symbolic_ref,
+    local_source_root, local_source_root_from, map_git_error, parse_remote_default_branch_name,
+    reject_git_credentials, resolve_https_checkout_ref, resolve_local_checkout_ref,
+    resolve_remote_head_ref, validate_checkout_ref, validate_https_upstream_url,
 };
 use super::*;
 use async_trait::async_trait;
 use chrono::Utc;
-use git2::{Repository, RepositoryInitOptions, Signature, build::RepoBuilder};
+use git2::{
+    CredentialType, ErrorClass, ErrorCode, Oid, Repository, RepositoryInitOptions, Signature,
+    build::RepoBuilder,
+};
 use reqwest::Url;
 use std::{
     path::{Path, PathBuf},
@@ -80,6 +84,13 @@ fn initialize_local_repo(path: &Path) -> String {
     commit_id.to_string()
 }
 
+fn initialize_unborn_repo(path: &Path) {
+    let mut options = RepositoryInitOptions::new();
+    options.external_template(false);
+    options.initial_head(TEST_BRANCH);
+    Repository::init_opts(path, &options).expect("empty repos should initialize");
+}
+
 fn create_bare_remote_repo(prefix: &str) -> (String, String) {
     let source_root = unique_test_dir(&format!("{prefix}-source"));
     let expected_head = initialize_local_repo(&source_root);
@@ -135,6 +146,45 @@ fn initialize_detached_head_only_repo(path: &Path) -> String {
     )
     .expect("detached HEAD commits should succeed")
     .to_string()
+}
+
+fn corrupt_head_file(repo_path: &Path, contents: &[u8]) {
+    let git_dir = Repository::open(repo_path)
+        .expect("repo should open")
+        .path()
+        .to_path_buf();
+    std::fs::write(git_dir.join("HEAD"), contents).expect("HEAD should be writable");
+}
+
+fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
+    let mut state_dir = unique_test_dir(prefix);
+    std::fs::create_dir_all(&state_dir).expect("long state dir root should be creatable");
+    let segment = "aaaaaaaaaaaaaaaa";
+    let probe_suffix = format!("remote-head-{}", "a".repeat(32));
+    while state_dir
+        .join("git-home")
+        .join(&probe_suffix)
+        .to_string_lossy()
+        .len()
+        <= 4095
+    {
+        state_dir = state_dir.join(segment);
+        std::fs::create_dir_all(&state_dir).expect("long state dirs should be creatable");
+    }
+    assert!(
+        state_dir.join("git-home").to_string_lossy().len() < 4096,
+        "git home path should remain short enough to create"
+    );
+    assert!(
+        state_dir
+            .join("git-home")
+            .join(&probe_suffix)
+            .to_string_lossy()
+            .len()
+            > 4095,
+        "probe path should overflow the platform path limit"
+    );
+    state_dir
 }
 
 fn fetch_checkout_origin_head(checkout_path: &Path) {
@@ -318,6 +368,13 @@ fn build_prepared_checkout_preserves_supplied_fields() {
             working_dir: checkout_path.to_path_buf(),
         }
     );
+}
+
+#[test]
+fn workspace_checkout_errors_display_their_messages() {
+    let error = WorkspaceCheckoutError::Git("git failed".to_string());
+
+    assert_eq!(error.to_string(), "git failed");
 }
 
 #[test]
@@ -513,7 +570,47 @@ fn clone_local_repository_reports_state_dir_creation_failures() {
 }
 
 #[test]
-fn git_symbolic_ref_handles_detached_heads_and_io_failures() {
+fn parse_remote_default_branch_name_rejects_invalid_utf8() {
+    assert_eq!(
+        parse_remote_default_branch_name(Some("refs/heads/main"))
+            .expect("UTF-8 branch names should parse"),
+        Some("refs/heads/main".to_string())
+    );
+    assert_eq!(
+        parse_remote_default_branch_name(None).expect_err("missing UTF-8 should fail"),
+        WorkspaceCheckoutError::Git("remote default branch is not valid UTF-8".to_string())
+    );
+}
+
+#[test]
+fn resolve_remote_head_ref_reports_probe_directory_creation_failures() {
+    let state_dir = state_dir_with_probe_path_overflow("acp-workspace-checkout-probe-overflow");
+
+    let error = resolve_remote_head_ref("file:///unused.git", &state_dir)
+        .expect_err("overflowed probe paths should fail before remote access");
+
+    assert_io_error_contains(error, "creating git home failed");
+}
+
+#[test]
+fn reject_git_credentials_fails_closed() {
+    let error = match reject_git_credentials(
+        "https://example.com/repo.git",
+        None,
+        CredentialType::USER_PASS_PLAINTEXT,
+    ) {
+        Ok(_) => panic!("credential requests should always fail closed"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.message(),
+        "credentialed git transports are not supported"
+    );
+}
+
+#[test]
+fn git_symbolic_ref_handles_branch_detached_unborn_invalid_and_io_failures() {
     let repo = unique_test_dir("acp-workspace-checkout-symbolic-ref");
     initialize_local_repo(&repo);
     let state_dir = unique_test_dir("acp-workspace-checkout-symbolic-state");
@@ -528,6 +625,25 @@ fn git_symbolic_ref_handles_detached_heads_and_io_failures() {
         git_symbolic_ref(&repo, &state_dir).expect("detached heads should not error"),
         None
     );
+
+    let unborn_repo = unique_test_dir("acp-workspace-checkout-symbolic-unborn");
+    initialize_unborn_repo(&unborn_repo);
+    assert_eq!(
+        git_symbolic_ref(
+            &unborn_repo,
+            &unique_test_dir("acp-workspace-checkout-symbolic-unborn-state")
+        )
+        .expect("unborn heads should not error"),
+        None
+    );
+
+    corrupt_head_file(&repo, b"ref: refs/heads/invalid lock\n");
+    let invalid_head_error = git_symbolic_ref(
+        &repo,
+        &unique_test_dir("acp-workspace-checkout-symbolic-invalid-state"),
+    )
+    .expect_err("invalid HEAD refs should surface git errors");
+    assert_git_error(invalid_head_error);
 
     let broken_state_dir = unique_test_dir("acp-workspace-checkout-symbolic-state-broken");
     std::fs::write(&broken_state_dir, "state file").expect("state dir blocker should be writable");
@@ -545,6 +661,26 @@ fn local_source_root_from_returns_git_errors_outside_repositories() {
     .expect_err("non-repository paths should fail");
 
     assert_git_error(error);
+}
+
+#[test]
+fn local_source_root_from_rejects_bare_repositories() {
+    let repo = unique_test_dir("acp-workspace-checkout-local-root-bare");
+    let mut options = RepositoryInitOptions::new();
+    options.bare(true);
+    options.external_template(false);
+    Repository::init_opts(&repo, &options).expect("bare repositories should initialize");
+
+    let error = local_source_root_from(
+        &repo,
+        &unique_test_dir("acp-workspace-checkout-local-root-bare-state"),
+    )
+    .expect_err("bare repositories should not expose a working directory");
+
+    assert_eq!(
+        error,
+        WorkspaceCheckoutError::Git("repository root has no working directory".to_string())
+    );
 }
 
 #[test]
@@ -567,10 +703,7 @@ fn local_source_root_from_resolves_repository_roots() {
 #[test]
 fn checkout_head_commit_returns_none_for_unborn_repositories() {
     let repo_dir = unique_test_dir("acp-workspace-checkout-unborn");
-    let mut options = RepositoryInitOptions::new();
-    options.external_template(false);
-    options.initial_head(TEST_BRANCH);
-    Repository::init_opts(&repo_dir, &options).expect("empty repos should initialize");
+    initialize_unborn_repo(&repo_dir);
 
     assert_eq!(
         checkout_head_commit(
@@ -579,6 +712,70 @@ fn checkout_head_commit_returns_none_for_unborn_repositories() {
         )
         .expect("unborn repos should not error"),
         None
+    );
+}
+
+#[test]
+fn current_head_commit_returns_none_for_missing_head_targets() {
+    let repo_dir = unique_test_dir("acp-workspace-checkout-missing-head-target");
+    initialize_local_repo(&repo_dir);
+    let repo = Repository::open(&repo_dir).expect("repo should open");
+    let missing =
+        Oid::from_str("0123456789abcdef0123456789abcdef01234567").expect("test OIDs should parse");
+    std::fs::write(
+        repo.path().join("refs/heads/missing-target"),
+        format!("{missing}\n"),
+    )
+    .expect("direct refs should be writable");
+    repo.set_head("refs/heads/missing-target")
+        .expect("HEAD should point at the missing object ref");
+
+    assert_eq!(
+        current_head_commit(&repo).expect("missing head targets should map to None"),
+        None
+    );
+}
+
+#[test]
+fn current_head_commit_reports_non_commit_and_invalid_head_errors() {
+    let blob_repo_dir = unique_test_dir("acp-workspace-checkout-blob-head");
+    initialize_local_repo(&blob_repo_dir);
+    let blob_repo = Repository::open(&blob_repo_dir).expect("repo should open");
+    let blob_id = blob_repo
+        .blob(b"blob-only")
+        .expect("test blobs should be writable");
+    blob_repo
+        .reference("refs/heads/blob-head", blob_id, true, "test")
+        .expect("blob refs should be writable");
+    blob_repo
+        .set_head("refs/heads/blob-head")
+        .expect("HEAD should point at the blob ref");
+
+    let blob_error =
+        current_head_commit(&blob_repo).expect_err("blob heads should not peel to commits");
+    assert_git_error(blob_error);
+
+    let invalid_repo_dir = unique_test_dir("acp-workspace-checkout-invalid-head");
+    initialize_local_repo(&invalid_repo_dir);
+    corrupt_head_file(&invalid_repo_dir, b"ref: refs/heads/invalid lock\n");
+    let invalid_repo = Repository::open(&invalid_repo_dir).expect("repo should still open");
+
+    let invalid_head_error =
+        current_head_commit(&invalid_repo).expect_err("invalid HEAD refs should error");
+    assert_git_error(invalid_head_error);
+}
+
+#[test]
+fn map_git_error_falls_back_for_blank_messages() {
+    let error = map_git_error(git2::Error::new(
+        ErrorCode::GenericError,
+        ErrorClass::Net,
+        "   ",
+    ));
+
+    assert_eq!(
+        error,
+        WorkspaceCheckoutError::Git("git operation failed (GenericError)".to_string())
     );
 }
 

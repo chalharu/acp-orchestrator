@@ -125,15 +125,21 @@ impl FsWorkspaceCheckoutManager {
                 workspace.default_ref.as_deref(),
                 validated_override.as_deref(),
                 &checkout_path,
-                checkout_relpath,
             ),
             None => self.clone_local_workspace(
                 workspace.default_ref.as_deref(),
                 validated_override.as_deref(),
                 &checkout_path,
-                checkout_relpath,
             ),
-        };
+        }
+        .map(|(resolved_ref, checkout_commit_sha)| {
+            build_prepared_checkout(
+                checkout_relpath,
+                resolved_ref,
+                checkout_commit_sha,
+                &checkout_path,
+            )
+        });
 
         if prepared.is_err() && checkout_path.exists() {
             let _ = fs::remove_dir_all(&checkout_path);
@@ -148,23 +154,17 @@ impl FsWorkspaceCheckoutManager {
         default_ref: Option<&str>,
         override_ref: Option<&str>,
         checkout_path: &Path,
-        checkout_relpath: String,
-    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+    ) -> Result<(Option<String>, Option<String>), WorkspaceCheckoutError> {
         validate_https_upstream_url(upstream_url)?;
         let resolved_ref =
             resolve_https_checkout_ref(upstream_url, default_ref, override_ref, &self.state_dir)?;
-        let checkout_commit_sha = clone_remote_workspace(
+        clone_remote_workspace(
             upstream_url,
             resolved_ref.as_deref(),
             checkout_path,
             &self.state_dir,
-        )?;
-        Ok(build_prepared_checkout(
-            checkout_relpath,
-            resolved_ref,
-            checkout_commit_sha,
-            checkout_path,
-        ))
+        )
+        .map(|checkout_commit_sha| (resolved_ref, checkout_commit_sha))
     }
 
     fn clone_local_workspace(
@@ -172,23 +172,17 @@ impl FsWorkspaceCheckoutManager {
         default_ref: Option<&str>,
         override_ref: Option<&str>,
         checkout_path: &Path,
-        checkout_relpath: String,
-    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+    ) -> Result<(Option<String>, Option<String>), WorkspaceCheckoutError> {
         let source_root = local_source_root(&self.state_dir)?;
         let resolved_ref =
             resolve_local_checkout_ref(&source_root, default_ref, override_ref, &self.state_dir)?;
-        let checkout_commit_sha = clone_local_repository(
+        clone_local_repository(
             &source_root,
             resolved_ref.as_deref(),
             checkout_path,
             &self.state_dir,
-        )?;
-        Ok(build_prepared_checkout(
-            checkout_relpath,
-            resolved_ref,
-            checkout_commit_sha,
-            checkout_path,
-        ))
+        )
+        .map(|checkout_commit_sha| (resolved_ref, checkout_commit_sha))
     }
 }
 
@@ -486,12 +480,18 @@ fn supports_shallow_fetch(remote_url: &str) -> bool {
 
 fn git_remote_callbacks() -> RemoteCallbacks<'static> {
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_url, _username_from_url, _allowed| {
-        Err(git2::Error::from_str(
-            "credentialed git transports are not supported",
-        ))
-    });
+    callbacks.credentials(reject_git_credentials);
     callbacks
+}
+
+fn reject_git_credentials(
+    _url: &str,
+    _username_from_url: Option<&str>,
+    _allowed: git2::CredentialType,
+) -> Result<git2::Cred, git2::Error> {
+    Err(git2::Error::from_str(
+        "credentialed git transports are not supported",
+    ))
 }
 
 fn git_proxy_options() -> ProxyOptions<'static> {
@@ -501,12 +501,18 @@ fn git_proxy_options() -> ProxyOptions<'static> {
 fn parse_remote_default_branch(
     default_branch: git2::Buf,
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
-    default_branch
-        .as_str()
-        .map(|reference| Some(reference.to_string()))
-        .ok_or_else(|| {
-            WorkspaceCheckoutError::Git("remote default branch is not valid UTF-8".to_string())
-        })
+    parse_remote_default_branch_name(default_branch.as_str())
+}
+
+fn parse_remote_default_branch_name(
+    default_branch: Option<&str>,
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    match default_branch {
+        Some(reference) => Ok(Some(reference.to_string())),
+        None => Err(WorkspaceCheckoutError::Git(
+            "remote default branch is not valid UTF-8".to_string(),
+        )),
+    }
 }
 
 fn checkout_builder() -> CheckoutBuilder<'static> {

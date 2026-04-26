@@ -566,7 +566,6 @@ fn should_disable_repo_hooks(control_plane_hooks_source: Option<&OsStr>) -> bool
     control_plane_hooks_source.is_none()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

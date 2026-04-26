@@ -693,10 +693,11 @@ async fn persist_failed_session_lifecycle(
     )
     .await
     {
+        let error_message = persist_error.message();
         tracing::warn!(
             session_id = %snapshot.id,
             owner_user_id = %user.user_id,
-            error = %persist_error.message(),
+            error = %error_message,
             "failed to persist failed session lifecycle"
         );
     }
@@ -733,11 +734,12 @@ async fn load_checkout_cleanup_path_best_effort(
         },
         Ok(None) => None,
         Err(error) => {
+            let error_message = error.message();
             tracing::warn!(
                 session_id = %session_id,
                 action,
                 "failed to load session metadata for checkout cleanup: {}",
-                error.message()
+                error_message
             );
             None
         }
@@ -1239,6 +1241,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_checkout_manager_panics_when_prepare_is_called_directly() {
+        assert_future_panics(InvalidCheckoutManager.prepare_checkout(
+            &sample_workspace(),
+            "s_test",
+            None,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
     async fn provisioning_persistence_failures_roll_back_live_sessions() {
         let store = Arc::new(crate::sessions::SessionStore::new(4));
         let session = store
@@ -1339,6 +1351,25 @@ mod tests {
 
         assert_eq!(
             load_checkout_cleanup_path_best_effort(&load_error_state, &user, "s_test", "delete")
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_cleanup_path_loading_handles_metadata_without_checkout_paths() {
+        let state = AppState::with_workspace_repository(
+            Arc::new(crate::sessions::SessionStore::new(4)),
+            Arc::new(StubWorkspaceRepository {
+                metadata: Some(sample_metadata(None)),
+                load_error: None,
+                save_error: None,
+            }),
+            Arc::new(NoopReplyProvider),
+        );
+
+        assert_eq!(
+            load_checkout_cleanup_path_best_effort(&state, &sample_user(), "s_test", "delete")
                 .await,
             None
         );

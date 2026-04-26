@@ -698,6 +698,9 @@ elif command == "checkout" and filtered[1:3] == ["--detach", "FETCH_HEAD"]:
     pass
 elif command == "rev-parse" and filtered[1] == "HEAD":
     print("deadbeef")
+elif command == "rev-parse" and filtered[1] == "--show-toplevel":
+    sys.stderr.write("fatal: show-toplevel failed\n")
+    sys.exit(45)
 elif command == "symbolic-ref":
     print("refs/heads/main")
 elif command == "print-tmpdir":
@@ -1201,20 +1204,65 @@ else:
 
     #[cfg(unix)]
     fn assert_tmpdir_is_forwarded(state_dir: &Path) {
+        let previous_tmpdir = unique_test_dir("acp-workspace-checkout-previous-tmpdir");
         let tmpdir = unique_test_dir("acp-workspace-checkout-tmpdir");
+        std::fs::create_dir_all(&previous_tmpdir)
+            .expect("previous TMPDIR fixture should be creatable");
         std::fs::create_dir_all(&tmpdir).expect("TMPDIR fixture should be creatable");
         let expected = tmpdir.to_string_lossy().to_string();
+        let previous_expected = previous_tmpdir.to_string_lossy().to_string();
         let _guard = TMPDIR_ENV_LOCK
             .lock()
             .expect("TMPDIR lock should be acquirable");
-        let _tmpdir_guard = TmpdirEnvGuard(std::env::var_os("TMPDIR"));
+        let _original_tmpdir_guard = TmpdirEnvGuard(std::env::var_os("TMPDIR"));
         unsafe {
             // Tests serialize TMPDIR mutation with TMPDIR_ENV_LOCK.
-            std::env::set_var("TMPDIR", &tmpdir);
+            std::env::set_var("TMPDIR", &previous_tmpdir);
         }
-        let output = run_git(None, state_dir, GitMode::Https, &["print-tmpdir"])
-            .expect("fake git should expose TMPDIR");
-        assert_eq!(output.trim(), expected);
+        {
+            let _tmpdir_guard = TmpdirEnvGuard(std::env::var_os("TMPDIR"));
+            unsafe {
+                // Tests serialize TMPDIR mutation with TMPDIR_ENV_LOCK.
+                std::env::set_var("TMPDIR", &tmpdir);
+            }
+            let output = run_git(None, state_dir, GitMode::Https, &["print-tmpdir"])
+                .expect("fake git should expose TMPDIR");
+            assert_eq!(output.trim(), expected);
+        }
+        assert_eq!(
+            std::env::var("TMPDIR").expect("TMPDIR should be restored after the scoped override"),
+            previous_expected
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_source_root_from_propagates_git_failures() {
+        let fixture_dir = unique_test_dir("acp-workspace-checkout-local-root-failure");
+        let script_path = write_fake_git_script(&fixture_dir.join("bin"));
+        let _git_override = override_git_for_current_thread(&script_path);
+        let current_dir = fixture_dir.join("cwd");
+        std::fs::create_dir_all(&current_dir)
+            .expect("fake current directories should be creatable");
+
+        let error = local_source_root_from(&current_dir, &fixture_dir.join("state"))
+            .expect_err("fake git failures should propagate");
+        assert_git_error_contains(error, "show-toplevel failed");
+    }
+
+    #[test]
+    fn checkout_local_ref_if_needed_propagates_git_failures() {
+        let repo = unique_test_dir("acp-workspace-checkout-local-ref-failure");
+        initialize_local_repo(&repo);
+
+        let error = checkout_local_ref_if_needed(
+            &repo,
+            Some("refs/heads/missing"),
+            &unique_test_dir("acp-workspace-checkout-local-ref-state"),
+        )
+        .expect_err("unknown local refs should fail checkout");
+
+        assert!(matches!(error, WorkspaceCheckoutError::Git(_)), "{error:?}");
     }
 
     #[cfg(unix)]

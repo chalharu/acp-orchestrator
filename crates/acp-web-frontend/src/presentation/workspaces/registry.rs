@@ -694,10 +694,18 @@ fn WorkspaceRenameForm(
     on_save: Callback<web_sys::SubmitEvent>,
     on_cancel: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
+    let form_ref = NodeRef::new();
+    bind_workspace_rename_pointer_cancel_listener(
+        form_ref,
+        workspace_id.clone(),
+        state,
+        is_saving,
+    );
     let on_focusout = workspace_rename_focusout_handler(workspace_id, state, is_saving);
     view! {
         <form
             class="workspace-inline-form"
+            node_ref=form_ref
             on:submit=move |event| on_save.run(event)
             on:focusout=on_focusout
         >
@@ -754,6 +762,86 @@ fn workspace_id_flag(signal: RwSignal<Option<String>>, workspace_id: &str) -> bo
 // ---------------------------------------------------------------------------
 // Action handlers (wasm only)
 // ---------------------------------------------------------------------------
+
+#[cfg(target_family = "wasm")]
+fn bind_workspace_rename_pointer_cancel_listener(
+    form: NodeRef<leptos::html::Form>,
+    workspace_id: String,
+    state: WorkspacesPageState,
+    is_saving: Signal<bool>,
+) {
+    Effect::new(move |_| {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(form) = form.get() else {
+            return;
+        };
+        let form_node = form.unchecked_into::<web_sys::Node>();
+        attach_workspace_rename_pointer_cancel_listener(
+            &document,
+            &form_node,
+            workspace_id.clone(),
+            state,
+            is_saving,
+        );
+    });
+}
+
+#[cfg(target_family = "wasm")]
+fn attach_workspace_rename_pointer_cancel_listener(
+    document: &web_sys::Document,
+    form_node: &web_sys::Node,
+    workspace_id: String,
+    state: WorkspacesPageState,
+    is_saving: Signal<bool>,
+) {
+    let document = document.clone();
+    let form_node = form_node.clone();
+    let listener = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::PointerEvent| {
+        cancel_workspace_edit_when_target_leaves_form(
+            event.target(),
+            &form_node,
+            &workspace_id,
+            state,
+            is_saving,
+        );
+    }) as Box<dyn FnMut(web_sys::PointerEvent)>);
+    let _ = document.add_event_listener_with_callback(
+        "pointerdown",
+        listener.as_ref().unchecked_ref(),
+    );
+    on_cleanup(move || {
+        let _ = document.remove_event_listener_with_callback(
+            "pointerdown",
+            listener.as_ref().unchecked_ref(),
+        );
+    });
+}
+
+#[cfg(target_family = "wasm")]
+fn cancel_workspace_edit_when_target_leaves_form(
+    target: Option<web_sys::EventTarget>,
+    form_node: &web_sys::Node,
+    workspace_id: &str,
+    state: WorkspacesPageState,
+    is_saving: Signal<bool>,
+) {
+    if is_saving.get_untracked() {
+        return;
+    }
+    if state.editing_workspace_id.get_untracked().as_deref() != Some(workspace_id) {
+        return;
+    }
+    let Some(target_node) = target.as_ref().and_then(|target| target.dyn_ref::<web_sys::Node>())
+    else {
+        cancel_workspace_edit(workspace_id, state);
+        return;
+    };
+    if !form_node.contains(Some(target_node)) {
+        cancel_workspace_edit(workspace_id, state);
+    }
+}
 
 #[cfg(target_family = "wasm")]
 fn workspace_rename_focusout_handler(

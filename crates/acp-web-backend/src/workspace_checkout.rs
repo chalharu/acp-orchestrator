@@ -1,3 +1,7 @@
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::ffi::OsString;
 use std::{
     env,
     ffi::OsStr,
@@ -13,6 +17,18 @@ use reqwest::Url;
 use crate::workspace_records::WorkspaceRecord;
 
 const CHECKOUTS_DIR_NAME: &str = "session-checkouts";
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TestGitCommand {
+    program: PathBuf,
+    prefix_args: Vec<OsString>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GIT_BIN_OVERRIDE: RefCell<Option<TestGitCommand>> = const { RefCell::new(None) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedWorkspaceCheckout {
@@ -150,10 +166,12 @@ impl FsWorkspaceCheckoutManager {
         initialize_https_checkout(checkout_path, upstream_url, &self.state_dir)?;
         fetch_https_checkout(checkout_path, resolved_ref.as_deref(), &self.state_dir)?;
         checkout_fetch_head(checkout_path, &self.state_dir, GitMode::Https)?;
+        let checkout_commit_sha =
+            checkout_head_commit(checkout_path, &self.state_dir, GitMode::Https)?;
         Ok(build_prepared_checkout(
             checkout_relpath,
             resolved_ref,
-            checkout_head_commit(checkout_path, &self.state_dir, GitMode::Https)?,
+            checkout_commit_sha,
             checkout_path,
         ))
     }
@@ -299,18 +317,10 @@ fn initialize_https_checkout(
     state_dir: &Path,
 ) -> Result<(), WorkspaceCheckoutError> {
     let checkout_path_string = checkout_path.to_string_lossy().to_string();
-    run_git(
-        None,
-        state_dir,
-        GitMode::Https,
-        ["init", checkout_path_string.as_str()].as_slice(),
-    )?;
-    run_git(
-        Some(checkout_path),
-        state_dir,
-        GitMode::Https,
-        ["remote", "add", "origin", upstream_url].as_slice(),
-    )?;
+    let init_args = ["init", checkout_path_string.as_str()];
+    run_git(None, state_dir, GitMode::Https, &init_args)?;
+    let remote_args = ["remote", "add", "origin", upstream_url];
+    run_git(Some(checkout_path), state_dir, GitMode::Https, &remote_args)?;
     Ok(())
 }
 
@@ -320,12 +330,8 @@ fn fetch_https_checkout(
     state_dir: &Path,
 ) -> Result<(), WorkspaceCheckoutError> {
     let fetch_target = resolved_ref.unwrap_or("HEAD");
-    run_git(
-        Some(checkout_path),
-        state_dir,
-        GitMode::Https,
-        ["fetch", "--depth", "1", "origin", fetch_target].as_slice(),
-    )?;
+    let fetch_args = ["fetch", "--depth", "1", "origin", fetch_target];
+    run_git(Some(checkout_path), state_dir, GitMode::Https, &fetch_args)?;
     Ok(())
 }
 
@@ -334,12 +340,8 @@ fn checkout_fetch_head(
     state_dir: &Path,
     mode: GitMode,
 ) -> Result<(), WorkspaceCheckoutError> {
-    run_git(
-        Some(checkout_path),
-        state_dir,
-        mode,
-        ["checkout", "--detach", "FETCH_HEAD"].as_slice(),
-    )?;
+    let checkout_args = ["checkout", "--detach", "FETCH_HEAD"];
+    run_git(Some(checkout_path), state_dir, mode, &checkout_args)?;
     Ok(())
 }
 
@@ -372,11 +374,18 @@ fn local_source_root(state_dir: &Path) -> Result<PathBuf, WorkspaceCheckoutError
             "reading the current working directory failed: {error}"
         ))
     })?;
+    local_source_root_from(&current_dir, state_dir)
+}
+
+fn local_source_root_from(
+    current_dir: &Path,
+    state_dir: &Path,
+) -> Result<PathBuf, WorkspaceCheckoutError> {
     let source_root = run_git(
-        Some(&current_dir),
+        Some(current_dir),
         state_dir,
         GitMode::Local,
-        ["rev-parse", "--show-toplevel"].as_slice(),
+        &["rev-parse", "--show-toplevel"],
     )?;
     Ok(PathBuf::from(source_root.trim()))
 }
@@ -400,18 +409,13 @@ fn clone_local_repository(
 ) -> Result<(), WorkspaceCheckoutError> {
     let source_root_string = source_root.to_string_lossy().to_string();
     let checkout_path_string = checkout_path.to_string_lossy().to_string();
-    run_git(
-        None,
-        state_dir,
-        GitMode::Local,
-        [
-            "clone",
-            "--no-local",
-            source_root_string.as_str(),
-            checkout_path_string.as_str(),
-        ]
-        .as_slice(),
-    )?;
+    let clone_args = [
+        "clone",
+        "--no-local",
+        source_root_string.as_str(),
+        checkout_path_string.as_str(),
+    ];
+    run_git(None, state_dir, GitMode::Local, &clone_args)?;
     Ok(())
 }
 
@@ -423,11 +427,12 @@ fn checkout_local_ref_if_needed(
     let Some(reference) = resolved_ref else {
         return Ok(());
     };
+    let checkout_args = ["checkout", "--detach", reference];
     run_git(
         Some(checkout_path),
         state_dir,
         GitMode::Local,
-        ["checkout", "--detach", reference].as_slice(),
+        &checkout_args,
     )?;
     Ok(())
 }
@@ -437,16 +442,8 @@ fn checkout_head_commit(
     state_dir: &Path,
     mode: GitMode,
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
-    Ok(Some(
-        run_git(
-            Some(checkout_path),
-            state_dir,
-            mode,
-            ["rev-parse", "HEAD"].as_slice(),
-        )?
-        .trim()
-        .to_string(),
-    ))
+    let head = run_git(Some(checkout_path), state_dir, mode, &["rev-parse", "HEAD"])?;
+    Ok(Some(head.trim().to_string()))
 }
 
 fn build_prepared_checkout(
@@ -474,7 +471,7 @@ fn run_git(
         WorkspaceCheckoutError::Io(format!("creating git home failed: {error}"))
     })?;
 
-    let mut command = Command::new("git");
+    let mut command = git_command();
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -509,6 +506,24 @@ fn run_git(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+fn git_command() -> Command {
+    TEST_GIT_BIN_OVERRIDE.with(|override_path| {
+        if let Some(override_path) = override_path.borrow().as_ref().cloned() {
+            let mut command = Command::new(override_path.program);
+            command.args(override_path.prefix_args);
+            command
+        } else {
+            Command::new("git")
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn git_command() -> Command {
+    Command::new("git")
 }
 
 fn safe_git_config_args(mode: GitMode) -> Vec<String> {
@@ -599,12 +614,8 @@ mod tests {
         }
         command.args(args);
         let output = command.output().expect("git command should start");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(output.status.success(), "git {:?} failed: {stderr}", args);
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 
@@ -635,10 +646,6 @@ mod tests {
             .to_string()
     }
 
-    fn fake_git_test_name(name: &str) -> String {
-        format!("workspace_checkout::tests::{name}")
-    }
-
     fn run_self_test_child(test_name: &str, extra_env: &[(&str, &str)]) -> std::process::Output {
         let mut command =
             Command::new(std::env::current_exe().expect("current test binary should exist"));
@@ -652,21 +659,13 @@ mod tests {
     }
 
     fn assert_child_success(output: std::process::Output) {
-        assert!(
-            output.status.success()
-                && !String::from_utf8_lossy(&output.stdout).contains("0 passed"),
-            "child test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("0 passed"));
     }
 
     #[cfg(unix)]
-    fn write_fake_git_script(bin_dir: &Path) -> PathBuf {
-        let script_path = bin_dir.join("git");
-        std::fs::write(
-            &script_path,
-            r#"#!/usr/bin/env python3
+    const FAKE_GIT_SCRIPT: &str = r#"#!/usr/bin/env python3
 import os
 import pathlib
 import sys
@@ -692,15 +691,17 @@ elif command == "init":
 elif command == "remote" and filtered[1:3] == ["add", "origin"]:
     pass
 elif command == "fetch":
-    pass
+    if filtered[-1] == "refs/heads/missing":
+        sys.stderr.write("fatal: missing ref\n")
+        sys.exit(44)
 elif command == "checkout" and filtered[1:3] == ["--detach", "FETCH_HEAD"]:
     pass
 elif command == "rev-parse" and filtered[1] == "HEAD":
     print("deadbeef")
-elif command == "print-tmpdir":
-    print(os.environ.get("TMPDIR", ""))
 elif command == "symbolic-ref":
     print("refs/heads/main")
+elif command == "print-tmpdir":
+    print(os.environ.get("TMPDIR", ""))
 elif command == "fail-empty-stderr":
     sys.exit(42)
 elif command == "fail-with-stderr":
@@ -709,32 +710,80 @@ elif command == "fail-with-stderr":
 else:
     sys.stderr.write(f"unexpected fake git command: {filtered}\n")
     sys.exit(99)
-"#,
-        )
-        .expect("fake git script should be writable");
-        let mut permissions = std::fs::metadata(&script_path)
+"#;
+
+    #[cfg(unix)]
+    struct TestGitOverrideGuard(Option<super::TestGitCommand>);
+
+    #[cfg(unix)]
+    static TMPDIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    struct TmpdirEnvGuard(Option<std::ffi::OsString>);
+
+    #[cfg(unix)]
+    impl Drop for TmpdirEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe {
+                    // Tests serialize TMPDIR mutation with TMPDIR_ENV_LOCK.
+                    std::env::set_var("TMPDIR", value)
+                },
+                None => unsafe {
+                    // Tests serialize TMPDIR mutation with TMPDIR_ENV_LOCK.
+                    std::env::remove_var("TMPDIR")
+                },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestGitOverrideGuard {
+        fn drop(&mut self) {
+            super::TEST_GIT_BIN_OVERRIDE.with(|override_path| {
+                override_path.replace(self.0.take());
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    fn override_git_for_current_thread(path: &Path) -> TestGitOverrideGuard {
+        let previous = super::TEST_GIT_BIN_OVERRIDE.with(|override_path| {
+            override_path.replace(Some(super::TestGitCommand {
+                program: PathBuf::from("python3"),
+                prefix_args: vec![path.as_os_str().to_os_string()],
+            }))
+        });
+        TestGitOverrideGuard(previous)
+    }
+
+    #[cfg(unix)]
+    fn make_executable(script_path: &Path) {
+        let mut permissions = std::fs::metadata(script_path)
             .expect("fake git script metadata should exist")
             .permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(&script_path, permissions)
+        std::fs::set_permissions(script_path, permissions)
             .expect("fake git script should be executable");
+    }
+
+    #[cfg(unix)]
+    fn write_fake_git_script(bin_dir: &Path) -> PathBuf {
+        let script_path = bin_dir.join("git");
+        std::fs::create_dir_all(bin_dir).expect("fake git bin dir should be creatable");
+        std::fs::write(&script_path, FAKE_GIT_SCRIPT).expect("fake git script should be writable");
+        make_executable(&script_path);
         script_path
     }
 
     fn assert_git_error_contains(error: WorkspaceCheckoutError, expected: &str) {
-        match error {
-            WorkspaceCheckoutError::Git(message) => {
-                assert!(message.contains(expected), "{message}")
-            }
-            other => panic!("expected git error, got {other:?}"),
-        }
+        assert!(matches!(error, WorkspaceCheckoutError::Git(_)), "{error:?}");
+        assert!(error.message().contains(expected), "{}", error.message());
     }
 
     fn assert_io_error_contains(error: WorkspaceCheckoutError, expected: &str) {
-        match error {
-            WorkspaceCheckoutError::Io(message) => assert!(message.contains(expected), "{message}"),
-            other => panic!("expected io error, got {other:?}"),
-        }
+        assert!(matches!(error, WorkspaceCheckoutError::Io(_)), "{error:?}");
+        assert!(error.message().contains(expected), "{}", error.message());
     }
 
     #[test]
@@ -1091,96 +1140,113 @@ else:
     }
 
     #[cfg(unix)]
+    fn assert_fake_https_checkout_success(manager: &FsWorkspaceCheckoutManager, state_dir: &Path) {
+        let checkout_path = state_dir.join("checkout");
+        assert_eq!(
+            resolve_remote_head_ref("https://example.test/repo.git", state_dir)
+                .expect("fake git should resolve remote HEAD"),
+            Some("refs/heads/main".to_string())
+        );
+        let checkout = manager
+            .clone_https_workspace(
+                "https://example.test/repo.git",
+                None,
+                None,
+                &checkout_path,
+                "session-checkouts/s_test".to_string(),
+            )
+            .expect("fake https checkouts should succeed");
+        assert_eq!(checkout.checkout_ref, Some("refs/heads/main".to_string()));
+        assert_eq!(checkout.checkout_commit_sha, Some("deadbeef".to_string()));
+        assert_eq!(checkout.working_dir, checkout_path);
+    }
+
+    #[cfg(unix)]
+    fn assert_fake_https_checkout_failure_cleans_up(manager: &FsWorkspaceCheckoutManager) {
+        let error = manager
+            .prepare_checkout_sync(
+                &sample_workspace_record(
+                    Some("https://example.test/repo.git"),
+                    Some("refs/heads/missing"),
+                ),
+                "s_missing",
+                None,
+            )
+            .expect_err("missing refs should fail fake https checkout preparation");
+        assert_git_error_contains(error, "fatal: missing ref");
+        assert!(
+            !manager.checkout_path("s_missing").exists(),
+            "failed preparations should remove the checkout directory"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_fake_git_error_paths(state_dir: &Path) {
+        assert_eq!(
+            resolve_https_checkout_ref("https://example.test/repo.git", None, None, state_dir)
+                .expect("HEAD discovery should resolve"),
+            Some("refs/heads/main".to_string())
+        );
+        assert_git_error_contains(
+            run_git(None, state_dir, GitMode::Https, &["fail-empty-stderr"])
+                .expect_err("empty-stderr failures should still report exit status"),
+            "git exited with status",
+        );
+        assert_git_error_contains(
+            run_git(None, state_dir, GitMode::Https, &["fail-with-stderr"])
+                .expect_err("stderr failures should preserve git details"),
+            "fatal: bad thing",
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_tmpdir_is_forwarded(state_dir: &Path) {
+        let tmpdir = unique_test_dir("acp-workspace-checkout-tmpdir");
+        std::fs::create_dir_all(&tmpdir).expect("TMPDIR fixture should be creatable");
+        let expected = tmpdir.to_string_lossy().to_string();
+        let _guard = TMPDIR_ENV_LOCK
+            .lock()
+            .expect("TMPDIR lock should be acquirable");
+        let _tmpdir_guard = TmpdirEnvGuard(std::env::var_os("TMPDIR"));
+        unsafe {
+            // Tests serialize TMPDIR mutation with TMPDIR_ENV_LOCK.
+            std::env::set_var("TMPDIR", &tmpdir);
+        }
+        let output = run_git(None, state_dir, GitMode::Https, &["print-tmpdir"])
+            .expect("fake git should expose TMPDIR");
+        assert_eq!(output.trim(), expected);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn fake_git_https_helpers_cover_success_and_empty_stderr_paths() {
-        const CHILD_ENV: &str = "ACP_WORKSPACE_CHECKOUT_FAKE_GIT_CHILD";
-        if std::env::var_os(CHILD_ENV).is_some() {
-            let state_dir = PathBuf::from(
-                std::env::var("ACP_FAKE_GIT_STATE_DIR").expect("state dir env should exist"),
-            );
-            let checkout_path = state_dir.join("checkout");
-            let expected_tmpdir = std::env::var("TMPDIR").expect("child should inherit tmpdir");
-
-            assert_eq!(
-                resolve_remote_head_ref("https://example.test/repo.git", &state_dir)
-                    .expect("fake git should resolve remote HEAD"),
-                Some("refs/heads/main".to_string())
-            );
-            assert_eq!(
-                resolve_https_checkout_ref("https://example.test/repo.git", None, None, &state_dir)
-                    .expect("HEAD discovery should resolve"),
-                Some("refs/heads/main".to_string())
-            );
-            initialize_https_checkout(&checkout_path, "https://example.test/repo.git", &state_dir)
-                .expect("https initialization should not require a live network");
-            fetch_https_checkout(&checkout_path, Some("refs/heads/main"), &state_dir)
-                .expect("fake fetches should succeed");
-            checkout_fetch_head(&checkout_path, &state_dir, GitMode::Https)
-                .expect("fake FETCH_HEAD checkouts should succeed");
-            assert_eq!(
-                checkout_head_commit(&checkout_path, &state_dir, GitMode::Https)
-                    .expect("fake HEAD lookups should succeed"),
-                Some("deadbeef".to_string())
-            );
-            assert_eq!(
-                run_git(
-                    None,
-                    &state_dir,
-                    GitMode::Https,
-                    ["print-tmpdir"].as_slice()
-                )
-                .expect("fake git should read TMPDIR")
-                .trim(),
-                expected_tmpdir
-            );
-            assert_git_error_contains(
-                run_git(
-                    None,
-                    &state_dir,
-                    GitMode::Https,
-                    ["fail-empty-stderr"].as_slice(),
-                )
-                .expect_err("empty-stderr failures should still report exit status"),
-                "git exited with status",
-            );
-            assert_git_error_contains(
-                run_git(
-                    None,
-                    &state_dir,
-                    GitMode::Https,
-                    ["fail-with-stderr"].as_slice(),
-                )
-                .expect_err("stderr failures should preserve git details"),
-                "fatal: bad thing",
-            );
-            return;
-        }
-
         let fixture_dir = unique_test_dir("acp-workspace-checkout-fake-git");
-        let bin_dir = fixture_dir.join("bin");
-        let tmpdir = fixture_dir.join("tmp");
-        std::fs::create_dir_all(&bin_dir).expect("fake git bin dir should be creatable");
-        std::fs::create_dir_all(&tmpdir).expect("fake git tmpdir should be creatable");
-        let _script = write_fake_git_script(&bin_dir);
-        let path = format!(
-            "{}:{}",
-            bin_dir.display(),
-            std::env::var("PATH").expect("PATH should exist")
-        );
+        let script_path = write_fake_git_script(&fixture_dir.join("bin"));
+        let _git_override = override_git_for_current_thread(&script_path);
         let state_dir = fixture_dir.join("state");
-        let state_dir_string = state_dir.to_string_lossy().to_string();
-        let tmpdir_string = tmpdir.to_string_lossy().to_string();
+        let manager = FsWorkspaceCheckoutManager::new(state_dir.clone());
 
-        let output = run_self_test_child(
-            &fake_git_test_name("fake_git_https_helpers_cover_success_and_empty_stderr_paths"),
-            &[
-                (CHILD_ENV, "1"),
-                ("ACP_FAKE_GIT_STATE_DIR", state_dir_string.as_str()),
-                ("PATH", path.as_str()),
-                ("TMPDIR", tmpdir_string.as_str()),
-            ],
+        assert_fake_https_checkout_success(&manager, &state_dir);
+        assert_fake_git_error_paths(&state_dir);
+        assert_tmpdir_is_forwarded(&state_dir);
+        assert_fake_https_checkout_failure_cleans_up(&manager);
+    }
+
+    #[test]
+    fn local_source_root_from_resolves_repository_roots() {
+        let repo = unique_test_dir("acp-workspace-checkout-local-root");
+        initialize_local_repo(&repo);
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested repository paths should be creatable");
+
+        assert_eq!(
+            local_source_root_from(
+                &nested,
+                &unique_test_dir("acp-workspace-checkout-local-state")
+            )
+            .expect("repository roots should resolve"),
+            repo
         );
-        assert_child_success(output);
     }
 
     #[test]
@@ -1215,7 +1281,7 @@ else:
         let deleted_dir = unique_test_dir("acp-workspace-checkout-deleted-cwd");
         let deleted_dir_string = deleted_dir.to_string_lossy().to_string();
         let output = run_self_test_child(
-            &fake_git_test_name("local_source_root_reports_deleted_current_directories"),
+            "workspace_checkout::tests::local_source_root_reports_deleted_current_directories",
             &[
                 (CHILD_ENV, "1"),
                 ("ACP_DELETED_CWD", deleted_dir_string.as_str()),

@@ -226,6 +226,29 @@ mod tests {
         }
     }
 
+    async fn sample_turn_handle() -> crate::sessions::TurnHandle {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice", "w_test")
+            .await
+            .expect("session creation should succeed");
+        store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed")
+            .turn_handle()
+    }
+
+    #[tokio::test]
+    async fn noop_reply_provider_returns_no_output() {
+        let reply = NoopReplyProvider
+            .request_reply(sample_turn_handle().await)
+            .await
+            .expect("noop reply providers should return successfully");
+
+        assert_eq!(reply, ReplyResult::NoOutput);
+    }
+
     #[tokio::test]
     async fn restored_sessions_skip_rebinding_without_a_persisted_checkout_path() {
         let state = AppState::with_dependencies(

@@ -842,10 +842,13 @@ mod tests {
         contract_accounts::LocalAccount,
         contract_sessions::SessionStatus,
         mock_client::ReplyFuture,
+        sessions::SessionStore,
         workspace_checkout::{PreparedWorkspaceCheckout, WorkspaceCheckoutManager},
         workspace_records::{DurableSessionSnapshotRecord, WorkspaceStoreError},
         workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUpdatePatch},
     };
+    use futures_util::FutureExt;
+    use std::{future::Future, panic::AssertUnwindSafe};
 
     #[derive(Debug)]
     struct NoopReplyProvider;
@@ -1120,6 +1123,119 @@ mod tests {
             messages: Vec::new(),
             pending_permissions: Vec::new(),
         }
+    }
+
+    fn sample_principal() -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            id: "alice".to_string(),
+            kind: AuthenticatedPrincipalKind::Bearer,
+            subject: "alice".to_string(),
+        }
+    }
+
+    fn sample_new_workspace() -> NewWorkspace {
+        NewWorkspace {
+            name: "Workspace".to_string(),
+            upstream_url: None,
+            default_ref: None,
+            credential_reference_id: None,
+        }
+    }
+
+    fn sample_workspace_update() -> WorkspaceUpdatePatch {
+        WorkspaceUpdatePatch {
+            name: Some("Updated".to_string()),
+            default_ref: Some("refs/heads/main".to_string()),
+        }
+    }
+
+    async fn sample_turn_handle() -> crate::sessions::TurnHandle {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice", "w_test")
+            .await
+            .expect("session creation should succeed");
+        store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed")
+            .turn_handle()
+    }
+
+    async fn assert_future_panics<F, T>(future: F)
+    where
+        F: Future<Output = T>,
+    {
+        let result = AssertUnwindSafe(future).catch_unwind().await;
+        assert!(result.is_err(), "future should panic");
+    }
+
+    #[tokio::test]
+    async fn noop_reply_provider_returns_no_output() {
+        let reply = NoopReplyProvider
+            .request_reply(sample_turn_handle().await)
+            .await
+            .expect("noop reply providers should return successfully");
+
+        assert_eq!(reply, ReplyResult::NoOutput);
+    }
+
+    #[tokio::test]
+    async fn stub_workspace_repository_workspace_methods_panic_when_unused() {
+        let repo = StubWorkspaceRepository {
+            metadata: None,
+            load_error: None,
+            save_error: None,
+        };
+
+        assert_future_panics(repo.materialize_user(&sample_principal())).await;
+        assert_future_panics(repo.bootstrap_workspace("u_test")).await;
+        assert_future_panics(repo.list_workspaces("u_test")).await;
+        assert_future_panics(repo.load_workspace("u_test", "w_test")).await;
+        assert_future_panics(repo.create_workspace("u_test", &sample_new_workspace())).await;
+        assert_future_panics(repo.update_workspace("u_test", "w_test", &sample_workspace_update()))
+            .await;
+        assert_future_panics(repo.delete_workspace("u_test", "w_test")).await;
+        assert_future_panics(repo.list_workspace_sessions("u_test", "w_test")).await;
+    }
+
+    #[tokio::test]
+    async fn stub_workspace_repository_session_methods_cover_remaining_branches() {
+        let repo = StubWorkspaceRepository {
+            metadata: None,
+            load_error: None,
+            save_error: None,
+        };
+
+        repo.persist_session_snapshot("u_test", &sample_snapshot("s_test"), true, None)
+            .await
+            .expect("stub snapshot persistence should succeed");
+        assert_future_panics(repo.load_session_snapshot("u_test", "s_test")).await;
+        assert_future_panics(repo.auth_status(None)).await;
+        assert_future_panics(repo.authenticate_browser_session("browser")).await;
+    }
+
+    #[tokio::test]
+    async fn stub_workspace_repository_account_methods_panic_when_unused() {
+        let repo = StubWorkspaceRepository {
+            metadata: None,
+            load_error: None,
+            save_error: None,
+        };
+
+        assert_future_panics(repo.bootstrap_local_account("browser", "alice", "password")).await;
+        assert_future_panics(repo.sign_in_local_account("browser", "alice", "password")).await;
+        assert_future_panics(repo.sign_out_browser_session("browser")).await;
+        assert_future_panics(repo.list_local_accounts()).await;
+        assert_future_panics(repo.create_local_account("alice", "password", true)).await;
+        assert_future_panics(repo.update_local_account(
+            "u_test",
+            "u_admin",
+            Some("password"),
+            Some(true),
+        ))
+        .await;
+        assert_future_panics(repo.delete_local_account("u_test", "u_admin")).await;
     }
 
     #[tokio::test]

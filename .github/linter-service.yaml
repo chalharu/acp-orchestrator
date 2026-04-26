@@ -1,9 +1,9 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/chalharu/linter-service/refs/heads/main/.github/linter-service.schema.json
 linters:
   cargo-coupling:
-    # The current backend/frontend module graph carries pre-existing architectural
-    # coupling that needs a dedicated refactor, not per-feature PR churn.
-    disabled: true
+    min_grade: C
+    max_critical: 0
+    max_circular: 0
   lizard:
     disabled: false
     languages:

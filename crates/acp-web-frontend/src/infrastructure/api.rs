@@ -26,8 +26,8 @@ pub(crate) use sessions::{
 };
 pub(crate) use stream::{SseItem, open_session_event_stream};
 pub(crate) use workspaces::{
-    create_workspace, create_workspace_session, delete_workspace, list_workspace_sessions,
-    list_workspaces, update_workspace,
+    create_workspace, create_workspace_session, delete_workspace, list_workspace_branches,
+    list_workspace_sessions, list_workspaces, update_workspace,
 };
 
 #[cfg(test)]

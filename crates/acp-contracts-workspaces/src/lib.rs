@@ -74,7 +74,7 @@ pub struct DeleteWorkspaceResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateWorkspaceRequest, WorkspaceDetail};
+    use super::{UpdateWorkspaceRequest, WorkspaceBranchListResponse, WorkspaceDetail};
 
     #[test]
     fn workspace_details_deserialize_optional_fields() {

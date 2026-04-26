@@ -3,7 +3,6 @@ use super::super::{
     cleanup_checkout_path_best_effort, load_checkout_cleanup_path_best_effort, map_checkout_error,
     persist_failed_session_lifecycle, persist_provisioning_session_lifecycle,
 };
-use super::*;
 use crate::{
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_accounts::LocalAccount,

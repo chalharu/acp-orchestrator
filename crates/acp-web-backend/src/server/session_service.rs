@@ -835,6 +835,5 @@ fn dispatch_assistant_request(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     mod service;
 }

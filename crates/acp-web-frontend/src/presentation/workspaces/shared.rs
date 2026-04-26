@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use acp_contracts_sessions::SessionListItem;
-use acp_contracts_workspaces::WorkspaceSummary;
+use acp_contracts_workspaces::{WorkspaceBranch, WorkspaceSummary};
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
@@ -28,7 +28,6 @@ pub(super) struct WorkspacesPageState {
     pub(super) show_create_modal: RwSignal<bool>,
     pub(super) create_name: RwSignal<String>,
     pub(super) create_upstream_url: RwSignal<String>,
-    pub(super) create_default_ref: RwSignal<String>,
     pub(super) creating: RwSignal<bool>,
     pub(super) editing_workspace_id: RwSignal<Option<String>>,
     pub(super) edit_name_draft: RwSignal<String>,
@@ -38,7 +37,9 @@ pub(super) struct WorkspacesPageState {
     pub(super) show_start_chat_modal: RwSignal<bool>,
     pub(super) start_chat_workspace_id: RwSignal<Option<String>>,
     pub(super) start_chat_workspace_name: RwSignal<String>,
-    pub(super) start_chat_checkout_ref: RwSignal<String>,
+    pub(super) start_chat_branches: RwSignal<Vec<WorkspaceBranch>>,
+    pub(super) start_chat_selected_branch: RwSignal<String>,
+    pub(super) start_chat_loading_branches: RwSignal<bool>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -54,7 +55,6 @@ impl WorkspacesPageState {
             show_create_modal: RwSignal::new(false),
             create_name: RwSignal::new(String::new()),
             create_upstream_url: RwSignal::new(String::new()),
-            create_default_ref: RwSignal::new(String::new()),
             creating: RwSignal::new(false),
             editing_workspace_id: RwSignal::new(None::<String>),
             edit_name_draft: RwSignal::new(String::new()),
@@ -64,7 +64,9 @@ impl WorkspacesPageState {
             show_start_chat_modal: RwSignal::new(false),
             start_chat_workspace_id: RwSignal::new(None::<String>),
             start_chat_workspace_name: RwSignal::new(String::new()),
-            start_chat_checkout_ref: RwSignal::new(String::new()),
+            start_chat_branches: RwSignal::new(Vec::<WorkspaceBranch>::new()),
+            start_chat_selected_branch: RwSignal::new(String::new()),
+            start_chat_loading_branches: RwSignal::new(false),
             checked: RwSignal::new(false),
         }
     }
@@ -222,7 +224,6 @@ mod tests {
             assert!(!state.show_create_modal.get());
             assert!(state.create_name.get().is_empty());
             assert!(state.create_upstream_url.get().is_empty());
-            assert!(state.create_default_ref.get().is_empty());
             assert!(!state.creating.get());
             assert!(state.editing_workspace_id.get().is_none());
             assert!(state.edit_name_draft.get().is_empty());
@@ -232,7 +233,9 @@ mod tests {
             assert!(!state.show_start_chat_modal.get());
             assert!(state.start_chat_workspace_id.get().is_none());
             assert!(state.start_chat_workspace_name.get().is_empty());
-            assert!(state.start_chat_checkout_ref.get().is_empty());
+            assert!(state.start_chat_branches.get().is_empty());
+            assert!(state.start_chat_selected_branch.get().is_empty());
+            assert!(!state.start_chat_loading_branches.get());
             assert!(!state.checked.get());
         });
     }

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsStr,
     fs,
@@ -8,12 +9,12 @@ use std::{
 
 use async_trait::async_trait;
 use git2::{
-    Direction, ErrorCode, FetchOptions, ProxyOptions, RemoteCallbacks, RemoteRedirect, Repository,
-    RepositoryInitOptions, build::CheckoutBuilder,
+    BranchType, Direction, ErrorCode, FetchOptions, ProxyOptions, RemoteCallbacks, RemoteRedirect,
+    Repository, RepositoryInitOptions, build::CheckoutBuilder,
 };
 use reqwest::Url;
 
-use crate::workspace_records::WorkspaceRecord;
+use crate::{contract_workspaces::WorkspaceBranch, workspace_records::WorkspaceRecord};
 
 const CHECKOUTS_DIR_NAME: &str = "session-checkouts";
 const GIT_FETCH_HEAD: &str = "FETCH_HEAD";
@@ -59,6 +60,13 @@ pub trait WorkspaceCheckoutManager: Send + Sync {
         session_id: &str,
         checkout_ref_override: Option<&str>,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError>;
+
+    async fn list_branches(
+        &self,
+        _workspace: &WorkspaceRecord,
+    ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+        Ok(Vec::new())
+    }
 
     fn resolve_checkout_path(&self, _checkout_relpath: &str) -> Option<PathBuf> {
         None
@@ -184,6 +192,19 @@ impl FsWorkspaceCheckoutManager {
         )
         .map(|checkout_commit_sha| (resolved_ref, checkout_commit_sha))
     }
+
+    fn list_branches_sync(
+        &self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+        match workspace.upstream_url.as_deref() {
+            Some(upstream_url) => list_remote_workspace_branches(upstream_url, &self.state_dir),
+            None => {
+                let source_root = local_source_root(&self.state_dir)?;
+                list_local_workspace_branches(&source_root, &self.state_dir)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -208,6 +229,19 @@ impl WorkspaceCheckoutManager for FsWorkspaceCheckoutManager {
     fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
         self.resolved_checkout_path(checkout_relpath)
     }
+
+    async fn list_branches(
+        &self,
+        workspace: &WorkspaceRecord,
+    ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+        let manager = self.clone();
+        let workspace = workspace.clone();
+
+        await_branch_task(tokio::task::spawn_blocking(move || {
+            manager.list_branches_sync(&workspace)
+        }))
+        .await
+    }
 }
 
 async fn await_checkout_task(
@@ -215,6 +249,14 @@ async fn await_checkout_task(
 ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
     handle.await.map_err(|error| {
         WorkspaceCheckoutError::Io(format!("joining checkout task failed: {error}"))
+    })?
+}
+
+async fn await_branch_task(
+    handle: tokio::task::JoinHandle<Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError>>,
+) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+    handle.await.map_err(|error| {
+        WorkspaceCheckoutError::Io(format!("joining branch lookup task failed: {error}"))
     })?
 }
 
@@ -296,6 +338,30 @@ fn resolve_https_checkout_ref(
         Some(reference) => Ok(Some(reference.to_string())),
         None => resolve_remote_head_ref(upstream_url, state_dir),
     }
+}
+
+fn list_remote_workspace_branches(
+    upstream_url: &str,
+    state_dir: &Path,
+) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+    validate_https_upstream_url(upstream_url)?;
+    with_probe_repository(state_dir, "remote-branches", |repo| {
+        let mut remote = repo.remote_anonymous(upstream_url).map_err(map_git_error)?;
+        let connection = remote
+            .connect_auth(
+                Direction::Fetch,
+                Some(git_remote_callbacks()),
+                Some(git_proxy_options()),
+            )
+            .map_err(map_git_error)?;
+        Ok(workspace_branches_from_refs(
+            connection
+                .list()
+                .map_err(map_git_error)?
+                .iter()
+                .map(|head| head.name()),
+        ))
+    })
 }
 
 fn clone_remote_workspace(
@@ -399,6 +465,31 @@ fn clone_local_repository(
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
     let source_root = source_root.to_string_lossy().to_string();
     fetch_workspace_checkout(&source_root, resolved_ref, checkout_path, state_dir)
+}
+
+fn list_local_workspace_branches(
+    source_root: &Path,
+    state_dir: &Path,
+) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+    let _git_home = ensure_git_home(state_dir)?;
+    let repo = Repository::discover(source_root).map_err(map_git_error)?;
+    let branches = repo
+        .branches(Some(BranchType::Local))
+        .map_err(map_git_error)?;
+    let mut ref_names = Vec::new();
+
+    for branch in branches {
+        let (branch, _) = branch.map_err(map_git_error)?;
+        let reference = branch.into_reference();
+        let Some(name) = reference.name() else {
+            continue;
+        };
+        ref_names.push(name.to_string());
+    }
+
+    Ok(workspace_branches_from_refs(
+        ref_names.iter().map(String::as_str),
+    ))
 }
 
 fn checkout_head_commit(
@@ -513,6 +604,28 @@ fn parse_remote_default_branch_name(
             "remote default branch is not valid UTF-8".to_string(),
         )),
     }
+}
+
+fn workspace_branches_from_refs<'a>(
+    refs: impl IntoIterator<Item = &'a str>,
+) -> Vec<WorkspaceBranch> {
+    let mut branches = BTreeMap::new();
+    for reference in refs {
+        let Some(name) = reference.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        branches.insert(
+            reference.to_string(),
+            WorkspaceBranch {
+                name: name.to_string(),
+                ref_name: reference.to_string(),
+            },
+        );
+    }
+    branches.into_values().collect()
 }
 
 fn checkout_builder() -> CheckoutBuilder<'static> {

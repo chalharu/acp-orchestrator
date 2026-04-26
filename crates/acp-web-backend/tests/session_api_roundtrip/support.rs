@@ -16,16 +16,19 @@ use acp_web_backend::contract_sessions::{
 pub(super) use acp_web_backend::contract_stream::{StreamEvent, StreamEventPayload};
 use acp_web_backend::contract_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, UpdateWorkspaceRequest,
-    UpdateWorkspaceResponse, WorkspaceListResponse, WorkspaceResponse,
+    UpdateWorkspaceResponse, WorkspaceBranch, WorkspaceListResponse, WorkspaceResponse,
 };
 use acp_web_backend::support::http::{
     build_http_client_for_url, wait_for_health, wait_for_tcp_connect,
 };
 use acp_web_backend::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
 use acp_web_backend::{
-    workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
+    DynWorkspaceCheckoutManager, MockClient, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
+    WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
+    workspace_store::SqliteWorkspaceRepository,
 };
 pub(super) use anyhow::{Context, Result};
+use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
 pub(super) use reqwest::{Client, StatusCode};
@@ -98,8 +101,7 @@ async fn create_browser_workspace(
         .header("x-csrf-token", csrf_token)
         .json(&CreateWorkspaceRequest {
             name: name.to_string(),
-            upstream_url: None,
-            default_ref: None,
+            upstream_url: "https://example.com/browser-workspace.git".to_string(),
             credential_reference_id: None,
         })
         .send()
@@ -302,8 +304,7 @@ impl TestStack {
                 token,
                 &CreateWorkspaceRequest {
                     name: "Legacy session workspace".to_string(),
-                    upstream_url: None,
-                    default_ref: None,
+                    upstream_url: "https://example.com/legacy-session-workspace.git".to_string(),
                     credential_reference_id: None,
                 },
             )
@@ -820,5 +821,88 @@ fn build_backend_state(backend_config: ServerConfig) -> Result<AppState> {
         SqliteWorkspaceRepository::new(backend_config.state_dir.join("db.sqlite"))
             .context("building workspace repository")?,
     );
-    AppState::new(backend_config, workspace_repository).context("building backend state")
+    let store = Arc::new(acp_web_backend::sessions::SessionStore::new(
+        backend_config.session_cap,
+    ));
+    let reply_provider = Arc::new(
+        MockClient::new(backend_config.acp_server.clone()).context("building reply provider")?,
+    );
+    let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
+        IntegrationTestWorkspaceCheckoutManager::new(backend_config.state_dir.clone()),
+    );
+    Ok(AppState::with_services(
+        store,
+        workspace_repository,
+        reply_provider,
+        checkout_manager,
+        backend_config.startup_hints,
+        backend_config.frontend_dist,
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct IntegrationTestWorkspaceCheckoutManager {
+    state_dir: PathBuf,
+}
+
+impl IntegrationTestWorkspaceCheckoutManager {
+    fn new(state_dir: PathBuf) -> Self {
+        Self { state_dir }
+    }
+
+    fn checkout_relpath(session_id: &str) -> String {
+        format!("session-checkouts/{session_id}")
+    }
+
+    fn checkout_path(&self, session_id: &str) -> PathBuf {
+        self.state_dir.join(Self::checkout_relpath(session_id))
+    }
+}
+
+#[async_trait]
+impl WorkspaceCheckoutManager for IntegrationTestWorkspaceCheckoutManager {
+    async fn prepare_checkout(
+        &self,
+        _workspace: &acp_web_backend::workspace_records::WorkspaceRecord,
+        session_id: &str,
+        checkout_ref_override: Option<&str>,
+    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+        let working_dir = self.checkout_path(session_id);
+        if working_dir.exists() {
+            std::fs::remove_dir_all(&working_dir).map_err(|error| {
+                WorkspaceCheckoutError::Io(format!(
+                    "clearing test checkout directory failed: {error}"
+                ))
+            })?;
+        }
+        std::fs::create_dir_all(&working_dir).map_err(|error| {
+            WorkspaceCheckoutError::Io(format!("creating test checkout directory failed: {error}"))
+        })?;
+        Ok(PreparedWorkspaceCheckout {
+            checkout_relpath: Self::checkout_relpath(session_id),
+            checkout_ref: checkout_ref_override.map(str::to_string),
+            checkout_commit_sha: Some("test-commit".to_string()),
+            working_dir,
+        })
+    }
+
+    async fn list_branches(
+        &self,
+        _workspace: &acp_web_backend::workspace_records::WorkspaceRecord,
+    ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+        Ok(vec![
+            WorkspaceBranch {
+                name: "main".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            WorkspaceBranch {
+                name: "release".to_string(),
+                ref_name: "refs/heads/release".to_string(),
+            },
+        ])
+    }
+
+    fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
+        Some(self.state_dir.join(checkout_relpath))
+    }
 }

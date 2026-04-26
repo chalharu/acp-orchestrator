@@ -3,9 +3,10 @@ use super::super::{
     WorkspaceCheckoutError, WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout,
     checkout_fetch_head, checkout_head_commit, checkout_parent_dir, clone_local_repository,
     clone_remote_workspace, current_head_commit, git_fetch_options, git_symbolic_ref,
-    local_source_root, local_source_root_from, map_git_error, parse_remote_default_branch_name,
-    reject_git_credentials, resolve_https_checkout_ref, resolve_local_checkout_ref,
-    resolve_remote_head_ref, validate_checkout_ref, validate_https_upstream_url,
+    list_local_workspace_branches, local_source_root, local_source_root_from, map_git_error,
+    parse_remote_default_branch_name, reject_git_credentials, resolve_https_checkout_ref,
+    resolve_local_checkout_ref, resolve_remote_head_ref, validate_checkout_ref,
+    validate_https_upstream_url, workspace_branches_from_refs,
 };
 use super::*;
 use async_trait::async_trait;
@@ -347,6 +348,55 @@ fn checkout_ref_resolution_prefers_override_then_default_and_discovers_remote_he
         )
         .expect("default should short-circuit"),
         Some("refs/heads/main".to_string())
+    );
+}
+
+#[test]
+fn workspace_branch_refs_filter_non_branch_refs_and_sort_values() {
+    let branches = workspace_branches_from_refs([
+        "refs/tags/v1",
+        "refs/heads/release",
+        "refs/heads/main",
+        "refs/heads/main",
+    ]);
+
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| (branch.name.as_str(), branch.ref_name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("main", "refs/heads/main"),
+            ("release", "refs/heads/release"),
+        ]
+    );
+}
+
+#[test]
+fn local_workspace_branch_listing_reads_local_repository_heads() {
+    let repo_dir = unique_test_dir("acp-workspace-branch-list-local");
+    initialize_local_repo(&repo_dir);
+    let repo = Repository::open(&repo_dir).expect("repo should open");
+    let head_commit = repo
+        .head()
+        .expect("repo should have HEAD")
+        .peel_to_commit()
+        .expect("HEAD should resolve to a commit");
+    repo.branch("release", &head_commit, false)
+        .expect("release branch should be creatable");
+
+    let branches = list_local_workspace_branches(
+        &repo_dir,
+        &unique_test_dir("acp-workspace-branch-list-local-state"),
+    )
+    .expect("local branches should list");
+
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["refs/heads/release", "refs/heads/test-branch"]
     );
 }
 

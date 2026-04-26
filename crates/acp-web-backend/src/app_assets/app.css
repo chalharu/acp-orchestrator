@@ -1259,12 +1259,17 @@ textarea:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  align-items: center;
+  align-items: stretch;
 }
 
 .workspace-name-input {
   flex: 1 1 14rem;
   min-width: 12rem;
+}
+
+.workspace-inline-form .workspace-action-btn {
+  min-height: 2.5rem;
+  align-self: stretch;
 }
 
 .workspace-action-btn {
@@ -1348,10 +1353,15 @@ textarea:focus-visible {
   font-weight: 700;
 }
 
+.workspace-card__repository,
 .workspace-card__status,
 .workspace-card__created {
   color: var(--ink-soft);
   font-size: 0.85rem;
+}
+
+.workspace-card__repository {
+  word-break: break-all;
 }
 
 .workspace-card__actions {
@@ -1457,6 +1467,12 @@ textarea:focus-visible {
   justify-content: flex-end;
 }
 
+.workspace-field__hint {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .account-notice {
   margin: 0;
   padding: 0.75rem 0.9rem;
@@ -1468,7 +1484,17 @@ textarea:focus-visible {
 }
 
 input[type="text"],
+input[type="url"],
 input[type="password"] {
+  min-height: 2.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+}
+
+select {
   min-height: 2.5rem;
   padding: 0.65rem 0.75rem;
   border: 1px solid var(--line);

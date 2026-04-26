@@ -5,8 +5,8 @@ use acp_contracts_sessions::{
 };
 use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
-    UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceDetail, WorkspaceListResponse,
-    WorkspaceSummary,
+    UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceBranch,
+    WorkspaceBranchListResponse, WorkspaceDetail, WorkspaceListResponse, WorkspaceSummary,
 };
 #[cfg(target_family = "wasm")]
 use gloo_net::http::Request;
@@ -65,10 +65,9 @@ pub(crate) async fn list_workspaces() -> Result<Vec<WorkspaceSummary>, String> {
 #[cfg(target_family = "wasm")]
 pub(crate) async fn create_workspace(
     name: &str,
-    upstream_url: Option<String>,
-    default_ref: Option<String>,
+    upstream_url: String,
 ) -> Result<WorkspaceDetail, String> {
-    let body = create_workspace_body(name, upstream_url, default_ref)?;
+    let body = create_workspace_body(name, upstream_url)?;
     let response = post_json_with_csrf(WORKSPACES_URL, body).await?;
     if !response.ok() {
         return Err(response_error_message(response, "Create workspace failed").await);
@@ -81,10 +80,9 @@ pub(crate) async fn create_workspace(
 #[cfg(not(target_family = "wasm"))]
 pub(crate) async fn create_workspace(
     name: &str,
-    upstream_url: Option<String>,
-    default_ref: Option<String>,
+    upstream_url: String,
 ) -> Result<WorkspaceDetail, String> {
-    let _ = create_workspace_body(name, upstream_url, default_ref)?;
+    let _ = create_workspace_body(name, upstream_url)?;
     Err(non_wasm_api_error("POST", WORKSPACES_URL))
 }
 
@@ -177,6 +175,31 @@ pub(crate) async fn create_workspace_session(
 }
 
 #[cfg(target_family = "wasm")]
+pub(crate) async fn list_workspace_branches(
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceBranch>, String> {
+    let response = Request::get(&workspace_branches_url(workspace_id))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.ok() {
+        return Err(response_error_message(response, "List workspace branches failed").await);
+    }
+
+    let listed: WorkspaceBranchListResponse =
+        response.json().await.map_err(|error| error.to_string())?;
+    Ok(listed.branches)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn list_workspace_branches(
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceBranch>, String> {
+    Err(non_wasm_api_error("GET", &workspace_branches_url(workspace_id)))
+}
+
+#[cfg(target_family = "wasm")]
 pub(crate) async fn list_workspace_sessions(
     workspace_id: &str,
 ) -> Result<Vec<SessionListItem>, String> {
@@ -203,15 +226,10 @@ pub(crate) async fn list_workspace_sessions(
     ))
 }
 
-fn create_workspace_body(
-    name: &str,
-    upstream_url: Option<String>,
-    default_ref: Option<String>,
-) -> Result<String, String> {
+fn create_workspace_body(name: &str, upstream_url: String) -> Result<String, String> {
     serde_json::to_string(&CreateWorkspaceRequest {
         name: name.to_string(),
-        upstream_url: normalize_optional_text(upstream_url),
-        default_ref: normalize_optional_text(default_ref),
+        upstream_url: normalize_required_text(upstream_url)?,
         credential_reference_id: None,
     })
     .map_err(|error| error.to_string())
@@ -227,7 +245,6 @@ fn create_workspace_session_body(checkout_ref: Option<String>) -> Result<String,
 fn update_workspace_body(name: Option<String>) -> Result<String, String> {
     serde_json::to_string(&UpdateWorkspaceRequest {
         name,
-        default_ref: None,
     })
     .map_err(|error| error.to_string())
 }
@@ -240,11 +257,23 @@ fn workspace_sessions_url(workspace_id: &str) -> String {
     format!("{}/sessions", workspace_url(workspace_id))
 }
 
+fn workspace_branches_url(workspace_id: &str) -> String {
+    format!("{}/branches", workspace_url(workspace_id))
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let value = value.trim().to_string();
         (!value.is_empty()).then_some(value)
     })
+}
+
+fn normalize_required_text(value: String) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err("repository_url is required".to_string());
+    }
+    Ok(value)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -260,15 +289,11 @@ mod tests {
 
     #[test]
     fn workspace_request_bodies_serialize_expected_payloads() {
-        let body = create_workspace_body(
-            "My Workspace",
-            Some(" https://example.com/repo.git ".to_string()),
-            Some(" refs/heads/main ".to_string()),
-        )
-        .expect("create body");
+        let body =
+            create_workspace_body("My Workspace", " https://example.com/repo.git ".to_string())
+                .expect("create body");
         assert!(body.contains("My Workspace"));
         assert!(body.contains("https://example.com/repo.git"));
-        assert!(body.contains("refs/heads/main"));
 
         let body = update_workspace_body(Some("Renamed".to_string())).expect("update body");
         assert!(body.contains("Renamed"));
@@ -286,6 +311,10 @@ mod tests {
             workspace_sessions_url("w/1"),
             "/api/v1/workspaces/w%2F1/sessions"
         );
+        assert_eq!(
+            workspace_branches_url("w/1"),
+            "/api/v1/workspaces/w%2F1/branches"
+        );
         assert_eq!(WORKSPACES_URL, "/api/v1/workspaces");
     }
 
@@ -294,8 +323,11 @@ mod tests {
         let list_error = poll_ready(list_workspaces()).expect_err("host list should fail");
         assert!(list_error.contains(WORKSPACES_URL));
 
-        let create_error =
-            poll_ready(create_workspace("test", None, None)).expect_err("host create should fail");
+        let create_error = poll_ready(create_workspace(
+            "test",
+            "https://example.com/repo.git".to_string(),
+        ))
+        .expect_err("host create should fail");
         assert!(create_error.contains(WORKSPACES_URL));
 
         let update_error = poll_ready(update_workspace("w_1", Some("new".to_string())))
@@ -313,6 +345,10 @@ mod tests {
                 .to_string()
                 .contains("/api/v1/workspaces/w_1/sessions")
         );
+
+        let list_branches_error = poll_ready(list_workspace_branches("w_1"))
+            .expect_err("host workspace branches should fail");
+        assert!(list_branches_error.contains("/api/v1/workspaces/w_1/branches"));
 
         let list_sessions_error = poll_ready(list_workspace_sessions("w_1"))
             .expect_err("host workspace session list should fail");
@@ -339,5 +375,17 @@ mod tests {
         );
         assert_eq!(normalize_optional_text(Some("   ".to_string())), None);
         assert_eq!(normalize_optional_text(None), None);
+    }
+
+    #[test]
+    fn normalize_required_text_trims_and_rejects_blank_values() {
+        assert_eq!(
+            normalize_required_text(" value ".to_string()).expect("value should trim"),
+            "value"
+        );
+        assert_eq!(
+            normalize_required_text("   ".to_string()).expect_err("blank values should fail"),
+            "repository_url is required"
+        );
     }
 }

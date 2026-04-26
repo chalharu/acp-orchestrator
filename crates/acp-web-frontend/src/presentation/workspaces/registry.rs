@@ -1,8 +1,10 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
 use acp_contracts_sessions::SessionListItem;
-use acp_contracts_workspaces::WorkspaceSummary;
+use acp_contracts_workspaces::{WorkspaceBranch, WorkspaceSummary};
 use leptos::prelude::*;
+#[cfg(target_family = "wasm")]
+use wasm_bindgen::JsCast;
 
 use crate::components::ErrorBanner;
 #[cfg(target_family = "wasm")]
@@ -81,7 +83,7 @@ fn workspace_loading_view() -> AnyView {
 struct WorkspaceCardDisplay {
     workspace_id: String,
     workspace_name: String,
-    workspace_default_ref: Option<String>,
+    workspace_repository_label: String,
     workspace_status: String,
     created_label: String,
 }
@@ -90,10 +92,16 @@ fn workspace_card_display(workspace: &WorkspaceSummary) -> WorkspaceCardDisplay 
     WorkspaceCardDisplay {
         workspace_id: workspace.workspace_id.clone(),
         workspace_name: workspace.name.clone(),
-        workspace_default_ref: workspace.default_ref.clone(),
+        workspace_repository_label: workspace_repository_label(workspace.upstream_url.as_deref()),
         workspace_status: workspace.status.clone(),
         created_label: workspace.created_at.format("%Y-%m-%d").to_string(),
     }
+}
+
+fn workspace_repository_label(upstream_url: Option<&str>) -> String {
+    upstream_url
+        .map(str::to_string)
+        .unwrap_or_else(|| "Local workspace".to_string())
 }
 
 #[component]
@@ -112,7 +120,6 @@ fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> imp
     let on_open_chat = workspace_open_chat_handler(
         workspace_id.clone(),
         display.workspace_name.clone(),
-        display.workspace_default_ref.clone(),
         state,
     );
     let on_edit =
@@ -226,6 +233,7 @@ fn workspace_card_meta_view(
                 }
             >
                 <WorkspaceRenameForm
+                    workspace_id=display.workspace_id.clone()
                     state=state
                     is_saving=is_saving
                     on_save=on_save
@@ -239,6 +247,7 @@ fn workspace_card_meta_view(
 fn workspace_card_summary_view(display: WorkspaceCardDisplay) -> impl IntoView {
     view! {
         <h3 class="workspace-card__name">{display.workspace_name}</h3>
+        <span class="workspace-card__repository">{display.workspace_repository_label}</span>
         <span class="workspace-card__status">{display.workspace_status}</span>
         <span class="workspace-card__created">"Created "{display.created_label}</span>
     }
@@ -375,7 +384,9 @@ fn workspace_start_chat_modal_view(
     on_submit: impl Fn(web_sys::SubmitEvent) + Copy + 'static,
 ) -> impl IntoView {
     let workspace_name = Signal::derive(move || state.start_chat_workspace_name.get());
-    let checkout_ref = Signal::derive(move || state.start_chat_checkout_ref.get());
+    let branches = Signal::derive(move || state.start_chat_branches.get());
+    let selected_branch = Signal::derive(move || state.start_chat_selected_branch.get());
+    let loading_branches = Signal::derive(move || state.start_chat_loading_branches.get());
     let opening = Signal::derive(move || state.opening_chat_workspace_id.get().is_some());
     let error = Signal::derive(move || state.error.get());
     let on_cancel = workspace_start_chat_cancel_handler(state);
@@ -384,11 +395,30 @@ fn workspace_start_chat_modal_view(
         <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="Start workspace chat">
             <div class="workspace-modal">
                 {workspace_start_chat_modal_header(workspace_name, on_cancel)}
-                <p class="muted">"Optionally override the checkout branch or ref for this chat."</p>
+                <p class="muted">
+                    {move || {
+                        if loading_branches.get() {
+                            "Loading branches for this workspace…"
+                        } else {
+                            "Choose a branch for this chat."
+                        }
+                    }}
+                </p>
                 <ErrorBanner message=error />
                 <form class="account-form workspace-modal__form" on:submit=on_submit>
-                    {workspace_start_chat_checkout_ref_field(state, checkout_ref)}
-                    {workspace_start_chat_modal_actions(opening, on_cancel)}
+                    {workspace_start_chat_branch_field(
+                        state,
+                        branches,
+                        selected_branch,
+                        loading_branches,
+                    )}
+                    {workspace_start_chat_modal_actions(
+                        opening,
+                        loading_branches,
+                        selected_branch,
+                        branches,
+                        on_cancel,
+                    )}
                 </form>
             </div>
         </div>
@@ -419,34 +449,71 @@ fn workspace_start_chat_modal_header(
     }
 }
 
-fn workspace_start_chat_checkout_ref_field(
+fn workspace_start_chat_branch_field(
     state: WorkspacesPageState,
-    checkout_ref: Signal<String>,
+    branches: Signal<Vec<WorkspaceBranch>>,
+    selected_branch: Signal<String>,
+    loading_branches: Signal<bool>,
 ) -> impl IntoView {
     view! {
         <label class="account-form__field">
-            <span>"Branch / ref (optional)"</span>
-            <input
-                type="text"
-                prop:value=checkout_ref
-                on:input=move |event| state.start_chat_checkout_ref.set(event_target_value(&event))
-                placeholder="refs/heads/main"
-            />
+            <span>"Branch"</span>
+            <select
+                class="workspace-branch-select"
+                prop:value=selected_branch
+                on:change=move |event| state.start_chat_selected_branch.set(event_target_value(&event))
+                prop:disabled=move || loading_branches.get() || branches.get().is_empty()
+            >
+                <option value="">
+                    {move || {
+                        if loading_branches.get() {
+                            "Loading branches…"
+                        } else {
+                            "Choose a branch"
+                        }
+                    }}
+                </option>
+                {move || {
+                    branches
+                        .get()
+                        .into_iter()
+                        .map(|branch| {
+                            let label = branch.name;
+                            let value = branch.ref_name;
+                            view! { <option value=value>{label}</option> }
+                        })
+                        .collect_view()
+                }}
+            </select>
+            <Show when=move || !loading_branches.get() && branches.get().is_empty()>
+                <span class="workspace-field__hint">
+                    "No branches are available for this workspace."
+                </span>
+            </Show>
         </label>
     }
 }
 
 fn workspace_start_chat_modal_actions(
     opening: Signal<bool>,
+    loading_branches: Signal<bool>,
+    selected_branch: Signal<String>,
+    branches: Signal<Vec<WorkspaceBranch>>,
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
     let submit_label = workspace_new_chat_label_signal(opening);
+    let submit_disabled = Signal::derive(move || {
+        opening.get()
+            || loading_branches.get()
+            || selected_branch.get().trim().is_empty()
+            || branches.get().is_empty()
+    });
     view! {
         <div class="workspace-modal__actions">
             <button
                 type="submit"
                 class="account-form__submit"
-                prop:disabled=move || opening.get()
+                prop:disabled=move || submit_disabled.get()
             >
                 {submit_label}
             </button>
@@ -621,13 +688,19 @@ fn WorkspaceSessionListHost(sessions: Vec<SessionListItem>) -> impl IntoView {
 #[component]
 #[cfg(target_family = "wasm")]
 fn WorkspaceRenameForm(
+    workspace_id: String,
     state: WorkspacesPageState,
     is_saving: Signal<bool>,
     on_save: Callback<web_sys::SubmitEvent>,
     on_cancel: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
+    let on_focusout = workspace_rename_focusout_handler(workspace_id, state, is_saving);
     view! {
-        <form class="workspace-inline-form" on:submit=move |event| on_save.run(event)>
+        <form
+            class="workspace-inline-form"
+            on:submit=move |event| on_save.run(event)
+            on:focusout=on_focusout
+        >
             <input
                 type="text"
                 class="workspace-name-input"
@@ -683,10 +756,52 @@ fn workspace_id_flag(signal: RwSignal<Option<String>>, workspace_id: &str) -> bo
 // ---------------------------------------------------------------------------
 
 #[cfg(target_family = "wasm")]
+fn workspace_rename_focusout_handler(
+    workspace_id: String,
+    state: WorkspacesPageState,
+    is_saving: Signal<bool>,
+) -> impl Fn(web_sys::FocusEvent) + 'static {
+    move |event: web_sys::FocusEvent| {
+        if is_saving.get_untracked() {
+            return;
+        }
+        if state.editing_workspace_id.get_untracked().as_deref() != Some(workspace_id.as_str()) {
+            return;
+        }
+
+        let Some(current_target) = event.current_target() else {
+            cancel_workspace_edit(&workspace_id, state);
+            return;
+        };
+        let Ok(form) = current_target.dyn_into::<web_sys::Node>() else {
+            cancel_workspace_edit(&workspace_id, state);
+            return;
+        };
+        if let Some(related_target) = event.related_target() {
+            if let Ok(related_node) = related_target.dyn_into::<web_sys::Node>() {
+                if form.contains(Some(&related_node)) {
+                    return;
+                }
+            }
+        }
+
+        cancel_workspace_edit(&workspace_id, state);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn cancel_workspace_edit(workspace_id: &str, state: WorkspacesPageState) {
+    if state.editing_workspace_id.get_untracked().as_deref() == Some(workspace_id) {
+        state.editing_workspace_id.set(None);
+        state.edit_name_draft.set(String::new());
+        state.error.set(None);
+    }
+}
+
+#[cfg(target_family = "wasm")]
 fn workspace_open_chat_handler(
     workspace_id: String,
     workspace_name: String,
-    default_ref: Option<String>,
     state: WorkspacesPageState,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_| {
@@ -700,11 +815,38 @@ fn workspace_open_chat_handler(
             .start_chat_workspace_id
             .set(Some(workspace_id.clone()));
         state.start_chat_workspace_name.set(workspace_name.clone());
-        state
-            .start_chat_checkout_ref
-            .set(default_ref.clone().unwrap_or_default());
+        state.start_chat_branches.set(Vec::new());
+        state.start_chat_selected_branch.set(String::new());
+        state.start_chat_loading_branches.set(true);
         state.show_start_chat_modal.set(true);
+        spawn_workspace_start_chat_branch_load(state, workspace_id.clone());
     })
+}
+
+#[cfg(target_family = "wasm")]
+fn spawn_workspace_start_chat_branch_load(state: WorkspacesPageState, workspace_id: String) {
+    leptos::task::spawn_local(async move {
+        match api::list_workspace_branches(&workspace_id).await {
+            Ok(branches) => {
+                if state.start_chat_workspace_id.get_untracked().as_deref()
+                    != Some(workspace_id.as_str())
+                {
+                    return;
+                }
+                state.start_chat_loading_branches.set(false);
+                state.start_chat_branches.set(branches);
+            }
+            Err(message) => {
+                if state.start_chat_workspace_id.get_untracked().as_deref()
+                    != Some(workspace_id.as_str())
+                {
+                    return;
+                }
+                state.start_chat_loading_branches.set(false);
+                state.error.set(Some(message));
+            }
+        }
+    });
 }
 
 #[cfg(target_family = "wasm")]
@@ -729,9 +871,15 @@ fn workspace_start_chat_submit_handler(
             .set(Some(workspace_id.clone()));
         state.error.set(None);
         state.notice.set(None);
-        let checkout_ref = state.start_chat_checkout_ref.get_untracked();
+        let selected_branch = state.start_chat_selected_branch.get_untracked();
+        if selected_branch.trim().is_empty() {
+            state.error.set(Some(
+                "Choose a branch before starting a chat.".to_string(),
+            ));
+            return;
+        }
         leptos::task::spawn_local(async move {
-            match api::create_workspace_session(&workspace_id, Some(checkout_ref)).await {
+            match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
                     if let Err(message) =
@@ -782,7 +930,9 @@ fn close_workspace_start_chat_modal(state: WorkspacesPageState) {
     state.show_start_chat_modal.set(false);
     state.start_chat_workspace_id.set(None);
     state.start_chat_workspace_name.set(String::new());
-    state.start_chat_checkout_ref.set(String::new());
+    state.start_chat_branches.set(Vec::new());
+    state.start_chat_selected_branch.set(String::new());
+    state.start_chat_loading_branches.set(false);
     state.error.set(None);
 }
 
@@ -805,16 +955,7 @@ fn workspace_cancel_handler(
     workspace_id: String,
     state: WorkspacesPageState,
 ) -> Callback<web_sys::MouseEvent> {
-    Callback::new(move |_| {
-        if state
-            .editing_workspace_id
-            .get_untracked()
-            .as_deref()
-            .is_some_and(|current_id| current_id == workspace_id)
-        {
-            state.editing_workspace_id.set(None);
-        }
-    })
+    Callback::new(move |_| cancel_workspace_edit(&workspace_id, state))
 }
 
 #[cfg(target_family = "wasm")]
@@ -922,8 +1063,7 @@ mod tests {
         WorkspaceSummary {
             workspace_id: id.to_string(),
             name: name.to_string(),
-            upstream_url: None,
-            default_ref: None,
+            upstream_url: Some("https://example.com/repo.git".to_string()),
             bootstrap_kind: None,
             status: "active".to_string(),
             created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
@@ -968,17 +1108,15 @@ mod tests {
     }
 
     #[test]
-    fn workspace_card_display_preserves_default_refs_and_dates() {
-        let mut workspace = sample_workspace("w_1", "Test Workspace");
-        workspace.default_ref = Some("refs/heads/main".to_string());
-
+    fn workspace_card_display_preserves_repository_labels_and_dates() {
+        let workspace = sample_workspace("w_1", "Test Workspace");
         let display = workspace_card_display(&workspace);
 
         assert_eq!(display.workspace_id, "w_1");
         assert_eq!(display.workspace_name, "Test Workspace");
         assert_eq!(
-            display.workspace_default_ref.as_deref(),
-            Some("refs/heads/main")
+            display.workspace_repository_label,
+            "https://example.com/repo.git"
         );
         assert_eq!(display.workspace_status, "active");
         assert_eq!(display.created_label, "2026-04-17");
@@ -1059,13 +1197,19 @@ mod tests {
             state
                 .start_chat_workspace_name
                 .set("Test Workspace".to_string());
+            state.start_chat_branches.set(vec![WorkspaceBranch {
+                name: "feature".to_string(),
+                ref_name: "refs/heads/feature".to_string(),
+            }]);
             state
-                .start_chat_checkout_ref
+                .start_chat_selected_branch
                 .set("refs/heads/feature".to_string());
             state.error.set(Some("existing error".to_string()));
 
             let workspace_name = Signal::derive(move || state.start_chat_workspace_name.get());
-            let checkout_ref = Signal::derive(move || state.start_chat_checkout_ref.get());
+            let branches = Signal::derive(move || state.start_chat_branches.get());
+            let selected_branch = Signal::derive(move || state.start_chat_selected_branch.get());
+            let loading_branches = Signal::derive(move || state.start_chat_loading_branches.get());
             let opening = Signal::derive(move || state.opening_chat_workspace_id.get().is_some());
             let title = workspace_start_chat_title_signal(workspace_name);
             let submit_label = workspace_new_chat_label_signal(opening);
@@ -1073,8 +1217,19 @@ mod tests {
             let _ = workspace_start_chat_modal_view(state, |_event: web_sys::SubmitEvent| {});
             let _ =
                 workspace_start_chat_modal_header(workspace_name, |_event: web_sys::MouseEvent| {});
-            let _ = workspace_start_chat_checkout_ref_field(state, checkout_ref);
-            let _ = workspace_start_chat_modal_actions(opening, |_event: web_sys::MouseEvent| {});
+            let _ = workspace_start_chat_branch_field(
+                state,
+                branches,
+                selected_branch,
+                loading_branches,
+            );
+            let _ = workspace_start_chat_modal_actions(
+                opening,
+                loading_branches,
+                selected_branch,
+                branches,
+                |_event: web_sys::MouseEvent| {},
+            );
             assert_eq!(title(), "Test Workspace");
             assert_eq!(submit_label(), "New chat");
 
@@ -1083,7 +1238,9 @@ mod tests {
             assert!(!state.show_start_chat_modal.get());
             assert!(state.start_chat_workspace_id.get().is_none());
             assert!(state.start_chat_workspace_name.get().is_empty());
-            assert!(state.start_chat_checkout_ref.get().is_empty());
+            assert!(state.start_chat_branches.get().is_empty());
+            assert!(state.start_chat_selected_branch.get().is_empty());
+            assert!(!state.start_chat_loading_branches.get());
             assert!(state.error.get().is_none());
         });
     }
@@ -1099,8 +1256,12 @@ mod tests {
             state
                 .start_chat_workspace_name
                 .set("Test Workspace".to_string());
+            state.start_chat_branches.set(vec![WorkspaceBranch {
+                name: "feature".to_string(),
+                ref_name: "refs/heads/feature".to_string(),
+            }]);
             state
-                .start_chat_checkout_ref
+                .start_chat_selected_branch
                 .set("refs/heads/feature".to_string());
 
             workspace_start_chat_submit_handler(state)(fake_submit_event());

@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::sessions::TurnHandle;
+use crate::workspace_checkout::FsWorkspaceCheckoutManager;
 #[cfg(test)]
 use crate::workspace_checkout::{
     PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutManager,
@@ -35,7 +36,7 @@ use crate::{
     contract_health::ErrorResponse,
     mock_client::{MockClient, MockClientError, ReplyProvider},
     sessions::{SessionStore, SessionStoreError},
-    workspace_checkout::{DynWorkspaceCheckoutManager, FsWorkspaceCheckoutManager},
+    workspace_checkout::DynWorkspaceCheckoutManager,
     workspace_records::{UserRecord, WorkspaceStoreError},
     workspace_repository::WorkspaceRepository,
 };
@@ -66,7 +67,7 @@ use self::session_service::{
 };
 use self::workspace_api::{
     create_workspace, create_workspace_session, delete_workspace, get_workspace,
-    list_workspace_sessions, list_workspaces, update_workspace,
+    list_workspace_branches, list_workspace_sessions, list_workspaces, update_workspace,
 };
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -166,14 +167,37 @@ impl AppState {
         config: ServerConfig,
         workspace_repository: Arc<dyn WorkspaceRepository>,
     ) -> Result<Self, AppStateBuildError> {
-        Ok(Self {
-            store: Arc::new(SessionStore::new(config.session_cap)),
+        let store = Arc::new(SessionStore::new(config.session_cap));
+        let reply_provider = Arc::new(MockClient::new(config.acp_server)?);
+        let checkout_manager: DynWorkspaceCheckoutManager =
+            Arc::new(FsWorkspaceCheckoutManager::new(config.state_dir));
+
+        Ok(Self::with_services(
+            store,
             workspace_repository,
-            reply_provider: Arc::new(MockClient::new(config.acp_server)?),
-            checkout_manager: Arc::new(FsWorkspaceCheckoutManager::new(config.state_dir)),
-            startup_hints: config.startup_hints,
-            frontend_dist: config.frontend_dist.map(Arc::new),
-        })
+            reply_provider,
+            checkout_manager,
+            config.startup_hints,
+            config.frontend_dist,
+        ))
+    }
+
+    pub fn with_services(
+        store: Arc<SessionStore>,
+        workspace_repository: Arc<dyn WorkspaceRepository>,
+        reply_provider: Arc<dyn ReplyProvider>,
+        checkout_manager: DynWorkspaceCheckoutManager,
+        startup_hints: bool,
+        frontend_dist: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            workspace_repository,
+            reply_provider,
+            checkout_manager,
+            startup_hints,
+            frontend_dist: frontend_dist.map(Arc::new),
+        }
     }
 
     #[cfg(test)]
@@ -210,14 +234,14 @@ impl AppState {
         reply_provider: Arc<dyn ReplyProvider>,
         checkout_manager: DynWorkspaceCheckoutManager,
     ) -> Self {
-        Self {
+        Self::with_services(
             store,
             workspace_repository,
             reply_provider,
             checkout_manager,
-            startup_hints: false,
-            frontend_dist: None,
-        }
+            false,
+            None,
+        )
     }
 
     async fn owner_context(
@@ -262,6 +286,10 @@ fn read_api_routes() -> Router<AppState> {
         .route("/api/v1/sessions", get(list_sessions))
         .route("/api/v1/workspaces", get(list_workspaces))
         .route("/api/v1/workspaces/{workspace_id}", get(get_workspace))
+        .route(
+            "/api/v1/workspaces/{workspace_id}/branches",
+            get(list_workspace_branches),
+        )
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
             get(list_workspace_sessions),
@@ -392,6 +420,22 @@ impl WorkspaceCheckoutManager for TestWorkspaceCheckoutManager {
 
     fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
         Some(test_checkout_path(checkout_relpath))
+    }
+
+    async fn list_branches(
+        &self,
+        _workspace: &crate::workspace_records::WorkspaceRecord,
+    ) -> Result<Vec<crate::contract_workspaces::WorkspaceBranch>, WorkspaceCheckoutError> {
+        Ok(vec![
+            crate::contract_workspaces::WorkspaceBranch {
+                name: "main".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            crate::contract_workspaces::WorkspaceBranch {
+                name: "release".to_string(),
+                ref_name: "refs/heads/release".to_string(),
+            },
+        ])
     }
 }
 

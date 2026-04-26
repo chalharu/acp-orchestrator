@@ -236,8 +236,7 @@ async fn create_owned_workspace_for_principal(
         principal,
         Json(CreateWorkspaceRequest {
             name: name.to_string(),
-            upstream_url: None,
-            default_ref: None,
+            upstream_url: "https://example.com/test-workspace.git".to_string(),
             credential_reference_id: None,
         }),
     )

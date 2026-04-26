@@ -27,8 +27,8 @@ pub(in crate::server) async fn create_workspace(
     let owner = state.owner_context(principal).await?;
     let workspace_request = NewWorkspace {
         name: request.name,
-        upstream_url: request.upstream_url,
-        default_ref: request.default_ref,
+        upstream_url: Some(request.upstream_url),
+        default_ref: None,
         credential_reference_id: request.credential_reference_id,
     };
     let workspace = state
@@ -50,10 +50,16 @@ pub(in crate::server) async fn update_workspace(
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(request): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<UpdateWorkspaceResponse>, AppError> {
+    if request.name.is_none() {
+        return Err(AppError::BadRequest(
+            "workspace update must include name".to_string(),
+        ));
+    }
+
     let owner = state.owner_context(principal).await?;
     let workspace_update = WorkspaceUpdatePatch {
         name: request.name,
-        default_ref: request.default_ref,
+        default_ref: None,
     };
     let workspace = state
         .workspace_repository

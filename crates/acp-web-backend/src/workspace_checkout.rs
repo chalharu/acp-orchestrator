@@ -9,8 +9,7 @@ use std::{
 use async_trait::async_trait;
 use git2::{
     Direction, ErrorCode, FetchOptions, ProxyOptions, RemoteCallbacks, RemoteRedirect, Repository,
-    RepositoryInitOptions,
-    build::{CheckoutBuilder, CloneLocal, RepoBuilder},
+    RepositoryInitOptions, build::CheckoutBuilder,
 };
 use reqwest::Url;
 
@@ -178,12 +177,16 @@ impl FsWorkspaceCheckoutManager {
         let source_root = local_source_root(&self.state_dir)?;
         let resolved_ref =
             resolve_local_checkout_ref(&source_root, default_ref, override_ref, &self.state_dir)?;
-        clone_local_repository(&source_root, checkout_path, &self.state_dir)?;
-        checkout_local_ref_if_needed(checkout_path, resolved_ref.as_deref(), &self.state_dir)?;
+        let checkout_commit_sha = clone_local_repository(
+            &source_root,
+            resolved_ref.as_deref(),
+            checkout_path,
+            &self.state_dir,
+        )?;
         Ok(build_prepared_checkout(
             checkout_relpath,
             resolved_ref,
-            checkout_head_commit(checkout_path, &self.state_dir)?,
+            checkout_commit_sha,
             checkout_path,
         ))
     }
@@ -307,13 +310,22 @@ fn clone_remote_workspace(
     checkout_path: &Path,
     state_dir: &Path,
 ) -> Result<Option<String>, WorkspaceCheckoutError> {
+    fetch_workspace_checkout(upstream_url, resolved_ref, checkout_path, state_dir)
+}
+
+fn fetch_workspace_checkout(
+    remote_spec: &str,
+    resolved_ref: Option<&str>,
+    checkout_path: &Path,
+    state_dir: &Path,
+) -> Result<Option<String>, WorkspaceCheckoutError> {
     let _git_home = ensure_git_home(state_dir)?;
     let repo = init_repository(checkout_path)?;
-    repo.remote(GIT_REMOTE_NAME, upstream_url)
+    repo.remote(GIT_REMOTE_NAME, remote_spec)
         .map_err(map_git_error)?;
     {
         let mut remote = repo.find_remote(GIT_REMOTE_NAME).map_err(map_git_error)?;
-        let mut fetch_options = git_fetch_options(upstream_url);
+        let mut fetch_options = git_fetch_options(remote_spec);
         remote
             .fetch(
                 &[resolved_ref.unwrap_or("HEAD")],
@@ -387,31 +399,12 @@ fn resolve_local_checkout_ref(
 
 fn clone_local_repository(
     source_root: &Path,
-    checkout_path: &Path,
-    state_dir: &Path,
-) -> Result<(), WorkspaceCheckoutError> {
-    let _git_home = ensure_git_home(state_dir)?;
-    let source_root = source_root.to_string_lossy().to_string();
-    let mut builder = RepoBuilder::new();
-    builder.clone_local(CloneLocal::None);
-    builder.with_checkout(checkout_builder());
-    builder
-        .clone(&source_root, checkout_path)
-        .map_err(map_git_error)?;
-    Ok(())
-}
-
-fn checkout_local_ref_if_needed(
-    checkout_path: &Path,
     resolved_ref: Option<&str>,
+    checkout_path: &Path,
     state_dir: &Path,
-) -> Result<(), WorkspaceCheckoutError> {
-    let _git_home = ensure_git_home(state_dir)?;
-    let Some(reference) = resolved_ref else {
-        return Ok(());
-    };
-    let repo = Repository::open(checkout_path).map_err(map_git_error)?;
-    checkout_revision(&repo, reference)
+) -> Result<Option<String>, WorkspaceCheckoutError> {
+    let source_root = source_root.to_string_lossy().to_string();
+    fetch_workspace_checkout(&source_root, resolved_ref, checkout_path, state_dir)
 }
 
 fn checkout_head_commit(

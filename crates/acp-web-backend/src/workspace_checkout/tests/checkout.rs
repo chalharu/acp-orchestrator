@@ -1,10 +1,10 @@
 use super::super::{
     CHECKOUTS_DIR_NAME, FsWorkspaceCheckoutManager, GIT_REMOTE_NAME, PreparedWorkspaceCheckout,
     WorkspaceCheckoutError, WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout,
-    checkout_fetch_head, checkout_head_commit, checkout_local_ref_if_needed, checkout_parent_dir,
-    clone_local_repository, clone_remote_workspace, git_fetch_options, git_symbolic_ref,
-    local_source_root, local_source_root_from, resolve_https_checkout_ref,
-    resolve_local_checkout_ref, validate_checkout_ref, validate_https_upstream_url,
+    checkout_fetch_head, checkout_head_commit, checkout_parent_dir, clone_local_repository,
+    clone_remote_workspace, git_fetch_options, git_symbolic_ref, local_source_root,
+    local_source_root_from, resolve_https_checkout_ref, resolve_local_checkout_ref,
+    validate_checkout_ref, validate_https_upstream_url,
 };
 use super::*;
 use async_trait::async_trait;
@@ -104,6 +104,37 @@ fn detach_head(repo_path: &Path) {
         .expect("HEAD should resolve to a commit");
     repo.set_head_detached(commit.id())
         .expect("detaching HEAD should succeed");
+}
+
+fn initialize_detached_head_only_repo(path: &Path) -> String {
+    initialize_local_repo(path);
+    let repo = Repository::open(path).expect("repo should open");
+    let base_commit = repo
+        .head()
+        .expect("repo should have HEAD")
+        .peel_to_commit()
+        .expect("HEAD should resolve to a commit");
+    repo.set_head_detached(base_commit.id())
+        .expect("detaching HEAD should succeed");
+    std::fs::write(path.join("detached.txt"), "detached\n")
+        .expect("detached-head fixture files should be writable");
+    let mut index = repo.index().expect("repo index should be readable");
+    index
+        .add_path(Path::new("detached.txt"))
+        .expect("detached fixture file should be addable");
+    let tree_id = index.write_tree().expect("tree should be writable");
+    let tree = repo.find_tree(tree_id).expect("tree should be readable");
+    let signature = test_signature();
+    repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        "detached",
+        &tree,
+        &[&base_commit],
+    )
+    .expect("detached HEAD commits should succeed")
+    .to_string()
 }
 
 fn fetch_checkout_origin_head(checkout_path: &Path) {
@@ -416,10 +447,10 @@ fn local_checkout_helpers_cover_clone_checkout_and_commit_resolution() {
     let state_dir = unique_test_dir("acp-workspace-checkout-state");
     let checkout_path = unique_test_dir("acp-workspace-checkout-clone");
 
-    clone_local_repository(&source_root, &checkout_path, &state_dir)
-        .expect("local repositories should clone");
-    checkout_local_ref_if_needed(&checkout_path, Some("v1"), &state_dir)
-        .expect("named refs should be check-outable");
+    let checkout_commit_sha =
+        clone_local_repository(&source_root, Some("v1"), &checkout_path, &state_dir)
+            .expect("local repositories should clone");
+    assert_eq!(checkout_commit_sha, Some(expected_head.clone()));
     assert_eq!(
         checkout_head_commit(&checkout_path, &state_dir).expect("head commits should resolve"),
         Some(expected_head.clone())
@@ -431,6 +462,30 @@ fn local_checkout_helpers_cover_clone_checkout_and_commit_resolution() {
         checkout_head_commit(&checkout_path, &state_dir).expect("detached commits should resolve"),
         Some(expected_head)
     );
+}
+
+#[test]
+fn local_checkout_helpers_preserve_detached_source_heads() {
+    let source_root = unique_test_dir("acp-workspace-checkout-detached-source");
+    let expected_head = initialize_detached_head_only_repo(&source_root);
+    let state_dir = unique_test_dir("acp-workspace-checkout-detached-state");
+    let checkout_path = unique_test_dir("acp-workspace-checkout-detached-clone");
+
+    assert_eq!(
+        resolve_local_checkout_ref(&source_root, None, None, &state_dir)
+            .expect("detached source HEADs should not error"),
+        None
+    );
+    let checkout_commit_sha =
+        clone_local_repository(&source_root, None, &checkout_path, &state_dir)
+            .expect("detached local HEADs should clone");
+
+    assert_eq!(checkout_commit_sha, Some(expected_head.clone()));
+    assert_eq!(
+        checkout_head_commit(&checkout_path, &state_dir).expect("HEAD should resolve"),
+        Some(expected_head)
+    );
+    assert!(checkout_path.join("detached.txt").exists());
 }
 
 #[test]
@@ -448,6 +503,7 @@ fn clone_local_repository_reports_state_dir_creation_failures() {
 
     let error = clone_local_repository(
         &source_root,
+        None,
         &unique_test_dir("acp-workspace-checkout-local-state-clone"),
         &broken_state_dir,
     )
@@ -567,13 +623,14 @@ fn local_source_root_reports_deleted_current_directories() {
 }
 
 #[test]
-fn checkout_local_ref_if_needed_propagates_git_failures() {
+fn clone_local_repository_propagates_git_failures_for_unknown_refs() {
     let repo = unique_test_dir("acp-workspace-checkout-local-ref-failure");
     initialize_local_repo(&repo);
 
-    let error = checkout_local_ref_if_needed(
+    let error = clone_local_repository(
         &repo,
         Some("refs/heads/missing"),
+        &unique_test_dir("acp-workspace-checkout-local-ref-checkout"),
         &unique_test_dir("acp-workspace-checkout-local-ref-state"),
     )
     .expect_err("unknown local refs should fail checkout");
@@ -610,4 +667,53 @@ async fn local_workspace_fallback_prepares_a_checkout_from_the_current_repo() {
     assert_eq!(checkout.checkout_relpath, "session-checkouts/s_test");
     assert!(checkout.checkout_commit_sha.is_some());
     assert!(checkout.working_dir.join("Cargo.toml").exists());
+}
+
+#[test]
+fn local_workspace_fallback_prepares_a_checkout_from_detached_head_sources() {
+    const CHILD_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_CHILD";
+    const SOURCE_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_SOURCE";
+    const EXPECTED_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_EXPECTED";
+
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let source_root = PathBuf::from(
+            std::env::var(SOURCE_ENV).expect("detached source root env should exist"),
+        );
+        let expected_commit =
+            std::env::var(EXPECTED_ENV).expect("detached source commit env should exist");
+        let original_dir = std::env::current_dir().expect("current dir should be readable");
+        std::env::set_current_dir(&source_root)
+            .expect("child should be able to chdir into the detached source");
+        let state_dir = source_root
+            .parent()
+            .expect("detached source should have a parent")
+            .join(format!(
+                "acp-workspace-checkout-detached-head-state-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+        let manager = FsWorkspaceCheckoutManager::new(state_dir);
+        let checkout = manager
+            .prepare_checkout_sync(&sample_workspace_record(None, None), "s_detached", None)
+            .expect("detached source local checkout should prepare");
+
+        assert_eq!(checkout.checkout_ref, None);
+        assert_eq!(checkout.checkout_commit_sha, Some(expected_commit));
+        assert!(checkout.working_dir.join("detached.txt").exists());
+        std::env::set_current_dir(original_dir)
+            .expect("child should restore the original working directory");
+        return;
+    }
+
+    let source_root = unique_test_dir("acp-workspace-checkout-detached-head-source");
+    let expected_commit = initialize_detached_head_only_repo(&source_root);
+    let source_root_string = source_root.to_string_lossy().to_string();
+    let output = run_self_test_child(
+        "workspace_checkout::tests::checkout::local_workspace_fallback_prepares_a_checkout_from_detached_head_sources",
+        &[
+            (CHILD_ENV, "1"),
+            (SOURCE_ENV, source_root_string.as_str()),
+            (EXPECTED_ENV, expected_commit.as_str()),
+        ],
+    );
+    assert_child_success(output);
 }

@@ -796,7 +796,6 @@ fn attach_workspace_rename_pointer_cancel_listener(
     state: WorkspacesPageState,
     is_saving: Signal<bool>,
 ) {
-    let document = document.clone();
     let form_node = form_node.clone();
     let listener = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::PointerEvent| {
         cancel_workspace_edit_when_target_leaves_form(
@@ -811,12 +810,7 @@ fn attach_workspace_rename_pointer_cancel_listener(
         "pointerdown",
         listener.as_ref().unchecked_ref(),
     );
-    on_cleanup(move || {
-        let _ = document.remove_event_listener_with_callback(
-            "pointerdown",
-            listener.as_ref().unchecked_ref(),
-        );
-    });
+    listener.forget();
 }
 
 #[cfg(target_family = "wasm")]

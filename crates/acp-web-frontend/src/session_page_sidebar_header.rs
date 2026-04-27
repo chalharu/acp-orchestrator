@@ -724,6 +724,30 @@ mod tests {
     }
 
     #[test]
+    fn session_sidebar_branch_load_ignores_stale_workspace_updates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(None::<String>);
+            let state = SessionSidebarNewChatState::new();
+            let _ = session_sidebar_begin_new_chat(
+                Some("workspace-1".to_string()),
+                sidebar_error,
+                state,
+            );
+
+            session_sidebar_complete_branch_load(
+                state,
+                "workspace-2",
+                vec![sample_sidebar_branch()],
+            );
+
+            assert!(state.loading_branches.get());
+            assert!(state.selected_branch.get().is_empty());
+            assert!(state.branches.get().is_empty());
+        });
+    }
+
+    #[test]
     fn session_sidebar_begin_new_chat_reports_missing_workspace() {
         let owner = Owner::new();
         owner.with(|| {

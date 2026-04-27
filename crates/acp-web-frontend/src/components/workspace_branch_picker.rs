@@ -116,33 +116,67 @@ mod tests {
     }
 
     #[test]
-    fn workspace_branch_picker_views_build_without_panicking() {
+    fn workspace_branch_select_field_renders_loading_populated_and_empty_states() {
         let owner = Owner::new();
         owner.with(|| {
-            let branches = RwSignal::new(vec![sample_branch()]);
-            let selected_branch = RwSignal::new("refs/heads/main".to_string());
-            let loading_branches = RwSignal::new(false);
-            let busy = RwSignal::new(false);
-
-            let branches_signal = Signal::derive(move || branches.get());
-            let selected_branch_signal = Signal::derive(move || selected_branch.get());
-            let loading_branches_signal = Signal::derive(move || loading_branches.get());
-            let busy_signal = Signal::derive(move || busy.get());
-
-            let _ = workspace_branch_select_field(
-                branches_signal,
-                selected_branch_signal,
-                loading_branches_signal,
+            let loading_html = workspace_branch_select_field(
+                Signal::derive(Vec::<WorkspaceBranch>::new),
+                Signal::derive(String::new),
+                Signal::derive(|| true),
                 |_| {},
-            );
-            let _ = workspace_branch_modal_actions(
+            )
+            .to_html();
+            assert!(loading_html.contains("Loading branches..."));
+
+            let populated_html = workspace_branch_select_field(
+                Signal::derive(|| vec![sample_branch()]),
+                Signal::derive(|| "refs/heads/main".to_string()),
+                Signal::derive(|| false),
+                |_| {},
+            )
+            .to_html();
+            assert!(populated_html.contains("Choose a branch"));
+            assert!(populated_html.contains("refs/heads/main"));
+            assert!(populated_html.contains(">main<"));
+
+            let empty_html = workspace_branch_select_field(
+                Signal::derive(Vec::<WorkspaceBranch>::new),
+                Signal::derive(String::new),
+                Signal::derive(|| false),
+                |_| {},
+            )
+            .to_html();
+            assert!(empty_html.contains("No branches are available for this workspace."));
+        });
+    }
+
+    #[test]
+    fn workspace_branch_modal_actions_render_ready_and_disabled_states() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let ready_html = workspace_branch_modal_actions(
                 || "New chat",
-                busy_signal,
-                loading_branches_signal,
-                selected_branch_signal,
-                branches_signal,
+                Signal::derive(|| false),
+                Signal::derive(|| false),
+                Signal::derive(|| "refs/heads/main".to_string()),
+                Signal::derive(|| vec![sample_branch()]),
                 |_| {},
-            );
+            )
+            .to_html();
+            assert!(ready_html.contains("New chat"));
+            assert!(ready_html.contains("Cancel"));
+
+            let disabled_html = workspace_branch_modal_actions(
+                || "Creating...",
+                Signal::derive(|| false),
+                Signal::derive(|| false),
+                Signal::derive(String::new),
+                Signal::derive(Vec::<WorkspaceBranch>::new),
+                |_| {},
+            )
+            .to_html();
+            assert!(disabled_html.contains("Creating..."));
+            assert!(disabled_html.contains("disabled"));
         });
     }
 }

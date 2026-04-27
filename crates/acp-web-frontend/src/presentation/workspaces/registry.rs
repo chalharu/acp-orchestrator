@@ -6,6 +6,7 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
+#[cfg(target_family = "wasm")]
 use crate::components::{
     ErrorBanner, workspace_branch_modal_actions, workspace_branch_select_field,
     workspace_branch_status_message,
@@ -381,6 +382,7 @@ fn workspace_start_chat_modal(state: WorkspacesPageState) -> impl IntoView {
     workspace_start_chat_modal_view(state, workspace_start_chat_submit_handler(state)).into_any()
 }
 
+#[cfg(target_family = "wasm")]
 fn workspace_start_chat_modal_view(
     state: WorkspacesPageState,
     on_submit: impl Fn(web_sys::SubmitEvent) + Copy + 'static,
@@ -421,6 +423,16 @@ fn workspace_start_chat_modal_view(
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn workspace_start_chat_modal_view(
+    state: WorkspacesPageState,
+    on_submit: impl Fn(web_sys::SubmitEvent) + Copy + 'static,
+) -> impl IntoView {
+    let _ = state;
+    let _ = on_submit;
+    view! { <div class="workspace-modal" /> }
+}
+
 fn workspace_start_chat_modal_header(
     workspace_name: Signal<String>,
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
@@ -445,6 +457,7 @@ fn workspace_start_chat_modal_header(
     }
 }
 
+#[cfg(target_family = "wasm")]
 fn workspace_start_chat_branch_field(
     state: WorkspacesPageState,
     branches: Signal<Vec<WorkspaceBranch>>,
@@ -458,6 +471,21 @@ fn workspace_start_chat_branch_field(
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn workspace_start_chat_branch_field(
+    state: WorkspacesPageState,
+    branches: Signal<Vec<WorkspaceBranch>>,
+    selected_branch: Signal<String>,
+    loading_branches: Signal<bool>,
+) -> impl IntoView {
+    let _ = state;
+    let _ = branches;
+    let _ = selected_branch;
+    let _ = loading_branches;
+    view! { <div class="workspace-branch-select" /> }
+}
+
+#[cfg(target_family = "wasm")]
 fn workspace_start_chat_modal_actions(
     opening: Signal<bool>,
     loading_branches: Signal<bool>,
@@ -473,6 +501,22 @@ fn workspace_start_chat_modal_actions(
         branches,
         on_cancel,
     )
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_start_chat_modal_actions(
+    opening: Signal<bool>,
+    loading_branches: Signal<bool>,
+    selected_branch: Signal<String>,
+    branches: Signal<Vec<WorkspaceBranch>>,
+    on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
+) -> impl IntoView {
+    let _ = opening;
+    let _ = loading_branches;
+    let _ = selected_branch;
+    let _ = branches;
+    let _ = on_cancel;
+    view! { <div class="workspace-modal__actions" /> }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1349,6 +1393,29 @@ mod tests {
             assert!(!state.start_chat_loading_branches.get());
             assert_eq!(state.start_chat_selected_branch.get(), "refs/heads/main");
             assert_eq!(state.start_chat_branches.get().len(), 2);
+        });
+    }
+
+    #[test]
+    fn workspace_start_chat_branch_store_ignores_stale_workspace_updates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.start_chat_workspace_id.set(Some("w_1".to_string()));
+            state.start_chat_loading_branches.set(true);
+
+            store_workspace_start_chat_branches(
+                state,
+                "w_2",
+                vec![WorkspaceBranch {
+                    name: "main".to_string(),
+                    ref_name: "refs/heads/main".to_string(),
+                }],
+            );
+
+            assert!(state.start_chat_loading_branches.get());
+            assert!(state.start_chat_selected_branch.get().is_empty());
+            assert!(state.start_chat_branches.get().is_empty());
         });
     }
 

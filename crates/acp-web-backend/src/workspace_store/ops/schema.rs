@@ -84,6 +84,244 @@ CREATE INDEX IF NOT EXISTS sessions_workspace_id_idx
     ON sessions(workspace_id);
 "#;
 
+const BROWSER_SESSIONS_REBUILD_TABLE_SQL: &str = r#"
+CREATE TABLE {table_name} (
+    browser_session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+)
+"#;
+
+const WORKSPACES_REBUILD_TABLE_SQL: &str = r#"
+CREATE TABLE {table_name} (
+    workspace_id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    upstream_url TEXT,
+    default_ref TEXT,
+    credential_reference_id TEXT,
+    status TEXT NOT NULL,
+    bootstrap_kind TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
+)
+"#;
+
+const SESSIONS_REBUILD_TABLE_SQL: &str = r#"
+CREATE TABLE {table_name} (
+    session_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    checkout_relpath TEXT,
+    checkout_ref TEXT,
+    checkout_commit_sha TEXT,
+    failure_reason TEXT,
+    detach_deadline_at TEXT,
+    restartable_deadline_at TEXT,
+    created_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    latest_sequence INTEGER NOT NULL DEFAULT 0,
+    messages_json TEXT NOT NULL DEFAULT '[]',
+    closed_at TEXT,
+    deleted_at TEXT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id),
+    FOREIGN KEY (owner_user_id) REFERENCES users(user_id)
+)
+"#;
+
+#[derive(Clone, Copy)]
+struct ExpectedForeignKey {
+    from_column: &'static str,
+    parent_table: &'static str,
+    parent_column: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct TableRebuildColumn {
+    name: &'static str,
+    fallback_sql: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForeignKeyReference {
+    from_column: String,
+    parent_table: String,
+    parent_column: String,
+}
+
+const BROWSER_SESSIONS_FOREIGN_KEYS: &[ExpectedForeignKey] = &[ExpectedForeignKey {
+    from_column: "user_id",
+    parent_table: "users",
+    parent_column: "user_id",
+}];
+
+const WORKSPACES_FOREIGN_KEYS: &[ExpectedForeignKey] = &[ExpectedForeignKey {
+    from_column: "owner_user_id",
+    parent_table: "users",
+    parent_column: "user_id",
+}];
+
+const SESSIONS_FOREIGN_KEYS: &[ExpectedForeignKey] = &[
+    ExpectedForeignKey {
+        from_column: "workspace_id",
+        parent_table: "workspaces",
+        parent_column: "workspace_id",
+    },
+    ExpectedForeignKey {
+        from_column: "owner_user_id",
+        parent_table: "users",
+        parent_column: "user_id",
+    },
+];
+
+const BROWSER_SESSIONS_REBUILD_COLUMNS: &[TableRebuildColumn] = &[
+    TableRebuildColumn {
+        name: "browser_session_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "user_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "created_at",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "last_seen_at",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "deleted_at",
+        fallback_sql: Some("NULL"),
+    },
+];
+
+const WORKSPACES_REBUILD_COLUMNS: &[TableRebuildColumn] = &[
+    TableRebuildColumn {
+        name: "workspace_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "owner_user_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "name",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "upstream_url",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "default_ref",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "credential_reference_id",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "status",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "bootstrap_kind",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "created_at",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "updated_at",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "deleted_at",
+        fallback_sql: Some("NULL"),
+    },
+];
+
+const SESSIONS_REBUILD_COLUMNS: &[TableRebuildColumn] = &[
+    TableRebuildColumn {
+        name: "session_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "workspace_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "owner_user_id",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "title",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "status",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "checkout_relpath",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "checkout_ref",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "checkout_commit_sha",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "failure_reason",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "detach_deadline_at",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "restartable_deadline_at",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "created_at",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "last_activity_at",
+        fallback_sql: None,
+    },
+    TableRebuildColumn {
+        name: "latest_sequence",
+        fallback_sql: Some("0"),
+    },
+    TableRebuildColumn {
+        name: "messages_json",
+        fallback_sql: Some("'[]'"),
+    },
+    TableRebuildColumn {
+        name: "closed_at",
+        fallback_sql: Some("NULL"),
+    },
+    TableRebuildColumn {
+        name: "deleted_at",
+        fallback_sql: Some("NULL"),
+    },
+];
+
 fn ensure_table_column(
     connection: &Connection,
     table_name: &str,
@@ -130,8 +368,206 @@ pub(in crate::workspace_store) fn initialize_schema(
     ensure_user_auth_columns(connection)?;
     ensure_session_snapshot_columns(connection)?;
     migrate_legacy_auth_schema(connection)?;
+    prune_orphaned_foreign_key_rows(connection)?;
+    ensure_foreign_key_tables(connection)?;
     recreate_users_username_index(connection)?;
+    ensure_foreign_key_integrity(connection)?;
     Ok(())
+}
+
+fn prune_orphaned_foreign_key_rows(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    connection
+        .execute_batch(
+            "DELETE FROM workspaces
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM users
+                 WHERE users.user_id = workspaces.owner_user_id
+             );
+
+             DELETE FROM sessions
+             WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM workspaces
+                     WHERE workspaces.workspace_id = sessions.workspace_id
+                 )
+                OR NOT EXISTS (
+                     SELECT 1
+                     FROM users
+                     WHERE users.user_id = sessions.owner_user_id
+                 );
+
+             DELETE FROM browser_sessions
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM users
+                 WHERE users.user_id = browser_sessions.user_id
+             );",
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn ensure_foreign_key_tables(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    rebuild_table_with_foreign_keys_if_needed(
+        connection,
+        "browser_sessions",
+        BROWSER_SESSIONS_REBUILD_TABLE_SQL,
+        BROWSER_SESSIONS_REBUILD_COLUMNS,
+        BROWSER_SESSIONS_FOREIGN_KEYS,
+    )?;
+    rebuild_table_with_foreign_keys_if_needed(
+        connection,
+        "workspaces",
+        WORKSPACES_REBUILD_TABLE_SQL,
+        WORKSPACES_REBUILD_COLUMNS,
+        WORKSPACES_FOREIGN_KEYS,
+    )?;
+    rebuild_table_with_foreign_keys_if_needed(
+        connection,
+        "sessions",
+        SESSIONS_REBUILD_TABLE_SQL,
+        SESSIONS_REBUILD_COLUMNS,
+        SESSIONS_FOREIGN_KEYS,
+    )?;
+    connection
+        .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn rebuild_table_with_foreign_keys_if_needed(
+    connection: &Connection,
+    table_name: &str,
+    create_table_sql_template: &str,
+    columns: &[TableRebuildColumn],
+    expected_foreign_keys: &[ExpectedForeignKey],
+) -> Result<(), WorkspaceStoreError> {
+    if !table_exists(connection, table_name)?
+        || table_has_expected_foreign_keys(connection, table_name, expected_foreign_keys)?
+    {
+        return Ok(());
+    }
+
+    let existing_columns = table_columns(connection, table_name)?;
+    let temp_table_name = format!("__acp_rebuild_{table_name}");
+    let insert_columns = columns
+        .iter()
+        .map(|column| column.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_columns = columns
+        .iter()
+        .map(|column| rebuild_select_expression(table_name, &existing_columns, *column))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let create_table_sql = create_table_sql_template.replace("{table_name}", &temp_table_name);
+
+    connection
+        .execute_batch(&format!(
+            "DROP TABLE IF EXISTS {temp_table_name};
+             {create_table_sql};
+             INSERT INTO {temp_table_name} ({insert_columns})
+             SELECT {select_columns}
+             FROM {table_name};
+             DROP TABLE {table_name};
+             ALTER TABLE {temp_table_name} RENAME TO {table_name};"
+        ))
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn rebuild_select_expression(
+    table_name: &str,
+    existing_columns: &[String],
+    column: TableRebuildColumn,
+) -> Result<String, WorkspaceStoreError> {
+    if existing_columns
+        .iter()
+        .any(|existing| existing == column.name)
+    {
+        return Ok(column.name.to_string());
+    }
+
+    column.fallback_sql.map(str::to_string).ok_or_else(|| {
+        WorkspaceStoreError::Database(format!(
+            "table '{table_name}' is missing required column '{}'",
+            column.name
+        ))
+    })
+}
+
+fn table_has_expected_foreign_keys(
+    connection: &Connection,
+    table_name: &str,
+    expected_foreign_keys: &[ExpectedForeignKey],
+) -> Result<bool, WorkspaceStoreError> {
+    let actual_foreign_keys = table_foreign_keys(connection, table_name)?;
+    Ok(actual_foreign_keys.len() == expected_foreign_keys.len()
+        && expected_foreign_keys.iter().all(|expected| {
+            actual_foreign_keys.iter().any(|actual| {
+                actual.from_column == expected.from_column
+                    && actual.parent_table == expected.parent_table
+                    && actual.parent_column == expected.parent_column
+            })
+        }))
+}
+
+fn table_foreign_keys(
+    connection: &Connection,
+    table_name: &str,
+) -> Result<Vec<ForeignKeyReference>, WorkspaceStoreError> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA foreign_key_list({table_name})"))
+        .map_err(database_error)?;
+    statement
+        .query_map([], |row| {
+            Ok(ForeignKeyReference {
+                parent_table: row.get(2)?,
+                from_column: row.get(3)?,
+                parent_column: row.get(4)?,
+            })
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+}
+
+fn ensure_foreign_key_integrity(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(database_error)?;
+    let violations = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    let details = violations
+        .into_iter()
+        .map(|(table, row_id, parent, fk_index)| {
+            format!(
+                "{table}(rowid={}) -> {parent} [fk#{fk_index}]",
+                row_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "NULL".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(WorkspaceStoreError::Database(format!(
+        "foreign key check failed: {details}"
+    )))
 }
 
 fn ensure_user_auth_columns(connection: &Connection) -> Result<(), WorkspaceStoreError> {

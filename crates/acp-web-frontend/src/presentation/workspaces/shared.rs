@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use acp_contracts_sessions::SessionListItem;
-use acp_contracts_workspaces::WorkspaceSummary;
+use acp_contracts_workspaces::{WorkspaceBranch, WorkspaceSummary};
 use leptos::prelude::*;
 
 #[cfg(target_family = "wasm")]
@@ -27,12 +27,19 @@ pub(super) struct WorkspacesPageState {
     pub(super) workspace_sessions: RwSignal<HashMap<String, Vec<SessionListItem>>>,
     pub(super) show_create_modal: RwSignal<bool>,
     pub(super) create_name: RwSignal<String>,
+    pub(super) create_upstream_url: RwSignal<String>,
     pub(super) creating: RwSignal<bool>,
     pub(super) editing_workspace_id: RwSignal<Option<String>>,
     pub(super) edit_name_draft: RwSignal<String>,
     pub(super) saving_workspace_id: RwSignal<Option<String>>,
     pub(super) deleting_workspace_id: RwSignal<Option<String>>,
     pub(super) opening_chat_workspace_id: RwSignal<Option<String>>,
+    pub(super) show_start_chat_modal: RwSignal<bool>,
+    pub(super) start_chat_workspace_id: RwSignal<Option<String>>,
+    pub(super) start_chat_workspace_name: RwSignal<String>,
+    pub(super) start_chat_branches: RwSignal<Vec<WorkspaceBranch>>,
+    pub(super) start_chat_selected_branch: RwSignal<String>,
+    pub(super) start_chat_loading_branches: RwSignal<bool>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -47,15 +54,29 @@ impl WorkspacesPageState {
             workspace_sessions: RwSignal::new(HashMap::new()),
             show_create_modal: RwSignal::new(false),
             create_name: RwSignal::new(String::new()),
+            create_upstream_url: RwSignal::new(String::new()),
             creating: RwSignal::new(false),
             editing_workspace_id: RwSignal::new(None::<String>),
             edit_name_draft: RwSignal::new(String::new()),
             saving_workspace_id: RwSignal::new(None::<String>),
             deleting_workspace_id: RwSignal::new(None::<String>),
             opening_chat_workspace_id: RwSignal::new(None::<String>),
+            show_start_chat_modal: RwSignal::new(false),
+            start_chat_workspace_id: RwSignal::new(None::<String>),
+            start_chat_workspace_name: RwSignal::new(String::new()),
+            start_chat_branches: RwSignal::new(Vec::<WorkspaceBranch>::new()),
+            start_chat_selected_branch: RwSignal::new(String::new()),
+            start_chat_loading_branches: RwSignal::new(false),
             checked: RwSignal::new(false),
         }
     }
+}
+
+pub(crate) fn default_branch_ref_name(branches: &[WorkspaceBranch]) -> String {
+    branches
+        .first()
+        .map(|branch| branch.ref_name.clone())
+        .unwrap_or_default()
 }
 
 pub(crate) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
@@ -209,14 +230,39 @@ mod tests {
             assert!(state.workspace_sessions.get().is_empty());
             assert!(!state.show_create_modal.get());
             assert!(state.create_name.get().is_empty());
+            assert!(state.create_upstream_url.get().is_empty());
             assert!(!state.creating.get());
             assert!(state.editing_workspace_id.get().is_none());
             assert!(state.edit_name_draft.get().is_empty());
             assert!(state.saving_workspace_id.get().is_none());
             assert!(state.deleting_workspace_id.get().is_none());
             assert!(state.opening_chat_workspace_id.get().is_none());
+            assert!(!state.show_start_chat_modal.get());
+            assert!(state.start_chat_workspace_id.get().is_none());
+            assert!(state.start_chat_workspace_name.get().is_empty());
+            assert!(state.start_chat_branches.get().is_empty());
+            assert!(state.start_chat_selected_branch.get().is_empty());
+            assert!(!state.start_chat_loading_branches.get());
             assert!(!state.checked.get());
         });
+    }
+
+    #[test]
+    fn default_branch_ref_name_prefers_the_first_branch() {
+        assert!(default_branch_ref_name(&[]).is_empty());
+        assert_eq!(
+            default_branch_ref_name(&[
+                WorkspaceBranch {
+                    name: "main".to_string(),
+                    ref_name: "refs/heads/main".to_string(),
+                },
+                WorkspaceBranch {
+                    name: "release".to_string(),
+                    ref_name: "refs/heads/release".to_string(),
+                },
+            ]),
+            "refs/heads/main"
+        );
     }
 
     #[test]

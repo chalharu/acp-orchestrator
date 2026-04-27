@@ -21,6 +21,11 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::sessions::TurnHandle;
+use crate::workspace_checkout::FsWorkspaceCheckoutManager;
+#[cfg(test)]
+use crate::workspace_checkout::{
+    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutManager,
+};
 #[cfg(test)]
 use crate::workspace_store::SqliteWorkspaceRepository;
 use crate::{
@@ -31,6 +36,7 @@ use crate::{
     contract_health::ErrorResponse,
     mock_client::{MockClient, MockClientError, ReplyProvider},
     sessions::{SessionStore, SessionStoreError},
+    workspace_checkout::DynWorkspaceCheckoutManager,
     workspace_records::{UserRecord, WorkspaceStoreError},
     workspace_repository::WorkspaceRepository,
 };
@@ -61,7 +67,7 @@ use self::session_service::{
 };
 use self::workspace_api::{
     create_workspace, create_workspace_session, delete_workspace, get_workspace,
-    list_workspace_sessions, list_workspaces, update_workspace,
+    list_workspace_branches, list_workspace_sessions, list_workspaces, update_workspace,
 };
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -140,6 +146,7 @@ pub struct AppState {
     store: Arc<SessionStore>,
     workspace_repository: Arc<dyn WorkspaceRepository>,
     reply_provider: Arc<dyn ReplyProvider>,
+    checkout_manager: DynWorkspaceCheckoutManager,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
     frontend_dist: Option<Arc<PathBuf>>,
@@ -160,13 +167,37 @@ impl AppState {
         config: ServerConfig,
         workspace_repository: Arc<dyn WorkspaceRepository>,
     ) -> Result<Self, AppStateBuildError> {
-        Ok(Self {
-            store: Arc::new(SessionStore::new(config.session_cap)),
+        let store = Arc::new(SessionStore::new(config.session_cap));
+        let reply_provider = Arc::new(MockClient::new(config.acp_server)?);
+        let checkout_manager: DynWorkspaceCheckoutManager =
+            Arc::new(FsWorkspaceCheckoutManager::new(config.state_dir));
+
+        Ok(Self::with_services(
+            store,
             workspace_repository,
-            reply_provider: Arc::new(MockClient::new(config.acp_server)?),
-            startup_hints: config.startup_hints,
-            frontend_dist: config.frontend_dist.map(Arc::new),
-        })
+            reply_provider,
+            checkout_manager,
+            config.startup_hints,
+            config.frontend_dist,
+        ))
+    }
+
+    pub fn with_services(
+        store: Arc<SessionStore>,
+        workspace_repository: Arc<dyn WorkspaceRepository>,
+        reply_provider: Arc<dyn ReplyProvider>,
+        checkout_manager: DynWorkspaceCheckoutManager,
+        startup_hints: bool,
+        frontend_dist: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            store,
+            workspace_repository,
+            reply_provider,
+            checkout_manager,
+            startup_hints,
+            frontend_dist: frontend_dist.map(Arc::new),
+        }
     }
 
     #[cfg(test)]
@@ -174,13 +205,12 @@ impl AppState {
         store: Arc<SessionStore>,
         reply_provider: Arc<dyn ReplyProvider>,
     ) -> Self {
-        Self {
+        Self::with_workspace_repository_and_checkout_manager(
             store,
-            workspace_repository: new_ephemeral_workspace_repository(),
+            new_ephemeral_workspace_repository(),
             reply_provider,
-            startup_hints: false,
-            frontend_dist: None,
-        }
+            test_checkout_manager(),
+        )
     }
 
     #[cfg(test)]
@@ -189,13 +219,29 @@ impl AppState {
         workspace_repository: Arc<dyn WorkspaceRepository>,
         reply_provider: Arc<dyn ReplyProvider>,
     ) -> Self {
-        Self {
+        Self::with_workspace_repository_and_checkout_manager(
             store,
             workspace_repository,
             reply_provider,
-            startup_hints: false,
-            frontend_dist: None,
-        }
+            test_checkout_manager(),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn with_workspace_repository_and_checkout_manager(
+        store: Arc<SessionStore>,
+        workspace_repository: Arc<dyn WorkspaceRepository>,
+        reply_provider: Arc<dyn ReplyProvider>,
+        checkout_manager: DynWorkspaceCheckoutManager,
+    ) -> Self {
+        Self::with_services(
+            store,
+            workspace_repository,
+            reply_provider,
+            checkout_manager,
+            false,
+            None,
+        )
     }
 
     async fn owner_context(
@@ -240,6 +286,10 @@ fn read_api_routes() -> Router<AppState> {
         .route("/api/v1/sessions", get(list_sessions))
         .route("/api/v1/workspaces", get(list_workspaces))
         .route("/api/v1/workspaces/{workspace_id}", get(get_workspace))
+        .route(
+            "/api/v1/workspaces/{workspace_id}/branches",
+            get(list_workspace_branches),
+        )
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
             get(list_workspace_sessions),
@@ -321,6 +371,74 @@ fn new_ephemeral_workspace_repository() -> Arc<dyn WorkspaceRepository> {
     )
 }
 
+#[cfg(test)]
+fn test_checkout_manager() -> DynWorkspaceCheckoutManager {
+    Arc::new(TestWorkspaceCheckoutManager)
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestWorkspaceCheckoutManager;
+
+#[cfg(test)]
+fn test_checkout_path(checkout_relpath: &str) -> PathBuf {
+    std::env::temp_dir().join(checkout_relpath)
+}
+
+#[cfg(test)]
+fn reset_test_checkout_dir(working_dir: &std::path::Path) -> Result<(), WorkspaceCheckoutError> {
+    if working_dir.exists() {
+        std::fs::remove_dir_all(working_dir).map_err(|error| {
+            WorkspaceCheckoutError::Io(format!("clearing test checkout directory failed: {error}"))
+        })?;
+    }
+    std::fs::create_dir_all(working_dir).map_err(|error| {
+        WorkspaceCheckoutError::Io(format!("creating test checkout directory failed: {error}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl WorkspaceCheckoutManager for TestWorkspaceCheckoutManager {
+    async fn prepare_checkout(
+        &self,
+        _workspace: &crate::workspace_records::WorkspaceRecord,
+        session_id: &str,
+        checkout_ref_override: Option<&str>,
+    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+        let checkout_relpath = format!("session-checkouts/{session_id}");
+        let working_dir = test_checkout_path(&checkout_relpath);
+        reset_test_checkout_dir(&working_dir)?;
+        Ok(PreparedWorkspaceCheckout {
+            checkout_relpath,
+            checkout_ref: checkout_ref_override.map(str::to_string),
+            checkout_commit_sha: Some("test-commit".to_string()),
+            working_dir,
+        })
+    }
+
+    fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
+        Some(test_checkout_path(checkout_relpath))
+    }
+
+    async fn list_branches(
+        &self,
+        _workspace: &crate::workspace_records::WorkspaceRecord,
+    ) -> Result<Vec<crate::contract_workspaces::WorkspaceBranch>, WorkspaceCheckoutError> {
+        Ok(vec![
+            crate::contract_workspaces::WorkspaceBranch {
+                name: "main".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            crate::contract_workspaces::WorkspaceBranch {
+                name: "release".to_string(),
+                ref_name: "refs/heads/release".to_string(),
+            },
+        ])
+    }
+}
+
 #[derive(Debug)]
 pub enum AppError {
     Unauthorized(String),
@@ -360,13 +478,15 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (
-            self.status_code(),
-            axum::Json(ErrorResponse {
-                error: self.message().to_string(),
-            }),
-        )
-            .into_response()
+        let status = self.status_code();
+        let message = match &self {
+            Self::Internal(message) => {
+                tracing::error!(error = %message, "request failed with internal error");
+                "internal server error".to_string()
+            }
+            _ => self.message().to_string(),
+        };
+        (status, axum::Json(ErrorResponse { error: message })).into_response()
     }
 }
 

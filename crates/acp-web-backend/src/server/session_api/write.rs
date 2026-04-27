@@ -1,14 +1,16 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Extension, Path, State},
 };
+use serde::de::DeserializeOwned;
 
 use crate::auth::AuthenticatedPrincipal;
 use crate::contract_messages::{PromptRequest, PromptResponse};
 use crate::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
 use crate::contract_sessions::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionResponse, DeleteSessionResponse,
-    RenameSessionRequest, RenameSessionResponse,
+    CancelTurnResponse, CloseSessionResponse, CreateSessionRequest, CreateSessionResponse,
+    DeleteSessionResponse, RenameSessionRequest, RenameSessionResponse,
 };
 
 use super::super::{
@@ -22,13 +24,28 @@ use super::super::{
 pub(in crate::server) async fn create_session(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
+    body: Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateSessionResponse>), AppError> {
-    let session = create_session_snapshot(&state, principal).await?;
+    let request = parse_optional_json_body::<CreateSessionRequest>(&body)?.unwrap_or_default();
+    let session = create_session_snapshot(&state, principal, request.checkout_ref).await?;
 
     Ok((
         axum::http::StatusCode::CREATED,
         Json(CreateSessionResponse { session }),
     ))
+}
+
+pub(in crate::server) fn parse_optional_json_body<T>(body: &[u8]) -> Result<Option<T>, AppError>
+where
+    T: DeserializeOwned,
+{
+    if body.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+
+    serde_json::from_slice(body)
+        .map(Some)
+        .map_err(|error| AppError::BadRequest(format!("invalid request body: {error}")))
 }
 
 pub(in crate::server) async fn rename_session(

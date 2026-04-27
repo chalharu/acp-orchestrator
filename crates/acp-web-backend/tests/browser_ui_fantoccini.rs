@@ -32,6 +32,7 @@ const WEBDRIVER_READY_ATTEMPTS: usize = 50;
 const WEBDRIVER_READY_DELAY: Duration = Duration::from_millis(100);
 const WEBDRIVER_START_RETRIES: usize = 5;
 const BROWSER_WORKSPACE_NAME: &str = "Browser Workspace";
+const BROWSER_WORKSPACE_REPOSITORY_URL: &str = "https://example.com/browser-workspace.git";
 
 fn mock_reply_for(prompt: &str) -> String {
     let compact_prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -385,9 +386,43 @@ async fn workspaces_page_can_create_update_and_delete_workspace() -> Result<()> 
         let renamed = "Browser-Test Workspace Renamed";
         browser.create_workspace_and_confirm(workspace_name).await?;
         browser
+            .wait_for_body_text(BROWSER_WORKSPACE_REPOSITORY_URL, Duration::from_secs(10))
+            .await?;
+        browser
             .rename_workspace_and_confirm(workspace_name, renamed)
             .await?;
         browser.delete_workspace_and_confirm(renamed).await?;
+
+        Ok(())
+    }
+    .await;
+
+    browser.shutdown().await;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires ChromeDriver, Chrome, and a built frontend bundle"]
+async fn workspaces_page_cancels_rename_when_clicking_outside_input() -> Result<()> {
+    let browser = BrowserHarness::spawn((1280, 960)).await?;
+    let result = async {
+        browser.open_app().await?;
+        browser.wait_for_workspaces_page().await?;
+
+        let workspace_name = "Rename Outside Click Workspace";
+        browser.create_workspace_and_confirm(workspace_name).await?;
+        browser.open_workspace_rename(workspace_name).await?;
+        browser.click_workspace_page_heading().await?;
+        browser
+            .wait_for_condition(
+                "return !document.querySelector('.workspace-name-input');",
+                Duration::from_secs(10),
+                "rename form to close after outside click",
+            )
+            .await?;
+        browser
+            .wait_for_body_text(workspace_name, Duration::from_secs(10))
+            .await?;
 
         Ok(())
     }
@@ -479,6 +514,9 @@ async fn assert_session_sidebar_workspace(
     browser: &BrowserHarness,
     workspace_name: &str,
 ) -> Result<()> {
+    browser
+        .wait_for_session_sidebar_workspace_label(workspace_name, Duration::from_secs(30))
+        .await?;
     assert_eq!(
         browser.session_sidebar_workspace_label().await?,
         format!("Workspace: {workspace_name}")
@@ -497,6 +535,14 @@ async fn open_workspace_chat_for_storage_cleanup(browser: &BrowserHarness) -> Re
 }
 
 async fn assert_session_storage_present(browser: &BrowserHarness, key: &str) -> Result<()> {
+    let encoded_key = serde_json::to_string(key).context("encoding session storage key")?;
+    browser
+        .wait_for_condition(
+            &format!("return window.sessionStorage.getItem({encoded_key}) !== null;"),
+            Duration::from_secs(10),
+            "session storage item",
+        )
+        .await?;
     assert!(browser.session_storage_item(key).await?.is_some());
     Ok(())
 }
@@ -761,6 +807,24 @@ impl BrowserHarness {
     }
 
     async fn focused_composer(&self) -> Result<fantoccini::elements::Element> {
+        self.wait_for_condition(
+            "const composer = document.querySelector('#composer-input');\
+             if (!composer) return false;\
+             const rect = composer.getBoundingClientRect();\
+             return !composer.disabled && rect.width > 0 && rect.height > 0;",
+            Duration::from_secs(10),
+            "enabled composer",
+        )
+        .await?;
+        self.wait_for_condition(
+            "const composer = document.querySelector('#composer-input');\
+             if (!composer || composer.disabled) return false;\
+             composer.focus();\
+             return document.activeElement === composer;",
+            Duration::from_secs(10),
+            "focused composer",
+        )
+        .await?;
         let composer = self
             .client
             .find(Locator::Css(COMPOSER_SELECTOR))
@@ -941,6 +1005,24 @@ impl BrowserHarness {
         .await
     }
 
+    async fn wait_for_session_sidebar_workspace_label(
+        &self,
+        workspace_name: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let expected = serde_json::to_string(&format!("Workspace: {workspace_name}"))
+            .context("encoding workspace label")?;
+        self.wait_for_condition(
+            &format!(
+                "return document.querySelector('.session-sidebar__workspace')\
+                 ?.textContent?.trim() === {expected};"
+            ),
+            timeout,
+            &format!("workspace label for {workspace_name}"),
+        )
+        .await
+    }
+
     async fn click_workspaces_link(&self) -> Result<()> {
         self.wait_for_condition(
             "return Boolean(document.querySelector(\
@@ -981,12 +1063,44 @@ impl BrowserHarness {
             )
             .await
             .context("clicking the session sidebar new chat button")?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-modal-overlay .workspace-branch-select'));",
+            Duration::from_secs(10),
+            "session sidebar new chat modal",
+        )
+        .await?;
+        self.select_branch_in_visible_modal("refs/heads/main")
+            .await?;
+        self.client
+            .find(Locator::Css(".workspace-modal .account-form__submit"))
+            .await
+            .context("finding the session sidebar start chat submit button")?
+            .click()
+            .await
+            .context("submitting the session sidebar start chat form")?;
         Ok(())
     }
 
     async fn create_workspace(&self, name: &str) -> Result<()> {
-        // In the new UI, workspace creation is behind a modal triggered by the
-        // "+ New workspace" button.  Open the modal first.
+        self.open_create_workspace_modal().await?;
+        self.fill_create_workspace_input(
+            ".workspace-modal input[type='text']",
+            name,
+            "workspace name input in modal",
+            "workspace name",
+        )
+        .await?;
+        self.fill_create_workspace_input(
+            ".workspace-modal input[type='url']",
+            BROWSER_WORKSPACE_REPOSITORY_URL,
+            "workspace repository url input in modal",
+            "workspace repository url",
+        )
+        .await?;
+        self.submit_create_workspace_form().await
+    }
+
+    async fn open_create_workspace_modal(&self) -> Result<()> {
         self.client
             .find(Locator::Css(".workspace-dashboard__new-btn"))
             .await
@@ -1000,20 +1114,33 @@ impl BrowserHarness {
             Duration::from_secs(10),
             "workspace name input in modal",
         )
-        .await?;
+        .await
+    }
+
+    async fn fill_create_workspace_input(
+        &self,
+        selector: &'static str,
+        value: &str,
+        field_context: &str,
+        field_label: &str,
+    ) -> Result<()> {
         let input = self
             .client
-            .find(Locator::Css(".workspace-modal input[type='text']"))
+            .find(Locator::Css(selector))
             .await
-            .context("finding workspace name input in modal")?;
+            .with_context(|| format!("finding {field_context}"))?;
         input
             .click()
             .await
-            .context("focusing workspace name input")?;
+            .with_context(|| format!("focusing {field_label}"))?;
         input
-            .send_keys(name)
+            .send_keys(value)
             .await
-            .context("typing workspace name")?;
+            .with_context(|| format!("typing {field_label}"))?;
+        Ok(())
+    }
+
+    async fn submit_create_workspace_form(&self) -> Result<()> {
         self.client
             .find(Locator::Css(".workspace-modal .account-form__submit"))
             .await
@@ -1030,6 +1157,15 @@ impl BrowserHarness {
     }
 
     async fn open_workspace_chat_and_confirm(&self, name: &str) -> Result<()> {
+        self.open_workspace_chat_and_confirm_with_ref(name, None)
+            .await
+    }
+
+    async fn open_workspace_chat_and_confirm_with_ref(
+        &self,
+        name: &str,
+        checkout_ref: Option<&str>,
+    ) -> Result<()> {
         self.wait_for_workspace_action_button(
             ".workspace-action-btn",
             name,
@@ -1039,7 +1175,45 @@ impl BrowserHarness {
         .await?;
         self.click_workspace_action_button(".workspace-action-btn", name, "New chat")
             .await?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-modal-overlay .workspace-branch-select'));",
+            Duration::from_secs(10),
+            "start chat modal",
+        )
+        .await?;
+        self.select_branch_in_visible_modal(checkout_ref.unwrap_or("refs/heads/main"))
+            .await?;
+        self.client
+            .find(Locator::Css(".workspace-modal .account-form__submit"))
+            .await
+            .context("finding the start chat submit button")?
+            .click()
+            .await
+            .context("submitting the start chat form")?;
         self.wait_for_session_page().await
+    }
+
+    async fn select_branch_in_visible_modal(&self, checkout_ref: &str) -> Result<()> {
+        self.wait_for_condition(
+            "const select = document.querySelector('.workspace-modal .workspace-branch-select');\
+             return Boolean(select) && !select.disabled;",
+            Duration::from_secs(10),
+            "workspace branch select",
+        )
+        .await?;
+        self.client
+            .execute(
+                "const select = document.querySelector('.workspace-modal .workspace-branch-select');\
+                 const targetValue = arguments[0];\
+                 if (select) {\
+                   select.value = targetValue;\
+                   select.dispatchEvent(new Event('change', { bubbles: true }));\
+                 }",
+                vec![json!(checkout_ref)],
+            )
+            .await
+            .context("selecting the workspace branch")?;
+        Ok(())
     }
 
     async fn rename_workspace(&self, current_name: &str, new_name: &str) -> Result<()> {
@@ -1195,6 +1369,17 @@ impl BrowserHarness {
             )
             .await
             .context("clicking the back to chat link")?;
+        Ok(())
+    }
+
+    async fn click_workspace_page_heading(&self) -> Result<()> {
+        self.client
+            .find(Locator::Css("h1"))
+            .await
+            .context("finding the workspace page heading")?
+            .click()
+            .await
+            .context("clicking the workspace page heading")?;
         Ok(())
     }
 

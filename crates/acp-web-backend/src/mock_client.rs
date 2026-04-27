@@ -27,8 +27,11 @@ use backend_client::BackendAcpClient;
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
 pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Send + 'a>>;
 pub type PrimeSessionFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
+pub type BindSessionFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>>;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
+type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
 type SessionLock = Arc<tokio::sync::Mutex<()>>;
 type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
 
@@ -42,6 +45,14 @@ pub enum ReplyResult {
 pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
     fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a>;
 
+    fn bind_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _working_dir: PathBuf,
+    ) -> BindSessionFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn prime_session<'a>(&'a self, _session_id: &'a str) -> PrimeSessionFuture<'a> {
         Box::pin(async { Ok(None) })
     }
@@ -53,7 +64,8 @@ pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
 pub struct MockClient {
     mock_address: String,
     request_timeout: Duration,
-    working_dir: PathBuf,
+    default_working_dir: PathBuf,
+    session_working_dirs: SessionWorkingDirs,
     upstream_sessions: UpstreamSessions,
     session_locks: SessionLocks,
 }
@@ -113,7 +125,8 @@ impl MockClient {
         Ok(Self {
             mock_address,
             request_timeout,
-            working_dir,
+            default_working_dir: working_dir,
+            session_working_dirs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             upstream_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -162,6 +175,10 @@ impl MockClient {
     }
 
     async fn forget_session(&self, backend_session_id: &str) {
+        self.session_working_dirs
+            .lock()
+            .await
+            .remove(backend_session_id);
         self.upstream_sessions
             .lock()
             .await
@@ -187,7 +204,7 @@ impl MockClient {
         F: FnOnce(String, PathBuf, Duration, UpstreamSessions) -> Result<T> + Send + 'static,
     {
         let mock_address = self.mock_address.clone();
-        let working_dir = self.working_dir.clone();
+        let working_dir = self.session_working_dir(&backend_session_id).await;
         let request_timeout = self.request_timeout;
         let upstream_sessions = self.upstream_sessions.clone();
         let session_lock = self.session_lock(&backend_session_id).await;
@@ -213,11 +230,34 @@ impl MockClient {
             .get(backend_session_id)
             .cloned()
     }
+
+    async fn session_working_dir(&self, backend_session_id: &str) -> PathBuf {
+        self.session_working_dirs
+            .lock()
+            .await
+            .get(backend_session_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_working_dir.clone())
+    }
 }
 
 impl ReplyProvider for MockClient {
     fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a> {
         Box::pin(MockClient::request_reply(self, turn))
+    }
+
+    fn bind_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        working_dir: PathBuf,
+    ) -> BindSessionFuture<'a> {
+        Box::pin(async move {
+            self.session_working_dirs
+                .lock()
+                .await
+                .insert(session_id.to_string(), working_dir);
+            Ok(())
+        })
     }
 
     fn prime_session<'a>(&'a self, session_id: &'a str) -> PrimeSessionFuture<'a> {

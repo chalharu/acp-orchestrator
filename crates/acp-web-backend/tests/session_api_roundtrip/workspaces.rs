@@ -1,4 +1,5 @@
 use super::support::*;
+use acp_web_backend::contract_sessions::CreateSessionRequest;
 use acp_web_backend::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
 async fn workspace_stack() -> Result<TestStack> {
@@ -15,8 +16,7 @@ async fn workspace_stack() -> Result<TestStack> {
 fn repo_workspace_request(name: &str) -> CreateWorkspaceRequest {
     CreateWorkspaceRequest {
         name: name.to_string(),
-        upstream_url: Some("https://example.com/repo.git".to_string()),
-        default_ref: Some("refs/heads/main".to_string()),
+        upstream_url: "https://example.com/repo.git".to_string(),
         credential_reference_id: None,
     }
 }
@@ -82,15 +82,10 @@ async fn workspace_crud_works_over_http() -> Result<()> {
             &workspace_id,
             &UpdateWorkspaceRequest {
                 name: Some("Renamed repo".to_string()),
-                default_ref: Some("refs/heads/release".to_string()),
             },
         )
         .await?;
     assert_eq!(updated.workspace.name, "Renamed repo");
-    assert_eq!(
-        updated.workspace.default_ref.as_deref(),
-        Some("refs/heads/release")
-    );
 
     stack.delete_workspace("alice", &workspace_id).await?;
     let response = stack
@@ -139,5 +134,55 @@ async fn workspace_sessions_are_scoped_over_http() -> Result<()> {
         &[&first_workspace_id, &second_workspace_id],
     )
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_session_creation_accepts_empty_and_override_bodies_over_http() -> Result<()> {
+    let stack = workspace_stack().await?;
+    let workspace_id = create_repo_workspace(&stack, "Repo").await?;
+
+    let empty = stack
+        .create_workspace_session("alice", &workspace_id)
+        .await?;
+    let override_request = CreateSessionRequest {
+        checkout_ref: Some("HEAD".to_string()),
+    };
+    let overridden = stack
+        .create_workspace_session_with_request("alice", &workspace_id, Some(&override_request))
+        .await?;
+
+    assert_eq!(empty.session.workspace_id, workspace_id);
+    assert_eq!(overridden.session.workspace_id, workspace_id);
+    assert_ne!(empty.session.id, overridden.session.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_branch_lists_are_available_over_http() -> Result<()> {
+    let stack = workspace_stack().await?;
+    let workspace_id = create_repo_workspace(&stack, "Repo").await?;
+
+    let response = stack
+        .client
+        .get(format!(
+            "{}/api/v1/workspaces/{workspace_id}/branches",
+            stack.backend_url
+        ))
+        .bearer_auth("alice")
+        .send()
+        .await?
+        .error_for_status()?;
+    let payload: acp_web_backend::contract_workspaces::WorkspaceBranchListResponse =
+        response.json().await?;
+
+    assert_eq!(
+        payload
+            .branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["refs/heads/main", "refs/heads/release"]
+    );
     Ok(())
 }

@@ -6,7 +6,7 @@ use crate::contract_accounts::{
 use crate::contract_messages::PromptRequest;
 use crate::contract_sessions::{SessionSnapshot, SessionStatus};
 use crate::contract_workspaces::CreateWorkspaceRequest;
-use crate::mock_client::{MockClientError, ReplyFuture, ReplyResult};
+use crate::mock_client::{BindSessionFuture, MockClientError, ReplyFuture, ReplyResult};
 use crate::support::frontend::{FrontendBundleAsset, frontend_bundle_file_name};
 use crate::support::http::build_http_client_for_url;
 use crate::workspace_records::{
@@ -24,7 +24,10 @@ use axum::{
     },
     response::Response,
 };
-use std::sync::{Arc as StdArc, Mutex};
+use std::sync::{
+    Arc as StdArc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
@@ -91,6 +94,7 @@ fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
         reply_provider: Arc::new(StaticReplyProvider {
             reply: String::new(),
         }),
+        checkout_manager: test_checkout_manager(),
         startup_hints: false,
         frontend_dist: Some(Arc::new(dist)),
     }
@@ -232,8 +236,7 @@ async fn create_owned_workspace_for_principal(
         principal,
         Json(CreateWorkspaceRequest {
             name: name.to_string(),
-            upstream_url: None,
-            default_ref: None,
+            upstream_url: "https://example.com/test-workspace.git".to_string(),
             credential_reference_id: None,
         }),
     )
@@ -257,6 +260,7 @@ async fn create_persisted_session(
         State(context.state.clone()),
         Path(workspace.workspace_id),
         context.principal.clone(),
+        axum::body::Bytes::new(),
     )
     .await
     .expect("session creation should succeed")
@@ -605,6 +609,58 @@ impl ReplyProvider for TrackingReplyProvider {
 }
 
 #[derive(Debug)]
+struct BindingTrackingReplyProvider {
+    calls: StdArc<Mutex<Vec<String>>>,
+    bindings: StdArc<Mutex<Vec<(String, std::path::PathBuf)>>>,
+}
+
+impl BindingTrackingReplyProvider {
+    fn new() -> Self {
+        Self {
+            calls: StdArc::new(Mutex::new(Vec::new())),
+            bindings: StdArc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl ReplyProvider for BindingTrackingReplyProvider {
+    fn request_reply<'a>(&'a self, _turn: TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn bind_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        working_dir: std::path::PathBuf,
+    ) -> BindSessionFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("binding calls should not poison")
+                .push("bind".to_string());
+            self.bindings
+                .lock()
+                .expect("binding state should not poison")
+                .push((session_id.to_string(), working_dir));
+            Ok(())
+        })
+    }
+
+    fn prime_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> crate::mock_client::PrimeSessionFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("prime calls should not poison")
+                .push("prime".to_string());
+            Ok(None)
+        })
+    }
+}
+
+#[derive(Debug)]
 struct FailingWorkspaceStore {
     error: WorkspaceStoreError,
 }
@@ -624,6 +680,9 @@ struct RollbackFailingMetadataWorkspaceStore {
     user: UserRecord,
     error: WorkspaceStoreError,
     discard_before_fail: bool,
+    fail_save_attempt: Option<usize>,
+    save_attempts: AtomicUsize,
+    saved_metadata: StdArc<Mutex<Vec<SessionMetadataRecord>>>,
 }
 
 impl RollbackFailingMetadataWorkspaceStore {
@@ -639,6 +698,27 @@ impl RollbackFailingMetadataWorkspaceStore {
             user: sample_user_record(),
             error: WorkspaceStoreError::Database(message.to_string()),
             discard_before_fail,
+            fail_save_attempt: None,
+            save_attempts: AtomicUsize::new(0),
+            saved_metadata: StdArc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_save_failure_on_attempt(
+        store: Arc<SessionStore>,
+        live_owner: &str,
+        message: &str,
+        fail_save_attempt: usize,
+    ) -> Self {
+        Self {
+            store,
+            live_owner: live_owner.to_string(),
+            user: sample_user_record(),
+            error: WorkspaceStoreError::Database(message.to_string()),
+            discard_before_fail: false,
+            fail_save_attempt: Some(fail_save_attempt),
+            save_attempts: AtomicUsize::new(0),
+            saved_metadata: StdArc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -920,8 +1000,16 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
 
     async fn save_session_metadata(
         &self,
-        _record: &SessionMetadataRecord,
+        record: &SessionMetadataRecord,
     ) -> Result<(), WorkspaceStoreError> {
+        let attempt = self.save_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_save_attempt == Some(attempt) {
+            return Err(self.error.clone());
+        }
+        self.saved_metadata
+            .lock()
+            .expect("saved metadata should not poison")
+            .push(record.clone());
         Ok(())
     }
 
@@ -944,9 +1032,16 @@ impl WorkspaceRepository for RollbackFailingMetadataWorkspaceStore {
     async fn load_session_metadata(
         &self,
         _owner_user_id: &str,
-        _session_id: &str,
+        session_id: &str,
     ) -> Result<Option<SessionMetadataRecord>, WorkspaceStoreError> {
-        Ok(None)
+        Ok(self
+            .saved_metadata
+            .lock()
+            .expect("saved metadata should not poison")
+            .iter()
+            .rev()
+            .find(|record| record.session_id == session_id)
+            .cloned())
     }
 
     async fn load_session_snapshot(

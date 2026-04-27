@@ -13,6 +13,7 @@ pub mod runtime;
 pub mod server;
 pub mod sessions;
 pub mod support;
+mod workspace_checkout;
 pub mod workspace_records;
 pub mod workspace_repository;
 pub mod workspace_store;
@@ -21,3 +22,7 @@ pub use mock_client::{MockClient, MockClientError, ReplyFuture, ReplyProvider, R
 pub use runtime::{BackendAppError, run_with_args};
 pub use server::{AppError, AppState, AppStateBuildError, ServerConfig, app, serve_with_shutdown};
 pub use sessions::TurnHandle;
+pub use workspace_checkout::{
+    DynWorkspaceCheckoutManager, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
+    WorkspaceCheckoutManager,
+};

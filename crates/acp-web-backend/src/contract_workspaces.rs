@@ -1,5 +1,5 @@
 pub use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
-    UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceDetail, WorkspaceListResponse,
-    WorkspaceResponse, WorkspaceSummary,
+    UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceBranch, WorkspaceBranchListResponse,
+    WorkspaceDetail, WorkspaceListResponse, WorkspaceResponse, WorkspaceSummary,
 };

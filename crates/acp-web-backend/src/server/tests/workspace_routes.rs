@@ -1,4 +1,5 @@
 use super::*;
+use crate::contract_sessions::CreateSessionRequest;
 use crate::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
 fn workspace_state() -> AppState {
@@ -19,8 +20,7 @@ async fn create_owned_workspace(
         bearer_principal("alice"),
         Json(CreateWorkspaceRequest {
             name: name.to_string(),
-            upstream_url: Some("https://example.com/repo.git".to_string()),
-            default_ref: Some("refs/heads/main".to_string()),
+            upstream_url: "https://example.com/repo.git".to_string(),
             credential_reference_id: None,
         }),
     )
@@ -39,12 +39,45 @@ async fn create_workspace_session_for(
         State(state.clone()),
         Path(workspace_id.to_string()),
         bearer_principal("alice"),
+        axum::body::Bytes::new(),
     )
     .await
     .expect("workspace session should create")
     .1
     .0
     .session
+}
+
+#[tokio::test]
+async fn workspace_session_routes_accept_empty_and_override_request_bodies() {
+    let state = workspace_state();
+    let workspace = create_owned_workspace(&state, "Compat").await;
+
+    let empty_body = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("empty session body should remain supported");
+
+    let override_body = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::from(
+            serde_json::to_vec(&CreateSessionRequest {
+                checkout_ref: Some("refs/heads/release".to_string()),
+            })
+            .expect("request should serialize"),
+        ),
+    )
+    .await
+    .expect("override session body should be accepted");
+
+    assert_eq!(empty_body.0, StatusCode::CREATED);
+    assert_eq!(override_body.0, StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -83,16 +116,11 @@ async fn workspace_crud_handlers_round_trip_owned_workspaces() {
         bearer_principal("alice"),
         Json(UpdateWorkspaceRequest {
             name: Some("Renamed repo".to_string()),
-            default_ref: Some("refs/heads/release".to_string()),
         }),
     )
     .await
     .expect("workspace update should succeed");
     assert_eq!(updated.0.workspace.name, "Renamed repo");
-    assert_eq!(
-        updated.0.workspace.default_ref.as_deref(),
-        Some("refs/heads/release")
-    );
 
     let deleted = delete_workspace(
         State(state.clone()),
@@ -157,7 +185,7 @@ async fn workspace_session_routes_list_durable_sessions_after_live_state_is_clea
 }
 
 #[tokio::test]
-async fn workspace_updates_require_name_or_default_ref() {
+async fn workspace_updates_require_name() {
     let state = workspace_state();
     let created = create_owned_workspace(&state, "Repo").await;
 
@@ -165,15 +193,36 @@ async fn workspace_updates_require_name_or_default_ref() {
         State(state),
         Path(created.workspace_id),
         bearer_principal("alice"),
-        Json(UpdateWorkspaceRequest {
-            name: None,
-            default_ref: None,
-        }),
+        Json(UpdateWorkspaceRequest { name: None }),
     )
     .await
     .expect_err("workspace updates without mutable fields should fail");
 
     assert!(
-        matches!(error, AppError::BadRequest(message) if message == "workspace update must include name or default_ref")
+        matches!(error, AppError::BadRequest(message) if message == "workspace update must include name")
+    );
+}
+
+#[tokio::test]
+async fn workspace_branch_routes_list_available_branches() {
+    let state = workspace_state();
+    let created = create_owned_workspace(&state, "Repo").await;
+
+    let response = list_workspace_branches(
+        State(state),
+        Path(created.workspace_id),
+        bearer_principal("alice"),
+    )
+    .await
+    .expect("workspace branches should load");
+
+    assert_eq!(
+        response
+            .0
+            .branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["refs/heads/main", "refs/heads/release"]
     );
 }

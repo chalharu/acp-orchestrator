@@ -511,16 +511,19 @@ fn apply_default_cli_args(launcher_args: &mut LauncherArgs) {
         launcher_args.cli_args = vec!["chat".into(), "--new".into()];
     }
 }
+
+fn prepend_role_program_name(mut role_args: Vec<OsString>, program_name: &str) -> Vec<OsString> {
+    role_args.insert(0, OsString::from(program_name));
+    role_args
+}
+
 async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<()> {
     match role.to_string_lossy().as_ref() {
-        "cli" => {
-            let args = std::iter::once(OsString::from("acp")).chain(role_args);
-            acp_cli::run_with_args(args)
-                .await
-                .map_err(|error| LauncherError::RunCli {
-                    message: error.to_string(),
-                })
-        }
+        "cli" => acp_cli::run_with_args(prepend_role_program_name(role_args, "acp"))
+            .await
+            .map_err(|error| LauncherError::RunCli {
+                message: error.to_string(),
+            }),
         "mock" => run_mock_role(role_args).await,
         "backend" => run_backend_role(role_args).await,
         value => UnknownInternalRoleSnafu {
@@ -531,8 +534,7 @@ async fn run_internal_role(role: OsString, role_args: Vec<OsString>) -> Result<(
 }
 
 async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
-    let args = std::iter::once(OsString::from("acp-mock")).chain(role_args);
-    acp_mock::run_with_args(args)
+    acp_mock::run_with_args(prepend_role_program_name(role_args, "acp-mock"))
         .await
         .map_err(|error| LauncherError::RunMock {
             message: error.to_string(),
@@ -540,8 +542,7 @@ async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
 }
 
 async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
-    let args = std::iter::once(OsString::from("acp-web-backend")).chain(role_args);
-    acp_web_backend::run_with_args(args)
+    acp_web_backend::run_with_args(prepend_role_program_name(role_args, "acp-web-backend"))
         .await
         .map_err(|error| LauncherError::RunBackend {
             message: error.to_string(),

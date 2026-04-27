@@ -1,7 +1,7 @@
 use super::*;
 use crate::prompt::{
-    MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER, prompt_requires_permission, reply_for,
-    response_delay_for, wait_for_cancel,
+    MANUAL_CANCEL_TRIGGER, MANUAL_FAILURE_TRIGGER, MANUAL_PERMISSION_TRIGGER,
+    prompt_requires_permission, prompt_should_fail, reply_for, response_delay_for, wait_for_cancel,
 };
 use agent_client_protocol::schema;
 use std::{
@@ -453,6 +453,21 @@ fn manual_permission_trigger_is_case_and_spacing_insensitive() {
 #[test]
 fn bare_permission_words_do_not_trigger_the_permission_flow() {
     assert!(!prompt_requires_permission("permission"));
+}
+
+#[test]
+fn manual_failure_trigger_uses_the_failure_flow() {
+    assert!(prompt_should_fail(MANUAL_FAILURE_TRIGGER));
+}
+
+#[test]
+fn manual_failure_trigger_is_case_and_spacing_insensitive() {
+    assert!(prompt_should_fail("  This   Will   Fail "));
+}
+
+#[test]
+fn ordinary_prompts_do_not_trigger_failure() {
+    assert!(!prompt_should_fail("hello"));
 }
 
 #[test]

@@ -56,6 +56,18 @@ fn app_errors_map_to_the_expected_status_codes() {
     }
 }
 
+#[tokio::test]
+async fn internal_errors_are_sanitized_in_http_responses() {
+    let response = AppError::Internal("sensitive internal detail".to_string()).into_response();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should be readable");
+    let payload: crate::contract_health::ErrorResponse =
+        serde_json::from_slice(&body).expect("error payload should decode");
+
+    assert_eq!(payload.error, "internal server error");
+}
+
 #[test]
 fn auth_errors_become_unauthorized_responses() {
     let missing: AppError = AuthError::MissingAuthentication.into();
@@ -345,12 +357,16 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
         "Browser Workspace",
     )
     .await;
-    let created = create_session(State(state.clone()), Extension(browser.principal.clone()))
-        .await
-        .expect("session creation should succeed")
-        .1
-        .0
-        .session;
+    let created = create_session(
+        State(state.clone()),
+        Extension(browser.principal.clone()),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("session creation should succeed")
+    .1
+    .0
+    .session;
     state
         .workspace_repository
         .create_local_account("member", "password123", false)

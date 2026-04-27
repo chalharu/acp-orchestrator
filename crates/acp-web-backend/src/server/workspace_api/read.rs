@@ -96,3 +96,30 @@ fn map_workspace_branch_error(error: WorkspaceCheckoutError) -> AppError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_branch_errors_map_validation_to_bad_request() {
+        let error = map_workspace_branch_error(WorkspaceCheckoutError::Validation(
+            "invalid branch".to_string(),
+        ));
+
+        assert!(matches!(error, AppError::BadRequest(message) if message == "invalid branch"));
+    }
+
+    #[test]
+    fn workspace_branch_errors_map_io_and_git_to_internal() {
+        for error in [
+            WorkspaceCheckoutError::Io("io failure".to_string()),
+            WorkspaceCheckoutError::Git("git failure".to_string()),
+        ] {
+            let mapped = map_workspace_branch_error(error);
+            assert!(
+                matches!(mapped, AppError::Internal(message) if message == "workspace branch lookup failed")
+            );
+        }
+    }
+}

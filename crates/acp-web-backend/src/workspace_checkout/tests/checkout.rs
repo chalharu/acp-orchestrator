@@ -3,9 +3,10 @@ use super::super::{
     WorkspaceCheckoutError, WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout,
     checkout_fetch_head, checkout_head_commit, checkout_parent_dir, clone_local_repository,
     clone_remote_workspace, current_head_commit, git_fetch_options, git_symbolic_ref,
-    list_local_workspace_branches, local_source_root, local_source_root_from, map_git_error,
-    parse_remote_default_branch_name, prioritize_workspace_branch_ref, reject_git_credentials,
-    resolve_https_checkout_ref, resolve_local_checkout_ref, resolve_remote_head_ref,
+    list_local_workspace_branches, list_remote_workspace_branches, local_source_root,
+    local_source_root_from, map_git_error, parse_remote_default_branch_name,
+    prioritize_workspace_branch_ref, reject_git_credentials, resolve_https_checkout_ref,
+    resolve_local_checkout_ref, resolve_remote_head_ref, validate_branch_list_upstream_url,
     validate_checkout_ref, validate_https_upstream_url, workspace_branches_from_refs,
 };
 use super::*;
@@ -16,6 +17,8 @@ use git2::{
     build::RepoBuilder,
 };
 use reqwest::Url;
+#[cfg(unix)]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -270,6 +273,13 @@ async fn workspace_checkout_manager_defaults_to_unresolved_paths() {
         NoopCheckoutManager.resolve_checkout_path("session-checkouts/s_test"),
         None
     );
+    assert!(
+        NoopCheckoutManager
+            .list_branches(&sample_workspace_record(None, None))
+            .await
+            .expect("default branch listing should succeed")
+            .is_empty()
+    );
     assert_eq!(
         NoopCheckoutManager
             .prepare_checkout(&sample_workspace_record(None, None), "s_test", None)
@@ -355,6 +365,7 @@ fn checkout_ref_resolution_prefers_override_then_default_and_discovers_remote_he
 fn workspace_branch_refs_filter_non_branch_refs_and_sort_values() {
     let branches = workspace_branches_from_refs([
         "refs/tags/v1",
+        "refs/heads/",
         "refs/heads/release",
         "refs/heads/main",
         "refs/heads/main",
@@ -392,6 +403,44 @@ fn workspace_branch_preference_moves_default_ref_to_the_front() {
 }
 
 #[test]
+fn workspace_branch_preference_ignores_missing_or_absent_defaults() {
+    let original = workspace_branches_from_refs(["refs/heads/release", "refs/heads/main"]);
+
+    let mut without_default = original.clone();
+    prioritize_workspace_branch_ref(&mut without_default, None);
+    assert_eq!(without_default, original);
+
+    let mut without_match = original.clone();
+    prioritize_workspace_branch_ref(&mut without_match, Some("refs/heads/hotfix"));
+    assert_eq!(without_match, original);
+}
+
+#[test]
+fn remote_workspace_branch_listing_reads_remote_heads() {
+    let state_dir = unique_test_dir("acp-workspace-branch-list-remote-state");
+    let (remote_url, _) = create_bare_remote_repo("acp-workspace-branch-list-remote");
+
+    let branches = list_remote_workspace_branches(&remote_url, &state_dir)
+        .expect("remote branches should list");
+
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!("refs/heads/{TEST_BRANCH}")]
+    );
+}
+
+#[test]
+fn branch_list_upstream_validation_accepts_https_and_test_file_urls() {
+    validate_branch_list_upstream_url("https://example.com/repo.git")
+        .expect("https branch-list URLs should validate");
+    validate_branch_list_upstream_url("file:///tmp/repo.git")
+        .expect("test file URLs should validate");
+}
+
+#[test]
 fn local_workspace_branch_listing_reads_local_repository_heads() {
     let repo_dir = unique_test_dir("acp-workspace-branch-list-local");
     initialize_local_repo(&repo_dir);
@@ -416,6 +465,38 @@ fn local_workspace_branch_listing_reads_local_repository_heads() {
             .map(|branch| branch.ref_name.as_str())
             .collect::<Vec<_>>(),
         vec!["refs/heads/test-branch", "refs/heads/release"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn local_workspace_branch_listing_skips_non_utf8_reference_names() {
+    let repo_dir = unique_test_dir("acp-workspace-branch-list-non-utf8");
+    initialize_local_repo(&repo_dir);
+    let repo = Repository::open(&repo_dir).expect("repo should open");
+    let head_commit = repo
+        .head()
+        .expect("repo should have HEAD")
+        .peel_to_commit()
+        .expect("HEAD should resolve to a commit");
+    let invalid_ref_path = repo_dir
+        .join(".git/refs/heads")
+        .join(OsString::from_vec(vec![0x66, 0x80]));
+    std::fs::write(&invalid_ref_path, format!("{}\n", head_commit.id()))
+        .expect("invalid UTF-8 branch ref should be writable");
+
+    let branches = list_local_workspace_branches(
+        &repo_dir,
+        &unique_test_dir("acp-workspace-branch-list-non-utf8-state"),
+    )
+    .expect("local branches should still list");
+
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!("refs/heads/{TEST_BRANCH}")]
     );
 }
 
@@ -917,6 +998,86 @@ async fn await_checkout_task_maps_join_failures_into_io_errors() {
     assert!(
         matches!(error, WorkspaceCheckoutError::Io(message) if message.contains("joining checkout task failed"))
     );
+}
+
+#[tokio::test]
+async fn await_branch_task_maps_join_failures_into_io_errors() {
+    let error = await_branch_task(tokio::task::spawn_blocking(
+        || -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
+            panic!("simulated branch panic");
+        },
+    ))
+    .await
+    .expect_err("panicking blocking tasks should surface join failures");
+
+    assert!(
+        matches!(error, WorkspaceCheckoutError::Io(message) if message.contains("joining branch lookup task failed"))
+    );
+}
+
+#[tokio::test]
+async fn fs_workspace_checkout_manager_lists_remote_branches_async() {
+    let state_dir = unique_test_dir("acp-workspace-branch-manager-remote-state");
+    let (remote_url, _) = create_bare_remote_repo("acp-workspace-branch-manager-remote");
+    let manager = FsWorkspaceCheckoutManager::new(state_dir);
+
+    let branches = manager
+        .list_branches(&sample_workspace_record(Some(remote_url.as_str()), None))
+        .await
+        .expect("remote branch listing should succeed");
+
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!("refs/heads/{TEST_BRANCH}")]
+    );
+}
+
+#[test]
+fn fs_workspace_checkout_manager_lists_local_branches_from_current_repo() {
+    const CHILD_ENV: &str = "ACP_WORKSPACE_CHECKOUT_LIST_BRANCHES_CHILD";
+    const SOURCE_ENV: &str = "ACP_WORKSPACE_CHECKOUT_LIST_BRANCHES_SOURCE";
+
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let source_root =
+            PathBuf::from(std::env::var(SOURCE_ENV).expect("local branch source env should exist"));
+        let original_dir = std::env::current_dir().expect("current dir should be readable");
+        std::env::set_current_dir(&source_root)
+            .expect("child should be able to chdir into the local source");
+        let state_dir = source_root
+            .parent()
+            .expect("local source should have a parent")
+            .join(format!(
+                "acp-workspace-checkout-branch-list-state-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+        let manager = FsWorkspaceCheckoutManager::new(state_dir);
+        let branches = manager
+            .list_branches_sync(&sample_workspace_record(None, None))
+            .expect("local branch listing should succeed");
+        std::env::set_current_dir(original_dir)
+            .expect("child should restore the original working directory");
+
+        assert_eq!(
+            branches
+                .iter()
+                .map(|branch| branch.ref_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("refs/heads/{TEST_BRANCH}")]
+        );
+        return;
+    }
+
+    let source_root = unique_test_dir("acp-workspace-checkout-branch-list-local-source");
+    initialize_local_repo(&source_root);
+    let source_root_string = source_root.to_string_lossy().to_string();
+    let output = run_self_test_child(
+        "workspace_checkout::tests::checkout::fs_workspace_checkout_manager_lists_local_branches_from_current_repo",
+        &[(CHILD_ENV, "1"), (SOURCE_ENV, source_root_string.as_str())],
+    );
+    assert_child_success(output);
 }
 
 #[tokio::test]

@@ -344,7 +344,7 @@ fn list_remote_workspace_branches(
     upstream_url: &str,
     state_dir: &Path,
 ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
-    validate_https_upstream_url(upstream_url)?;
+    validate_branch_list_upstream_url(upstream_url)?;
     with_probe_repository(state_dir, "remote-branches", |repo| {
         let mut remote = repo.remote_anonymous(upstream_url).map_err(map_git_error)?;
         let connection = remote
@@ -366,6 +366,13 @@ fn list_remote_workspace_branches(
         prioritize_workspace_branch_ref(&mut branches, default_ref.as_deref());
         Ok(branches)
     })
+}
+
+fn validate_branch_list_upstream_url(upstream_url: &str) -> Result<(), WorkspaceCheckoutError> {
+    if cfg!(test) && upstream_url.starts_with("file://") {
+        return Ok(());
+    }
+    validate_https_upstream_url(upstream_url)
 }
 
 fn clone_remote_workspace(

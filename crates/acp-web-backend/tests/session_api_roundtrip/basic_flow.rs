@@ -19,7 +19,7 @@ async fn assert_invalid_rename_title(title: String, expected_message: &str) -> R
             stack.backend_url, session.session.id
         ))
         .bearer_auth("alice")
-        .json(&acp_web_backend::contract_sessions::RenameSessionRequest { title })
+        .json(&acp_web::contract_sessions::RenameSessionRequest { title })
         .send()
         .await
         .context("sending invalid rename request")?;
@@ -127,7 +127,7 @@ async fn rename_and_delete_reject_different_principal() -> Result<()> {
             stack.backend_url, session.session.id
         ))
         .bearer_auth("bob")
-        .json(&acp_web_backend::contract_sessions::RenameSessionRequest {
+        .json(&acp_web::contract_sessions::RenameSessionRequest {
             title: "hijack".to_string(),
         })
         .send()
@@ -199,12 +199,12 @@ async fn session_list_is_owner_scoped_and_keeps_retained_closed_sessions() -> Re
     assert_eq!(sessions.sessions[0].id, second.session.id);
     assert_eq!(
         sessions.sessions[0].status,
-        acp_web_backend::contract_sessions::SessionStatus::Active
+        acp_web::contract_sessions::SessionStatus::Active
     );
     assert_eq!(sessions.sessions[1].id, first.session.id);
     assert_eq!(
         sessions.sessions[1].status,
-        acp_web_backend::contract_sessions::SessionStatus::Closed
+        acp_web::contract_sessions::SessionStatus::Closed
     );
     assert!(
         sessions

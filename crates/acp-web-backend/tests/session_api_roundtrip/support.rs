@@ -1,28 +1,24 @@
 use std::{future::pending, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
-pub(super) use acp_web_backend::ServerConfig;
-use acp_web_backend::contract_accounts::{
-    BootstrapRegistrationRequest, BootstrapRegistrationResponse,
-};
-pub(super) use acp_web_backend::contract_messages::MessageRole;
-use acp_web_backend::contract_messages::PromptRequest;
-pub(super) use acp_web_backend::contract_permissions::PermissionDecision;
-use acp_web_backend::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
-use acp_web_backend::contract_sessions::{
+pub(super) use acp_web::ServerConfig;
+use acp_web::contract_accounts::{BootstrapRegistrationRequest, BootstrapRegistrationResponse};
+pub(super) use acp_web::contract_messages::MessageRole;
+use acp_web::contract_messages::PromptRequest;
+pub(super) use acp_web::contract_permissions::PermissionDecision;
+use acp_web::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
+use acp_web::contract_sessions::{
     CancelTurnResponse, CreateSessionRequest, CreateSessionResponse, RenameSessionRequest,
     RenameSessionResponse, SessionListResponse,
 };
-pub(super) use acp_web_backend::contract_stream::{StreamEvent, StreamEventPayload};
-use acp_web_backend::contract_workspaces::{
+pub(super) use acp_web::contract_stream::{StreamEvent, StreamEventPayload};
+use acp_web::contract_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, UpdateWorkspaceRequest,
     UpdateWorkspaceResponse, WorkspaceBranch, WorkspaceListResponse, WorkspaceResponse,
 };
-use acp_web_backend::support::http::{
-    build_http_client_for_url, wait_for_health, wait_for_tcp_connect,
-};
-use acp_web_backend::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
-use acp_web_backend::{
+use acp_web::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
+use acp_web::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
+use acp_web::{
     DynWorkspaceCheckoutManager, MockClient, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
     WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
     workspace_store::SqliteWorkspaceRepository,
@@ -578,7 +574,7 @@ impl TestStack {
         &self,
         token: &str,
         session_id: &str,
-    ) -> Result<acp_web_backend::contract_sessions::SessionHistoryResponse> {
+    ) -> Result<acp_web::contract_sessions::SessionHistoryResponse> {
         let response = self
             .client
             .get(format!(
@@ -821,7 +817,7 @@ fn build_backend_state(backend_config: ServerConfig) -> Result<AppState> {
         SqliteWorkspaceRepository::new(backend_config.state_dir.join("db.sqlite"))
             .context("building workspace repository")?,
     );
-    let store = Arc::new(acp_web_backend::sessions::SessionStore::new(
+    let store = Arc::new(acp_web::sessions::SessionStore::new(
         backend_config.session_cap,
     ));
     let reply_provider = Arc::new(
@@ -863,7 +859,7 @@ impl IntegrationTestWorkspaceCheckoutManager {
 impl WorkspaceCheckoutManager for IntegrationTestWorkspaceCheckoutManager {
     async fn prepare_checkout(
         &self,
-        _workspace: &acp_web_backend::workspace_records::WorkspaceRecord,
+        _workspace: &acp_web::workspace_records::WorkspaceRecord,
         session_id: &str,
         checkout_ref_override: Option<&str>,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
@@ -888,7 +884,7 @@ impl WorkspaceCheckoutManager for IntegrationTestWorkspaceCheckoutManager {
 
     async fn list_branches(
         &self,
-        _workspace: &acp_web_backend::workspace_records::WorkspaceRecord,
+        _workspace: &acp_web::workspace_records::WorkspaceRecord,
     ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
         Ok(vec![
             WorkspaceBranch {

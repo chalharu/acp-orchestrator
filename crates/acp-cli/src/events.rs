@@ -151,17 +151,20 @@ fn resume_state_updates(
     messages: &[ConversationMessage],
     pending_permissions: &[PermissionRequest],
 ) -> Vec<StreamUpdate> {
-    messages
-        .iter()
-        .cloned()
-        .map(StreamUpdate::ConversationMessage)
-        .chain(
-            pending_permissions
-                .iter()
-                .cloned()
-                .map(StreamUpdate::PermissionRequested),
-        )
-        .collect()
+    let mut updates = Vec::with_capacity(messages.len() + pending_permissions.len());
+    updates.extend(
+        messages
+            .iter()
+            .cloned()
+            .map(StreamUpdate::ConversationMessage),
+    );
+    updates.extend(
+        pending_permissions
+            .iter()
+            .cloned()
+            .map(StreamUpdate::PermissionRequested),
+    );
+    updates
 }
 
 fn event_updates(event: StreamEvent) -> Vec<StreamUpdate> {

@@ -1,6 +1,6 @@
 use super::support::*;
-use acp_web_backend::contract_sessions::CreateSessionRequest;
-use acp_web_backend::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
+use acp_web::contract_sessions::CreateSessionRequest;
+use acp_web::contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest};
 
 async fn workspace_stack() -> Result<TestStack> {
     TestStack::spawn(ServerConfig {
@@ -173,7 +173,7 @@ async fn workspace_branch_lists_are_available_over_http() -> Result<()> {
         .send()
         .await?
         .error_for_status()?;
-    let payload: acp_web_backend::contract_workspaces::WorkspaceBranchListResponse =
+    let payload: acp_web::contract_workspaces::WorkspaceBranchListResponse =
         response.json().await?;
 
     assert_eq!(

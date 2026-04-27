@@ -542,7 +542,7 @@ async fn run_mock_role(role_args: Vec<OsString>) -> Result<()> {
 }
 
 async fn run_backend_role(role_args: Vec<OsString>) -> Result<()> {
-    acp_web_backend::run_with_args(prepend_role_program_name(role_args, "acp-web-backend"))
+    acp_web::run_with_args(prepend_role_program_name(role_args, "acp-web-backend"))
         .await
         .map_err(|error| LauncherError::RunBackend {
             message: error.to_string(),

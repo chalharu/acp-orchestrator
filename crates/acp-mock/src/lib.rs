@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use agent_client_protocol::{self as acp, schema};
+use agent_client_protocol::{self as acp, ConnectTo, schema};
 use prompt::{
     prompt_requires_permission, prompt_should_fail, prompt_text, reply_for, response_delay_for,
     wait_for_cancel,
@@ -636,7 +636,14 @@ fn build_mock_agent_builder(
 }
 
 #[rustfmt::skip]
-async fn connect_mock_agent(reader: OwnedReadHalf, writer: OwnedWriteHalf, agent: MockAgent) -> Result<(), acp::Error> { build_mock_agent_builder(agent).connect_to(acp::ByteStreams::new(writer.compat_write(), reader.compat())).await }
+async fn connect_mock_agent(reader: OwnedReadHalf, writer: OwnedWriteHalf, agent: MockAgent) -> Result<(), acp::Error> {
+    let transport: acp::DynConnectTo<acp::Agent> =
+        acp::DynConnectTo::new(acp::ByteStreams::new(writer.compat_write(), reader.compat()));
+    let (channel, transport_task) = transport.into_channel_and_future();
+    let agent: acp::DynConnectTo<acp::Client> = acp::DynConnectTo::new(build_mock_agent_builder(agent));
+    let _ = tokio::try_join!(transport_task, agent.connect_to(channel))?;
+    Ok(())
+}
 
 #[rustfmt::skip]
 async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Result<(), acp::Error> { let (reader, writer) = stream.into_split(); connect_mock_agent(reader, writer, MockAgent::new(state)).await }

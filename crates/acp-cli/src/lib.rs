@@ -38,6 +38,7 @@ use support::http::build_http_client_for_url;
 use support::tracing::init_tracing;
 
 pub type Result<T, E = CliError> = std::result::Result<T, E>;
+const DEFAULT_AUTH_TOKEN: &str = "developer";
 
 #[derive(Debug)]
 pub(crate) struct ChatSession {
@@ -163,14 +164,14 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct ChatArgs {
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     new: bool,
     #[arg(long = "session")]
     session_id: Option<String>,
     #[arg(long, env = "ACP_SERVER_URL")]
     server_url: Option<String>,
-    #[arg(long, env = "ACP_AUTH_TOKEN", default_value = "developer")]
-    auth_token: String,
+    #[arg(long, env = "ACP_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -189,8 +190,8 @@ enum SessionCommand {
 struct ListArgs {
     #[arg(long, env = "ACP_SERVER_URL")]
     server_url: Option<String>,
-    #[arg(long, env = "ACP_AUTH_TOKEN", default_value = "developer")]
-    auth_token: String,
+    #[arg(long, env = "ACP_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -198,8 +199,8 @@ struct CloseArgs {
     session_id: String,
     #[arg(long, env = "ACP_SERVER_URL")]
     server_url: Option<String>,
-    #[arg(long, env = "ACP_AUTH_TOKEN", default_value = "developer")]
-    auth_token: String,
+    #[arg(long, env = "ACP_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 pub async fn run_with_args<I, T>(args: I) -> Result<()>
@@ -235,8 +236,16 @@ where
     ensure!(args.new || args.session_id.is_some(), ChatModeRequiredSnafu);
 
     let server_url = require_server_url("chat", args.server_url.clone())?;
+    let auth_token = resolved_auth_token(args.auth_token.clone());
     let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-    let chat_session = load_chat_session(&client, &server_url, &args).await?;
+    let chat_session = load_chat_session(
+        &client,
+        &server_url,
+        args.new,
+        args.session_id.as_deref(),
+        &auth_token,
+    )
+    .await?;
     let session_id = chat_session.session.id.clone();
     if chat_session.is_read_only() {
         print_chat_banner(&chat_session.session.id, &server_url);
@@ -245,7 +254,7 @@ where
         return Ok(());
     }
     if interactive_ui {
-        return run_ui(client, server_url, args.auth_token, chat_session).await;
+        return run_ui(client, server_url, auth_token, chat_session).await;
     }
 
     print_chat_banner(&chat_session.session.id, &server_url);
@@ -254,11 +263,11 @@ where
     let event_task = spawn_event_task(
         &client,
         &server_url,
-        &args.auth_token,
+        &auth_token,
         &chat_session.session.id,
         initial_snapshot_state,
     );
-    let repl_result = run_repl(client, server_url, args.auth_token, session_id).await;
+    let repl_result = run_repl(client, server_url, auth_token, session_id).await;
     event_task.abort();
     repl_result
 }
@@ -290,10 +299,12 @@ fn interactive_terminal_available() -> bool {
 async fn load_chat_session(
     client: &Client,
     server_url: &str,
-    args: &ChatArgs,
+    new_session: bool,
+    session_id: Option<&str>,
+    auth_token: &str,
 ) -> Result<ChatSession> {
-    if args.new {
-        return create_session(client, server_url, &args.auth_token)
+    if new_session {
+        return create_session(client, server_url, auth_token)
             .await
             .map(|session| ChatSession {
                 session,
@@ -302,23 +313,24 @@ async fn load_chat_session(
             });
     }
 
-    let session_id = args
-        .session_id
-        .as_deref()
-        .expect("session id checked before chat execution");
-    let session = get_session(client, server_url, &args.auth_token, session_id).await?;
-    let resume_history =
-        match get_session_history(client, server_url, &args.auth_token, session_id).await {
-            Ok(history) => history.messages,
-            Err(error) if is_session_not_found(&error) => session.messages.clone(),
-            Err(error) => return Err(error),
-        };
+    let session_id = session_id.expect("session id checked before chat execution");
+    let session = get_session(client, server_url, auth_token, session_id).await?;
+    let resume_history = match get_session_history(client, server_url, auth_token, session_id).await
+    {
+        Ok(history) => history.messages,
+        Err(error) if is_session_not_found(&error) => session.messages.clone(),
+        Err(error) => return Err(error),
+    };
 
     Ok(ChatSession {
         session,
         resume_history,
         resumed: true,
     })
+}
+
+fn resolved_auth_token(auth_token: Option<String>) -> String {
+    auth_token.unwrap_or_else(|| DEFAULT_AUTH_TOKEN.to_string())
 }
 
 fn is_session_not_found(error: &CliError) -> bool {
@@ -390,9 +402,10 @@ async fn run_session(args: SessionArgs) -> Result<()> {
     match args.command {
         SessionCommand::List(args) => {
             let server_url = require_server_url("listing sessions", args.server_url)?;
+            let auth_token = resolved_auth_token(args.auth_token);
             let client =
                 build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-            let sessions = list_sessions(&client, &server_url, &args.auth_token).await?;
+            let sessions = list_sessions(&client, &server_url, &auth_token).await?;
             if sessions.sessions.is_empty() {
                 println!("no sessions found for the current owner");
                 return Ok(());
@@ -411,9 +424,10 @@ async fn run_session(args: SessionArgs) -> Result<()> {
         }
         SessionCommand::Close(args) => {
             let server_url = require_server_url("closing a session", args.server_url)?;
+            let auth_token = resolved_auth_token(args.auth_token);
             let client =
                 build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-            close_session(&client, &server_url, &args.auth_token, &args.session_id).await?;
+            close_session(&client, &server_url, &auth_token, &args.session_id).await?;
             println!("[status] session {} closed", args.session_id);
             Ok(())
         }

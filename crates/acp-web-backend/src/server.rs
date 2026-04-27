@@ -1,4 +1,4 @@
-use std::{fmt::Display, path::PathBuf, sync::Arc, time::Duration};
+use std::{convert::Infallible, fmt::Display, path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(test)]
 use crate::contract_sessions::RenameSessionRequest;
@@ -10,12 +10,15 @@ use axum::{
 };
 use axum::{
     Router,
+    body::Body,
     extract::Request,
+    handler::Handler,
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{MethodRouter, get_service, patch_service, post_service},
 };
+use tower::util::BoxCloneSyncService;
 #[cfg(test)]
 use uuid::Uuid;
 
@@ -267,11 +270,10 @@ impl AppState {
 }
 
 pub fn app(state: AppState) -> Router {
-    install_frontend_routes(Router::new())
-        .route("/api/v1/auth/status", get(auth_status))
-        .merge(read_api_routes())
-        .merge(write_api_routes())
-        .with_state(state)
+    install_frontend_routes(Router::new(), state.clone())
+        .route("/api/v1/auth/status", get_route(&state, auth_status))
+        .merge(read_api_routes(state.clone()))
+        .merge(write_api_routes(state))
 }
 
 #[derive(Debug, Clone)]
@@ -280,64 +282,122 @@ struct OwnerContext {
     user: UserRecord,
 }
 
-fn read_api_routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/accounts", get(list_accounts))
-        .route("/api/v1/sessions", get(list_sessions))
-        .route("/api/v1/workspaces", get(list_workspaces))
-        .route("/api/v1/workspaces/{workspace_id}", get(get_workspace))
-        .route(
-            "/api/v1/workspaces/{workspace_id}/branches",
-            get(list_workspace_branches),
-        )
-        .route(
-            "/api/v1/workspaces/{workspace_id}/sessions",
-            get(list_workspace_sessions),
-        )
-        .route("/api/v1/sessions/{session_id}", get(get_session))
-        .route(
-            "/api/v1/sessions/{session_id}/history",
-            get(get_session_history),
-        )
-        .route(
-            "/api/v1/sessions/{session_id}/events",
-            get(stream_session_events),
-        )
-        .route("/api/v1/completions/slash", get(get_slash_completions))
-        .layer(middleware::from_fn(authorize_read_request))
+type BoxedRouteService = BoxCloneSyncService<Request<Body>, Response, Infallible>;
+
+pub(super) fn get_route<H, T>(state: &AppState, handler: H) -> MethodRouter
+where
+    H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+    T: 'static,
+{
+    get_service(boxed_handler_service(state.clone(), handler))
 }
 
-fn write_api_routes() -> Router<AppState> {
+fn post_route<H, T>(state: &AppState, handler: H) -> MethodRouter
+where
+    H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+    T: 'static,
+{
+    post_service(boxed_handler_service(state.clone(), handler))
+}
+
+fn patch_route<H, T>(state: &AppState, handler: H) -> MethodRouter
+where
+    H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+    T: 'static,
+{
+    patch_service(boxed_handler_service(state.clone(), handler))
+}
+
+fn boxed_handler_service<H, T>(state: AppState, handler: H) -> BoxedRouteService
+where
+    H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+    T: 'static,
+{
+    BoxCloneSyncService::new(handler.with_state(state))
+}
+
+fn read_api_routes(state: AppState) -> Router {
     Router::new()
-        .route("/api/v1/auth/sign-in", post(sign_in))
-        .route("/api/v1/auth/sign-out", post(sign_out))
-        .route("/api/v1/bootstrap/register", post(bootstrap_register))
-        .route("/api/v1/sessions", post(create_session))
-        .route("/api/v1/workspaces", post(create_workspace))
-        .route("/api/v1/accounts", post(create_account))
-        .route(
-            "/api/v1/accounts/{user_id}",
-            patch(update_account).delete(delete_account),
-        )
+        .route("/api/v1/accounts", get_route(&state, list_accounts))
+        .route("/api/v1/sessions", get_route(&state, list_sessions))
+        .route("/api/v1/workspaces", get_route(&state, list_workspaces))
         .route(
             "/api/v1/workspaces/{workspace_id}",
-            patch(update_workspace).delete(delete_workspace),
+            get_route(&state, get_workspace),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/branches",
+            get_route(&state, list_workspace_branches),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
-            post(create_workspace_session),
+            get_route(&state, list_workspace_sessions),
         )
         .route(
             "/api/v1/sessions/{session_id}",
-            patch(rename_session).delete(delete_session),
+            get_route(&state, get_session),
         )
-        .route("/api/v1/sessions/{session_id}/messages", post(post_message))
-        .route("/api/v1/sessions/{session_id}/cancel", post(cancel_turn))
+        .route(
+            "/api/v1/sessions/{session_id}/history",
+            get_route(&state, get_session_history),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/events",
+            get_route(&state, stream_session_events),
+        )
+        .route(
+            "/api/v1/completions/slash",
+            get_route(&state, get_slash_completions),
+        )
+        .layer(middleware::from_fn(authorize_read_request))
+}
+
+fn write_api_routes(state: AppState) -> Router {
+    Router::new()
+        .route("/api/v1/auth/sign-in", post_route(&state, sign_in))
+        .route("/api/v1/auth/sign-out", post_route(&state, sign_out))
+        .route(
+            "/api/v1/bootstrap/register",
+            post_route(&state, bootstrap_register),
+        )
+        .route("/api/v1/sessions", post_route(&state, create_session))
+        .route("/api/v1/workspaces", post_route(&state, create_workspace))
+        .route("/api/v1/accounts", post_route(&state, create_account))
+        .route(
+            "/api/v1/accounts/{user_id}",
+            patch_route(&state, update_account)
+                .delete_service(boxed_handler_service(state.clone(), delete_account)),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}",
+            patch_route(&state, update_workspace)
+                .delete_service(boxed_handler_service(state.clone(), delete_workspace)),
+        )
+        .route(
+            "/api/v1/workspaces/{workspace_id}/sessions",
+            post_route(&state, create_workspace_session),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}",
+            patch_route(&state, rename_session)
+                .delete_service(boxed_handler_service(state.clone(), delete_session)),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/messages",
+            post_route(&state, post_message),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/cancel",
+            post_route(&state, cancel_turn),
+        )
         .route(
             "/api/v1/sessions/{session_id}/permissions/{request_id}",
-            post(resolve_permission),
+            post_route(&state, resolve_permission),
         )
-        .route("/api/v1/sessions/{session_id}/close", post(close_session))
+        .route(
+            "/api/v1/sessions/{session_id}/close",
+            post_route(&state, close_session),
+        )
         .layer(middleware::from_fn(authorize_write_request))
 }
 

@@ -40,7 +40,7 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
             new: true,
             session_id: None,
             server_url: Some(server_url.clone()),
-            auth_token: "developer".to_string(),
+            auth_token: Some("developer".to_string()),
         },
         true,
         move |_client, ui_server_url, _auth_token, chat_session| async move {
@@ -84,7 +84,7 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
             new: true,
             session_id: None,
             server_url: Some(server_url.clone()),
-            auth_token: "developer".to_string(),
+            auth_token: Some("developer".to_string()),
         },
         false,
         |_client, _server_url, _auth_token, _chat_session| async { Ok(()) },
@@ -158,9 +158,16 @@ async fn load_chat_session_loads_history_for_resumed_sessions() {
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    let chat_session = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
-        .await
-        .expect("resumed sessions should load");
+    let args = resumed_chat_args(&server_url);
+    let chat_session = load_chat_session(
+        &client,
+        &server_url,
+        args.new,
+        args.session_id.as_deref(),
+        args.auth_token.as_deref().unwrap_or("developer"),
+    )
+    .await
+    .expect("resumed sessions should load");
 
     assert!(chat_session.resumed);
     assert_eq!(chat_session.resume_history[0].text, "from history");
@@ -197,9 +204,16 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    let chat_session = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
-        .await
-        .expect("snapshot fallback should succeed");
+    let args = resumed_chat_args(&server_url);
+    let chat_session = load_chat_session(
+        &client,
+        &server_url,
+        args.new,
+        args.session_id.as_deref(),
+        args.auth_token.as_deref().unwrap_or("developer"),
+    )
+    .await
+    .expect("snapshot fallback should succeed");
 
     assert!(chat_session.resumed);
     assert_eq!(chat_session.resume_history.len(), 1);
@@ -218,9 +232,16 @@ async fn load_chat_session_returns_non_404_history_errors() {
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    let error = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
-        .await
-        .expect_err("unexpected history failures should surface");
+    let args = resumed_chat_args(&server_url);
+    let error = load_chat_session(
+        &client,
+        &server_url,
+        args.new,
+        args.session_id.as_deref(),
+        args.auth_token.as_deref().unwrap_or("developer"),
+    )
+    .await
+    .expect_err("unexpected history failures should surface");
 
     assert!(matches!(
         error,
@@ -238,9 +259,16 @@ async fn load_chat_session_surfaces_missing_sessions() {
     .await;
     let client = Client::builder().build().expect("client should build");
 
-    let error = load_chat_session(&client, &server_url, &resumed_chat_args(&server_url))
-        .await
-        .expect_err("missing sessions should fail");
+    let args = resumed_chat_args(&server_url);
+    let error = load_chat_session(
+        &client,
+        &server_url,
+        args.new,
+        args.session_id.as_deref(),
+        args.auth_token.as_deref().unwrap_or("developer"),
+    )
+    .await
+    .expect_err("missing sessions should fail");
 
     assert!(matches!(
         error,
@@ -283,7 +311,7 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
     run_session(SessionArgs {
         command: SessionCommand::List(ListArgs {
             server_url: Some(server_url.clone()),
-            auth_token: "developer".to_string(),
+            auth_token: Some("developer".to_string()),
         }),
     })
     .await
@@ -293,7 +321,7 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
         command: SessionCommand::Close(CloseArgs {
             session_id: "s_close".to_string(),
             server_url: Some(server_url),
-            auth_token: "developer".to_string(),
+            auth_token: Some("developer".to_string()),
         }),
     })
     .await
@@ -355,7 +383,7 @@ fn resumed_chat_args(server_url: &str) -> ChatArgs {
         new: false,
         session_id: Some("s_resume".to_string()),
         server_url: Some(server_url.to_string()),
-        auth_token: "developer".to_string(),
+        auth_token: Some("developer".to_string()),
     }
 }
 

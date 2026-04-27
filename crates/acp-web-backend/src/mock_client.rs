@@ -29,6 +29,20 @@ pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Se
 pub type PrimeSessionFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
 pub type BindSessionFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>>;
+type OperationFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
+type ConnectionFuture<T> = Pin<Box<dyn Future<Output = std::result::Result<T, acp::Error>> + Send>>;
+type ConnectedOperation<T> = Box<
+    dyn FnOnce(
+            acp::ConnectionTo<acp::Agent>,
+            PathBuf,
+            String,
+            BackendAcpClient,
+            UpstreamSessions,
+        ) -> OperationFuture<T>
+        + Send,
+>;
+type ConnectedMain<T> =
+    Box<dyn FnOnce(acp::ConnectionTo<acp::Agent>) -> ConnectionFuture<T> + Send>;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
@@ -288,28 +302,32 @@ async fn drive_acp_roundtrip(
         backend_session_id,
         upstream_sessions,
         client,
-        move |conn, working_dir, backend_session_id, client, upstream_sessions| async move {
-            let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
-            let session_id = load_or_create_session(
-                &conn,
-                &working_dir,
-                &backend_session_id,
-                &upstream_sessions,
-            )
-            .await?;
-            if *cancel_rx.borrow() {
-                return Ok(ReplyResult::Status("turn cancelled".to_string()));
-            }
+        Box::new(
+            move |conn, working_dir, backend_session_id, client, upstream_sessions| {
+                Box::pin(async move {
+                    let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
+                    let session_id = load_or_create_session(
+                        &conn,
+                        &working_dir,
+                        &backend_session_id,
+                        &upstream_sessions,
+                    )
+                    .await?;
+                    if *cancel_rx.borrow() {
+                        return Ok(ReplyResult::Status("turn cancelled".to_string()));
+                    }
 
-            prompt_session(
-                &conn,
-                &client,
-                &mut cancel_rx,
-                session_id,
-                turn.prompt_text(),
-            )
-            .await
-        },
+                    prompt_session(
+                        &conn,
+                        &client,
+                        &mut cancel_rx,
+                        session_id,
+                        turn.prompt_text(),
+                    )
+                    .await
+                })
+            },
+        ),
     )
     .await
 }
@@ -326,18 +344,22 @@ async fn drive_acp_session_prime(
         backend_session_id,
         upstream_sessions,
         BackendAcpClient::without_turn(),
-        move |conn, working_dir, backend_session_id, client, upstream_sessions| async move {
-            let session_id = load_or_create_session(
-                &conn,
-                &working_dir,
-                &backend_session_id,
-                &upstream_sessions,
-            )
-            .await?;
-            let _ = session_id;
-            let reply = client.take_reply_text();
-            Ok((!reply.is_empty()).then_some(reply))
-        },
+        Box::new(
+            move |conn, working_dir, backend_session_id, client, upstream_sessions| {
+                Box::pin(async move {
+                    let session_id = load_or_create_session(
+                        &conn,
+                        &working_dir,
+                        &backend_session_id,
+                        &upstream_sessions,
+                    )
+                    .await?;
+                    let _ = session_id;
+                    let reply = client.take_reply_text();
+                    Ok((!reply.is_empty()).then_some(reply))
+                })
+            },
+        ),
     )
     .await
 }
@@ -446,24 +468,14 @@ async fn forward_session_notification(
     client.session_notification(args).await
 }
 
-async fn run_connected_operation<T, F, Fut>(
+async fn run_connected_operation<T: 'static>(
     conn: acp::ConnectionTo<acp::Agent>,
     working_dir: PathBuf,
     backend_session_id: String,
     client: BackendAcpClient,
     upstream_sessions: UpstreamSessions,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce(
-        acp::ConnectionTo<acp::Agent>,
-        PathBuf,
-        String,
-        BackendAcpClient,
-        UpstreamSessions,
-    ) -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
+    operation: ConnectedOperation<T>,
+) -> Result<T> {
     initialize_connection(&conn).await?;
     operation(
         conn,
@@ -475,17 +487,20 @@ where
     .await
 }
 
-async fn connect_backend_mock_client<T, F, Fut>(
+async fn connect_backend_mock_client<T: 'static>(
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
     request_client: BackendAcpClient,
     notification_client: BackendAcpClient,
-    main_fn: F,
-) -> std::result::Result<T, acp::Error>
-where
-    F: FnOnce(acp::ConnectionTo<acp::Agent>) -> Fut,
-    Fut: Future<Output = std::result::Result<T, acp::Error>>,
-{
+    connected_main: ConnectedMain<T>,
+) -> std::result::Result<T, acp::Error> {
+    let transport: acp::DynConnectTo<acp::Client> = acp::DynConnectTo::new(acp::ByteStreams::new(
+        writer.compat_write(),
+        reader.compat(),
+    ));
+    #[allow(clippy::redundant_closure)]
+    let main_fn = move |conn| connected_main(conn);
+
     acp::Client
         .builder()
         .name("acp-web-backend-mock-client")
@@ -501,10 +516,7 @@ where
             },
             acp::on_receive_notification!(),
         )
-        .connect_with(
-            acp::ByteStreams::new(writer.compat_write(), reader.compat()),
-            async move |conn| main_fn(conn).await,
-        )
+        .connect_with(transport, main_fn)
         .await
 }
 
@@ -557,24 +569,14 @@ where
     })
 }
 
-async fn drive_acp_operation<T, F, Fut>(
+async fn drive_acp_operation<T: 'static>(
     mock_address: String,
     working_dir: PathBuf,
     backend_session_id: String,
     upstream_sessions: UpstreamSessions,
     client: BackendAcpClient,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce(
-        acp::ConnectionTo<acp::Agent>,
-        PathBuf,
-        String,
-        BackendAcpClient,
-        UpstreamSessions,
-    ) -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
+    operation: ConnectedOperation<T>,
+) -> Result<T> {
     let stream = connect_stream(&mock_address).await?;
     let (reader, writer) = stream.into_split();
     let request_client = client.clone();
@@ -585,19 +587,21 @@ where
         writer,
         request_client,
         notification_client,
-        async move |conn| {
-            Ok::<_, acp::Error>(
-                run_connected_operation(
-                    conn,
-                    working_dir,
-                    backend_session_id,
-                    client,
-                    upstream_sessions,
-                    operation,
+        Box::new(move |conn| {
+            Box::pin(async move {
+                Ok::<_, acp::Error>(
+                    run_connected_operation(
+                        conn,
+                        working_dir,
+                        backend_session_id,
+                        client,
+                        upstream_sessions,
+                        operation,
+                    )
+                    .await,
                 )
-                .await,
-            )
-        },
+            })
+        }),
     )
     .await
     .context(ConnectionClosedSnafu)?

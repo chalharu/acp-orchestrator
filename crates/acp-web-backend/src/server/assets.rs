@@ -11,7 +11,6 @@ use axum::{
         header::{CACHE_CONTROL, CONTENT_TYPE, REFERRER_POLICY, SET_COOKIE},
     },
     response::{Html, IntoResponse, Redirect, Response},
-    routing::get,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -25,32 +24,50 @@ use crate::{
     },
 };
 
-use super::{AppState, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, cookie_value};
+use super::{AppState, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, cookie_value, get_route};
 
-pub(super) fn install_frontend_routes(router: Router<AppState>) -> Router<AppState> {
+pub(super) fn install_frontend_routes(router: Router, state: AppState) -> Router {
     router
-        .route("/healthz", get(healthz))
-        .route("/app", get(redirect_to_app))
-        .route("/app/", get(app_entrypoint))
-        .route("/app/register", get(redirect_to_register))
-        .route("/app/register/", get(app_register_entrypoint))
-        .route("/app/sign-in", get(redirect_to_sign_in))
-        .route("/app/sign-in/", get(app_sign_in_entrypoint))
-        .route("/app/accounts", get(redirect_to_accounts))
-        .route("/app/accounts/", get(app_accounts_entrypoint))
-        .route("/app/workspaces", get(redirect_to_workspaces))
-        .route("/app/workspaces/", get(app_workspaces_entrypoint))
-        .route("/app/assets/app.css", get(app_stylesheet))
-        .route("/app/assets/fonts/{font_name}", get(app_font_asset))
-        .route("/app/assets/wasm-init.js", get(wasm_init_script))
-        .route(FRONTEND_JAVASCRIPT_ASSET_PATH, get(wasm_glue_javascript))
-        .route(FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
+        .route("/healthz", get_route(&state, healthz))
+        .route("/app", get_route(&state, redirect_to_app))
+        .route("/app/", get_route(&state, app_entrypoint))
+        .route("/app/register", get_route(&state, redirect_to_register))
+        .route("/app/register/", get_route(&state, app_register_entrypoint))
+        .route("/app/sign-in", get_route(&state, redirect_to_sign_in))
+        .route("/app/sign-in/", get_route(&state, app_sign_in_entrypoint))
+        .route("/app/accounts", get_route(&state, redirect_to_accounts))
+        .route("/app/accounts/", get_route(&state, app_accounts_entrypoint))
+        .route("/app/workspaces", get_route(&state, redirect_to_workspaces))
+        .route(
+            "/app/workspaces/",
+            get_route(&state, app_workspaces_entrypoint),
+        )
+        .route("/app/assets/app.css", get_route(&state, app_stylesheet))
+        .route(
+            "/app/assets/fonts/{font_name}",
+            get_route(&state, app_font_asset),
+        )
+        .route(
+            "/app/assets/wasm-init.js",
+            get_route(&state, wasm_init_script),
+        )
+        .route(
+            FRONTEND_JAVASCRIPT_ASSET_PATH,
+            get_route(&state, wasm_glue_javascript),
+        )
+        .route(FRONTEND_WASM_ASSET_PATH, get_route(&state, wasm_binary))
         .route(
             LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH,
-            get(wasm_glue_javascript),
+            get_route(&state, wasm_glue_javascript),
         )
-        .route(LEGACY_FRONTEND_WASM_ASSET_PATH, get(wasm_binary))
-        .route("/app/sessions/{session_id}", get(app_session_entrypoint))
+        .route(
+            LEGACY_FRONTEND_WASM_ASSET_PATH,
+            get_route(&state, wasm_binary),
+        )
+        .route(
+            "/app/sessions/{session_id}",
+            get_route(&state, app_session_entrypoint),
+        )
 }
 
 pub(super) async fn healthz() -> axum::Json<HealthResponse> {

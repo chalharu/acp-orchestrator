@@ -4,7 +4,7 @@ use acp_cli::contract_messages::MessageRole;
 use acp_cli::contract_sessions::{SessionHistoryResponse, SessionListResponse, SessionResponse};
 use acp_cli::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
-use acp_web_backend::{
+use acp_web::{
     AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown,
     workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
 };

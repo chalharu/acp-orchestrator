@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "acp_web"
+
 [dependencies]
 acp-app-support-errors.workspace = true
 acp-app-support-frontend.workspace = true
@@ -43,6 +46,7 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+tower = "=0.5.3"
 tracing.workspace = true
 uuid.workspace = true
 
@@ -55,4 +59,3 @@ fantoccini = { version = "=0.22.1", default-features = false, features = [
 ] }
 futures-util.workspace = true
 tokio.workspace = true
-tower = "=0.5.3"

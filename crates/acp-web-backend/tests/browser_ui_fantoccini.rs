@@ -535,6 +535,14 @@ async fn open_workspace_chat_for_storage_cleanup(browser: &BrowserHarness) -> Re
 }
 
 async fn assert_session_storage_present(browser: &BrowserHarness, key: &str) -> Result<()> {
+    let encoded_key = serde_json::to_string(key).context("encoding session storage key")?;
+    browser
+        .wait_for_condition(
+            &format!("return window.sessionStorage.getItem({encoded_key}) !== null;"),
+            Duration::from_secs(10),
+            "session storage item",
+        )
+        .await?;
     assert!(browser.session_storage_item(key).await?.is_some());
     Ok(())
 }

@@ -1327,10 +1327,10 @@ mod tests {
             let opening = Signal::derive(move || state.opening_chat_workspace_id.get().is_some());
             let title = workspace_start_chat_title_signal(workspace_name);
             let submit_label = workspace_new_chat_label_signal(opening);
+            let cancel = workspace_start_chat_cancel_handler(state);
             let _ = workspace_start_chat_modal(state);
             let _ = workspace_start_chat_modal_view(state, |_event: web_sys::SubmitEvent| {});
-            let _ =
-                workspace_start_chat_modal_header(workspace_name, |_event: web_sys::MouseEvent| {});
+            let _ = workspace_start_chat_modal_header(workspace_name, cancel);
             let _ = workspace_start_chat_branch_field(
                 state,
                 branches,
@@ -1342,7 +1342,7 @@ mod tests {
                 loading_branches,
                 selected_branch,
                 branches,
-                |_event: web_sys::MouseEvent| {},
+                cancel,
             );
             assert_eq!(title(), "Test Workspace");
             assert_eq!(submit_label(), "New chat");

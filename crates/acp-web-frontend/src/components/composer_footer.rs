@@ -59,23 +59,7 @@ fn composer_actions_view(
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     let cancel_props = (cancel_disabled, on_cancel);
-    view! {
-        <div class="composer__actions">
-            <Show when=move || show_cancel.get()>
-                <ComposerCancelButton cancel_disabled=cancel_props.0 on_cancel=cancel_props.1 />
-            </Show>
-            <button
-                class="composer__submit icon-action icon-action--primary"
-                type="submit"
-                prop:disabled=move || disabled.get()
-                aria-label=submit_button_label()
-                title=submit_button_label()
-            >
-                {app_icon_view(AppIcon::Send)}
-                <span class="sr-only">{submit_button_label()}</span>
-            </button>
-        </div>
-    }
+    view! { <div class="composer__actions"><Show when=move || show_cancel.get()><ComposerCancelButton cancel_disabled=cancel_props.0 on_cancel=cancel_props.1 /></Show><button class="composer__submit icon-action icon-action--primary" type="submit" prop:disabled=move || disabled.get() aria-label=submit_button_label() title=submit_button_label()>{app_icon_view(AppIcon::Send)}<span class="sr-only">{submit_button_label()}</span></button></div> }
 }
 
 #[component]
@@ -198,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_actions_view_converts_into_any_view() {
+    fn composer_actions_view_renders_send_and_cancel_actions() {
         let owner = Owner::new();
         owner.with(|| {
             let _ = composer_actions_view(
@@ -208,6 +192,8 @@ mod tests {
                 Callback::new(|()| {}),
             )
             .into_any();
+            assert_eq!(submit_button_label(), "Send");
+            assert_eq!(cancel_button_label(), "Cancel");
         });
     }
 

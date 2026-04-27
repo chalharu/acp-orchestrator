@@ -391,6 +391,44 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    fn create_workspace_submit_host_requires_workspace_name() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state
+                .create_upstream_url
+                .set("https://example.com/repo.git".to_string());
+
+            create_workspace_submit_host(state);
+
+            assert_eq!(
+                state.error.get(),
+                Some("Workspace name is required.".to_string())
+            );
+            assert!(!state.creating.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn create_workspace_submit_host_requires_repository_url() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.create_name.set("My Workspace".to_string());
+
+            create_workspace_submit_host(state);
+
+            assert_eq!(
+                state.error.get(),
+                Some("Repository URL is required.".to_string())
+            );
+            assert!(!state.creating.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
     fn close_create_workspace_modal_clears_form_state() {
         let owner = Owner::new();
         owner.with(|| {

@@ -807,6 +807,24 @@ impl BrowserHarness {
     }
 
     async fn focused_composer(&self) -> Result<fantoccini::elements::Element> {
+        self.wait_for_condition(
+            "const composer = document.querySelector('#composer-input');\
+             if (!composer) return false;\
+             const rect = composer.getBoundingClientRect();\
+             return !composer.disabled && rect.width > 0 && rect.height > 0;",
+            Duration::from_secs(10),
+            "enabled composer",
+        )
+        .await?;
+        self.wait_for_condition(
+            "const composer = document.querySelector('#composer-input');\
+             if (!composer || composer.disabled) return false;\
+             composer.focus();\
+             return document.activeElement === composer;",
+            Duration::from_secs(10),
+            "focused composer",
+        )
+        .await?;
         let composer = self
             .client
             .find(Locator::Css(COMPOSER_SELECTOR))

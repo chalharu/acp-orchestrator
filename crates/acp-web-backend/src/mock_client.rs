@@ -8,7 +8,13 @@ use std::{
     time::Duration,
 };
 
-use agent_client_protocol::{self as acp, schema};
+use agent_client_protocol::{self as acp, ConnectTo, schema};
+use futures_util::{
+    Sink, Stream,
+    future::{self, BoxFuture, Either},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sink::unfold,
+};
 use snafu::prelude::*;
 use tokio::net::{
     TcpStream,
@@ -29,6 +35,10 @@ pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Se
 pub type PrimeSessionFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
 pub type BindSessionFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>>;
+type DynRd = Box<dyn AsyncRead + Send + Unpin>;
+type DynWr = Box<dyn AsyncWrite + Send + Unpin>;
+type LineSink = Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>>;
+type LineStream = Pin<Box<dyn Stream<Item = std::io::Result<String>> + Send>>;
 type OperationFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 type ConnectionFuture<T> = Pin<Box<dyn Future<Output = std::result::Result<T, acp::Error>> + Send>>;
 type ConnectedOperation<T> = Box<
@@ -468,6 +478,138 @@ async fn forward_session_notification(
     client.session_notification(args).await
 }
 
+struct BackendIo {
+    outgoing: DynWr,
+    incoming: DynRd,
+}
+
+impl BackendIo {
+    fn new(reader: OwnedReadHalf, writer: OwnedWriteHalf) -> Self {
+        Self {
+            outgoing: Box::new(writer.compat_write()) as DynWr,
+            incoming: Box::new(reader.compat()) as DynRd,
+        }
+    }
+}
+
+async fn write_backend_io_line(mut writer: DynWr, line: String) -> std::io::Result<DynWr> {
+    let mut bytes = line.into_bytes();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    Ok(writer)
+}
+
+impl<R: acp::Role> ConnectTo<R> for BackendIo {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<R::Counterpart>,
+    ) -> std::result::Result<(), acp::Error> {
+        let (channel, serve_io) = <BackendIo as ConnectTo<R>>::into_channel_and_future(self);
+        let serve_client: BoxFuture<'static, std::result::Result<(), acp::Error>> =
+            Box::pin(client.connect_to(channel));
+        match future::select(serve_client, serve_io).await {
+            Either::Left((result, _)) | Either::Right((result, _)) => result,
+        }
+    }
+
+    fn into_channel_and_future(
+        self,
+    ) -> (
+        acp::Channel,
+        BoxFuture<'static, std::result::Result<(), acp::Error>>,
+    ) {
+        let Self { outgoing, incoming } = self;
+        let incoming_lines: LineStream = Box::pin(BufReader::new(incoming).lines());
+        let outgoing_sink: LineSink = Box::pin(unfold(outgoing, write_backend_io_line));
+        ConnectTo::<R>::into_channel_and_future(acp::Lines::new(outgoing_sink, incoming_lines))
+    }
+}
+
+#[derive(Clone)]
+struct BackendDispatchHandler {
+    request_client: BackendAcpClient,
+    notification_client: BackendAcpClient,
+}
+
+impl BackendDispatchHandler {
+    fn new(request_client: BackendAcpClient, notification_client: BackendAcpClient) -> Self {
+        Self {
+            request_client,
+            notification_client,
+        }
+    }
+
+    async fn handle_permission_request(
+        &self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Agent>,
+    ) -> std::result::Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::RequestPermissionRequest>()? {
+            Ok((args, responder)) => {
+                respond_permission_request(
+                    self.request_client.clone(),
+                    args,
+                    responder,
+                    connection,
+                )
+                .await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_session_notification(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> std::result::Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_notification::<schema::SessionNotification>()? {
+            Ok(args) => {
+                forward_session_notification(self.notification_client.clone(), args).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+}
+
+impl acp::HandleDispatchFrom<acp::Agent> for BackendDispatchHandler {
+    fn describe_chain(&self) -> impl std::fmt::Debug {
+        "BackendDispatchHandler"
+    }
+
+    async fn handle_dispatch_from(
+        &mut self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Agent>,
+    ) -> std::result::Result<acp::Handled<acp::Dispatch>, acp::Error> {
+        let Some(dispatch) = self
+            .handle_permission_request(dispatch, connection.clone())
+            .await?
+        else {
+            return Ok(acp::Handled::Yes);
+        };
+        let Some(dispatch) = self.handle_session_notification(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
+        };
+        Ok(acp::Handled::No {
+            message: dispatch,
+            retry: false,
+        })
+    }
+}
+
+fn build_backend_client_builder(
+    request_client: BackendAcpClient,
+    notification_client: BackendAcpClient,
+) -> acp::Builder<acp::Client, BackendDispatchHandler, acp::NullRun> {
+    acp::Builder::new_with(
+        acp::Client,
+        BackendDispatchHandler::new(request_client, notification_client),
+    )
+    .name("acp-web-backend-mock-client")
+}
+
 async fn run_connected_operation<T: 'static>(
     conn: acp::ConnectionTo<acp::Agent>,
     working_dir: PathBuf,
@@ -494,29 +636,10 @@ async fn connect_backend_mock_client<T: 'static>(
     notification_client: BackendAcpClient,
     connected_main: ConnectedMain<T>,
 ) -> std::result::Result<T, acp::Error> {
-    let transport: acp::DynConnectTo<acp::Client> = acp::DynConnectTo::new(acp::ByteStreams::new(
-        writer.compat_write(),
-        reader.compat(),
-    ));
     #[allow(clippy::redundant_closure)]
     let main_fn = move |conn| connected_main(conn);
-
-    acp::Client
-        .builder()
-        .name("acp-web-backend-mock-client")
-        .on_receive_request(
-            async move |args: schema::RequestPermissionRequest, responder, cx| {
-                respond_permission_request(request_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_notification(
-            async move |args: schema::SessionNotification, _cx| {
-                forward_session_notification(notification_client.clone(), args).await
-            },
-            acp::on_receive_notification!(),
-        )
-        .connect_with(transport, main_fn)
+    build_backend_client_builder(request_client, notification_client)
+        .connect_with(BackendIo::new(reader, writer), main_fn)
         .await
 }
 

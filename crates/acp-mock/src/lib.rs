@@ -8,6 +8,7 @@ mod tests;
 use std::{
     collections::HashMap,
     future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -16,6 +17,12 @@ use std::{
 };
 
 use agent_client_protocol::{self as acp, ConnectTo, schema};
+use futures_util::{
+    Sink, Stream,
+    future::{self, BoxFuture, Either},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sink::unfold,
+};
 use prompt::{
     prompt_requires_permission, prompt_should_fail, prompt_text, reply_for, response_delay_for,
     wait_for_cancel,
@@ -635,14 +642,60 @@ fn build_mock_agent_builder(
     acp::Builder::new_with(acp::Agent, MockDispatchHandler::new(agent)).name("acp-mock")
 }
 
-#[rustfmt::skip]
-async fn connect_mock_agent(reader: OwnedReadHalf, writer: OwnedWriteHalf, agent: MockAgent) -> Result<(), acp::Error> {
-    let transport: acp::DynConnectTo<acp::Agent> =
-        acp::DynConnectTo::new(acp::ByteStreams::new(writer.compat_write(), reader.compat()));
-    let (channel, transport_task) = transport.into_channel_and_future();
-    let agent: acp::DynConnectTo<acp::Client> = acp::DynConnectTo::new(build_mock_agent_builder(agent));
-    let _ = tokio::try_join!(transport_task, agent.connect_to(channel))?;
-    Ok(())
+type DynRd = Box<dyn AsyncRead + Send + Unpin>;
+type DynWr = Box<dyn AsyncWrite + Send + Unpin>;
+type LineSink = Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>>;
+type LineStream = Pin<Box<dyn Stream<Item = std::io::Result<String>> + Send>>;
+
+struct MockIo {
+    outgoing: DynWr,
+    incoming: DynRd,
+}
+
+impl MockIo {
+    fn new(reader: OwnedReadHalf, writer: OwnedWriteHalf) -> Self {
+        Self {
+            outgoing: Box::new(writer.compat_write()) as DynWr,
+            incoming: Box::new(reader.compat()) as DynRd,
+        }
+    }
+}
+
+async fn write_mock_io_line(mut writer: DynWr, line: String) -> std::io::Result<DynWr> {
+    let mut bytes = line.into_bytes();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    Ok(writer)
+}
+
+impl<R: acp::Role> ConnectTo<R> for MockIo {
+    async fn connect_to(self, client: impl ConnectTo<R::Counterpart>) -> Result<(), acp::Error> {
+        let (channel, serve_io) = <MockIo as ConnectTo<R>>::into_channel_and_future(self);
+        let serve_client: BoxFuture<'static, acp::Result<()>> =
+            Box::pin(client.connect_to(channel));
+        match future::select(serve_client, serve_io).await {
+            Either::Left((result, _)) | Either::Right((result, _)) => result,
+        }
+    }
+
+    fn into_channel_and_future(self) -> (acp::Channel, BoxFuture<'static, acp::Result<()>>) {
+        let Self { outgoing, incoming } = self;
+        let incoming_lines: LineStream = Box::pin(BufReader::new(incoming).lines());
+        let outgoing_sink: LineSink = Box::pin(unfold(outgoing, write_mock_io_line));
+        ConnectTo::<R>::into_channel_and_future(acp::Lines::new(outgoing_sink, incoming_lines))
+    }
+}
+
+async fn connect_mock_agent(
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    agent: MockAgent,
+) -> Result<(), acp::Error> {
+    ConnectTo::<acp::Agent>::connect_to(
+        MockIo::new(reader, writer),
+        build_mock_agent_builder(agent),
+    )
+    .await
 }
 
 #[rustfmt::skip]

@@ -1071,6 +1071,12 @@ impl BrowserHarness {
         .await?;
         self.select_branch_in_visible_modal("refs/heads/main")
             .await?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-modal .account-form__submit'));",
+            Duration::from_secs(10),
+            "session sidebar start chat submit button",
+        )
+        .await?;
         self.client
             .find(Locator::Css(".workspace-modal .account-form__submit"))
             .await
@@ -1183,6 +1189,12 @@ impl BrowserHarness {
         .await?;
         self.select_branch_in_visible_modal(checkout_ref.unwrap_or("refs/heads/main"))
             .await?;
+        self.wait_for_condition(
+            "return Boolean(document.querySelector('.workspace-modal .account-form__submit'));",
+            Duration::from_secs(10),
+            "start chat submit button",
+        )
+        .await?;
         self.client
             .find(Locator::Css(".workspace-modal .account-form__submit"))
             .await

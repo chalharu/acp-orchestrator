@@ -1257,7 +1257,9 @@ textarea:focus-visible {
 
 .workspace-inline-form {
   display: flex;
-  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: nowrap;
   gap: 0.5rem;
   align-items: stretch;
 }

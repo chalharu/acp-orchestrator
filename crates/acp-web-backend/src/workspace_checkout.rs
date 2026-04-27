@@ -354,13 +354,17 @@ fn list_remote_workspace_branches(
                 Some(git_proxy_options()),
             )
             .map_err(map_git_error)?;
-        Ok(workspace_branches_from_refs(
+        let default_ref =
+            parse_remote_default_branch(connection.default_branch().map_err(map_git_error)?)?;
+        let mut branches = workspace_branches_from_refs(
             connection
                 .list()
                 .map_err(map_git_error)?
                 .iter()
                 .map(|head| head.name()),
-        ))
+        );
+        prioritize_workspace_branch_ref(&mut branches, default_ref.as_deref());
+        Ok(branches)
     })
 }
 
@@ -473,6 +477,7 @@ fn list_local_workspace_branches(
 ) -> Result<Vec<WorkspaceBranch>, WorkspaceCheckoutError> {
     let _git_home = ensure_git_home(state_dir)?;
     let repo = Repository::discover(source_root).map_err(map_git_error)?;
+    let default_ref = git_symbolic_ref(source_root, state_dir)?;
     let branches = repo
         .branches(Some(BranchType::Local))
         .map_err(map_git_error)?;
@@ -487,9 +492,9 @@ fn list_local_workspace_branches(
         ref_names.push(name.to_string());
     }
 
-    Ok(workspace_branches_from_refs(
-        ref_names.iter().map(String::as_str),
-    ))
+    let mut branches = workspace_branches_from_refs(ref_names.iter().map(String::as_str));
+    prioritize_workspace_branch_ref(&mut branches, default_ref.as_deref());
+    Ok(branches)
 }
 
 fn checkout_head_commit(
@@ -626,6 +631,23 @@ fn workspace_branches_from_refs<'a>(
         );
     }
     branches.into_values().collect()
+}
+
+fn prioritize_workspace_branch_ref(
+    branches: &mut Vec<WorkspaceBranch>,
+    preferred_ref: Option<&str>,
+) {
+    let Some(preferred_ref) = preferred_ref else {
+        return;
+    };
+    let Some(index) = branches
+        .iter()
+        .position(|branch| branch.ref_name == preferred_ref)
+    else {
+        return;
+    };
+    let preferred_branch = branches.remove(index);
+    branches.insert(0, preferred_branch);
 }
 
 fn checkout_builder() -> CheckoutBuilder<'static> {

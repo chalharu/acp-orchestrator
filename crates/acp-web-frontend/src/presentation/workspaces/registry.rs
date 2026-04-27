@@ -14,6 +14,8 @@ use crate::presentation::{AppIcon, app_icon_view};
 use crate::{browser::store_prepared_session_id, routing::app_session_path};
 
 use super::shared::WorkspacesPageState;
+#[cfg(any(test, target_family = "wasm"))]
+use super::shared::default_branch_ref_name;
 #[cfg(target_family = "wasm")]
 use super::shared::spawn_workspace_reload;
 
@@ -930,13 +932,7 @@ fn spawn_workspace_start_chat_branch_load(state: WorkspacesPageState, workspace_
     leptos::task::spawn_local(async move {
         match api::list_workspace_branches(&workspace_id).await {
             Ok(branches) => {
-                if state.start_chat_workspace_id.get_untracked().as_deref()
-                    != Some(workspace_id.as_str())
-                {
-                    return;
-                }
-                state.start_chat_loading_branches.set(false);
-                state.start_chat_branches.set(branches);
+                store_workspace_start_chat_branches(state, &workspace_id, branches);
             }
             Err(message) => {
                 if state.start_chat_workspace_id.get_untracked().as_deref()
@@ -949,6 +945,22 @@ fn spawn_workspace_start_chat_branch_load(state: WorkspacesPageState, workspace_
             }
         }
     });
+}
+
+#[cfg(any(test, target_family = "wasm"))]
+fn store_workspace_start_chat_branches(
+    state: WorkspacesPageState,
+    workspace_id: &str,
+    branches: Vec<WorkspaceBranch>,
+) {
+    if state.start_chat_workspace_id.get_untracked().as_deref() != Some(workspace_id) {
+        return;
+    }
+    state.start_chat_loading_branches.set(false);
+    state
+        .start_chat_selected_branch
+        .set(default_branch_ref_name(&branches));
+    state.start_chat_branches.set(branches);
 }
 
 #[cfg(target_family = "wasm")]
@@ -967,12 +979,6 @@ fn workspace_start_chat_submit_handler(
             ));
             return;
         };
-
-        state
-            .opening_chat_workspace_id
-            .set(Some(workspace_id.clone()));
-        state.error.set(None);
-        state.notice.set(None);
         let selected_branch = state.start_chat_selected_branch.get_untracked();
         if selected_branch.trim().is_empty() {
             state
@@ -980,6 +986,11 @@ fn workspace_start_chat_submit_handler(
                 .set(Some("Choose a branch before starting a chat.".to_string()));
             return;
         }
+        state
+            .opening_chat_workspace_id
+            .set(Some(workspace_id.clone()));
+        state.error.set(None);
+        state.notice.set(None);
         leptos::task::spawn_local(async move {
             match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
                 Ok(session_id) => {
@@ -1364,6 +1375,33 @@ mod tests {
             assert!(state.start_chat_selected_branch.get().is_empty());
             assert!(!state.start_chat_loading_branches.get());
             assert!(state.error.get().is_none());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn workspace_start_chat_branch_store_selects_the_first_branch() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.start_chat_workspace_id.set(Some("w_1".to_string()));
+            state.start_chat_loading_branches.set(true);
+
+            store_workspace_start_chat_branches(
+                state,
+                "w_1",
+                vec![
+                    WorkspaceBranch {
+                        name: "main".to_string(),
+                        ref_name: "refs/heads/main".to_string(),
+                    },
+                    sample_workspace_branch(),
+                ],
+            );
+
+            assert!(!state.start_chat_loading_branches.get());
+            assert_eq!(state.start_chat_selected_branch.get(), "refs/heads/main");
+            assert_eq!(state.start_chat_branches.get().len(), 2);
         });
     }
 

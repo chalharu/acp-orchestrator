@@ -2,6 +2,8 @@
 
 use leptos::prelude::*;
 
+use crate::presentation::{AppIcon, app_icon_view};
+
 #[component]
 pub(super) fn ComposerFooter(
     #[prop(into)] status_text: Signal<String>,
@@ -57,7 +59,23 @@ fn composer_actions_view(
     on_cancel: Callback<()>,
 ) -> impl IntoView {
     let cancel_props = (cancel_disabled, on_cancel);
-    view! { <div class="composer__actions"><Show when=move || show_cancel.get()><ComposerCancelButton cancel_disabled=cancel_props.0 on_cancel=cancel_props.1 /></Show><button class="composer__submit" type="submit" prop:disabled=move || disabled.get()>"Send"</button></div> }
+    view! {
+        <div class="composer__actions">
+            <Show when=move || show_cancel.get()>
+                <ComposerCancelButton cancel_disabled=cancel_props.0 on_cancel=cancel_props.1 />
+            </Show>
+            <button
+                class="composer__submit icon-action icon-action--primary"
+                type="submit"
+                prop:disabled=move || disabled.get()
+                aria-label=submit_button_label()
+                title=submit_button_label()
+            >
+                {app_icon_view(AppIcon::Send)}
+                <span class="sr-only">{submit_button_label()}</span>
+            </button>
+        </div>
+    }
 }
 
 #[component]
@@ -77,14 +95,17 @@ fn ComposerCancelButton(
             type=cancel_type
             on:click=cancel_click
             prop:disabled=cancel_disabled_binding
+            aria-label=cancel_label
+            title=cancel_label
         >
-            {cancel_label}
+            {app_icon_view(AppIcon::Cancel)}
+            <span class="sr-only">{cancel_label}</span>
         </button>
     }
 }
 
 fn cancel_button_class() -> &'static str {
-    "pending-list__button--secondary composer__cancel"
+    "composer__cancel icon-action icon-action--ghost"
 }
 
 fn cancel_button_type() -> &'static str {
@@ -93,6 +114,10 @@ fn cancel_button_type() -> &'static str {
 
 fn cancel_button_label() -> &'static str {
     "Cancel"
+}
+
+fn submit_button_label() -> &'static str {
+    "Send"
 }
 
 fn cancel_click_handler<E>(on_cancel: Callback<()>) -> impl Fn(E) + Copy + 'static
@@ -199,10 +224,11 @@ mod tests {
             assert_eq!(composer_status_binding(ready)(), "Ready");
             assert_eq!(
                 cancel_button_class(),
-                "pending-list__button--secondary composer__cancel"
+                "composer__cancel icon-action icon-action--ghost"
             );
             assert_eq!(cancel_button_type(), "button");
             assert_eq!(cancel_button_label(), "Cancel");
+            assert_eq!(submit_button_label(), "Send");
             assert!(!cancel_button_disabled(Signal::derive(|| false)));
             assert!(cancel_button_disabled(Signal::derive(|| true)));
             assert!(!cancel_button_disabled_binding(Signal::derive(|| false))());

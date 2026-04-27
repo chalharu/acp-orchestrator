@@ -128,11 +128,20 @@ fn session_sidebar_sign_out_button_view(
     view! {
         <button
             type="button"
-            class="session-sidebar__secondary-link session-sidebar__secondary-button"
+            class="session-sidebar__secondary-link session-sidebar__secondary-icon-link icon-action icon-action--ghost"
             prop:disabled=signing_out
             on:click=move |event| sign_out.run(event)
+            aria-label=sign_out_button_label(signing_out)
+            title=sign_out_button_label(signing_out)
         >
-            {sign_out_button_label(signing_out)}
+            <span class="session-sidebar__secondary-link-icon" aria-hidden="true">
+                {app_icon_view(if signing_out {
+                    AppIcon::Busy
+                } else {
+                    AppIcon::SignOut
+                })}
+            </span>
+            <span class="sr-only">{sign_out_button_label(signing_out)}</span>
         </button>
     }
     .into_any()

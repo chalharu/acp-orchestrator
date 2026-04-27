@@ -72,6 +72,13 @@ impl WorkspacesPageState {
     }
 }
 
+pub(crate) fn default_branch_ref_name(branches: &[WorkspaceBranch]) -> String {
+    branches
+        .first()
+        .map(|branch| branch.ref_name.clone())
+        .unwrap_or_default()
+}
+
 pub(crate) fn workspaces_path_with_return_to(return_to_path: &str) -> String {
     path_with_return_to("/app/workspaces/", return_to_path)
 }
@@ -238,6 +245,24 @@ mod tests {
             assert!(!state.start_chat_loading_branches.get());
             assert!(!state.checked.get());
         });
+    }
+
+    #[test]
+    fn default_branch_ref_name_prefers_the_first_branch() {
+        assert!(default_branch_ref_name(&[]).is_empty());
+        assert_eq!(
+            default_branch_ref_name(&[
+                WorkspaceBranch {
+                    name: "main".to_string(),
+                    ref_name: "refs/heads/main".to_string(),
+                },
+                WorkspaceBranch {
+                    name: "release".to_string(),
+                    ref_name: "refs/heads/release".to_string(),
+                },
+            ]),
+            "refs/heads/main"
+        );
     }
 
     #[test]

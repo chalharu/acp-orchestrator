@@ -4,6 +4,8 @@ use crate::components::ErrorBanner;
 use acp_contracts_workspaces::WorkspaceBranch;
 use leptos::prelude::*;
 
+#[cfg(any(test, target_family = "wasm"))]
+use crate::presentation::default_branch_ref_name;
 #[cfg(target_family = "wasm")]
 use crate::{
     browser::{navigate_to, store_prepared_session_id},
@@ -207,6 +209,9 @@ fn session_sidebar_complete_branch_load(
         return;
     }
     state.loading_branches.set(false);
+    state
+        .selected_branch
+        .set(default_branch_ref_name(&branches));
     state.branches.set(branches);
 }
 
@@ -759,6 +764,7 @@ mod tests {
                 vec![sample_sidebar_branch()],
             );
             assert!(!state.loading_branches.get());
+            assert_eq!(state.selected_branch.get(), "refs/heads/main");
             assert_eq!(state.branches.get().len(), 1);
         });
     }

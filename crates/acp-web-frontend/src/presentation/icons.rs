@@ -3,8 +3,8 @@ use leptos_icons::Icon;
 
 use icondata::{
     FaArrowLeftLongSolid, FaArrowRightFromBracketSolid, FaFloppyDiskSolid, FaFolderPlusSolid,
-    FaFolderTreeSolid, FaPenToSquareSolid, FaPlusSolid, FaSpinnerSolid, FaTrashCanSolid,
-    FaUserGearSolid, FaXmarkSolid, Icon as IconData,
+    FaFolderTreeSolid, FaPaperPlaneSolid, FaPenToSquareSolid, FaPlusSolid, FaSpinnerSolid,
+    FaTrashCanSolid, FaUserGearSolid, FaXmarkSolid, Icon as IconData,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +18,7 @@ pub(crate) enum AppIcon {
     NewChat,
     Rename,
     Save,
+    Send,
     SignOut,
     Workspaces,
 }
@@ -48,6 +49,7 @@ fn app_icon_data(icon: AppIcon) -> IconData {
         AppIcon::NewChat => FaPlusSolid,
         AppIcon::Rename => FaPenToSquareSolid,
         AppIcon::Save => FaFloppyDiskSolid,
+        AppIcon::Send => FaPaperPlaneSolid,
         AppIcon::SignOut => FaArrowRightFromBracketSolid,
         AppIcon::Workspaces => FaFolderTreeSolid,
     }
@@ -80,6 +82,7 @@ mod tests {
             let _ = app_icon_view(AppIcon::NewChat);
             let _ = app_icon_view(AppIcon::Rename);
             let _ = app_icon_view(AppIcon::Save);
+            let _ = app_icon_view(AppIcon::Send);
             let _ = app_icon_view(AppIcon::SignOut);
             let _ = app_icon_view(AppIcon::Workspaces);
             let _ = app_icon_view(AppIcon::Accounts);

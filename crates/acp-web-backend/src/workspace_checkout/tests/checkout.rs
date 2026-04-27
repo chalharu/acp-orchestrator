@@ -4,9 +4,9 @@ use super::super::{
     checkout_fetch_head, checkout_head_commit, checkout_parent_dir, clone_local_repository,
     clone_remote_workspace, current_head_commit, git_fetch_options, git_symbolic_ref,
     list_local_workspace_branches, local_source_root, local_source_root_from, map_git_error,
-    parse_remote_default_branch_name, reject_git_credentials, resolve_https_checkout_ref,
-    resolve_local_checkout_ref, resolve_remote_head_ref, validate_checkout_ref,
-    validate_https_upstream_url, workspace_branches_from_refs,
+    parse_remote_default_branch_name, prioritize_workspace_branch_ref, reject_git_credentials,
+    resolve_https_checkout_ref, resolve_local_checkout_ref, resolve_remote_head_ref,
+    validate_checkout_ref, validate_https_upstream_url, workspace_branches_from_refs,
 };
 use super::*;
 use async_trait::async_trait;
@@ -373,6 +373,25 @@ fn workspace_branch_refs_filter_non_branch_refs_and_sort_values() {
 }
 
 #[test]
+fn workspace_branch_preference_moves_default_ref_to_the_front() {
+    let mut branches = workspace_branches_from_refs([
+        "refs/heads/release",
+        "refs/heads/main",
+        "refs/heads/hotfix",
+    ]);
+
+    prioritize_workspace_branch_ref(&mut branches, Some("refs/heads/main"));
+
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| branch.ref_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["refs/heads/main", "refs/heads/hotfix", "refs/heads/release"]
+    );
+}
+
+#[test]
 fn local_workspace_branch_listing_reads_local_repository_heads() {
     let repo_dir = unique_test_dir("acp-workspace-branch-list-local");
     initialize_local_repo(&repo_dir);
@@ -396,7 +415,7 @@ fn local_workspace_branch_listing_reads_local_repository_heads() {
             .iter()
             .map(|branch| branch.ref_name.as_str())
             .collect::<Vec<_>>(),
-        vec!["refs/heads/release", "refs/heads/test-branch"]
+        vec!["refs/heads/test-branch", "refs/heads/release"]
     );
 }
 

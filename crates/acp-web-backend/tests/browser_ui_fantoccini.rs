@@ -23,7 +23,6 @@ const APP_PATH: &str = "/app/";
 const COMPOSER_SELECTOR: &str = "#composer-input";
 const REGISTER_USERNAME_SELECTOR: &str = ".account-form input[autocomplete='username']";
 const REGISTER_PASSWORD_SELECTOR: &str = ".account-form input[type='password']";
-const SIGN_OUT_SELECTOR: &str = ".session-sidebar__secondary-link[aria-label='Sign out']";
 const SUBMIT_SELECTOR: &str = ".composer__submit";
 const SIDEBAR_TOGGLE_SELECTOR: &str = ".session-sidebar__toggle";
 const MOCK_REPLY_TEXT: &str = "mock assistant: I received test.";
@@ -1279,16 +1278,19 @@ impl BrowserHarness {
 
     async fn click_sign_out_button(&self) -> Result<()> {
         self.wait_for_condition(
-            "return Boolean(document.querySelector(\".session-sidebar__secondary-link[aria-label='Sign out']\"));",
+            "return Array.from(document.querySelectorAll('.session-sidebar__secondary-button'))\
+             .some(button => button.textContent?.trim() === 'Sign out');",
             Duration::from_secs(10),
             "sign out button",
         )
         .await?;
         self.client
-            .find(Locator::Css(SIGN_OUT_SELECTOR))
-            .await
-            .context("finding the sign out button")?
-            .click()
+            .execute(
+                "const button = Array.from(document.querySelectorAll('.session-sidebar__secondary-button'))\
+                 .find(candidate => candidate.textContent?.trim() === 'Sign out');\
+                 if (button) button.click();",
+                Vec::new(),
+            )
             .await
             .context("clicking the sign out button")?;
         Ok(())

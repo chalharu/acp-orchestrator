@@ -128,7 +128,7 @@ fn session_sidebar_sign_out_button_view(
     view! {
         <button
             type="button"
-            class="session-sidebar__secondary-link session-sidebar__secondary-icon-link icon-action icon-action--ghost"
+            class="session-sidebar__secondary-link session-sidebar__secondary-button session-sidebar__secondary-icon-link icon-action icon-action--ghost"
             prop:disabled=signing_out
             on:click=move |event| sign_out.run(event)
             aria-label=sign_out_button_label(signing_out)

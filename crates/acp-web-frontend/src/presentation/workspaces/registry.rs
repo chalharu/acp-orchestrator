@@ -6,7 +6,10 @@ use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
 
-use crate::components::ErrorBanner;
+use crate::components::{
+    ErrorBanner, workspace_branch_modal_actions, workspace_branch_select_field,
+    workspace_branch_status_message,
+};
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 use crate::presentation::{AppIcon, app_icon_view};
@@ -395,13 +398,7 @@ fn workspace_start_chat_modal_view(
             <div class="workspace-modal">
                 {workspace_start_chat_modal_header(workspace_name, on_cancel)}
                 <p class="muted">
-                    {move || {
-                        if loading_branches.get() {
-                            "Loading branches for this workspace…"
-                        } else {
-                            "Choose a branch for this chat."
-                        }
-                    }}
+                    {move || workspace_branch_status_message(loading_branches.get())}
                 </p>
                 <ErrorBanner message=error />
                 <form class="account-form workspace-modal__form" on:submit=on_submit>
@@ -454,43 +451,11 @@ fn workspace_start_chat_branch_field(
     selected_branch: Signal<String>,
     loading_branches: Signal<bool>,
 ) -> impl IntoView {
-    view! {
-        <label class="account-form__field">
-            <span>"Branch"</span>
-            <select
-                class="workspace-branch-select"
-                prop:value=selected_branch
-                on:change=move |event| state.start_chat_selected_branch.set(event_target_value(&event))
-                prop:disabled=move || loading_branches.get() || branches.get().is_empty()
-            >
-                <option value="">
-                    {move || {
-                        if loading_branches.get() {
-                            "Loading branches…"
-                        } else {
-                            "Choose a branch"
-                        }
-                    }}
-                </option>
-                {move || {
-                    branches
-                        .get()
-                        .into_iter()
-                        .map(|branch| {
-                            let label = branch.name;
-                            let value = branch.ref_name;
-                            view! { <option value=value>{label}</option> }
-                        })
-                        .collect_view()
-                }}
-            </select>
-            <Show when=move || !loading_branches.get() && branches.get().is_empty()>
-                <span class="workspace-field__hint">
-                    "No branches are available for this workspace."
-                </span>
-            </Show>
-        </label>
-    }
+    workspace_branch_select_field(branches, selected_branch, loading_branches, move |event| {
+        state
+            .start_chat_selected_branch
+            .set(event_target_value(&event))
+    })
 }
 
 fn workspace_start_chat_modal_actions(
@@ -500,32 +465,14 @@ fn workspace_start_chat_modal_actions(
     branches: Signal<Vec<WorkspaceBranch>>,
     on_cancel: impl Fn(web_sys::MouseEvent) + Copy + 'static,
 ) -> impl IntoView {
-    let submit_label = workspace_new_chat_label_signal(opening);
-    let submit_disabled = Signal::derive(move || {
-        opening.get()
-            || loading_branches.get()
-            || selected_branch.get().trim().is_empty()
-            || branches.get().is_empty()
-    });
-    view! {
-        <div class="workspace-modal__actions">
-            <button
-                type="submit"
-                class="account-form__submit"
-                prop:disabled=move || submit_disabled.get()
-            >
-                {submit_label}
-            </button>
-            <button
-                type="button"
-                class="account-form__cancel"
-                on:click=on_cancel
-                prop:disabled=move || opening.get()
-            >
-                "Cancel"
-            </button>
-        </div>
-    }
+    workspace_branch_modal_actions(
+        workspace_new_chat_label_signal(opening),
+        opening,
+        loading_branches,
+        selected_branch,
+        branches,
+        on_cancel,
+    )
 }
 
 #[cfg(not(target_family = "wasm"))]

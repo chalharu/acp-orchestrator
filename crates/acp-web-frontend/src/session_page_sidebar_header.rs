@@ -1,5 +1,8 @@
 #[cfg(target_family = "wasm")]
-use crate::components::ErrorBanner;
+use crate::components::{
+    ErrorBanner, workspace_branch_modal_actions, workspace_branch_select_field,
+    workspace_branch_status_message,
+};
 #[cfg(any(test, target_family = "wasm"))]
 use acp_contracts_workspaces::WorkspaceBranch;
 use leptos::prelude::*;
@@ -326,27 +329,12 @@ fn SessionSidebarNewChatAction(
     let state = SessionSidebarNewChatState::new();
     let on_click =
         session_sidebar_new_chat_click_handler(current_workspace_id, sidebar_error, state);
-    let branches = Signal::derive(move || state.branches.get());
-    let selected_branch = Signal::derive(move || state.selected_branch.get());
-    let loading_branches = Signal::derive(move || state.loading_branches.get());
     let creating = Signal::derive(move || state.creating.get());
-    let error = Signal::derive(move || sidebar_error.get());
-    let on_submit = session_sidebar_new_chat_submit_handler(sidebar_error, state);
-    let on_cancel = session_sidebar_new_chat_cancel_handler(sidebar_error, state);
 
     view! {
         <>
             {session_sidebar_new_chat_button_view(creating, on_click)}
-            {session_sidebar_new_chat_modal(
-                state,
-                branches,
-                selected_branch,
-                loading_branches,
-                creating,
-                error,
-                on_submit,
-                on_cancel,
-            )}
+            {session_sidebar_new_chat_modal(state, sidebar_error)}
         </>
     }
 }
@@ -376,67 +364,85 @@ fn session_sidebar_new_chat_button_view(
 #[cfg(target_family = "wasm")]
 fn session_sidebar_new_chat_modal(
     state: SessionSidebarNewChatState,
-    branches: Signal<Vec<WorkspaceBranch>>,
-    selected_branch: Signal<String>,
-    loading_branches: Signal<bool>,
-    creating: Signal<bool>,
+    sidebar_error: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let error = Signal::derive(move || sidebar_error.get());
+    let on_submit = session_sidebar_new_chat_submit_handler(sidebar_error, state);
+    let on_cancel = session_sidebar_new_chat_cancel_handler(sidebar_error, state);
+
+    view! {
+        <Show when=move || state.show_modal.get()>
+            {session_sidebar_new_chat_modal_view(state, error, on_submit, on_cancel)}
+        </Show>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_modal_view(
+    state: SessionSidebarNewChatState,
     error: Signal<Option<String>>,
     on_submit: Callback<web_sys::SubmitEvent>,
     on_cancel: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
-    let status_message = Signal::derive(move || {
-        if loading_branches.get() {
-            "Loading branches for this workspace…"
-        } else {
-            "Choose a branch for this chat."
-        }
-    });
+    let branches = Signal::derive(move || state.branches.get());
+    let selected_branch = Signal::derive(move || state.selected_branch.get());
+    let loading_branches = Signal::derive(move || state.loading_branches.get());
+    let creating = Signal::derive(move || state.creating.get());
 
     view! {
-        <Show when=move || state.show_modal.get()>
-            <div
-                class="workspace-modal-overlay"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Start new chat"
-            >
-                <div class="workspace-modal">
-                    <div class="workspace-modal__header">
-                        <h2 class="workspace-modal__title">"Start new chat"</h2>
-                        <button
-                            type="button"
-                            class="workspace-modal__close"
-                            on:click=move |event| on_cancel.run(event)
-                            aria-label="Close"
-                            title="Close"
-                        >
-                            {app_icon_view(AppIcon::Cancel)}
-                            <span class="sr-only">"Close"</span>
-                        </button>
-                    </div>
-                    <p class="muted">{move || status_message.get()}</p>
-                    <ErrorBanner message=error />
-                    <form
-                        class="account-form workspace-modal__form"
-                        on:submit=move |event| on_submit.run(event)
-                    >
-                        {session_sidebar_new_chat_branch_field(
-                            state,
-                            branches,
-                            selected_branch,
-                            loading_branches,
-                        )}
-                        {session_sidebar_new_chat_modal_actions(
-                            creating,
-                            loading_branches,
-                            selected_branch,
-                            branches,
-                            on_cancel,
-                        )}
-                    </form>
-                </div>
+        <div
+            class="workspace-modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Start new chat"
+        >
+            <div class="workspace-modal">
+                {session_sidebar_new_chat_modal_header(on_cancel)}
+                <p class="muted">
+                    {move || workspace_branch_status_message(loading_branches.get())}
+                </p>
+                <ErrorBanner message=error />
+                <form
+                    class="account-form workspace-modal__form"
+                    on:submit=move |event| on_submit.run(event)
+                >
+                    {session_sidebar_new_chat_branch_field(
+                        state,
+                        branches,
+                        selected_branch,
+                        loading_branches,
+                    )}
+                    {session_sidebar_new_chat_modal_actions(
+                        creating,
+                        loading_branches,
+                        selected_branch,
+                        branches,
+                        on_cancel,
+                    )}
+                </form>
             </div>
-        </Show>
+        </div>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_modal_header(
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-modal__header">
+            <h2 class="workspace-modal__title">"Start new chat"</h2>
+            <button
+                type="button"
+                class="workspace-modal__close"
+                on:click=move |event| on_cancel.run(event)
+                aria-label="Close"
+                title="Close"
+            >
+                {app_icon_view(AppIcon::Cancel)}
+                <span class="sr-only">"Close"</span>
+            </button>
+        </div>
     }
 }
 
@@ -493,43 +499,9 @@ fn session_sidebar_new_chat_branch_field(
     selected_branch: Signal<String>,
     loading_branches: Signal<bool>,
 ) -> impl IntoView {
-    view! {
-        <label class="account-form__field">
-            <span>"Branch"</span>
-            <select
-                class="workspace-branch-select"
-                prop:value=selected_branch
-                on:change=move |event| state.selected_branch.set(event_target_value(&event))
-                prop:disabled=move || loading_branches.get() || branches.get().is_empty()
-            >
-                <option value="">
-                    {move || {
-                        if loading_branches.get() {
-                            "Loading branches…"
-                        } else {
-                            "Choose a branch"
-                        }
-                    }}
-                </option>
-                {move || {
-                    branches
-                        .get()
-                        .into_iter()
-                        .map(|branch| {
-                            let label = branch.name;
-                            let value = branch.ref_name;
-                            view! { <option value=value>{label}</option> }
-                        })
-                        .collect_view()
-                }}
-            </select>
-            <Show when=move || !loading_branches.get() && branches.get().is_empty()>
-                <span class="workspace-field__hint">
-                    "No branches are available for this workspace."
-                </span>
-            </Show>
-        </label>
-    }
+    workspace_branch_select_field(branches, selected_branch, loading_branches, move |event| {
+        state.selected_branch.set(event_target_value(&event))
+    })
 }
 
 #[cfg(target_family = "wasm")]
@@ -540,32 +512,14 @@ fn session_sidebar_new_chat_modal_actions(
     branches: Signal<Vec<WorkspaceBranch>>,
     on_cancel: Callback<web_sys::MouseEvent>,
 ) -> impl IntoView {
-    let submit_disabled = Signal::derive(move || {
-        creating.get()
-            || loading_branches.get()
-            || selected_branch.get().trim().is_empty()
-            || branches.get().is_empty()
-    });
-
-    view! {
-        <div class="workspace-modal__actions">
-            <button
-                type="submit"
-                class="account-form__submit"
-                prop:disabled=move || submit_disabled.get()
-            >
-                {move || session_sidebar_new_chat_label(creating.get())}
-            </button>
-            <button
-                type="button"
-                class="account-form__cancel"
-                on:click=move |event| on_cancel.run(event)
-                prop:disabled=move || creating.get()
-            >
-                "Cancel"
-            </button>
-        </div>
-    }
+    workspace_branch_modal_actions(
+        move || session_sidebar_new_chat_label(creating.get()),
+        creating,
+        loading_branches,
+        selected_branch,
+        branches,
+        move |event| on_cancel.run(event),
+    )
 }
 
 #[cfg(target_family = "wasm")]

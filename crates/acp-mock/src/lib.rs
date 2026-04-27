@@ -662,7 +662,7 @@ mod coverage_tests {
 
     use super::{
         MANUAL_PERMISSION_TRIGGER, MockAgent, MockConfig, MockDispatchHandler, MockServerState,
-        prompt_response_for_permission_outcome, spawn_with_shutdown_task,
+        connect_mock_agent, prompt_response_for_permission_outcome, spawn_with_shutdown_task,
     };
     use agent_client_protocol as acp;
 
@@ -891,6 +891,51 @@ mod coverage_tests {
 
         finish_roundtrip(shutdown_tx, server).await;
         Ok(result)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_mock_agent_accepts_direct_acp_roundtrips() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose a local address");
+        let state = Arc::new(MockServerState::new(MockConfig {
+            response_delay: Duration::from_millis(1),
+            startup_hints: false,
+        }));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("test listener should accept");
+            let (reader, writer) = stream.into_split();
+            connect_mock_agent(reader, writer, MockAgent::new(state)).await
+        });
+
+        let stream = connect_roundtrip_stream(address).await;
+        let (reader, writer) = stream.into_split();
+        let working_dir = std::env::current_dir().expect("current directory should be available");
+        let result = acp::Client
+            .builder()
+            .name("acp-mock-connect-agent-test")
+            .connect_with(
+                acp::ByteStreams::new(writer.compat_write(), reader.compat()),
+                move |connection: acp::ConnectionTo<acp::Agent>| async move {
+                    initialize_roundtrip_connection(&connection).await?;
+                    connection
+                        .send_request(schema::LoadSessionRequest::new("mock_0", working_dir))
+                        .block_task()
+                        .await
+                },
+            )
+            .await
+            .expect("direct ACP roundtrip should succeed");
+
+        assert_eq!(result, schema::LoadSessionResponse::new());
+        server.abort();
+        let _ = server.await;
     }
 
     #[rustfmt::skip]

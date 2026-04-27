@@ -408,28 +408,11 @@ fn prune_orphaned_foreign_key_rows(connection: &Connection) -> Result<(), Worksp
     Ok(())
 }
 
+#[rustfmt::skip]
 fn ensure_foreign_key_tables(connection: &Connection) -> Result<(), WorkspaceStoreError> {
-    rebuild_table_with_foreign_keys_if_needed(
-        connection,
-        "browser_sessions",
-        BROWSER_SESSIONS_REBUILD_TABLE_SQL,
-        BROWSER_SESSIONS_REBUILD_COLUMNS,
-        BROWSER_SESSIONS_FOREIGN_KEYS,
-    )?;
-    rebuild_table_with_foreign_keys_if_needed(
-        connection,
-        "workspaces",
-        WORKSPACES_REBUILD_TABLE_SQL,
-        WORKSPACES_REBUILD_COLUMNS,
-        WORKSPACES_FOREIGN_KEYS,
-    )?;
-    rebuild_table_with_foreign_keys_if_needed(
-        connection,
-        "sessions",
-        SESSIONS_REBUILD_TABLE_SQL,
-        SESSIONS_REBUILD_COLUMNS,
-        SESSIONS_FOREIGN_KEYS,
-    )?;
+    rebuild_table_with_foreign_keys_if_needed(connection, "browser_sessions", BROWSER_SESSIONS_REBUILD_TABLE_SQL, BROWSER_SESSIONS_REBUILD_COLUMNS, BROWSER_SESSIONS_FOREIGN_KEYS)?;
+    rebuild_table_with_foreign_keys_if_needed(connection, "workspaces", WORKSPACES_REBUILD_TABLE_SQL, WORKSPACES_REBUILD_COLUMNS, WORKSPACES_FOREIGN_KEYS)?;
+    rebuild_table_with_foreign_keys_if_needed(connection, "sessions", SESSIONS_REBUILD_TABLE_SQL, SESSIONS_REBUILD_COLUMNS, SESSIONS_FOREIGN_KEYS)?;
     connection
         .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
         .map_err(database_error)?;
@@ -857,4 +840,218 @@ fn promote_legacy_bearer_admins(connection: &Connection) -> Result<(), Workspace
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_connection() -> Connection {
+        Connection::open_in_memory().expect("in-memory sqlite should open")
+    }
+
+    fn create_users_table(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE users (
+                    user_id TEXT PRIMARY KEY,
+                    principal_kind TEXT NOT NULL,
+                    principal_subject TEXT NOT NULL,
+                    username TEXT,
+                    password_hash TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    deleted_at TEXT
+                );",
+            )
+            .expect("users table should initialize");
+    }
+
+    #[test]
+    fn ensure_foreign_key_tables_rebuilds_all_workspace_tables() {
+        let connection = test_connection();
+        create_users_table(&connection);
+        connection
+            .execute_batch(
+                "CREATE TABLE browser_sessions (
+                    browser_session_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
+                CREATE TABLE workspaces (
+                    workspace_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE sessions (
+                    session_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_activity_at TEXT NOT NULL
+                );",
+            )
+            .expect("legacy tables should initialize");
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    username,
+                    password_hash,
+                    is_admin,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                ) VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4, ?4, NULL)",
+                params!["u_owner", "bearer", "developer", "2026-04-27T00:00:00Z"],
+            )
+            .expect("user should insert");
+        connection
+            .execute(
+                "INSERT INTO browser_sessions (
+                    browser_session_id,
+                    user_id,
+                    created_at,
+                    last_seen_at
+                ) VALUES (?1, ?2, ?3, ?3)",
+                params!["bs_1", "u_owner", "2026-04-27T00:00:00Z"],
+            )
+            .expect("browser session should insert");
+        connection
+            .execute(
+                "INSERT INTO workspaces (
+                    workspace_id,
+                    owner_user_id,
+                    name,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![
+                    "w_1",
+                    "u_owner",
+                    "Workspace",
+                    "ready",
+                    "2026-04-27T00:00:00Z"
+                ],
+            )
+            .expect("workspace should insert");
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                    session_id,
+                    workspace_id,
+                    owner_user_id,
+                    title,
+                    status,
+                    created_at,
+                    last_activity_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    "s_1",
+                    "w_1",
+                    "u_owner",
+                    "Session",
+                    "active",
+                    "2026-04-27T00:00:00Z"
+                ],
+            )
+            .expect("session should insert");
+
+        ensure_foreign_key_tables(&connection).expect("tables should rebuild with foreign keys");
+
+        assert!(
+            table_has_expected_foreign_keys(
+                &connection,
+                "browser_sessions",
+                BROWSER_SESSIONS_FOREIGN_KEYS
+            )
+            .expect("browser sessions foreign keys should load")
+        );
+        assert!(
+            table_has_expected_foreign_keys(&connection, "workspaces", WORKSPACES_FOREIGN_KEYS)
+                .expect("workspaces foreign keys should load")
+        );
+        assert!(
+            table_has_expected_foreign_keys(&connection, "sessions", SESSIONS_FOREIGN_KEYS)
+                .expect("sessions foreign keys should load")
+        );
+        let snapshot_defaults: (i64, String) = connection
+            .query_row(
+                "SELECT latest_sequence, messages_json FROM sessions WHERE session_id = 's_1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("session defaults should survive rebuild");
+        assert_eq!(snapshot_defaults, (0, "[]".to_string()));
+    }
+
+    #[test]
+    fn rebuild_select_expression_rejects_missing_required_columns() {
+        let error = rebuild_select_expression(
+            "sessions",
+            &[],
+            TableRebuildColumn {
+                name: "session_id",
+                fallback_sql: None,
+            },
+        )
+        .expect_err("missing required columns should fail");
+
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Database(
+                "table 'sessions' is missing required column 'session_id'".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn ensure_foreign_key_integrity_accepts_clean_tables_and_reports_violations() {
+        let connection = test_connection();
+        connection
+            .execute_batch(
+                "CREATE TABLE parent (
+                    id TEXT PRIMARY KEY
+                );
+                CREATE TABLE child (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT NOT NULL,
+                    FOREIGN KEY (parent_id) REFERENCES parent(id)
+                );
+                INSERT INTO parent (id) VALUES ('p_1');
+                INSERT INTO child (id, parent_id) VALUES ('c_valid', 'p_1');",
+            )
+            .expect("parent and child tables should initialize");
+
+        ensure_foreign_key_integrity(&connection).expect("clean schema should pass integrity");
+
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("foreign key pragma should disable");
+        connection
+            .execute(
+                "INSERT INTO child (id, parent_id) VALUES (?1, ?2)",
+                params!["c_orphan", "p_missing"],
+            )
+            .expect("orphan child row should insert with foreign keys disabled");
+
+        let error =
+            ensure_foreign_key_integrity(&connection).expect_err("orphan rows should be reported");
+        assert_eq!(
+            error,
+            WorkspaceStoreError::Database(
+                "foreign key check failed: child(rowid=2) -> parent [fk#0]".to_string()
+            )
+        );
+    }
 }

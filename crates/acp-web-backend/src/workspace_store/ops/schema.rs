@@ -846,145 +846,129 @@ fn promote_legacy_bearer_admins(connection: &Connection) -> Result<(), Workspace
 mod tests {
     use super::*;
 
+    const TEST_TIMESTAMP: &str = "2026-04-27T00:00:00Z";
+
     fn test_connection() -> Connection {
         Connection::open_in_memory().expect("in-memory sqlite should open")
     }
 
-    fn create_users_table(connection: &Connection) {
+    fn prepare_users_only_schema(connection: &Connection) {
+        connection
+            .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
+            .expect("workspace schema should initialize");
         connection
             .execute_batch(
-                "CREATE TABLE users (
-                    user_id TEXT PRIMARY KEY,
-                    principal_kind TEXT NOT NULL,
-                    principal_subject TEXT NOT NULL,
-                    username TEXT,
-                    password_hash TEXT,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );",
+                "DROP TABLE sessions;
+                 DROP TABLE browser_sessions;
+                 DROP TABLE workspaces;",
             )
-            .expect("users table should initialize");
+            .expect("workspace tables should drop");
+    }
+
+    fn create_legacy_workspace_tables(connection: &Connection) {
+        for sql in [
+            "CREATE TABLE browser_sessions (browser_session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);",
+            "CREATE TABLE workspaces (workspace_id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL);",
+        ] {
+            connection
+                .execute_batch(sql)
+                .expect("legacy table should initialize");
+        }
+    }
+
+    fn insert_user(connection: &Connection, user_id: &str) {
+        connection
+            .execute(
+                "INSERT INTO users VALUES (?1, 'bearer', 'developer', NULL, NULL, 1, ?2, ?2, NULL)",
+                params![user_id, TEST_TIMESTAMP],
+            )
+            .expect("user should insert");
+    }
+
+    fn insert_legacy_workspace_rows(connection: &Connection, owner_user_id: &str) {
+        connection
+            .execute(
+                "INSERT INTO browser_sessions VALUES (?1, ?2, ?3, ?3)",
+                params!["bs_1", owner_user_id, TEST_TIMESTAMP],
+            )
+            .expect("browser session should insert");
+        connection
+            .execute(
+                "INSERT INTO workspaces VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params!["w_1", owner_user_id, "Workspace", "ready", TEST_TIMESTAMP],
+            )
+            .expect("workspace should insert");
+        connection
+            .execute(
+                "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    "s_1",
+                    "w_1",
+                    owner_user_id,
+                    "Session",
+                    "active",
+                    TEST_TIMESTAMP
+                ],
+            )
+            .expect("session should insert");
+    }
+
+    fn assert_foreign_keys(
+        connection: &Connection,
+        table_name: &str,
+        expected_foreign_keys: &[ExpectedForeignKey],
+    ) {
+        assert!(
+            table_has_expected_foreign_keys(connection, table_name, expected_foreign_keys)
+                .expect("foreign keys should load"),
+            "{table_name} should include the expected foreign keys"
+        );
+    }
+
+    fn create_parent_child_tables(connection: &Connection) {
+        connection
+            .execute_batch("CREATE TABLE parent (id TEXT PRIMARY KEY);")
+            .expect("parent table should initialize");
+        connection
+            .execute_batch(
+                "CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, FOREIGN KEY (parent_id) REFERENCES parent(id));",
+            )
+            .expect("child table should initialize");
+    }
+
+    fn insert_parent(connection: &Connection, parent_id: &str) {
+        connection
+            .execute("INSERT INTO parent VALUES (?1)", params![parent_id])
+            .expect("parent row should insert");
+    }
+
+    fn insert_child(connection: &Connection, child_id: &str, parent_id: &str) {
+        connection
+            .execute(
+                "INSERT INTO child VALUES (?1, ?2)",
+                params![child_id, parent_id],
+            )
+            .expect("child row should insert");
     }
 
     #[test]
     fn ensure_foreign_key_tables_rebuilds_all_workspace_tables() {
         let connection = test_connection();
-        create_users_table(&connection);
-        connection
-            .execute_batch(
-                "CREATE TABLE browser_sessions (
-                    browser_session_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL
-                );
-                CREATE TABLE workspaces (
-                    workspace_id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE sessions (
-                    session_id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL,
-                    owner_user_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_activity_at TEXT NOT NULL
-                );",
-            )
-            .expect("legacy tables should initialize");
-        connection
-            .execute(
-                "INSERT INTO users (
-                    user_id,
-                    principal_kind,
-                    principal_subject,
-                    username,
-                    password_hash,
-                    is_admin,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                ) VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4, ?4, NULL)",
-                params!["u_owner", "bearer", "developer", "2026-04-27T00:00:00Z"],
-            )
-            .expect("user should insert");
-        connection
-            .execute(
-                "INSERT INTO browser_sessions (
-                    browser_session_id,
-                    user_id,
-                    created_at,
-                    last_seen_at
-                ) VALUES (?1, ?2, ?3, ?3)",
-                params!["bs_1", "u_owner", "2026-04-27T00:00:00Z"],
-            )
-            .expect("browser session should insert");
-        connection
-            .execute(
-                "INSERT INTO workspaces (
-                    workspace_id,
-                    owner_user_id,
-                    name,
-                    status,
-                    created_at,
-                    updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![
-                    "w_1",
-                    "u_owner",
-                    "Workspace",
-                    "ready",
-                    "2026-04-27T00:00:00Z"
-                ],
-            )
-            .expect("workspace should insert");
-        connection
-            .execute(
-                "INSERT INTO sessions (
-                    session_id,
-                    workspace_id,
-                    owner_user_id,
-                    title,
-                    status,
-                    created_at,
-                    last_activity_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                params![
-                    "s_1",
-                    "w_1",
-                    "u_owner",
-                    "Session",
-                    "active",
-                    "2026-04-27T00:00:00Z"
-                ],
-            )
-            .expect("session should insert");
+        prepare_users_only_schema(&connection);
+        create_legacy_workspace_tables(&connection);
+        insert_user(&connection, "u_owner");
+        insert_legacy_workspace_rows(&connection, "u_owner");
 
         ensure_foreign_key_tables(&connection).expect("tables should rebuild with foreign keys");
 
-        assert!(
-            table_has_expected_foreign_keys(
-                &connection,
-                "browser_sessions",
-                BROWSER_SESSIONS_FOREIGN_KEYS
-            )
-            .expect("browser sessions foreign keys should load")
+        assert_foreign_keys(
+            &connection,
+            "browser_sessions",
+            BROWSER_SESSIONS_FOREIGN_KEYS,
         );
-        assert!(
-            table_has_expected_foreign_keys(&connection, "workspaces", WORKSPACES_FOREIGN_KEYS)
-                .expect("workspaces foreign keys should load")
-        );
-        assert!(
-            table_has_expected_foreign_keys(&connection, "sessions", SESSIONS_FOREIGN_KEYS)
-                .expect("sessions foreign keys should load")
-        );
+        assert_foreign_keys(&connection, "workspaces", WORKSPACES_FOREIGN_KEYS);
+        assert_foreign_keys(&connection, "sessions", SESSIONS_FOREIGN_KEYS);
         let snapshot_defaults: (i64, String) = connection
             .query_row(
                 "SELECT latest_sequence, messages_json FROM sessions WHERE session_id = 's_1'",
@@ -1018,32 +1002,16 @@ mod tests {
     #[test]
     fn ensure_foreign_key_integrity_accepts_clean_tables_and_reports_violations() {
         let connection = test_connection();
-        connection
-            .execute_batch(
-                "CREATE TABLE parent (
-                    id TEXT PRIMARY KEY
-                );
-                CREATE TABLE child (
-                    id TEXT PRIMARY KEY,
-                    parent_id TEXT NOT NULL,
-                    FOREIGN KEY (parent_id) REFERENCES parent(id)
-                );
-                INSERT INTO parent (id) VALUES ('p_1');
-                INSERT INTO child (id, parent_id) VALUES ('c_valid', 'p_1');",
-            )
-            .expect("parent and child tables should initialize");
+        create_parent_child_tables(&connection);
+        insert_parent(&connection, "p_1");
+        insert_child(&connection, "c_valid", "p_1");
 
         ensure_foreign_key_integrity(&connection).expect("clean schema should pass integrity");
 
         connection
             .pragma_update(None, "foreign_keys", false)
             .expect("foreign key pragma should disable");
-        connection
-            .execute(
-                "INSERT INTO child (id, parent_id) VALUES (?1, ?2)",
-                params!["c_orphan", "p_missing"],
-            )
-            .expect("orphan child row should insert with foreign keys disabled");
+        insert_child(&connection, "c_orphan", "p_missing");
 
         let error =
             ensure_foreign_key_integrity(&connection).expect_err("orphan rows should be reported");

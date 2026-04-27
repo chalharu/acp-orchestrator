@@ -973,6 +973,310 @@ mod tests {
         rows
     }
 
+    const LEGACY_WORKSPACE_SCHEMA_WITHOUT_FOREIGN_KEYS: &str = "CREATE TABLE users (
+            user_id TEXT PRIMARY KEY,
+            principal_kind TEXT NOT NULL,
+            principal_subject TEXT NOT NULL,
+            username TEXT,
+            password_hash TEXT,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
+        CREATE TABLE browser_sessions (
+            browser_session_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
+        CREATE TABLE workspaces (
+            workspace_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            upstream_url TEXT,
+            default_ref TEXT,
+            credential_reference_id TEXT,
+            status TEXT NOT NULL,
+            bootstrap_kind TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            checkout_relpath TEXT,
+            checkout_ref TEXT,
+            checkout_commit_sha TEXT,
+            failure_reason TEXT,
+            detach_deadline_at TEXT,
+            restartable_deadline_at TEXT,
+            created_at TEXT NOT NULL,
+            last_activity_at TEXT NOT NULL,
+            latest_sequence INTEGER NOT NULL DEFAULT 0,
+            messages_json TEXT NOT NULL DEFAULT '[]',
+            closed_at TEXT,
+            deleted_at TEXT
+        );";
+
+    fn legacy_workspace_db(label: &str) -> (std::path::PathBuf, Connection) {
+        legacy_user_db_connection(label, LEGACY_WORKSPACE_SCHEMA_WITHOUT_FOREIGN_KEYS)
+    }
+
+    fn insert_workspace_schema_user(
+        connection: &Connection,
+        user_id: &str,
+        principal_subject: &str,
+        now: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO users (
+                    user_id,
+                    principal_kind,
+                    principal_subject,
+                    username,
+                    password_hash,
+                    is_admin,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                 ) VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4, ?4, NULL)",
+                params![
+                    user_id,
+                    AuthenticatedPrincipalKind::Bearer.as_str(),
+                    principal_subject,
+                    now
+                ],
+            )
+            .expect("workspace schema user should insert");
+    }
+
+    fn insert_workspace_schema_browser_session(
+        connection: &Connection,
+        browser_session_id: &str,
+        user_id: &str,
+        now: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO browser_sessions (
+                    browser_session_id,
+                    user_id,
+                    created_at,
+                    last_seen_at,
+                    deleted_at
+                 ) VALUES (?1, ?2, ?3, ?3, NULL)",
+                params![browser_session_id, user_id, now],
+            )
+            .expect("workspace schema browser session should insert");
+    }
+
+    fn insert_workspace_schema_workspace(
+        connection: &Connection,
+        workspace_id: &str,
+        owner_user_id: &str,
+        name: &str,
+        upstream_url: Option<&str>,
+        status: &str,
+        now: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO workspaces (
+                    workspace_id,
+                    owner_user_id,
+                    name,
+                    upstream_url,
+                    default_ref,
+                    credential_reference_id,
+                    status,
+                    bootstrap_kind,
+                    created_at,
+                    updated_at,
+                    deleted_at
+                 ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, ?6, NULL)",
+                params![workspace_id, owner_user_id, name, upstream_url, status, now],
+            )
+            .expect("workspace schema workspace should insert");
+    }
+
+    fn insert_workspace_schema_session(
+        connection: &Connection,
+        session_id: &str,
+        workspace_id: &str,
+        owner_user_id: &str,
+        title: &str,
+        status: &str,
+        now: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                    session_id,
+                    workspace_id,
+                    owner_user_id,
+                    title,
+                    status,
+                    checkout_relpath,
+                    checkout_ref,
+                    checkout_commit_sha,
+                    failure_reason,
+                    detach_deadline_at,
+                    restartable_deadline_at,
+                    created_at,
+                    last_activity_at,
+                    latest_sequence,
+                    messages_json,
+                    closed_at,
+                    deleted_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?6, 0, '[]', NULL, NULL)",
+                params![session_id, workspace_id, owner_user_id, title, status, now],
+            )
+            .expect("workspace schema session should insert");
+    }
+
+    fn workspace_table_row_count(connection: &Connection, table_name: &str) -> i64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table_name}"), [], |row| {
+                row.get(0)
+            })
+            .expect("table count should load")
+    }
+
+    fn workspace_row_exists(
+        connection: &Connection,
+        table_name: &str,
+        id_column: &str,
+        id_value: &str,
+    ) -> bool {
+        connection
+            .query_row(
+                &format!("SELECT 1 FROM {table_name} WHERE {id_column} = ?1"),
+                params![id_value],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    fn assert_workspace_foreign_keys(connection: &Connection) {
+        assert_eq!(
+            foreign_key_targets(connection, "browser_sessions"),
+            vec![(
+                "users".to_string(),
+                "user_id".to_string(),
+                "user_id".to_string()
+            )]
+        );
+        assert_eq!(
+            foreign_key_targets(connection, "workspaces"),
+            vec![(
+                "users".to_string(),
+                "owner_user_id".to_string(),
+                "user_id".to_string()
+            )]
+        );
+        assert_eq!(
+            foreign_key_targets(connection, "sessions"),
+            vec![
+                (
+                    "users".to_string(),
+                    "owner_user_id".to_string(),
+                    "user_id".to_string()
+                ),
+                (
+                    "workspaces".to_string(),
+                    "workspace_id".to_string(),
+                    "workspace_id".to_string()
+                )
+            ]
+        );
+    }
+
+    fn insert_valid_workspace_fixture(connection: &Connection, now: &str) {
+        insert_workspace_schema_user(connection, "u_owner", "developer", now);
+        insert_workspace_schema_browser_session(connection, "bs_valid", "u_owner", now);
+        insert_workspace_schema_workspace(
+            connection,
+            "w_valid",
+            "u_owner",
+            "Valid Workspace",
+            None,
+            "ready",
+            now,
+        );
+        insert_workspace_schema_session(
+            connection,
+            "s_valid",
+            "w_valid",
+            "u_owner",
+            "Valid Session",
+            "active",
+            now,
+        );
+    }
+
+    fn insert_orphaned_workspace_fixture(connection: &Connection, now: &str) {
+        insert_valid_workspace_fixture(connection, now);
+        insert_workspace_schema_browser_session(connection, "bs_orphan", "u_missing", now);
+        insert_workspace_schema_workspace(
+            connection,
+            "w_orphan",
+            "u_missing",
+            "Orphan Workspace",
+            None,
+            "ready",
+            now,
+        );
+        insert_workspace_schema_session(
+            connection,
+            "s_orphan_workspace",
+            "w_orphan",
+            "u_owner",
+            "Orphan Session",
+            "active",
+            now,
+        );
+        insert_workspace_schema_session(
+            connection,
+            "s_orphan_owner",
+            "w_valid",
+            "u_missing",
+            "Orphan Owner Session",
+            "active",
+            now,
+        );
+    }
+
+    fn assert_only_valid_workspace_rows(connection: &Connection) {
+        assert_eq!(workspace_table_row_count(connection, "browser_sessions"), 1);
+        assert_eq!(workspace_table_row_count(connection, "workspaces"), 1);
+        assert_eq!(workspace_table_row_count(connection, "sessions"), 1);
+        assert!(workspace_row_exists(
+            connection,
+            "browser_sessions",
+            "browser_session_id",
+            "bs_valid"
+        ));
+        assert!(workspace_row_exists(
+            connection,
+            "workspaces",
+            "workspace_id",
+            "w_valid"
+        ));
+        assert!(workspace_row_exists(
+            connection,
+            "sessions",
+            "session_id",
+            "s_valid"
+        ));
+    }
+
     fn insert_legacy_bearer_user(
         connection: &Connection,
         user_id: &str,
@@ -1769,149 +2073,28 @@ mod tests {
 
     #[test]
     fn initialization_rebuilds_existing_tables_with_foreign_keys() {
-        let (db_path, connection) = legacy_user_db_connection(
-            "missing-foreign-keys",
-            "CREATE TABLE users (
-                    user_id TEXT PRIMARY KEY,
-                    principal_kind TEXT NOT NULL,
-                    principal_subject TEXT NOT NULL,
-                    username TEXT,
-                    password_hash TEXT,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE TABLE browser_sessions (
-                    browser_session_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE TABLE workspaces (
-                    workspace_id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    upstream_url TEXT,
-                    default_ref TEXT,
-                    credential_reference_id TEXT,
-                    status TEXT NOT NULL,
-                    bootstrap_kind TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE TABLE sessions (
-                    session_id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL,
-                    owner_user_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    checkout_relpath TEXT,
-                    checkout_ref TEXT,
-                    checkout_commit_sha TEXT,
-                    failure_reason TEXT,
-                    detach_deadline_at TEXT,
-                    restartable_deadline_at TEXT,
-                    created_at TEXT NOT NULL,
-                    last_activity_at TEXT NOT NULL,
-                    latest_sequence INTEGER NOT NULL DEFAULT 0,
-                    messages_json TEXT NOT NULL DEFAULT '[]',
-                    closed_at TEXT,
-                    deleted_at TEXT
-                );",
-        );
+        let (db_path, connection) = legacy_workspace_db("missing-foreign-keys");
         let now = timestamp(&Utc::now());
-        connection
-            .execute(
-                "INSERT INTO users (
-                    user_id,
-                    principal_kind,
-                    principal_subject,
-                    username,
-                    password_hash,
-                    is_admin,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4, ?4, NULL)",
-                params![
-                    "u_owner",
-                    AuthenticatedPrincipalKind::Bearer.as_str(),
-                    "developer",
-                    now
-                ],
-            )
-            .expect("legacy user should insert");
-        connection
-            .execute(
-                "INSERT INTO browser_sessions (
-                    browser_session_id,
-                    user_id,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?3, NULL)",
-                params!["bs_existing", "u_owner", now],
-            )
-            .expect("legacy browser session should insert");
-        connection
-            .execute(
-                "INSERT INTO workspaces (
-                    workspace_id,
-                    owner_user_id,
-                    name,
-                    upstream_url,
-                    default_ref,
-                    credential_reference_id,
-                    status,
-                    bootstrap_kind,
-                    created_at,
-                    updated_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, ?6, NULL)",
-                params![
-                    "w_existing",
-                    "u_owner",
-                    "Workspace",
-                    "https://example.com/repo.git",
-                    "ready",
-                    now
-                ],
-            )
-            .expect("legacy workspace should insert");
-        connection
-            .execute(
-                "INSERT INTO sessions (
-                    session_id,
-                    workspace_id,
-                    owner_user_id,
-                    title,
-                    status,
-                    checkout_relpath,
-                    checkout_ref,
-                    checkout_commit_sha,
-                    failure_reason,
-                    detach_deadline_at,
-                    restartable_deadline_at,
-                    created_at,
-                    last_activity_at,
-                    latest_sequence,
-                    messages_json,
-                    closed_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?6, 0, '[]', NULL, NULL)",
-                params![
-                    "s_existing",
-                    "w_existing",
-                    "u_owner",
-                    "Session",
-                    "active",
-                    now
-                ],
-            )
-            .expect("legacy session should insert");
+        insert_workspace_schema_user(&connection, "u_owner", "developer", &now);
+        insert_workspace_schema_browser_session(&connection, "bs_existing", "u_owner", &now);
+        insert_workspace_schema_workspace(
+            &connection,
+            "w_existing",
+            "u_owner",
+            "Workspace",
+            Some("https://example.com/repo.git"),
+            "ready",
+            &now,
+        );
+        insert_workspace_schema_session(
+            &connection,
+            "s_existing",
+            "w_existing",
+            "u_owner",
+            "Session",
+            "active",
+            &now,
+        );
         drop(connection);
 
         let repository =
@@ -1920,37 +2103,7 @@ mod tests {
             .open_connection()
             .expect("opening the migrated database should succeed");
 
-        assert_eq!(
-            foreign_key_targets(&connection, "browser_sessions"),
-            vec![(
-                "users".to_string(),
-                "user_id".to_string(),
-                "user_id".to_string()
-            )]
-        );
-        assert_eq!(
-            foreign_key_targets(&connection, "workspaces"),
-            vec![(
-                "users".to_string(),
-                "owner_user_id".to_string(),
-                "user_id".to_string()
-            )]
-        );
-        assert_eq!(
-            foreign_key_targets(&connection, "sessions"),
-            vec![
-                (
-                    "users".to_string(),
-                    "owner_user_id".to_string(),
-                    "user_id".to_string()
-                ),
-                (
-                    "workspaces".to_string(),
-                    "workspace_id".to_string(),
-                    "workspace_id".to_string()
-                )
-            ]
-        );
+        assert_workspace_foreign_keys(&connection);
 
         let orphan_insert = connection.execute(
             "INSERT INTO browser_sessions (
@@ -1972,213 +2125,9 @@ mod tests {
 
     #[test]
     fn initialization_prunes_orphaned_rows_before_enforcing_foreign_keys() {
-        let (db_path, connection) = legacy_user_db_connection(
-            "orphaned-foreign-keys",
-            "CREATE TABLE users (
-                    user_id TEXT PRIMARY KEY,
-                    principal_kind TEXT NOT NULL,
-                    principal_subject TEXT NOT NULL,
-                    username TEXT,
-                    password_hash TEXT,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE TABLE browser_sessions (
-                    browser_session_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE TABLE workspaces (
-                    workspace_id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    upstream_url TEXT,
-                    default_ref TEXT,
-                    credential_reference_id TEXT,
-                    status TEXT NOT NULL,
-                    bootstrap_kind TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE TABLE sessions (
-                    session_id TEXT PRIMARY KEY,
-                    workspace_id TEXT NOT NULL,
-                    owner_user_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    checkout_relpath TEXT,
-                    checkout_ref TEXT,
-                    checkout_commit_sha TEXT,
-                    failure_reason TEXT,
-                    detach_deadline_at TEXT,
-                    restartable_deadline_at TEXT,
-                    created_at TEXT NOT NULL,
-                    last_activity_at TEXT NOT NULL,
-                    latest_sequence INTEGER NOT NULL DEFAULT 0,
-                    messages_json TEXT NOT NULL DEFAULT '[]',
-                    closed_at TEXT,
-                    deleted_at TEXT
-                );",
-        );
+        let (db_path, connection) = legacy_workspace_db("orphaned-foreign-keys");
         let now = timestamp(&Utc::now());
-        connection
-            .execute(
-                "INSERT INTO users (
-                    user_id,
-                    principal_kind,
-                    principal_subject,
-                    username,
-                    password_hash,
-                    is_admin,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4, ?4, NULL)",
-                params![
-                    "u_owner",
-                    AuthenticatedPrincipalKind::Bearer.as_str(),
-                    "developer",
-                    now
-                ],
-            )
-            .expect("user should insert");
-        connection
-            .execute(
-                "INSERT INTO browser_sessions (
-                    browser_session_id,
-                    user_id,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?3, NULL)",
-                params!["bs_valid", "u_owner", now],
-            )
-            .expect("valid browser session should insert");
-        connection
-            .execute(
-                "INSERT INTO browser_sessions (
-                    browser_session_id,
-                    user_id,
-                    created_at,
-                    last_seen_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?3, NULL)",
-                params!["bs_orphan", "u_missing", now],
-            )
-            .expect("orphan browser session should insert in legacy schema");
-        connection
-            .execute(
-                "INSERT INTO workspaces (
-                    workspace_id,
-                    owner_user_id,
-                    name,
-                    upstream_url,
-                    default_ref,
-                    credential_reference_id,
-                    status,
-                    bootstrap_kind,
-                    created_at,
-                    updated_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, NULL, ?5, ?5, NULL)",
-                params!["w_valid", "u_owner", "Valid Workspace", "ready", now],
-            )
-            .expect("valid workspace should insert");
-        connection
-            .execute(
-                "INSERT INTO workspaces (
-                    workspace_id,
-                    owner_user_id,
-                    name,
-                    upstream_url,
-                    default_ref,
-                    credential_reference_id,
-                    status,
-                    bootstrap_kind,
-                    created_at,
-                    updated_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, NULL, ?5, ?5, NULL)",
-                params!["w_orphan", "u_missing", "Orphan Workspace", "ready", now],
-            )
-            .expect("orphan workspace should insert in legacy schema");
-        connection
-            .execute(
-                "INSERT INTO sessions (
-                    session_id,
-                    workspace_id,
-                    owner_user_id,
-                    title,
-                    status,
-                    checkout_relpath,
-                    checkout_ref,
-                    checkout_commit_sha,
-                    failure_reason,
-                    detach_deadline_at,
-                    restartable_deadline_at,
-                    created_at,
-                    last_activity_at,
-                    latest_sequence,
-                    messages_json,
-                    closed_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?6, 0, '[]', NULL, NULL)",
-                params!["s_valid", "w_valid", "u_owner", "Valid Session", "active", now],
-            )
-            .expect("valid session should insert");
-        connection
-            .execute(
-                "INSERT INTO sessions (
-                    session_id,
-                    workspace_id,
-                    owner_user_id,
-                    title,
-                    status,
-                    checkout_relpath,
-                    checkout_ref,
-                    checkout_commit_sha,
-                    failure_reason,
-                    detach_deadline_at,
-                    restartable_deadline_at,
-                    created_at,
-                    last_activity_at,
-                    latest_sequence,
-                    messages_json,
-                    closed_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?6, 0, '[]', NULL, NULL)",
-                params!["s_orphan_workspace", "w_orphan", "u_owner", "Orphan Session", "active", now],
-            )
-            .expect("session tied to orphan workspace should insert in legacy schema");
-        connection
-            .execute(
-                "INSERT INTO sessions (
-                    session_id,
-                    workspace_id,
-                    owner_user_id,
-                    title,
-                    status,
-                    checkout_relpath,
-                    checkout_ref,
-                    checkout_commit_sha,
-                    failure_reason,
-                    detach_deadline_at,
-                    restartable_deadline_at,
-                    created_at,
-                    last_activity_at,
-                    latest_sequence,
-                    messages_json,
-                    closed_at,
-                    deleted_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?6, 0, '[]', NULL, NULL)",
-                params!["s_orphan_owner", "w_valid", "u_missing", "Orphan Owner Session", "active", now],
-            )
-            .expect("session tied to missing owner should insert in legacy schema");
+        insert_orphaned_workspace_fixture(&connection, &now);
         drop(connection);
 
         let repository =
@@ -2187,48 +2136,7 @@ mod tests {
             .open_connection()
             .expect("opening the migrated database should succeed");
 
-        let browser_sessions: i64 = connection
-            .query_row("SELECT COUNT(*) FROM browser_sessions", [], |row| {
-                row.get(0)
-            })
-            .expect("browser sessions count should load");
-        let workspaces: i64 = connection
-            .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
-            .expect("workspaces count should load");
-        let sessions: i64 = connection
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .expect("sessions count should load");
-
-        assert_eq!(browser_sessions, 1);
-        assert_eq!(workspaces, 1);
-        assert_eq!(sessions, 1);
-        assert!(
-            connection
-                .query_row(
-                    "SELECT 1 FROM browser_sessions WHERE browser_session_id = 'bs_valid'",
-                    [],
-                    |_| Ok(())
-                )
-                .is_ok()
-        );
-        assert!(
-            connection
-                .query_row(
-                    "SELECT 1 FROM workspaces WHERE workspace_id = 'w_valid'",
-                    [],
-                    |_| Ok(())
-                )
-                .is_ok()
-        );
-        assert!(
-            connection
-                .query_row(
-                    "SELECT 1 FROM sessions WHERE session_id = 's_valid'",
-                    [],
-                    |_| Ok(())
-                )
-                .is_ok()
-        );
+        assert_only_valid_workspace_rows(&connection);
     }
 
     #[test]

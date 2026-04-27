@@ -181,146 +181,63 @@ const SESSIONS_FOREIGN_KEYS: &[ExpectedForeignKey] = &[
     },
 ];
 
-const BROWSER_SESSIONS_REBUILD_COLUMNS: &[TableRebuildColumn] = &[
-    TableRebuildColumn {
-        name: "browser_session_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "user_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "created_at",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "last_seen_at",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "deleted_at",
-        fallback_sql: Some("NULL"),
-    },
-];
+const BROWSER_SESSIONS_REBUILD_COLUMNS_SPEC: &str = "\
+browser_session_id
+user_id
+created_at
+last_seen_at
+deleted_at=NULL
+";
 
-const WORKSPACES_REBUILD_COLUMNS: &[TableRebuildColumn] = &[
-    TableRebuildColumn {
-        name: "workspace_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "owner_user_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "name",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "upstream_url",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "default_ref",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "credential_reference_id",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "status",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "bootstrap_kind",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "created_at",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "updated_at",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "deleted_at",
-        fallback_sql: Some("NULL"),
-    },
-];
+const WORKSPACES_REBUILD_COLUMNS_SPEC: &str = "\
+workspace_id
+owner_user_id
+name
+upstream_url=NULL
+default_ref=NULL
+credential_reference_id=NULL
+status
+bootstrap_kind=NULL
+created_at
+updated_at
+deleted_at=NULL
+";
 
-const SESSIONS_REBUILD_COLUMNS: &[TableRebuildColumn] = &[
-    TableRebuildColumn {
-        name: "session_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "workspace_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "owner_user_id",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "title",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "status",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "checkout_relpath",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "checkout_ref",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "checkout_commit_sha",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "failure_reason",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "detach_deadline_at",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "restartable_deadline_at",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "created_at",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "last_activity_at",
-        fallback_sql: None,
-    },
-    TableRebuildColumn {
-        name: "latest_sequence",
-        fallback_sql: Some("0"),
-    },
-    TableRebuildColumn {
-        name: "messages_json",
-        fallback_sql: Some("'[]'"),
-    },
-    TableRebuildColumn {
-        name: "closed_at",
-        fallback_sql: Some("NULL"),
-    },
-    TableRebuildColumn {
-        name: "deleted_at",
-        fallback_sql: Some("NULL"),
-    },
-];
+const SESSIONS_REBUILD_COLUMNS_SPEC: &str = "\
+session_id
+workspace_id
+owner_user_id
+title
+status
+checkout_relpath=NULL
+checkout_ref=NULL
+checkout_commit_sha=NULL
+failure_reason=NULL
+detach_deadline_at=NULL
+restartable_deadline_at=NULL
+created_at
+last_activity_at
+latest_sequence=0
+messages_json='[]'
+closed_at=NULL
+deleted_at=NULL
+";
+
+fn parse_rebuild_columns(spec: &'static str) -> Vec<TableRebuildColumn> {
+    spec.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once('=') {
+            Some((name, fallback_sql)) => TableRebuildColumn {
+                name,
+                fallback_sql: Some(fallback_sql),
+            },
+            None => TableRebuildColumn {
+                name: line,
+                fallback_sql: None,
+            },
+        })
+        .collect()
+}
 
 fn ensure_table_column(
     connection: &Connection,
@@ -410,9 +327,12 @@ fn prune_orphaned_foreign_key_rows(connection: &Connection) -> Result<(), Worksp
 
 #[rustfmt::skip]
 fn ensure_foreign_key_tables(connection: &Connection) -> Result<(), WorkspaceStoreError> {
-    rebuild_table_with_foreign_keys_if_needed(connection, "browser_sessions", BROWSER_SESSIONS_REBUILD_TABLE_SQL, BROWSER_SESSIONS_REBUILD_COLUMNS, BROWSER_SESSIONS_FOREIGN_KEYS)?;
-    rebuild_table_with_foreign_keys_if_needed(connection, "workspaces", WORKSPACES_REBUILD_TABLE_SQL, WORKSPACES_REBUILD_COLUMNS, WORKSPACES_FOREIGN_KEYS)?;
-    rebuild_table_with_foreign_keys_if_needed(connection, "sessions", SESSIONS_REBUILD_TABLE_SQL, SESSIONS_REBUILD_COLUMNS, SESSIONS_FOREIGN_KEYS)?;
+    let browser_session_columns = parse_rebuild_columns(BROWSER_SESSIONS_REBUILD_COLUMNS_SPEC);
+    let workspace_columns = parse_rebuild_columns(WORKSPACES_REBUILD_COLUMNS_SPEC);
+    let session_columns = parse_rebuild_columns(SESSIONS_REBUILD_COLUMNS_SPEC);
+    rebuild_table_with_foreign_keys_if_needed(connection, "browser_sessions", BROWSER_SESSIONS_REBUILD_TABLE_SQL, &browser_session_columns, BROWSER_SESSIONS_FOREIGN_KEYS)?;
+    rebuild_table_with_foreign_keys_if_needed(connection, "workspaces", WORKSPACES_REBUILD_TABLE_SQL, &workspace_columns, WORKSPACES_FOREIGN_KEYS)?;
+    rebuild_table_with_foreign_keys_if_needed(connection, "sessions", SESSIONS_REBUILD_TABLE_SQL, &session_columns, SESSIONS_FOREIGN_KEYS)?;
     connection
         .execute_batch(WORKSPACE_STORE_SCHEMA_SQL)
         .map_err(database_error)?;

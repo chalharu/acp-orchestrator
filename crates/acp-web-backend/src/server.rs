@@ -3,9 +3,9 @@ use std::{convert::Infallible, fmt::Display, path::PathBuf, sync::Arc, time::Dur
 #[cfg(test)]
 use crate::contract_sessions::RenameSessionRequest;
 use axum::{
-    Json, Router,
-    body::{Body, Bytes},
-    extract::{Extension, FromRequestParts, Path, Query, State},
+    Router,
+    body::Body,
+    extract::FromRequestParts,
     handler::Handler,
     http::{HeaderMap, Request, StatusCode, request::Parts},
     response::{IntoResponse, Response},
@@ -323,7 +323,26 @@ where
 }
 
 mod route_handlers {
-    use super::*;
+    use axum::{
+        Json,
+        body::Bytes,
+        extract::{Extension, Path, Query, State},
+        http::HeaderMap,
+        response::{IntoResponse, Response},
+    };
+
+    use super::{
+        AppError, AppState, BootstrapRegistrationRequest, CreateAccountRequest,
+        CreateWorkspaceRequest, PromptRequest, ReadPrincipal, RenameSessionBody,
+        ResolvePermissionRequest, SignInRequest, SlashCompletionsQuery, UpdateAccountRequest,
+        UpdateWorkspaceRequest, WritePrincipal, auth_status, bootstrap_register, cancel_turn,
+        close_session, create_account, create_session, create_workspace, create_workspace_session,
+        delete_account, delete_session, delete_workspace, get_session, get_session_history,
+        get_slash_completions, get_workspace, list_accounts, list_sessions,
+        list_workspace_branches, list_workspace_sessions, list_workspaces, parse_json_body,
+        post_message, rename_session, resolve_permission, sign_in, sign_out, stream_session_events,
+        update_account, update_workspace,
+    };
 
     pub(super) async fn auth_status_handler(
         State(state): State<AppState>,
@@ -719,6 +738,13 @@ fn read_api_routes(state: AppState) -> Router {
 }
 
 fn write_api_routes(state: AppState) -> Router {
+    auth_write_routes(state.clone())
+        .merge(account_write_routes(state.clone()))
+        .merge(workspace_write_routes(state.clone()))
+        .merge(session_write_routes(state))
+}
+
+fn auth_write_routes(state: AppState) -> Router {
     Router::new()
         .route(
             "/api/v1/auth/sign-in",
@@ -732,14 +758,10 @@ fn write_api_routes(state: AppState) -> Router {
             "/api/v1/bootstrap/register",
             post_route(&state, route_handlers::bootstrap_register_handler),
         )
-        .route(
-            "/api/v1/sessions",
-            post_route(&state, route_handlers::create_session_handler),
-        )
-        .route(
-            "/api/v1/workspaces",
-            post_route(&state, route_handlers::create_workspace_handler),
-        )
+}
+
+fn account_write_routes(state: AppState) -> Router {
+    Router::new()
         .route(
             "/api/v1/accounts",
             post_route(&state, route_handlers::create_account_handler),
@@ -750,6 +772,14 @@ fn write_api_routes(state: AppState) -> Router {
                 boxed_handler_service(state.clone(), route_handlers::delete_account_handler),
             ),
         )
+}
+
+fn workspace_write_routes(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/workspaces",
+            post_route(&state, route_handlers::create_workspace_handler),
+        )
         .route(
             "/api/v1/workspaces/{workspace_id}",
             patch_route(&state, route_handlers::update_workspace_handler).delete_service(
@@ -759,6 +789,14 @@ fn write_api_routes(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
             post_route(&state, route_handlers::create_workspace_session_handler),
+        )
+}
+
+fn session_write_routes(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/sessions",
+            post_route(&state, route_handlers::create_session_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}",

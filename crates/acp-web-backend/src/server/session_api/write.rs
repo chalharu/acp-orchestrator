@@ -189,11 +189,20 @@ mod tests {
     #[test]
     fn parse_json_body_requires_json_content_type() {
         let body = br#"{"value":"ok"}"#;
-        for content_type in [None, Some("text/json"), Some("text/plain")] {
+        for content_type in [None, Some("text/json"), Some("text/plain"), Some("json")] {
             let error = parse_json_body::<RequestBody>(&json_headers(content_type), body)
                 .expect_err("non-json content type should fail");
             assert!(matches!(error, AppError::UnsupportedMediaType(_)));
         }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_bytes(b"application/\xff").expect("opaque header bytes are allowed"),
+        );
+        let error = parse_json_body::<RequestBody>(&headers, body)
+            .expect_err("non-UTF-8 content type should fail");
+        assert!(matches!(error, AppError::UnsupportedMediaType(_)));
     }
 
     #[test]

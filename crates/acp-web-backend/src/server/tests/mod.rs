@@ -16,10 +16,11 @@ use crate::workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUp
 use crate::workspace_store::SqliteWorkspaceRepository;
 use async_trait::async_trait;
 use axum::{
+    Json,
     body::{Body, to_bytes},
-    extract::{Extension, Path},
+    extract::{Extension, Path, Query, State},
     http::{
-        HeaderValue,
+        HeaderMap, HeaderValue,
         header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, SET_COOKIE},
     },
     response::Response,

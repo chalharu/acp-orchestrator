@@ -706,7 +706,7 @@ async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Re
 mod coverage_tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use agent_client_protocol::{HandleDispatchFrom, JsonRpcMessage, schema};
+    use agent_client_protocol::{ConnectTo, HandleDispatchFrom, JsonRpcMessage, schema};
     use tokio::{
         io::{duplex, split},
         net::{TcpListener, TcpStream},
@@ -715,8 +715,9 @@ mod coverage_tests {
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     use super::{
-        MANUAL_PERMISSION_TRIGGER, MockAgent, MockConfig, MockDispatchHandler, MockServerState,
-        connect_mock_agent, prompt_response_for_permission_outcome, spawn_with_shutdown_task,
+        MANUAL_PERMISSION_TRIGGER, MockAgent, MockConfig, MockDispatchHandler, MockIo,
+        MockServerState, connect_mock_agent, prompt_response_for_permission_outcome,
+        spawn_with_shutdown_task,
     };
     use agent_client_protocol as acp;
 
@@ -990,6 +991,32 @@ mod coverage_tests {
         assert_eq!(result, schema::LoadSessionResponse::new());
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_io_connect_to_completes_when_peer_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose a local address");
+        let (client_stream, accepted) =
+            tokio::join!(TcpStream::connect(address), listener.accept());
+        let client_stream = client_stream.expect("test client should connect");
+        let (server_stream, _) = accepted.expect("test listener should accept");
+        let (reader, writer) = server_stream.into_split();
+        let (channel, counterpart) = acp::Channel::duplex();
+
+        drop(channel);
+        drop(client_stream);
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            ConnectTo::<acp::Agent>::connect_to(MockIo::new(reader, writer), counterpart),
+        )
+        .await
+        .expect("MockIo should stop promptly when the peer closes");
     }
 
     #[rustfmt::skip]

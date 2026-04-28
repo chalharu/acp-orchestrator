@@ -581,16 +581,10 @@ async fn account_handlers_require_admin_access() {
 }
 
 #[tokio::test]
-async fn route_handler_adapters_cover_browser_auth_and_account_routes() {
+async fn route_handler_adapters_cover_account_routes() {
     let state = auth_test_state();
     let admin_browser = BrowserAuthContext::spawn().await;
     bootstrap_admin_account(&state, &admin_browser).await;
-
-    let auth_status =
-        route_handlers::auth_status_handler(State(state.clone()), admin_browser.headers.clone())
-            .await
-            .expect("auth-status route adapter should succeed");
-    assert_eq!(auth_status.status(), StatusCode::OK);
 
     let listed = route_handlers::list_accounts_handler(
         State(state.clone()),
@@ -600,19 +594,7 @@ async fn route_handler_adapters_cover_browser_auth_and_account_routes() {
     .expect("list-accounts route adapter should succeed");
     assert_eq!(listed.status(), StatusCode::OK);
 
-    let created = route_handlers::create_account_handler(
-        State(state.clone()),
-        WritePrincipal(admin_browser.principal.clone()),
-        Json(CreateAccountRequest {
-            username: "member".to_string(),
-            password: "password123".to_string(),
-            is_admin: false,
-        }),
-    )
-    .await
-    .expect("create-account route adapter should succeed");
-    let created: crate::contract_accounts::CreateAccountResponse = response_json(created).await;
-    let user_id = created.account.user_id;
+    let user_id = create_member_with_route_handler(&state, &admin_browser).await;
 
     let mut json_headers = HeaderMap::new();
     json_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -626,6 +608,29 @@ async fn route_handler_adapters_cover_browser_auth_and_account_routes() {
     .await
     .expect("update-account route adapter should succeed");
     assert_eq!(updated.status(), StatusCode::OK);
+
+    let deleted = route_handlers::delete_account_handler(
+        State(state),
+        Path(user_id),
+        WritePrincipal(admin_browser.principal),
+    )
+    .await
+    .expect("delete-account route adapter should succeed");
+    assert_eq!(deleted.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn route_handler_adapters_cover_browser_auth_routes() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    create_member_with_route_handler(&state, &admin_browser).await;
+
+    let auth_status =
+        route_handlers::auth_status_handler(State(state.clone()), admin_browser.headers.clone())
+            .await
+            .expect("auth-status route adapter should succeed");
+    assert_eq!(auth_status.status(), StatusCode::OK);
 
     let second_browser = BrowserAuthContext::spawn().await;
     let signed_in = route_handlers::sign_in_handler(
@@ -647,15 +652,6 @@ async fn route_handler_adapters_cover_browser_auth_and_account_routes() {
     .await
     .expect("sign-out route adapter should succeed");
     assert_eq!(signed_out.status(), StatusCode::NO_CONTENT);
-
-    let deleted = route_handlers::delete_account_handler(
-        State(state),
-        Path(user_id),
-        WritePrincipal(admin_browser.principal),
-    )
-    .await
-    .expect("delete-account route adapter should succeed");
-    assert_eq!(deleted.status(), StatusCode::OK);
 }
 
 async fn response_json<T: serde::de::DeserializeOwned>(response: Response) -> T {
@@ -663,4 +659,23 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: Response) -> T 
         .await
         .expect("response body should be readable");
     serde_json::from_slice(&body).expect("response body should decode")
+}
+
+async fn create_member_with_route_handler(
+    state: &AppState,
+    admin_browser: &BrowserAuthContext,
+) -> String {
+    let created = route_handlers::create_account_handler(
+        State(state.clone()),
+        WritePrincipal(admin_browser.principal.clone()),
+        Json(CreateAccountRequest {
+            username: "member".to_string(),
+            password: "password123".to_string(),
+            is_admin: false,
+        }),
+    )
+    .await
+    .expect("create-account route adapter should succeed");
+    let created: crate::contract_accounts::CreateAccountResponse = response_json(created).await;
+    created.account.user_id
 }

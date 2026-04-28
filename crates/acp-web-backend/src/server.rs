@@ -61,8 +61,8 @@ use self::assets::{SlashCompletionsQuery, install_frontend_routes};
 pub use self::connection::serve_with_shutdown;
 use self::session_api::{
     cancel_turn, close_session, create_session, delete_session, get_session, get_session_history,
-    get_slash_completions, list_sessions, post_message, rename_session, resolve_permission,
-    stream_session_events,
+    get_slash_completions, list_sessions, parse_json_body, post_message, rename_session,
+    resolve_permission, stream_session_events,
 };
 #[cfg(test)]
 use self::session_service::{
@@ -271,7 +271,10 @@ impl AppState {
 
 pub fn app(state: AppState) -> Router {
     install_frontend_routes(Router::new(), state.clone())
-        .route("/api/v1/auth/status", get_route(&state, rt::st))
+        .route(
+            "/api/v1/auth/status",
+            get_route(&state, route_handlers::auth_status_handler),
+        )
         .merge(read_api_routes(state.clone()))
         .merge(write_api_routes(state))
 }
@@ -284,13 +287,11 @@ struct OwnerContext {
 
 type BoxedRouteService = BoxCloneSyncService<Request<Body>, Response, Infallible>;
 
-// Keep auth extractors and routed handler paths short so the shared symbol-length
-// linter stays below its threshold without changing auth behavior.
 #[derive(Clone)]
-struct Rp(AuthenticatedPrincipal);
+struct ReadPrincipal(AuthenticatedPrincipal);
 
 #[derive(Clone)]
-struct Wp(AuthenticatedPrincipal);
+struct WritePrincipal(AuthenticatedPrincipal);
 
 fn auth_principal(
     headers: &HeaderMap,
@@ -299,7 +300,7 @@ fn auth_principal(
     authorize_request(headers, requires_csrf).map_err(AppError::from)
 }
 
-impl<S> FromRequestParts<S> for Rp
+impl<S> FromRequestParts<S> for ReadPrincipal
 where
     S: Send + Sync,
 {
@@ -310,7 +311,7 @@ where
     }
 }
 
-impl<S> FromRequestParts<S> for Wp
+impl<S> FromRequestParts<S> for WritePrincipal
 where
     S: Send + Sync,
 {
@@ -321,10 +322,10 @@ where
     }
 }
 
-mod rt {
+mod route_handlers {
     use super::*;
 
-    pub(super) async fn st(
+    pub(super) async fn auth_status_handler(
         State(state): State<AppState>,
         headers: HeaderMap,
     ) -> Result<Response, AppError> {
@@ -333,106 +334,106 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn la(
+    pub(super) async fn list_accounts_handler(
         State(state): State<AppState>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         list_accounts(State(state), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn ls(
+    pub(super) async fn list_sessions_handler(
         State(state): State<AppState>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         list_sessions(State(state), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn lw(
+    pub(super) async fn list_workspaces_handler(
         State(state): State<AppState>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         list_workspaces(State(state), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn gw(
+    pub(super) async fn get_workspace_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         get_workspace(State(state), Path(workspace_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn lb(
+    pub(super) async fn list_workspace_branches_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         list_workspace_branches(State(state), Path(workspace_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn ws(
+    pub(super) async fn list_workspace_sessions_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         list_workspace_sessions(State(state), Path(workspace_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn gs(
+    pub(super) async fn get_session_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         get_session(State(state), Path(session_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn gh(
+    pub(super) async fn get_session_history_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         get_session_history(State(state), Path(session_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn se(
+    pub(super) async fn stream_session_events_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         stream_session_events(State(state), Path(session_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn sc(
+    pub(super) async fn get_slash_completions_handler(
         State(state): State<AppState>,
         Query(query): Query<SlashCompletionsQuery>,
-        Rp(principal): Rp,
+        ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         get_slash_completions(State(state), Query(query), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn si(
+    pub(super) async fn sign_in_handler(
         State(state): State<AppState>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
         Json(request): Json<SignInRequest>,
     ) -> Result<Response, AppError> {
         sign_in(State(state), Extension(principal), Json(request))
@@ -440,18 +441,18 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn so(
+    pub(super) async fn sign_out_handler(
         State(state): State<AppState>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
     ) -> Result<Response, AppError> {
         sign_out(State(state), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn br(
+    pub(super) async fn bootstrap_register_handler(
         State(state): State<AppState>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
         Json(request): Json<BootstrapRegistrationRequest>,
     ) -> Result<Response, AppError> {
         bootstrap_register(State(state), Extension(principal), Json(request))
@@ -459,9 +460,9 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn cs(
+    pub(super) async fn create_session_handler(
         State(state): State<AppState>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
         body: Bytes,
     ) -> Result<Response, AppError> {
         create_session(State(state), Extension(principal), body)
@@ -469,9 +470,9 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn cw(
+    pub(super) async fn create_workspace_handler(
         State(state): State<AppState>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
         Json(request): Json<CreateWorkspaceRequest>,
     ) -> Result<Response, AppError> {
         create_workspace(State(state), Extension(principal), Json(request))
@@ -479,9 +480,9 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn ca(
+    pub(super) async fn create_account_handler(
         State(state): State<AppState>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
         Json(request): Json<CreateAccountRequest>,
     ) -> Result<Response, AppError> {
         create_account(State(state), Extension(principal), Json(request))
@@ -489,12 +490,14 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn ua(
+    pub(super) async fn update_account_handler(
         State(state): State<AppState>,
         Path(user_id): Path<String>,
-        Wp(principal): Wp,
-        Json(request): Json<UpdateAccountRequest>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Result<Response, AppError> {
+        let request = parse_json_body::<UpdateAccountRequest>(&headers, &body)?;
         update_account(
             State(state),
             Path(user_id),
@@ -505,22 +508,24 @@ mod rt {
         .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn da(
+    pub(super) async fn delete_account_handler(
         State(state): State<AppState>,
         Path(user_id): Path<String>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
     ) -> Result<Response, AppError> {
         delete_account(State(state), Path(user_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn uw(
+    pub(super) async fn update_workspace_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
-        Wp(principal): Wp,
-        Json(request): Json<UpdateWorkspaceRequest>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Result<Response, AppError> {
+        let request = parse_json_body::<UpdateWorkspaceRequest>(&headers, &body)?;
         update_workspace(
             State(state),
             Path(workspace_id),
@@ -531,20 +536,20 @@ mod rt {
         .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn dw(
+    pub(super) async fn delete_workspace_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
     ) -> Result<Response, AppError> {
         delete_workspace(State(state), Path(workspace_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn cws(
+    pub(super) async fn create_workspace_session_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
         body: Bytes,
     ) -> Result<Response, AppError> {
         create_workspace_session(State(state), Path(workspace_id), Extension(principal), body)
@@ -552,12 +557,14 @@ mod rt {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn rs(
+    pub(super) async fn rename_session_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Wp(principal): Wp,
-        Json(request): Json<RenameSessionBody>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Result<Response, AppError> {
+        let request = parse_json_body::<RenameSessionBody>(&headers, &body)?;
         rename_session(
             State(state),
             Path(session_id),
@@ -568,22 +575,24 @@ mod rt {
         .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn ds(
+    pub(super) async fn delete_session_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
     ) -> Result<Response, AppError> {
         delete_session(State(state), Path(session_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn pm(
+    pub(super) async fn post_message_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Wp(principal): Wp,
-        Json(request): Json<PromptRequest>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Result<Response, AppError> {
+        let request = parse_json_body::<PromptRequest>(&headers, &body)?;
         post_message(
             State(state),
             Path(session_id),
@@ -594,22 +603,24 @@ mod rt {
         .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn ct(
+    pub(super) async fn cancel_turn_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
     ) -> Result<Response, AppError> {
         cancel_turn(State(state), Path(session_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn rp(
+    pub(super) async fn resolve_permission_handler(
         State(state): State<AppState>,
         Path((session_id, request_id)): Path<(String, String)>,
-        Wp(principal): Wp,
-        Json(request): Json<ResolvePermissionRequest>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Result<Response, AppError> {
+        let request = parse_json_body::<ResolvePermissionRequest>(&headers, &body)?;
         resolve_permission(
             State(state),
             Path((session_id, request_id)),
@@ -620,10 +631,10 @@ mod rt {
         .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn cl(
+    pub(super) async fn close_session_handler(
         State(state): State<AppState>,
         Path(session_id): Path<String>,
-        Wp(principal): Wp,
+        WritePrincipal(principal): WritePrincipal,
     ) -> Result<Response, AppError> {
         close_session(State(state), Path(session_id), Extension(principal))
             .await
@@ -665,75 +676,111 @@ where
 
 fn read_api_routes(state: AppState) -> Router {
     Router::new()
-        .route("/api/v1/accounts", get_route(&state, rt::la))
-        .route("/api/v1/sessions", get_route(&state, rt::ls))
-        .route("/api/v1/workspaces", get_route(&state, rt::lw))
+        .route(
+            "/api/v1/accounts",
+            get_route(&state, route_handlers::list_accounts_handler),
+        )
+        .route(
+            "/api/v1/sessions",
+            get_route(&state, route_handlers::list_sessions_handler),
+        )
+        .route(
+            "/api/v1/workspaces",
+            get_route(&state, route_handlers::list_workspaces_handler),
+        )
         .route(
             "/api/v1/workspaces/{workspace_id}",
-            get_route(&state, rt::gw),
+            get_route(&state, route_handlers::get_workspace_handler),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/branches",
-            get_route(&state, rt::lb),
+            get_route(&state, route_handlers::list_workspace_branches_handler),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
-            get_route(&state, rt::ws),
+            get_route(&state, route_handlers::list_workspace_sessions_handler),
         )
-        .route("/api/v1/sessions/{session_id}", get_route(&state, rt::gs))
+        .route(
+            "/api/v1/sessions/{session_id}",
+            get_route(&state, route_handlers::get_session_handler),
+        )
         .route(
             "/api/v1/sessions/{session_id}/history",
-            get_route(&state, rt::gh),
+            get_route(&state, route_handlers::get_session_history_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}/events",
-            get_route(&state, rt::se),
+            get_route(&state, route_handlers::stream_session_events_handler),
         )
-        .route("/api/v1/completions/slash", get_route(&state, rt::sc))
+        .route(
+            "/api/v1/completions/slash",
+            get_route(&state, route_handlers::get_slash_completions_handler),
+        )
 }
 
 fn write_api_routes(state: AppState) -> Router {
     Router::new()
-        .route("/api/v1/auth/sign-in", post_route(&state, rt::si))
-        .route("/api/v1/auth/sign-out", post_route(&state, rt::so))
-        .route("/api/v1/bootstrap/register", post_route(&state, rt::br))
-        .route("/api/v1/sessions", post_route(&state, rt::cs))
-        .route("/api/v1/workspaces", post_route(&state, rt::cw))
-        .route("/api/v1/accounts", post_route(&state, rt::ca))
+        .route(
+            "/api/v1/auth/sign-in",
+            post_route(&state, route_handlers::sign_in_handler),
+        )
+        .route(
+            "/api/v1/auth/sign-out",
+            post_route(&state, route_handlers::sign_out_handler),
+        )
+        .route(
+            "/api/v1/bootstrap/register",
+            post_route(&state, route_handlers::bootstrap_register_handler),
+        )
+        .route(
+            "/api/v1/sessions",
+            post_route(&state, route_handlers::create_session_handler),
+        )
+        .route(
+            "/api/v1/workspaces",
+            post_route(&state, route_handlers::create_workspace_handler),
+        )
+        .route(
+            "/api/v1/accounts",
+            post_route(&state, route_handlers::create_account_handler),
+        )
         .route(
             "/api/v1/accounts/{user_id}",
-            patch_route(&state, rt::ua)
-                .delete_service(boxed_handler_service(state.clone(), rt::da)),
+            patch_route(&state, route_handlers::update_account_handler).delete_service(
+                boxed_handler_service(state.clone(), route_handlers::delete_account_handler),
+            ),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}",
-            patch_route(&state, rt::uw)
-                .delete_service(boxed_handler_service(state.clone(), rt::dw)),
+            patch_route(&state, route_handlers::update_workspace_handler).delete_service(
+                boxed_handler_service(state.clone(), route_handlers::delete_workspace_handler),
+            ),
         )
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
-            post_route(&state, rt::cws),
+            post_route(&state, route_handlers::create_workspace_session_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}",
-            patch_route(&state, rt::rs)
-                .delete_service(boxed_handler_service(state.clone(), rt::ds)),
+            patch_route(&state, route_handlers::rename_session_handler).delete_service(
+                boxed_handler_service(state.clone(), route_handlers::delete_session_handler),
+            ),
         )
         .route(
             "/api/v1/sessions/{session_id}/messages",
-            post_route(&state, rt::pm),
+            post_route(&state, route_handlers::post_message_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}/cancel",
-            post_route(&state, rt::ct),
+            post_route(&state, route_handlers::cancel_turn_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}/permissions/{request_id}",
-            post_route(&state, rt::rp),
+            post_route(&state, route_handlers::resolve_permission_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}/close",
-            post_route(&state, rt::cl),
+            post_route(&state, route_handlers::close_session_handler),
         )
 }
 
@@ -823,6 +870,7 @@ pub enum AppError {
     Forbidden(String),
     NotFound(String),
     BadRequest(String),
+    UnsupportedMediaType(String),
     Conflict(String),
     TooManyRequests(String),
     Internal(String),
@@ -835,6 +883,7 @@ impl AppError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -847,6 +896,7 @@ impl AppError {
             Self::Forbidden(message) => message,
             Self::NotFound(message) => message,
             Self::BadRequest(message) => message,
+            Self::UnsupportedMediaType(message) => message,
             Self::Conflict(message) => message,
             Self::TooManyRequests(message) => message,
             Self::Internal(message) => message,

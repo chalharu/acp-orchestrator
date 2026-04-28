@@ -66,22 +66,39 @@ fn session_sidebar_cancel_rename_label() -> &'static str {
     "Cancel rename"
 }
 
-#[component]
-pub(super) fn SessionSidebarItem(
-    id: String,
-    href: String,
-    title: String,
-    activity_label: String,
-    is_current: bool,
-    is_closed: bool,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
+#[derive(Clone)]
+pub(super) struct SessionSidebarItemProps {
+    pub(super) id: String,
+    pub(super) href: String,
+    pub(super) title: String,
+    pub(super) activity_label: String,
+    pub(super) is_current: bool,
+    pub(super) is_closed: bool,
+    pub(super) deleting_session_id: Signal<Option<String>>,
+    pub(super) delete_disabled: Signal<bool>,
+    pub(super) renaming_session_id: RwSignal<Option<String>>,
+    pub(super) saving_rename_session_id: Signal<Option<String>>,
+    pub(super) rename_draft: RwSignal<String>,
+    pub(super) on_rename_session: Callback<(String, String)>,
+    pub(super) on_delete_session: Callback<String>,
+}
+
+pub(super) fn session_sidebar_item(props: SessionSidebarItemProps) -> AnyView {
+    let SessionSidebarItemProps {
+        id,
+        href,
+        title,
+        activity_label,
+        is_current,
+        is_closed,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = props;
     let item = SessionSidebarItemModel {
         id,
         href,
@@ -109,7 +126,7 @@ pub(super) fn SessionSidebarItem(
         on_delete_session,
     );
 
-    session_sidebar_item_view(item, rename_draft, item_signals, callbacks)
+    session_sidebar_item_view(item, rename_draft, item_signals, callbacks).into_any()
 }
 
 fn session_sidebar_item_callbacks(

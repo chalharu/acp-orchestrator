@@ -27,31 +27,28 @@ use super::shared::spawn_workspace_reload;
 // Top-level section
 // ---------------------------------------------------------------------------
 
-#[component]
 #[cfg(target_family = "wasm")]
-pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoView {
+pub(super) fn workspace_registry_section(state: WorkspacesPageState) -> AnyView {
     view! {
         <Show when=move || !state.loading.get() fallback=workspace_loading_view>
             <div class="workspace-dashboard">
                 <For
                     each=move || state.workspaces.get()
                     key=|workspace| workspace.workspace_id.clone()
-                    children=move |workspace| {
-                        view! { <WorkspaceCard workspace state /> }
-                    }
+                    children=move |workspace| workspace_card(workspace, state)
                 />
                 <Show when=move || state.workspaces.get().is_empty()>
                     <p class="muted">"No workspaces yet. Create one using the button above."</p>
                 </Show>
-                <WorkspaceStartChatModal state />
+                {workspace_start_chat_modal(state)}
             </div>
         </Show>
     }
+    .into_any()
 }
 
-#[component]
 #[cfg(not(target_family = "wasm"))]
-pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoView {
+pub(super) fn workspace_registry_section(state: WorkspacesPageState) -> AnyView {
     let loading = state.loading.get_untracked();
     if loading {
         return workspace_loading_view();
@@ -61,14 +58,14 @@ pub(super) fn WorkspaceRegistrySection(state: WorkspacesPageState) -> impl IntoV
         .workspaces
         .get_untracked()
         .into_iter()
-        .map(|workspace| view! { <WorkspaceCard workspace state /> })
+        .map(|workspace| workspace_card(workspace, state))
         .collect_view()
         .into_any();
 
     view! {
         <div class="workspace-dashboard">
             {cards}
-            <WorkspaceStartChatModal state />
+            {workspace_start_chat_modal(state)}
         </div>
     }
     .into_any()
@@ -110,9 +107,8 @@ fn workspace_repository_label(upstream_url: Option<&str>) -> String {
         .unwrap_or_else(|| "Local workspace".to_string())
 }
 
-#[component]
 #[cfg(target_family = "wasm")]
-fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl IntoView {
+fn workspace_card(workspace: WorkspaceSummary, state: WorkspacesPageState) -> AnyView {
     let display = workspace_card_display(&workspace);
     let workspace_id = display.workspace_id.clone();
 
@@ -150,17 +146,17 @@ fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> imp
                     on_delete,
                 )}
             </div>
-            <WorkspaceSessionList sessions=sessions />
+            {workspace_session_list(sessions)}
             <div class="workspace-card__footer">
                 {workspace_card_open_button_wasm(is_deleting, is_opening, on_open_chat)}
             </div>
         </div>
     }
+    .into_any()
 }
 
-#[component]
 #[cfg(not(target_family = "wasm"))]
-fn WorkspaceCard(workspace: WorkspaceSummary, state: WorkspacesPageState) -> impl IntoView {
+fn workspace_card(workspace: WorkspaceSummary, state: WorkspacesPageState) -> AnyView {
     let display = workspace_card_display(&workspace);
     let is_editing = workspace_id_flag(state.editing_workspace_id, &display.workspace_id);
     let is_saving = workspace_id_flag(state.saving_workspace_id, &display.workspace_id);
@@ -186,7 +182,7 @@ fn workspace_card_view_host(
     is_saving: bool,
     is_deleting: bool,
     is_opening: bool,
-) -> impl IntoView {
+) -> AnyView {
     let name_cell = workspace_card_name_cell_host(display.clone(), draft, is_editing, is_saving);
     let actions = workspace_card_actions_view_host(is_editing, is_deleting, is_opening);
     let open_button = workspace_card_open_button_host(is_deleting, is_opening);
@@ -197,12 +193,13 @@ fn workspace_card_view_host(
                 <div class="workspace-card__meta">{name_cell}</div>
                 <div class="workspace-card__actions">{actions}</div>
             </div>
-            <WorkspaceSessionListHost sessions=Vec::new() />
+            {workspace_session_list_host(Vec::new())}
             <div class="workspace-card__footer">
                 {open_button}
             </div>
         </div>
     }
+    .into_any()
 }
 
 #[cfg(target_family = "wasm")]
@@ -225,7 +222,7 @@ fn workspace_card_meta_view(
     is_saving: Signal<bool>,
     on_save: Callback<web_sys::SubmitEvent>,
     on_cancel: Callback<web_sys::MouseEvent>,
-) -> impl IntoView {
+) -> AnyView {
     view! {
         <div class="workspace-card__meta">
             <Show
@@ -235,25 +232,27 @@ fn workspace_card_meta_view(
                     move || workspace_card_summary_view(display.clone())
                 }
             >
-                <WorkspaceRenameForm
-                    workspace_id=display.workspace_id.clone()
-                    state=state
-                    is_saving=is_saving
-                    on_save=on_save
-                    on_cancel=on_cancel
-                />
+                {workspace_rename_form(
+                    display.workspace_id.clone(),
+                    state,
+                    is_saving,
+                    on_save,
+                    on_cancel,
+                )}
             </Show>
         </div>
     }
+    .into_any()
 }
 
-fn workspace_card_summary_view(display: WorkspaceCardDisplay) -> impl IntoView {
+fn workspace_card_summary_view(display: WorkspaceCardDisplay) -> AnyView {
     view! {
         <h3 class="workspace-card__name">{display.workspace_name}</h3>
         <span class="workspace-card__repository">{display.workspace_repository_label}</span>
         <span class="workspace-card__status">{display.workspace_status}</span>
         <span class="workspace-card__created">"Created "{display.created_label}</span>
     }
+    .into_any()
 }
 
 fn workspace_rename_label() -> &'static str {
@@ -357,11 +356,6 @@ fn workspace_card_open_button_wasm(
             <span class="sr-only">{move || workspace_new_chat_label(is_opening.get())}</span>
         </button>
     }
-}
-
-#[component]
-fn WorkspaceStartChatModal(state: WorkspacesPageState) -> impl IntoView {
-    workspace_start_chat_modal(state)
 }
 
 #[cfg(target_family = "wasm")]
@@ -615,9 +609,8 @@ fn workspace_card_open_button_host(is_deleting: bool, is_opening: bool) -> impl 
 // Per-workspace session list
 // ---------------------------------------------------------------------------
 
-#[component]
 #[cfg(target_family = "wasm")]
-fn WorkspaceSessionList(sessions: Signal<Option<Vec<SessionListItem>>>) -> impl IntoView {
+fn workspace_session_list(sessions: Signal<Option<Vec<SessionListItem>>>) -> AnyView {
     view! {
         <div class="workspace-card__sessions">
             {move || match sessions.get() {
@@ -639,11 +632,11 @@ fn WorkspaceSessionList(sessions: Signal<Option<Vec<SessionListItem>>>) -> impl 
             }}
         </div>
     }
+    .into_any()
 }
 
-#[component]
 #[cfg(not(target_family = "wasm"))]
-fn WorkspaceSessionListHost(sessions: Vec<SessionListItem>) -> impl IntoView {
+fn workspace_session_list_host(sessions: Vec<SessionListItem>) -> AnyView {
     if sessions.is_empty() {
         view! {
             <div class="workspace-card__sessions">
@@ -675,15 +668,14 @@ fn WorkspaceSessionListHost(sessions: Vec<SessionListItem>) -> impl IntoView {
 // Rename form (shared between wasm component and used by card)
 // ---------------------------------------------------------------------------
 
-#[component]
 #[cfg(target_family = "wasm")]
-fn WorkspaceRenameForm(
+fn workspace_rename_form(
     workspace_id: String,
     state: WorkspacesPageState,
     is_saving: Signal<bool>,
     on_save: Callback<web_sys::SubmitEvent>,
     on_cancel: Callback<web_sys::MouseEvent>,
-) -> impl IntoView {
+) -> AnyView {
     let form_ref = NodeRef::new();
     bind_workspace_rename_pointer_cancel_listener(form_ref, workspace_id.clone(), state, is_saving);
     let on_focusout = workspace_rename_focusout_handler(workspace_id, state, is_saving);
@@ -699,6 +691,7 @@ fn WorkspaceRenameForm(
             {workspace_rename_cancel_button(is_saving, on_cancel)}
         </form>
     }
+    .into_any()
 }
 
 #[cfg(target_family = "wasm")]
@@ -1253,7 +1246,7 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let state = WorkspacesPageState::new();
-            let _ = view! { <WorkspaceRegistrySection state=state /> };
+            let _ = workspace_registry_section(state);
         });
     }
 
@@ -1267,7 +1260,7 @@ mod tests {
             state
                 .workspaces
                 .set(vec![sample_workspace("w_1", "Test Workspace")]);
-            let _ = view! { <WorkspaceRegistrySection state=state /> };
+            let _ = workspace_registry_section(state);
         });
     }
 
@@ -1277,7 +1270,7 @@ mod tests {
         owner.with(|| {
             let state = WorkspacesPageState::new();
             let workspace = sample_workspace("w_1", "Test Workspace");
-            let _ = view! { <WorkspaceCard workspace=workspace state=state /> };
+            let _ = workspace_card(workspace, state);
         });
     }
 
@@ -1289,7 +1282,7 @@ mod tests {
             state.editing_workspace_id.set(Some("w_1".to_string()));
             state.edit_name_draft.set("Draft Name".to_string());
             let workspace = sample_workspace("w_1", "Test Workspace");
-            let _ = view! { <WorkspaceCard workspace=workspace state=state /> };
+            let _ = workspace_card(workspace, state);
         });
     }
 
@@ -1477,11 +1470,9 @@ mod tests {
     fn workspace_session_list_host_builds_non_empty_session_list() {
         let owner = Owner::new();
         owner.with(|| {
-            let _ = WorkspaceSessionListHost(WorkspaceSessionListHostProps {
-                sessions: Vec::new(),
-            });
+            let _ = workspace_session_list_host(Vec::new());
             let sessions = vec![sample_session("s_1", "w_1"), sample_session("s_2", "w_1")];
-            let _ = WorkspaceSessionListHost(WorkspaceSessionListHostProps { sessions });
+            let _ = workspace_session_list_host(sessions);
         });
     }
 
@@ -1502,7 +1493,7 @@ mod tests {
                     vec![sample_session("s_1", "w_1"), sample_session("s_2", "w_1")],
                 );
             });
-            let _ = view! { <WorkspaceRegistrySection state=state /> };
+            let _ = workspace_registry_section(state);
         });
     }
 
@@ -1527,7 +1518,7 @@ mod tests {
                 );
             });
             // Both workspace cards should build without error.
-            let _ = view! { <WorkspaceRegistrySection state=state /> };
+            let _ = workspace_registry_section(state);
         });
     }
 }

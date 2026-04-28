@@ -636,10 +636,10 @@ impl acp::HandleDispatchFrom<acp::Client> for MockDispatchHandler {
     }
 }
 
-fn build_mock_agent_builder(
-    agent: MockAgent,
-) -> acp::Builder<acp::Agent, MockDispatchHandler, acp::NullRun> {
-    acp::Builder::new_with(acp::Agent, MockDispatchHandler::new(agent)).name("acp-mock")
+fn build_mock_agent_connector(agent: MockAgent) -> acp::DynConnectTo<acp::Client> {
+    acp::DynConnectTo::new(
+        acp::Builder::new_with(acp::Agent, MockDispatchHandler::new(agent)).name("acp-mock"),
+    )
 }
 
 type DynRd = Box<dyn AsyncRead + Send + Unpin>;
@@ -671,6 +671,7 @@ async fn write_mock_io_line(mut writer: DynWr, line: String) -> std::io::Result<
 impl<R: acp::Role> ConnectTo<R> for MockIo {
     async fn connect_to(self, client: impl ConnectTo<R::Counterpart>) -> Result<(), acp::Error> {
         let (channel, serve_io) = <MockIo as ConnectTo<R>>::into_channel_and_future(self);
+        let client = acp::DynConnectTo::new(client);
         let serve_client: BoxFuture<'static, acp::Result<()>> =
             Box::pin(client.connect_to(channel));
         match future::select(serve_client, serve_io).await {
@@ -693,7 +694,7 @@ async fn connect_mock_agent(
 ) -> Result<(), acp::Error> {
     ConnectTo::<acp::Agent>::connect_to(
         MockIo::new(reader, writer),
-        build_mock_agent_builder(agent),
+        build_mock_agent_connector(agent),
     )
     .await
 }

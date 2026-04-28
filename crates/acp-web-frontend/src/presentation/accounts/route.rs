@@ -5,7 +5,7 @@ use crate::{application::auth::AccountsRouteAccess, components::ErrorBanner};
 
 use super::{
     create_account::CreateAccountSection,
-    registry::CurrentAccountsSection,
+    registry::current_accounts_section,
     shared::{
         AccountsPageState, accounts_back_to_chat_path_from_location, accounts_page_shows_sign_out,
         initialize_accounts_page, sign_out_button_label, sign_out_handler,
@@ -189,7 +189,7 @@ fn accounts_page_content_body(
     match access {
         Some(AccountsRouteAccess::Admin(_)) => view! {
             <CreateAccountSection state />
-            <CurrentAccountsSection state />
+            {current_accounts_section(state)}
         }
         .into_any(),
         Some(AccountsRouteAccess::RegisterRequired) => view! {

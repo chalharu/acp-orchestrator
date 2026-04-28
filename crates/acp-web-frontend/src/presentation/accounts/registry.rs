@@ -12,9 +12,8 @@ use crate::presentation::{AppIcon, app_icon_view};
 
 use super::shared::{AccountsPageState, event_target_checked, spawn_account_reload};
 
-#[component]
 #[cfg(target_family = "wasm")]
-pub(super) fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView {
+pub(super) fn current_accounts_section(state: AccountsPageState) -> AnyView {
     let account_count = Signal::derive(move || state.accounts.get().len());
 
     view! {
@@ -51,7 +50,7 @@ pub(super) fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView 
                             <For
                                 each=move || state.accounts.get()
                                 key=|account| account.user_id.clone()
-                                children=move |account| view! { <AccountRow account state /> }
+                                children=move |account| account_row(account, state)
                             />
                         </tbody>
                     </table>
@@ -59,11 +58,11 @@ pub(super) fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView 
             </Show>
         </div>
     }
+    .into_any()
 }
 
-#[component]
 #[cfg(not(target_family = "wasm"))]
-pub(super) fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView {
+pub(super) fn current_accounts_section(state: AccountsPageState) -> AnyView {
     let loading_accounts = state.loading_accounts.get_untracked();
     let summary = account_count_label(state.accounts.get_untracked().len());
     let content = if loading_accounts {
@@ -73,7 +72,7 @@ pub(super) fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView 
             .accounts
             .get_untracked()
             .into_iter()
-            .map(|account| view! { <AccountRow account state /> })
+            .map(|account| account_row(account, state))
             .collect_view()
             .into_any();
         view! {
@@ -111,10 +110,10 @@ pub(super) fn CurrentAccountsSection(state: AccountsPageState) -> impl IntoView 
             {content}
         </div>
     }
+    .into_any()
 }
 
-#[component]
-fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView {
+fn account_row(account: LocalAccount, state: AccountsPageState) -> AnyView {
     let password = RwSignal::new(String::new());
     let admin_checked = RwSignal::new(account.is_admin);
     let saving = RwSignal::new(false);
@@ -134,33 +133,34 @@ fn AccountRow(account: LocalAccount, state: AccountsPageState) -> impl IntoView 
     view! {
         <tr class="account-table__row">
             <td>
-                <AccountRowSummary username=username.clone() constraint_label />
+                <AccountRowSummary username=username.clone() constraint_label=constraint_label />
             </td>
             <td>
-                <AccountStateCell role_label role_badge_class />
+                <AccountStateCell role_label=role_label role_badge_class=role_badge_class />
             </td>
             <td class="account-table__created">
                 <span>{created_label}</span>
             </td>
             <td>
-                <AccountPasswordField password username />
+                <AccountPasswordField password=password username=username />
             </td>
             <td>
-                <AccountAdminToggle admin_checked can_modify />
+                <AccountAdminToggle admin_checked=admin_checked can_modify=can_modify />
             </td>
             <td>
                 <AccountRowActions
-                    saving
-                    deleting
-                    row_dirty
-                    can_modify
-                    save_account
-                    delete_account
-                    constraint_label
+                    saving=saving
+                    deleting=deleting
+                    row_dirty=row_dirty
+                    can_modify=can_modify
+                    save_account=save_account
+                    delete_account=delete_account
+                    constraint_label=constraint_label
                 />
             </td>
         </tr>
     }
+    .into_any()
 }
 
 fn account_row_dirty_signal(
@@ -840,8 +840,8 @@ mod tests {
             ]);
             state.loading_accounts.set(false);
 
-            let _ = view! { <CurrentAccountsSection state=state /> };
-            let _ = view! { <AccountRow account=sample_account("member", false) state=state /> };
+            let _ = current_accounts_section(state);
+            let _ = account_row(sample_account("member", false), state);
         });
     }
 
@@ -892,7 +892,7 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let state = AccountsPageState::new();
-            let _ = view! { <CurrentAccountsSection state=state /> };
+            let _ = current_accounts_section(state);
         });
     }
 

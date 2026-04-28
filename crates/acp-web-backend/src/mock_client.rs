@@ -40,7 +40,6 @@ type DynWr = Box<dyn AsyncWrite + Send + Unpin>;
 type LineSink = Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>>;
 type LineStream = Pin<Box<dyn Stream<Item = std::io::Result<String>> + Send>>;
 type OperationFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
-type ConnectionFuture<T> = Pin<Box<dyn Future<Output = std::result::Result<T, acp::Error>> + Send>>;
 type ConnectedOperation<T> = Box<
     dyn FnOnce(
             acp::ConnectionTo<acp::Agent>,
@@ -51,13 +50,19 @@ type ConnectedOperation<T> = Box<
         ) -> OperationFuture<T>
         + Send,
 >;
-type ConnectedMain<T> =
-    Box<dyn FnOnce(acp::ConnectionTo<acp::Agent>) -> ConnectionFuture<T> + Send>;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
 type SessionLock = Arc<tokio::sync::Mutex<()>>;
 type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
+
+struct ConnectedMainState<T> {
+    working_dir: PathBuf,
+    backend_session_id: String,
+    client: BackendAcpClient,
+    upstream_sessions: UpstreamSessions,
+    operation: ConnectedOperation<T>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyResult {
@@ -505,6 +510,7 @@ impl<R: acp::Role> ConnectTo<R> for BackendIo {
         client: impl ConnectTo<R::Counterpart>,
     ) -> std::result::Result<(), acp::Error> {
         let (channel, serve_io) = <BackendIo as ConnectTo<R>>::into_channel_and_future(self);
+        let client = acp::DynConnectTo::new(client);
         let serve_client: BoxFuture<'static, std::result::Result<(), acp::Error>> =
             Box::pin(client.connect_to(channel));
         match future::select(serve_client, serve_io).await {
@@ -634,12 +640,13 @@ async fn connect_backend_mock_client<T: 'static>(
     writer: OwnedWriteHalf,
     request_client: BackendAcpClient,
     notification_client: BackendAcpClient,
-    connected_main: ConnectedMain<T>,
-) -> std::result::Result<T, acp::Error> {
-    #[allow(clippy::redundant_closure)]
-    let main_fn = move |conn| connected_main(conn);
+    connected_main: ConnectedMainState<T>,
+) -> std::result::Result<Result<T>, acp::Error> {
     build_backend_client_builder(request_client, notification_client)
-        .connect_with(BackendIo::new(reader, writer), main_fn)
+        .connect_with(
+            acp::DynConnectTo::new(BackendIo::new(reader, writer)),
+            move |conn| run_connected_main(conn, connected_main),
+        )
         .await
 }
 
@@ -705,29 +712,46 @@ async fn drive_acp_operation<T: 'static>(
     let request_client = client.clone();
     let notification_client = client.clone();
 
+    let connected_main = ConnectedMainState {
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    };
+
     connect_backend_mock_client(
         reader,
         writer,
         request_client,
         notification_client,
-        Box::new(move |conn| {
-            Box::pin(async move {
-                Ok::<_, acp::Error>(
-                    run_connected_operation(
-                        conn,
-                        working_dir,
-                        backend_session_id,
-                        client,
-                        upstream_sessions,
-                        operation,
-                    )
-                    .await,
-                )
-            })
-        }),
+        connected_main,
     )
     .await
     .context(ConnectionClosedSnafu)?
+}
+
+async fn run_connected_main<T: 'static>(
+    conn: acp::ConnectionTo<acp::Agent>,
+    state: ConnectedMainState<T>,
+) -> std::result::Result<Result<T>, acp::Error> {
+    let ConnectedMainState {
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    } = state;
+
+    Ok(run_connected_operation(
+        conn,
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    )
+    .await)
 }
 
 async fn initialize_connection(conn: &acp::ConnectionTo<acp::Agent>) -> Result<()> {

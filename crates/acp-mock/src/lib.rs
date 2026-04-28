@@ -687,17 +687,8 @@ impl<R: acp::Role> ConnectTo<R> for MockIo {
     }
 }
 
-async fn connect_mock_agent(
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
-    agent: MockAgent,
-) -> Result<(), acp::Error> {
-    ConnectTo::<acp::Agent>::connect_to(
-        MockIo::new(reader, writer),
-        build_mock_agent_connector(agent),
-    )
-    .await
-}
+#[rustfmt::skip]
+async fn connect_mock_agent(reader: OwnedReadHalf, writer: OwnedWriteHalf, agent: MockAgent) -> Result<(), acp::Error> { ConnectTo::<acp::Agent>::connect_to(MockIo::new(reader, writer), build_mock_agent_connector(agent)).await }
 
 #[rustfmt::skip]
 async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Result<(), acp::Error> { let (reader, writer) = stream.into_split(); connect_mock_agent(reader, writer, MockAgent::new(state)).await }
@@ -948,6 +939,9 @@ mod coverage_tests {
         Ok(result)
     }
 
+    #[rustfmt::skip]
+    async fn accept_mock_agent_connection(listener: TcpListener, state: Arc<MockServerState>) -> Result<(), acp::Error> { let (stream, _) = listener.accept().await.expect("test listener should accept"); let (reader, writer) = stream.into_split(); connect_mock_agent(reader, writer, MockAgent::new(state)).await }
+
     #[tokio::test(flavor = "current_thread")]
     async fn connect_mock_agent_accepts_direct_acp_roundtrips() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -960,14 +954,7 @@ mod coverage_tests {
             response_delay: Duration::from_millis(1),
             startup_hints: false,
         }));
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .expect("test listener should accept");
-            let (reader, writer) = stream.into_split();
-            connect_mock_agent(reader, writer, MockAgent::new(state)).await
-        });
+        let server = tokio::spawn(accept_mock_agent_connection(listener, state));
 
         let stream = connect_roundtrip_stream(address).await;
         let (reader, writer) = stream.into_split();

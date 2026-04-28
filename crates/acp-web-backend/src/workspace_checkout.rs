@@ -3,6 +3,7 @@ use std::{
     env,
     ffi::OsStr,
     fs,
+    net::IpAddr,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -20,6 +21,9 @@ const CHECKOUTS_DIR_NAME: &str = "session-checkouts";
 const GIT_FETCH_HEAD: &str = "FETCH_HEAD";
 const GIT_HOME_DIR_NAME: &str = "git-home";
 const GIT_REMOTE_NAME: &str = "origin";
+const HTTPS_PROXY_ENV_NAMES: &[&str] = &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
+const HTTP_PROXY_ENV_NAMES: &[&str] = &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+const NO_PROXY_ENV_NAMES: &[&str] = &["NO_PROXY", "no_proxy"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedWorkspaceCheckout {
@@ -321,7 +325,7 @@ fn resolve_remote_head_ref(
             .connect_auth(
                 Direction::Fetch,
                 Some(git_remote_callbacks()),
-                Some(git_proxy_options()),
+                Some(git_proxy_options(upstream_url)),
             )
             .map_err(map_git_error)?;
         parse_remote_default_branch(connection.default_branch().map_err(map_git_error)?)
@@ -351,7 +355,7 @@ fn list_remote_workspace_branches(
             .connect_auth(
                 Direction::Fetch,
                 Some(git_remote_callbacks()),
-                Some(git_proxy_options()),
+                Some(git_proxy_options(upstream_url)),
             )
             .map_err(map_git_error)?;
         let default_ref =
@@ -572,7 +576,7 @@ fn git_fetch_options(remote_url: &str) -> FetchOptions<'static> {
         options.depth(1);
     }
     options.follow_redirects(RemoteRedirect::None);
-    options.proxy_options(git_proxy_options());
+    options.proxy_options(git_proxy_options(remote_url));
     options.remote_callbacks(git_remote_callbacks());
     options
 }
@@ -597,8 +601,144 @@ fn reject_git_credentials(
     ))
 }
 
-fn git_proxy_options() -> ProxyOptions<'static> {
-    ProxyOptions::new()
+fn git_proxy_options(remote_url: &str) -> ProxyOptions<'static> {
+    proxy_options_from_config(git_proxy_config_for_remote(remote_url))
+}
+
+fn proxy_options_from_config(config: GitProxyConfig) -> ProxyOptions<'static> {
+    let mut options = ProxyOptions::new();
+    match config {
+        GitProxyConfig::Bypass => {}
+        GitProxyConfig::Url(proxy_url) => {
+            options.url(&proxy_url);
+        }
+        GitProxyConfig::Auto => {
+            options.auto();
+        }
+    }
+    options
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitProxyConfig {
+    Bypass,
+    Url(String),
+    Auto,
+}
+
+fn git_proxy_config_for_remote(remote_url: &str) -> GitProxyConfig {
+    git_proxy_config_for_remote_from_env(remote_url, &|key| env::var(key).ok())
+}
+
+fn git_proxy_config_for_remote_from_env(
+    remote_url: &str,
+    env_value: &impl Fn(&str) -> Option<String>,
+) -> GitProxyConfig {
+    let Some(url) = proxyable_git_remote_url(remote_url) else {
+        return GitProxyConfig::Bypass;
+    };
+    if should_bypass_git_proxy(&url, env_value) {
+        return GitProxyConfig::Bypass;
+    }
+    proxy_env_names_for_scheme(url.scheme())
+        .iter()
+        .find_map(|name| git_env_value(name, env_value))
+        .map(GitProxyConfig::Url)
+        .unwrap_or(GitProxyConfig::Auto)
+}
+
+fn proxyable_git_remote_url(remote_url: &str) -> Option<Url> {
+    let url = Url::parse(remote_url).ok()?;
+    matches!(url.scheme(), "http" | "https").then_some(url)
+}
+
+fn proxy_env_names_for_scheme(scheme: &str) -> &'static [&'static str] {
+    match scheme {
+        "http" => HTTP_PROXY_ENV_NAMES,
+        "https" => HTTPS_PROXY_ENV_NAMES,
+        _ => &[],
+    }
+}
+
+fn should_bypass_git_proxy(url: &Url, env_value: &impl Fn(&str) -> Option<String>) -> bool {
+    let Some(host) = normalized_url_host(url) else {
+        return true;
+    };
+    if is_loopback_host(&host) {
+        return true;
+    }
+    NO_PROXY_ENV_NAMES.iter().any(|name| {
+        git_env_value(name, env_value).is_some_and(|value| {
+            value
+                .split(',')
+                .any(|entry| no_proxy_entry_matches(&host, url.port_or_known_default(), entry))
+        })
+    })
+}
+
+fn normalized_url_host(url: &Url) -> Option<String> {
+    url.host_str().map(|host| {
+        host.trim_matches(|c| c == '[' || c == ']')
+            .to_ascii_lowercase()
+    })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn git_env_value(name: &str, env_value: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    env_value(name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn no_proxy_entry_matches(host: &str, port: Option<u16>, entry: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    if entry == "*" {
+        return true;
+    }
+    let (entry_host, entry_port) = split_no_proxy_entry(entry);
+    if entry_port.is_some_and(|entry_port| Some(entry_port) != port) {
+        return false;
+    }
+    let entry_host = entry_host
+        .trim_matches(|c| c == '[' || c == ']')
+        .trim_start_matches("*.")
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    !entry_host.is_empty() && host_matches_no_proxy_entry(host, &entry_host)
+}
+
+fn split_no_proxy_entry(entry: &str) -> (&str, Option<u16>) {
+    if let Some(stripped) = entry.strip_prefix('[')
+        && let Some((host, rest)) = stripped.split_once(']')
+    {
+        return (
+            host,
+            rest.strip_prefix(':').and_then(|port| port.parse().ok()),
+        );
+    }
+    if let Some((host, port)) = entry.rsplit_once(':')
+        && !host.contains(':')
+        && let Ok(port) = port.parse()
+    {
+        return (host, Some(port));
+    }
+    (entry, None)
+}
+
+fn host_matches_no_proxy_entry(host: &str, entry_host: &str) -> bool {
+    host.eq_ignore_ascii_case(entry_host)
+        || host
+            .strip_suffix(entry_host)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 fn parse_remote_default_branch(

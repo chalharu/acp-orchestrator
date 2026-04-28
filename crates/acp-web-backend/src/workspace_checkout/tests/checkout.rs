@@ -1,13 +1,15 @@
 use super::super::{
-    CHECKOUTS_DIR_NAME, FsWorkspaceCheckoutManager, GIT_REMOTE_NAME, PreparedWorkspaceCheckout,
-    WorkspaceCheckoutError, WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout,
-    checkout_fetch_head, checkout_head_commit, checkout_parent_dir, clone_local_repository,
-    clone_remote_workspace, current_head_commit, git_fetch_options, git_symbolic_ref,
-    list_local_workspace_branches, list_remote_workspace_branches, local_source_root,
-    local_source_root_from, map_git_error, parse_remote_default_branch_name,
-    prioritize_workspace_branch_ref, reject_git_credentials, resolve_https_checkout_ref,
-    resolve_local_checkout_ref, resolve_remote_head_ref, validate_branch_list_upstream_url,
-    validate_checkout_ref, validate_https_upstream_url, workspace_branches_from_refs,
+    CHECKOUTS_DIR_NAME, FsWorkspaceCheckoutManager, GIT_REMOTE_NAME, GitProxyConfig,
+    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutManager,
+    await_checkout_task, build_prepared_checkout, checkout_fetch_head, checkout_head_commit,
+    checkout_parent_dir, clone_local_repository, clone_remote_workspace, current_head_commit,
+    git_fetch_options, git_proxy_config_for_remote, git_proxy_config_for_remote_from_env,
+    git_symbolic_ref, list_local_workspace_branches, list_remote_workspace_branches,
+    local_source_root, local_source_root_from, map_git_error, parse_remote_default_branch_name,
+    prioritize_workspace_branch_ref, proxy_options_from_config, reject_git_credentials,
+    resolve_https_checkout_ref, resolve_local_checkout_ref, resolve_remote_head_ref,
+    validate_branch_list_upstream_url, validate_checkout_ref, validate_https_upstream_url,
+    workspace_branches_from_refs,
 };
 use super::*;
 use async_trait::async_trait;
@@ -228,6 +230,14 @@ fn assert_git_error(error: WorkspaceCheckoutError) {
 fn assert_io_error_contains(error: WorkspaceCheckoutError, expected: &str) {
     assert!(matches!(error, WorkspaceCheckoutError::Io(_)), "{error:?}");
     assert!(error.message().contains(expected), "{}", error.message());
+}
+
+fn git_proxy_config_with_env(remote_url: &str, env: &[(&str, &str)]) -> GitProxyConfig {
+    git_proxy_config_for_remote_from_env(remote_url, &|key| {
+        env.iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| (*value).to_string())
+    })
 }
 
 #[test]
@@ -757,6 +767,90 @@ fn reject_git_credentials_fails_closed() {
         error.message(),
         "credentialed git transports are not supported"
     );
+}
+
+#[test]
+fn git_proxy_config_uses_scheme_specific_proxy_environment() {
+    assert_eq!(
+        git_proxy_config_with_env(
+            "https://example.com/repo.git",
+            &[
+                ("ALL_PROXY", "http://all-proxy.example:8080"),
+                ("HTTPS_PROXY", " http://https-proxy.example:8080 "),
+            ],
+        ),
+        GitProxyConfig::Url("http://https-proxy.example:8080".to_string())
+    );
+    assert_eq!(
+        git_proxy_config_with_env(
+            "http://example.com/repo.git",
+            &[("HTTP_PROXY", "http://http-proxy.example:8080")],
+        ),
+        GitProxyConfig::Url("http://http-proxy.example:8080".to_string())
+    );
+    assert_eq!(
+        git_proxy_config_with_env(
+            "https://example.com/repo.git",
+            &[
+                ("HTTPS_PROXY", "  "),
+                ("all_proxy", "socks5://proxy.example:1080")
+            ],
+        ),
+        GitProxyConfig::Url("socks5://proxy.example:1080".to_string())
+    );
+}
+
+#[test]
+fn git_proxy_config_bypasses_local_loopback_and_no_proxy_remotes() {
+    let proxy_env = &[("HTTPS_PROXY", "http://proxy.example:8080")];
+
+    assert_eq!(
+        git_proxy_config_with_env("file:///tmp/repo.git", proxy_env),
+        GitProxyConfig::Bypass
+    );
+    assert_eq!(
+        git_proxy_config_with_env("/tmp/repo", proxy_env),
+        GitProxyConfig::Bypass
+    );
+    assert_eq!(
+        git_proxy_config_with_env("https://127.0.0.1/repo.git", proxy_env),
+        GitProxyConfig::Bypass
+    );
+    assert_eq!(
+        git_proxy_config_with_env(
+            "https://git.example.com:8443/repo.git",
+            &[
+                ("HTTPS_PROXY", "http://proxy.example:8080"),
+                ("NO_PROXY", "example.org, .EXAMPLE.COM:8443"),
+            ],
+        ),
+        GitProxyConfig::Bypass
+    );
+    assert_eq!(
+        git_proxy_config_with_env(
+            "https://git.example.com/repo.git",
+            &[
+                ("HTTPS_PROXY", "http://proxy.example:8080"),
+                ("no_proxy", "*")
+            ],
+        ),
+        GitProxyConfig::Bypass
+    );
+}
+
+#[test]
+fn git_proxy_config_auto_detects_when_no_proxy_environment_matches() {
+    assert_eq!(
+        git_proxy_config_with_env("https://example.com/repo.git", &[]),
+        GitProxyConfig::Auto
+    );
+    assert_eq!(
+        git_proxy_config_for_remote("file:///tmp/repo.git"),
+        GitProxyConfig::Bypass
+    );
+    proxy_options_from_config(GitProxyConfig::Bypass);
+    proxy_options_from_config(GitProxyConfig::Auto);
+    proxy_options_from_config(GitProxyConfig::Url("http://proxy.example:8080".to_string()));
 }
 
 #[test]

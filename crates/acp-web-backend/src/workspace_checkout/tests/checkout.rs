@@ -5,9 +5,10 @@ use super::super::{
     checkout_parent_dir, clone_local_repository, clone_remote_workspace, current_head_commit,
     git_fetch_options, git_proxy_config_for_remote, git_proxy_config_for_remote_from_env,
     git_symbolic_ref, list_local_workspace_branches, list_remote_workspace_branches,
-    local_source_root, local_source_root_from, map_git_error, parse_remote_default_branch_name,
-    prioritize_workspace_branch_ref, proxy_options_from_config, reject_git_credentials,
-    resolve_https_checkout_ref, resolve_local_checkout_ref, resolve_remote_head_ref,
+    local_source_root, local_source_root_from, map_git_error, no_proxy_entry_matches,
+    parse_remote_default_branch_name, prioritize_workspace_branch_ref, proxy_env_names_for_scheme,
+    proxy_options_from_config, reject_git_credentials, resolve_https_checkout_ref,
+    resolve_local_checkout_ref, resolve_remote_head_ref, should_bypass_git_proxy,
     validate_branch_list_upstream_url, validate_checkout_ref, validate_https_upstream_url,
     workspace_branches_from_refs,
 };
@@ -851,6 +852,26 @@ fn git_proxy_config_auto_detects_when_no_proxy_environment_matches() {
     proxy_options_from_config(GitProxyConfig::Bypass);
     proxy_options_from_config(GitProxyConfig::Auto);
     proxy_options_from_config(GitProxyConfig::Url("http://proxy.example:8080".to_string()));
+}
+
+#[test]
+fn git_proxy_helpers_handle_non_proxyable_schemes_hosts_and_no_proxy_edges() {
+    assert!(proxy_env_names_for_scheme("ssh").is_empty());
+    assert!(should_bypass_git_proxy(
+        &Url::parse("file:///workspace/repo.git").expect("file URLs should parse"),
+        &|_| None
+    ));
+    assert!(!no_proxy_entry_matches("example.com", Some(443), ""));
+    assert!(!no_proxy_entry_matches(
+        "example.com",
+        Some(443),
+        "example.com:8443"
+    ));
+    assert!(no_proxy_entry_matches(
+        "2001:db8::1",
+        Some(8443),
+        "[2001:db8::1]:8443"
+    ));
 }
 
 #[test]

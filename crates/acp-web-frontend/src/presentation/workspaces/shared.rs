@@ -275,6 +275,12 @@ mod tests {
             workspaces_back_to_chat_path("?return_to=%2Fapp%2Fsessions%2Fs%252F1"),
             Some("/app/sessions/s%2F1".to_string())
         );
+        assert_eq!(
+            workspaces_back_to_chat_path(
+                "?return_to=%2Fapp%2Fworkspaces%2Fw%252F1%2Fsessions%2Fs%252F1"
+            ),
+            Some("/app/workspaces/w%2F1/sessions/s%2F1".to_string())
+        );
         assert_eq!(workspaces_back_to_chat_path("?return_to=%2Fapp%2F"), None);
     }
 

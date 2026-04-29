@@ -18,7 +18,7 @@ use crate::{
     presentation::{
         AppIcon, SessionSidebarAuthControls, app_icon_view, workspaces_path_with_return_to,
     },
-    routing::app_session_path,
+    routing::app_session_path_for_workspace,
 };
 
 #[cfg(target_family = "wasm")]
@@ -79,7 +79,10 @@ fn session_sidebar_header_view(
     sidebar_error: RwSignal<Option<String>>,
     dismiss_button: impl IntoView + 'static,
 ) -> impl IntoView {
-    let workspaces_href = session_sidebar_workspaces_href(&current_session_id);
+    let workspaces_href = session_sidebar_workspaces_href(
+        current_workspace_id.get_untracked().as_deref(),
+        &current_session_id,
+    );
     let current_session_id_for_auth = current_session_id.clone();
 
     #[cfg(target_family = "wasm")]
@@ -95,7 +98,11 @@ fn session_sidebar_header_view(
         <div class="session-sidebar__header">
             <div class="session-sidebar__header-links">
                 {primary_action}
-                <SessionSidebarAuthControls current_session_id=current_session_id_for_auth error=auth_error />
+                <SessionSidebarAuthControls
+                    current_session_id=current_session_id_for_auth
+                    current_workspace_id=current_workspace_id
+                    error=auth_error
+                />
             </div>
             {dismiss_button}
         </div>
@@ -254,8 +261,14 @@ fn session_sidebar_workspaces_label() -> &'static str {
     "Workspaces"
 }
 
-fn session_sidebar_workspaces_href(current_session_id: &str) -> String {
-    workspaces_path_with_return_to(&app_session_path(current_session_id))
+fn session_sidebar_workspaces_href(
+    current_workspace_id: Option<&str>,
+    current_session_id: &str,
+) -> String {
+    workspaces_path_with_return_to(&app_session_path_for_workspace(
+        current_workspace_id,
+        current_session_id,
+    ))
 }
 
 fn session_sidebar_workspaces_link(href: &str) -> AnyView {
@@ -551,7 +564,10 @@ fn session_sidebar_new_chat_submit_handler(
             match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
-                    if let Err(message) = navigate_to(&app_session_path(&session_id)) {
+                    if let Err(message) = navigate_to(&app_session_path_for_workspace(
+                        Some(&workspace_id),
+                        &session_id,
+                    )) {
                         session_sidebar_finish_new_chat_failure(state, sidebar_error, message);
                         return;
                     }
@@ -687,7 +703,11 @@ mod tests {
         assert_eq!(session_sidebar_workspaces_icon(), AppIcon::Workspaces);
         assert_eq!(session_sidebar_workspaces_label(), "Workspaces");
         assert_eq!(
-            session_sidebar_workspaces_href("session-1"),
+            session_sidebar_workspaces_href(Some("workspace-1"), "session-1"),
+            "/app/workspaces/?return_to=%2Fapp%2Fworkspaces%2Fworkspace-1%2Fsessions%2Fsession-1"
+        );
+        assert_eq!(
+            session_sidebar_workspaces_href(None, "session-1"),
             "/app/workspaces/?return_to=%2Fapp%2Fsessions%2Fsession-1"
         );
     }

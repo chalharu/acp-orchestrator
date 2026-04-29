@@ -138,6 +138,29 @@ async fn workspace_sessions_are_scoped_over_http() -> Result<()> {
 }
 
 #[tokio::test]
+async fn owner_scoped_session_post_no_longer_creates_over_http() -> Result<()> {
+    let stack = workspace_stack().await?;
+    let workspace_id = create_repo_workspace(&stack, "Repo").await?;
+
+    let legacy_response = stack
+        .client
+        .post(format!("{}/api/v1/sessions", stack.backend_url))
+        .bearer_auth("alice")
+        .send()
+        .await?;
+    assert!(
+        !legacy_response.status().is_success(),
+        "owner-scoped session creation should not succeed"
+    );
+
+    let created = stack
+        .create_workspace_session("alice", &workspace_id)
+        .await?;
+    assert_eq!(created.session.workspace_id, workspace_id);
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_session_creation_accepts_empty_and_override_bodies_over_http() -> Result<()> {
     let stack = workspace_stack().await?;
     let workspace_id = create_repo_workspace(&stack, "Repo").await?;

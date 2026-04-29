@@ -59,8 +59,10 @@ use self::account_api::{
 };
 use self::assets::{SlashCompletionsQuery, install_frontend_routes};
 pub use self::connection::serve_with_shutdown;
+#[cfg(test)]
+use self::session_api::create_session;
 use self::session_api::{
-    cancel_turn, close_session, create_session, delete_session, get_session, get_session_history,
+    cancel_turn, close_session, delete_session, get_session, get_session_history,
     get_slash_completions, list_sessions, parse_json_body, post_message, rename_session,
     resolve_permission, stream_session_events,
 };
@@ -69,8 +71,9 @@ use self::session_service::{
     persist_prompt_snapshot_best_effort, persist_session_metadata_best_effort,
 };
 use self::workspace_api::{
-    create_workspace, create_workspace_session, delete_workspace, get_workspace,
-    list_workspace_branches, list_workspace_sessions, list_workspaces, update_workspace,
+    bootstrap_workspace, create_workspace, create_workspace_session, delete_workspace,
+    get_workspace, list_workspace_branches, list_workspace_sessions, list_workspaces,
+    update_workspace,
 };
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -265,7 +268,11 @@ impl AppState {
                     AppError::Unauthorized("account authentication required".to_string())
                 })?,
         };
-        Ok(OwnerContext { principal, user })
+        let live_owner_id = live_owner_id_for_principal(&principal, &user);
+        Ok(OwnerContext {
+            user,
+            live_owner_id,
+        })
     }
 }
 
@@ -281,8 +288,29 @@ pub fn app(state: AppState) -> Router {
 
 #[derive(Debug, Clone)]
 struct OwnerContext {
-    principal: AuthenticatedPrincipal,
     user: UserRecord,
+    live_owner_id: String,
+}
+
+fn live_owner_id_for_principal(principal: &AuthenticatedPrincipal, user: &UserRecord) -> String {
+    match principal.kind {
+        crate::auth::AuthenticatedPrincipalKind::Bearer => live_owner_id_for_bearer(principal),
+        crate::auth::AuthenticatedPrincipalKind::BrowserSession => {
+            live_owner_id_for_browser_user(user)
+        }
+    }
+}
+
+fn live_owner_id_for_bearer(principal: &AuthenticatedPrincipal) -> String {
+    format!("bearer:{}", principal.id)
+}
+
+fn live_owner_id_for_browser_user(user: &UserRecord) -> String {
+    live_owner_id_for_browser_user_id(&user.user_id)
+}
+
+fn live_owner_id_for_browser_user_id(user_id: &str) -> String {
+    format!("browser-user:{user_id}")
 }
 
 type BoxedRouteService = BoxCloneSyncService<Request<Body>, Response, Infallible>;
@@ -335,10 +363,10 @@ mod route_handlers {
         AppError, AppState, BootstrapRegistrationRequest, CreateAccountRequest,
         CreateWorkspaceRequest, PromptRequest, ReadPrincipal, RenameSessionBody,
         ResolvePermissionRequest, SignInRequest, SlashCompletionsQuery, UpdateAccountRequest,
-        UpdateWorkspaceRequest, WritePrincipal, auth_status, bootstrap_register, cancel_turn,
-        close_session, create_account, create_session, create_workspace, create_workspace_session,
-        delete_account, delete_session, delete_workspace, get_session, get_session_history,
-        get_slash_completions, get_workspace, list_accounts, list_sessions,
+        UpdateWorkspaceRequest, WritePrincipal, auth_status, bootstrap_register,
+        bootstrap_workspace, cancel_turn, close_session, create_account, create_workspace,
+        create_workspace_session, delete_account, delete_session, delete_workspace, get_session,
+        get_session_history, get_slash_completions, get_workspace, list_accounts, list_sessions,
         list_workspace_branches, list_workspace_sessions, list_workspaces, parse_json_body,
         post_message, rename_session, resolve_permission, sign_in, sign_out, stream_session_events,
         update_account, update_workspace,
@@ -479,22 +507,21 @@ mod route_handlers {
             .map(IntoResponse::into_response)
     }
 
-    pub(super) async fn create_session_handler(
-        State(state): State<AppState>,
-        WritePrincipal(principal): WritePrincipal,
-        body: Bytes,
-    ) -> Result<Response, AppError> {
-        create_session(State(state), Extension(principal), body)
-            .await
-            .map(IntoResponse::into_response)
-    }
-
     pub(super) async fn create_workspace_handler(
         State(state): State<AppState>,
         WritePrincipal(principal): WritePrincipal,
         Json(request): Json<CreateWorkspaceRequest>,
     ) -> Result<Response, AppError> {
         create_workspace(State(state), Extension(principal), Json(request))
+            .await
+            .map(IntoResponse::into_response)
+    }
+
+    pub(super) async fn bootstrap_workspace_handler(
+        State(state): State<AppState>,
+        WritePrincipal(principal): WritePrincipal,
+    ) -> Result<Response, AppError> {
+        bootstrap_workspace(State(state), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
@@ -781,6 +808,10 @@ fn workspace_write_routes(state: AppState) -> Router {
             post_route(&state, route_handlers::create_workspace_handler),
         )
         .route(
+            "/api/v1/workspaces/bootstrap",
+            post_route(&state, route_handlers::bootstrap_workspace_handler),
+        )
+        .route(
             "/api/v1/workspaces/{workspace_id}",
             patch_route(&state, route_handlers::update_workspace_handler).delete_service(
                 boxed_handler_service(state.clone(), route_handlers::delete_workspace_handler),
@@ -794,10 +825,6 @@ fn workspace_write_routes(state: AppState) -> Router {
 
 fn session_write_routes(state: AppState) -> Router {
     Router::new()
-        .route(
-            "/api/v1/sessions",
-            post_route(&state, route_handlers::create_session_handler),
-        )
         .route(
             "/api/v1/sessions/{session_id}",
             patch_route(&state, route_handlers::rename_session_handler).delete_service(

@@ -92,6 +92,55 @@ async fn listing_workspaces_starts_empty_until_a_workspace_is_created() {
 }
 
 #[tokio::test]
+async fn bootstrap_workspace_creates_an_idempotent_local_workspace_for_bearer_clients() {
+    let state = workspace_state();
+
+    let first = bootstrap_workspace(State(state.clone()), bearer_principal("alice"))
+        .await
+        .expect("workspace bootstrap should succeed")
+        .0
+        .workspace;
+    let second = bootstrap_workspace(State(state.clone()), bearer_principal("alice"))
+        .await
+        .expect("workspace bootstrap should be idempotent")
+        .0
+        .workspace;
+    let listed = list_workspaces(State(state), bearer_principal("alice"))
+        .await
+        .expect("workspace list should succeed after bootstrap");
+
+    assert_eq!(second.workspace_id, first.workspace_id);
+    assert_eq!(first.name, "Bootstrap workspace");
+    assert_eq!(first.upstream_url, None);
+    assert_eq!(
+        first.bootstrap_kind.as_deref(),
+        Some("legacy-session-routes")
+    );
+    assert_eq!(listed.0.workspaces.len(), 1);
+    assert_eq!(listed.0.workspaces[0].workspace_id, first.workspace_id);
+}
+
+#[tokio::test]
+async fn bootstrap_workspace_rejects_browser_principals() {
+    let state = workspace_state();
+    let principal = Extension(AuthenticatedPrincipal {
+        id: "browser".to_string(),
+        kind: crate::auth::AuthenticatedPrincipalKind::BrowserSession,
+        subject: "browser".to_string(),
+    });
+
+    let error = bootstrap_workspace(State(state), principal)
+        .await
+        .expect_err("browser clients should not access local workspace bootstrap");
+
+    assert!(matches!(
+        error,
+        AppError::Forbidden(message)
+            if message == "workspace bootstrap is only available to loopback clients"
+    ));
+}
+
+#[tokio::test]
 async fn workspace_crud_handlers_round_trip_owned_workspaces() {
     let state = workspace_state();
     let created = create_owned_workspace(&state, "Repo").await;
@@ -169,7 +218,7 @@ async fn workspace_session_routes_list_durable_sessions_after_live_state_is_clea
 
     state
         .store
-        .delete_sessions_for_owners(&["alice".to_string()])
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
     let response = list_workspace_sessions(

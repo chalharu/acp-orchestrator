@@ -297,6 +297,7 @@ fn sample_snapshot(session_id: &str) -> crate::contract_sessions::SessionSnapsho
         latest_sequence: 0,
         messages: Vec::new(),
         pending_permissions: Vec::new(),
+        active_turn: false,
     }
 }
 
@@ -427,7 +428,7 @@ async fn invalid_checkout_manager_panics_when_prepare_is_called_directly() {
 async fn provisioning_persistence_failures_roll_back_live_sessions() {
     let store = Arc::new(crate::sessions::SessionStore::new(4));
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let state = AppState::with_workspace_repository(
@@ -442,12 +443,8 @@ async fn provisioning_persistence_failures_roll_back_live_sessions() {
         Arc::new(NoopReplyProvider),
     );
     let owner = OwnerContext {
-        principal: AuthenticatedPrincipal {
-            id: "alice".to_string(),
-            kind: AuthenticatedPrincipalKind::Bearer,
-            subject: "alice".to_string(),
-        },
         user: sample_user(),
+        live_owner_id: "bearer:alice".to_string(),
     };
 
     let error =
@@ -458,7 +455,7 @@ async fn provisioning_persistence_failures_roll_back_live_sessions() {
     assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
     assert_eq!(
         store
-            .session_snapshot("alice", &session.id)
+            .session_snapshot("bearer:alice", &session.id)
             .await
             .expect_err("failed provisioning should discard the session"),
         SessionStoreError::NotFound

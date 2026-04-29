@@ -201,7 +201,7 @@ async fn assert_restored_session_cleanup(
         vec![session_id.to_string()]
     );
     let snapshot_error = store
-        .session_snapshot("alice", session_id)
+        .session_snapshot("bearer:alice", session_id)
         .await
         .expect_err("failed restores should be discarded from the live store");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
@@ -211,7 +211,7 @@ async fn assert_restored_session_cleanup(
 async fn injected_reply_provider_handles_prompt_dispatch() {
     let (store, state) = state_with_static_reply("injected reply");
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let _ = post_message(
@@ -228,7 +228,7 @@ async fn injected_reply_provider_handles_prompt_dispatch() {
     let history = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let history = store
-                .session_history("alice", &session.id)
+                .session_history("bearer:alice", &session.id)
                 .await
                 .expect("session history should load");
             if history.len() == 2 {
@@ -268,7 +268,7 @@ async fn get_session_restores_durable_messages_after_live_session_is_cleared() {
     assert_eq!(durable.session.messages[1].text, "injected reply");
 
     store
-        .delete_sessions_for_owners(&["alice".to_string()])
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
     let restored = get_session(State(state), Path(created.id), principal)
@@ -410,12 +410,12 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         .cloned()
         .expect("failed priming should forget the provisional session");
     let snapshot_error = store
-        .session_snapshot("alice", &rolled_back_session_id)
+        .session_snapshot("bearer:alice", &rolled_back_session_id)
         .await
         .expect_err("rolled back sessions should be removed");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
     store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("rollback should free the session cap");
 }
@@ -429,7 +429,7 @@ async fn create_session_reports_rollback_failures() {
         workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(RollbackFailingStartupHintProvider {
             store: store.clone(),
-            owner: "alice".to_string(),
+            owner: "bearer:alice".to_string(),
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         checkout_manager: test_checkout_manager(),
@@ -552,7 +552,7 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
 
     reset_binding_tracking(&reply_provider);
     store
-        .delete_sessions_for_owners(&["alice".to_string()])
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
     let restored = get_session(State(state), Path(created.id.clone()), principal)
@@ -584,7 +584,7 @@ async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() 
         .await
         .expect("metadata mutation should persist");
     store
-        .delete_sessions_for_owners(&["alice".to_string()])
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -623,7 +623,7 @@ async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
     let principal = bearer_principal("alice");
     let created = create_persisted_workspace_session(&state, principal.clone()).await;
     store
-        .delete_sessions_for_owners(&["alice".to_string()])
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -653,7 +653,7 @@ async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
         vec![created.id.clone()]
     );
     let snapshot_error = store
-        .session_snapshot("alice", &created.id)
+        .session_snapshot("bearer:alice", &created.id)
         .await
         .expect_err("failed restores should be discarded from the live store");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
@@ -703,35 +703,6 @@ async fn delete_session_removes_the_persisted_checkout_directory() {
 }
 
 #[tokio::test]
-async fn create_session_requires_explicit_workspace_selection_when_multiple_workspaces_exist() {
-    let state = AppState::with_dependencies(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-    );
-    let _first =
-        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
-            .await;
-    let _second =
-        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace B")
-            .await;
-
-    let error = create_session(
-        State(state),
-        bearer_principal("alice"),
-        axum::body::Bytes::new(),
-    )
-    .await
-    .expect_err("root create should reject ambiguous workspace selection");
-
-    assert!(matches!(
-        error,
-        AppError::Conflict(message) if message == "workspace selection required"
-    ));
-}
-
-#[tokio::test]
 async fn closing_sessions_notifies_reply_provider_cleanup() {
     let store = Arc::new(SessionStore::new(4));
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -742,7 +713,7 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
         }),
     );
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = close_session(
@@ -761,6 +732,50 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
             .as_slice(),
         [session.id]
     );
+}
+
+#[tokio::test]
+async fn close_session_removes_checkout_but_preserves_closed_metadata() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state =
+        AppState::with_workspace_repository(store, metadata_test_workspace_store(), reply_provider);
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+    let metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
+    let checkout_relpath = metadata.checkout_relpath.clone();
+    let checkout_path = checkout_path_from_metadata(&state, &metadata);
+    assert!(
+        checkout_path.exists(),
+        "session startup should create a checkout"
+    );
+
+    let response = close_session(State(state.clone()), Path(created.id.clone()), principal)
+        .await
+        .expect("session close should succeed");
+
+    assert_eq!(
+        response.0.session.status,
+        crate::contract_sessions::SessionStatus::Closed
+    );
+    assert!(
+        !checkout_path.exists(),
+        "session close should remove the checkout directory"
+    );
+    let metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
+    assert_eq!(metadata.status, "closed");
+    assert_eq!(metadata.checkout_relpath, checkout_relpath);
+    let listed = state
+        .workspace_repository
+        .list_workspace_sessions(&user.user_id, &metadata.workspace_id)
+        .await
+        .expect("closed session should remain listable");
+    assert!(listed.iter().any(|session| session.id == created.id));
 }
 
 #[tokio::test]
@@ -792,7 +807,7 @@ async fn browser_session_writes_require_an_authenticated_account() {
 
     assert_eq!(
         invalidated_browser_sessions,
-        vec![context.live_owner_id.clone()]
+        vec![context.principal.0.id.clone()]
     );
 
     let error = post_message(

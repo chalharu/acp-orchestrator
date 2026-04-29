@@ -5,11 +5,11 @@ use axum::{
 };
 
 use crate::{
-    auth::AuthenticatedPrincipal,
+    auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::{CreateSessionRequest, CreateSessionResponse},
     contract_workspaces::{
         CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
-        UpdateWorkspaceRequest, UpdateWorkspaceResponse,
+        UpdateWorkspaceRequest, UpdateWorkspaceResponse, WorkspaceResponse,
     },
     workspace_repository::{NewWorkspace, WorkspaceUpdatePatch},
 };
@@ -42,6 +42,27 @@ pub(in crate::server) async fn create_workspace(
             workspace: workspace_detail(workspace),
         }),
     ))
+}
+
+pub(in crate::server) async fn bootstrap_workspace(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+) -> Result<Json<WorkspaceResponse>, AppError> {
+    if principal.kind != AuthenticatedPrincipalKind::Bearer {
+        return Err(AppError::Forbidden(
+            "workspace bootstrap is only available to loopback clients".to_string(),
+        ));
+    }
+
+    let owner = state.owner_context(principal).await?;
+    let workspace = state
+        .workspace_repository
+        .bootstrap_workspace(&owner.user.user_id)
+        .await?;
+
+    Ok(Json(WorkspaceResponse {
+        workspace: workspace_detail(workspace),
+    }))
 }
 
 pub(in crate::server) async fn update_workspace(

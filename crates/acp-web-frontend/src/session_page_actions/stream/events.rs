@@ -49,9 +49,10 @@ fn apply_session_snapshot(session: SessionSnapshot, signals: SessionSignals) {
     }
     signals.session_status.set(bootstrap.session_status);
     if should_apply_snapshot_turn_state(signals.turn_state.get_untracked()) {
-        signals
-            .turn_state
-            .set(turn_state_for_snapshot(&bootstrap.pending_permissions));
+        signals.turn_state.set(turn_state_for_snapshot(
+            &bootstrap.pending_permissions,
+            bootstrap.active_turn,
+        ));
     }
     signals
         .pending_permissions
@@ -231,6 +232,7 @@ mod tests {
             latest_sequence: 4,
             messages: vec![message("assistant-1", MessageRole::Assistant, "hello")],
             pending_permissions: permissions,
+            active_turn: false,
         }
     }
 
@@ -276,6 +278,27 @@ mod tests {
                 signals.current_workspace_id.get(),
                 Some("w_test".to_string())
             );
+        });
+    }
+
+    #[test]
+    fn session_snapshot_event_restores_active_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let mut session = snapshot(SessionStatus::Active, Vec::new());
+            session.active_turn = true;
+
+            handle_sse_event(
+                StreamEvent {
+                    sequence: 1,
+                    payload: StreamEventPayload::SessionSnapshot { session },
+                },
+                signals,
+            );
+
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingReply);
+            assert!(signals.pending_permissions.get().is_empty());
         });
     }
 

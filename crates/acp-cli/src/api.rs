@@ -4,6 +4,9 @@ use crate::contract_sessions::{
     SessionSnapshot,
 };
 use crate::contract_slash::SlashCompletionsResponse;
+use crate::contract_workspaces::{
+    CreateWorkspaceRequest, CreateWorkspaceResponse, WorkspaceListResponse, WorkspaceSummary,
+};
 
 pub(super) async fn list_sessions(
     client: &Client,
@@ -24,13 +27,17 @@ pub(super) async fn list_sessions(
     })
 }
 
-pub(super) async fn create_session(
+pub(super) async fn create_workspace_session(
     client: &Client,
     base_url: &str,
     auth_token: &str,
+    workspace_id: &str,
 ) -> Result<SessionSnapshot> {
     let response = client
-        .post(format!("{base_url}/api/v1/sessions"))
+        .post(format!(
+            "{base_url}/api/v1/workspaces/{}/sessions",
+            encode_path_segment(workspace_id)
+        ))
         .bearer_auth(auth_token)
         .send()
         .await
@@ -42,6 +49,60 @@ pub(super) async fn create_session(
         action: "create session",
     })?;
     Ok(payload.session)
+}
+
+pub(super) async fn list_workspaces(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+) -> Result<WorkspaceListResponse> {
+    let response = client
+        .get(format!("{base_url}/api/v1/workspaces"))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "list workspaces",
+        })?;
+    let response = ensure_success(response, "list workspaces").await?;
+    response.json().await.context(DecodeResponseSnafu {
+        action: "list workspaces",
+    })
+}
+
+pub(super) async fn create_workspace(
+    client: &Client,
+    base_url: &str,
+    auth_token: &str,
+    name: &str,
+    upstream_url: &str,
+) -> Result<WorkspaceSummary> {
+    let response = client
+        .post(format!("{base_url}/api/v1/workspaces"))
+        .bearer_auth(auth_token)
+        .json(&CreateWorkspaceRequest {
+            name: name.to_string(),
+            upstream_url: upstream_url.to_string(),
+            credential_reference_id: None,
+        })
+        .send()
+        .await
+        .context(SendRequestSnafu {
+            action: "create workspace",
+        })?;
+    let response = ensure_success(response, "create workspace").await?;
+    let payload: CreateWorkspaceResponse = response.json().await.context(DecodeResponseSnafu {
+        action: "create workspace",
+    })?;
+    Ok(WorkspaceSummary {
+        workspace_id: payload.workspace.workspace_id,
+        name: payload.workspace.name,
+        upstream_url: payload.workspace.upstream_url,
+        bootstrap_kind: payload.workspace.bootstrap_kind,
+        status: payload.workspace.status,
+        created_at: payload.workspace.created_at,
+        updated_at: payload.workspace.updated_at,
+    })
 }
 
 pub(super) async fn get_session(
@@ -222,4 +283,30 @@ pub(super) async fn ensure_success(response: Response, action: &'static str) -> 
         message,
     }
     .fail()
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_path_segment;
+
+    #[test]
+    fn encode_path_segment_escapes_reserved_characters() {
+        assert_eq!(
+            encode_path_segment("workspace/one two"),
+            "workspace%2Fone%20two"
+        );
+    }
 }

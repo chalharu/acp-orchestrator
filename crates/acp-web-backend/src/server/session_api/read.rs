@@ -21,7 +21,7 @@ pub(in crate::server) async fn list_sessions(
     Extension(principal): Extension<AuthenticatedPrincipal>,
 ) -> Result<Json<SessionListResponse>, AppError> {
     let owner = state.owner_context(principal).await?;
-    let sessions = state.store.list_owned_sessions(&owner.principal.id).await;
+    let sessions = state.store.list_owned_sessions(&owner.live_owner_id).await;
 
     Ok(Json(SessionListResponse { sessions }))
 }
@@ -61,7 +61,7 @@ pub(in crate::server) async fn get_slash_completions(
     let owner = state.owner_context(principal).await?;
     let response = resolve_slash_completions(
         &state.store,
-        &owner.principal.id,
+        &owner.live_owner_id,
         &query.session_id,
         &query.prefix,
     )
@@ -77,7 +77,7 @@ async fn load_or_restore_session(
 ) -> Result<SessionSnapshot, AppError> {
     match state
         .store
-        .session_snapshot(&owner.principal.id, session_id)
+        .session_snapshot(&owner.live_owner_id, session_id)
         .await
     {
         Ok(session) => Ok(session),
@@ -93,7 +93,7 @@ async fn restore_durable_session(
 ) -> Result<SessionSnapshot, AppError> {
     let (metadata, durable) = load_restorable_session(state, owner, session_id).await?;
     let restored = restore_durable_snapshot(state, owner, durable).await?;
-    bind_restored_session_to_checkout(state, &owner.principal.id, &restored, metadata.as_ref())
+    bind_restored_session_to_checkout(state, &owner.live_owner_id, &restored, metadata.as_ref())
         .await?;
     Ok(restored)
 }
@@ -126,7 +126,7 @@ async fn restore_durable_snapshot(
     } = durable;
     state
         .store
-        .restore_session(&owner.principal.id, session, last_activity_at)
+        .restore_session(&owner.live_owner_id, session, last_activity_at)
         .await
         .map_err(AppError::from)
 }
@@ -223,6 +223,7 @@ mod tests {
             latest_sequence: 0,
             messages: Vec::new(),
             pending_permissions: Vec::new(),
+            active_turn: false,
         }
     }
 

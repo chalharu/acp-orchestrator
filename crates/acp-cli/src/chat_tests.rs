@@ -6,6 +6,7 @@ use crate::contract_sessions::{
     CloseSessionResponse, CreateSessionResponse, SessionHistoryResponse, SessionListItem,
     SessionListResponse, SessionSnapshot, SessionStatus,
 };
+use crate::contract_workspaces::{WorkspaceListResponse, WorkspaceSummary};
 use reqwest::Client;
 use std::sync::{
     Arc,
@@ -19,18 +20,8 @@ use tokio::{
 #[tokio::test]
 async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
     let server_url = spawn_ordered_http_server(vec![json_response(
-        &serde_json::to_vec(&CreateSessionResponse {
-            session: SessionSnapshot {
-                id: "s_new".to_string(),
-                workspace_id: "w_test".to_string(),
-                title: "New chat".to_string(),
-                status: SessionStatus::Active,
-                latest_sequence: 1,
-                messages: Vec::new(),
-                pending_permissions: Vec::new(),
-            },
-        })
-        .expect("session response should serialize"),
+        &serde_json::to_vec(&active_session_response("s_new", "w_test"))
+            .expect("session response should serialize"),
     )])
     .await;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -39,6 +30,7 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
         ChatArgs {
             new: true,
             session_id: None,
+            workspace_id: Some("w_test".to_string()),
             server_url: Some(server_url.clone()),
             auth_token: Some("developer".to_string()),
         },
@@ -61,18 +53,8 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
 async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(
-            &serde_json::to_vec(&CreateSessionResponse {
-                session: SessionSnapshot {
-                    id: "s_line".to_string(),
-                    workspace_id: "w_test".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Active,
-                    latest_sequence: 1,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                },
-            })
-            .expect("session response should serialize"),
+            &serde_json::to_vec(&active_session_response("s_line", "w_test"))
+                .expect("session response should serialize"),
         ),
         sse_response(b"data: {\"sequence\":1,\"kind\":\"status\",\"message\":\"working\"}\n\n"),
     ])
@@ -83,6 +65,7 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
         ChatArgs {
             new: true,
             session_id: None,
+            workspace_id: Some("w_test".to_string()),
             server_url: Some(server_url.clone()),
             auth_token: Some("developer".to_string()),
         },
@@ -115,6 +98,7 @@ async fn run_chat_with_handlers_does_not_start_repl_for_closed_sessions() {
                     latest_sequence: 2,
                     messages: Vec::new(),
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("session response should serialize"),
@@ -164,6 +148,7 @@ async fn load_chat_session_loads_history_for_resumed_sessions() {
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -195,6 +180,7 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
                         created_at: chrono::Utc::now(),
                     }],
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("session response should serialize"),
@@ -210,6 +196,7 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -238,6 +225,7 @@ async fn load_chat_session_returns_non_404_history_errors() {
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -265,6 +253,7 @@ async fn load_chat_session_surfaces_missing_sessions() {
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -277,33 +266,180 @@ async fn load_chat_session_surfaces_missing_sessions() {
 }
 
 #[tokio::test]
+async fn load_chat_session_creates_new_chat_in_explicit_workspace() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&active_session_response("s_workspace", "w_explicit"))
+            .expect("session response should serialize"),
+    )])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let chat_session = load_chat_session(
+        &client,
+        &server_url,
+        true,
+        None,
+        Some("w_explicit"),
+        "developer",
+    )
+    .await
+    .expect("explicit workspace should create a new chat");
+
+    assert_eq!(chat_session.session.workspace_id, "w_explicit");
+    assert!(!chat_session.resumed);
+}
+
+#[tokio::test]
+async fn load_chat_session_requires_workspace_when_auto_selection_is_ambiguous() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&WorkspaceListResponse {
+            workspaces: vec![
+                workspace_summary("w_one", "One"),
+                workspace_summary("w_two", "Two"),
+            ],
+        })
+        .expect("workspace list response should serialize"),
+    )])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let error = load_chat_session(&client, &server_url, true, None, None, "developer")
+        .await
+        .expect_err("multiple workspaces should require --workspace");
+
+    assert!(matches!(
+        error,
+        CliError::WorkspaceSelectionRequired { reason } if reason == "multiple workspaces exist"
+    ));
+}
+
+#[tokio::test]
+async fn load_chat_session_auto_selects_the_only_workspace() {
+    let server_url = spawn_ordered_http_server(vec![
+        json_response(
+            &serde_json::to_vec(&WorkspaceListResponse {
+                workspaces: vec![workspace_summary("w_only", "Only")],
+            })
+            .expect("workspace list response should serialize"),
+        ),
+        json_response(
+            &serde_json::to_vec(&active_session_response("s_auto", "w_only"))
+                .expect("session response should serialize"),
+        ),
+    ])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let chat_session = load_chat_session(&client, &server_url, true, None, None, "developer")
+        .await
+        .expect("single workspace should be auto-selected");
+
+    assert_eq!(chat_session.session.workspace_id, "w_only");
+    assert!(!chat_session.resumed);
+}
+
+#[tokio::test]
+async fn load_chat_session_requires_workspace_when_none_exist() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&WorkspaceListResponse {
+            workspaces: Vec::new(),
+        })
+        .expect("workspace list response should serialize"),
+    )])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let error = load_chat_session(&client, &server_url, true, None, None, "developer")
+        .await
+        .expect_err("missing workspace should require --workspace");
+
+    assert!(matches!(
+        error,
+        CliError::WorkspaceSelectionRequired { reason } if reason == "no workspaces exist"
+    ));
+}
+
+#[tokio::test]
+async fn run_with_args_routes_workspace_list_and_allows_empty_results() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&WorkspaceListResponse {
+            workspaces: Vec::new(),
+        })
+        .expect("workspace list response should serialize"),
+    )])
+    .await;
+
+    run_with_args([
+        "acp",
+        "workspace",
+        "list",
+        "--server-url",
+        &server_url,
+        "--auth-token",
+        "developer",
+    ])
+    .await
+    .expect("empty workspace list should still succeed");
+}
+
+#[tokio::test]
+async fn run_workspace_list_and_create_cover_workspace_commands() {
+    let server_url = spawn_ordered_http_server(vec![
+        json_response(
+            &serde_json::to_vec(&WorkspaceListResponse {
+                workspaces: vec![workspace_summary("w_list", "Listed")],
+            })
+            .expect("workspace list response should serialize"),
+        ),
+        json_response(
+            &serde_json::to_vec(&crate::contract_workspaces::CreateWorkspaceResponse {
+                workspace: acp_contracts_workspaces::WorkspaceDetail {
+                    workspace_id: "w_created".to_string(),
+                    name: "Created".to_string(),
+                    upstream_url: Some("https://example.com/repo.git".to_string()),
+                    credential_reference_id: None,
+                    bootstrap_kind: None,
+                    status: "active".to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            })
+            .expect("workspace create response should serialize"),
+        ),
+    ])
+    .await;
+
+    run_workspace(WorkspaceArgs {
+        command: WorkspaceCommand::List(WorkspaceListArgs {
+            server_url: Some(server_url.clone()),
+            auth_token: Some("developer".to_string()),
+        }),
+    })
+    .await
+    .expect("workspace list should succeed");
+
+    run_workspace(WorkspaceArgs {
+        command: WorkspaceCommand::Create(WorkspaceCreateArgs {
+            name: "Created".to_string(),
+            upstream_url: "https://example.com/repo.git".to_string(),
+            server_url: Some(server_url),
+            auth_token: Some("developer".to_string()),
+        }),
+    })
+    .await
+    .expect("workspace create should succeed");
+}
+
+#[tokio::test]
 async fn run_session_list_and_close_cover_in_process_session_commands() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(
-            &serde_json::to_vec(&SessionListResponse {
-                sessions: vec![SessionListItem {
-                    id: "s_close".to_string(),
-                    workspace_id: "w_test".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Active,
-                    last_activity_at: chrono::Utc::now(),
-                }],
-            })
-            .expect("session list response should serialize"),
+            &serde_json::to_vec(&session_list_response("s_close"))
+                .expect("session list response should serialize"),
         ),
         json_response(
-            &serde_json::to_vec(&CloseSessionResponse {
-                session: SessionSnapshot {
-                    id: "s_close".to_string(),
-                    workspace_id: "w_test".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Closed,
-                    latest_sequence: 3,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                },
-            })
-            .expect("close response should serialize"),
+            &serde_json::to_vec(&close_session_response("s_close"))
+                .expect("close response should serialize"),
         ),
     ])
     .await;
@@ -326,6 +462,33 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
     })
     .await
     .expect("session close should succeed");
+}
+
+fn session_list_response(session_id: &str) -> SessionListResponse {
+    SessionListResponse {
+        sessions: vec![SessionListItem {
+            id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            title: "New chat".to_string(),
+            status: SessionStatus::Active,
+            last_activity_at: chrono::Utc::now(),
+        }],
+    }
+}
+
+fn close_session_response(session_id: &str) -> CloseSessionResponse {
+    CloseSessionResponse {
+        session: SessionSnapshot {
+            id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            title: "New chat".to_string(),
+            status: SessionStatus::Closed,
+            latest_sequence: 3,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+            active_turn: false,
+        },
+    }
 }
 
 async fn spawn_ordered_http_server(responses: Vec<Vec<u8>>) -> String {
@@ -378,12 +541,40 @@ fn raw_http_response(status: &str, content_type: &str, payload: &[u8]) -> Vec<u8
     .collect()
 }
 
+fn active_session_response(session_id: &str, workspace_id: &str) -> CreateSessionResponse {
+    CreateSessionResponse {
+        session: SessionSnapshot {
+            id: session_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            title: "New chat".to_string(),
+            status: SessionStatus::Active,
+            latest_sequence: 1,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+            active_turn: false,
+        },
+    }
+}
+
 fn resumed_chat_args(server_url: &str) -> ChatArgs {
     ChatArgs {
         new: false,
         session_id: Some("s_resume".to_string()),
+        workspace_id: None,
         server_url: Some(server_url.to_string()),
         auth_token: Some("developer".to_string()),
+    }
+}
+
+fn workspace_summary(workspace_id: &str, name: &str) -> WorkspaceSummary {
+    WorkspaceSummary {
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        upstream_url: Some(format!("https://example.com/{workspace_id}.git")),
+        bootstrap_kind: None,
+        status: "active".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
 
@@ -412,6 +603,7 @@ fn resumed_session_response() -> CreateSessionResponse {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
+            active_turn: false,
         },
     }
 }

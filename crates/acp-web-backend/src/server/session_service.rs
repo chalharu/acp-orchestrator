@@ -5,6 +5,8 @@ use std::{
 
 use chrono::Utc;
 
+#[cfg(test)]
+use crate::workspace_repository::NewWorkspace;
 use crate::{
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::SessionSnapshot,
@@ -12,17 +14,17 @@ use crate::{
     sessions::{PendingPrompt, SessionStoreError},
     workspace_records::UserRecord,
     workspace_records::{SessionMetadataRecord, WorkspaceRecord},
-    workspace_repository::NewWorkspace,
 };
 
-use super::{AppError, AppState};
+use super::{AppError, AppState, live_owner_id_for_bearer};
 
 #[derive(Debug, Clone)]
 pub(super) struct LiveSessionWriteContext {
-    pub(super) principal: AuthenticatedPrincipal,
     pub(super) user: Option<UserRecord>,
+    pub(super) live_owner_id: String,
 }
 
+#[cfg(test)]
 pub(super) async fn create_session_snapshot(
     state: &AppState,
     principal: AuthenticatedPrincipal,
@@ -52,6 +54,7 @@ pub(super) async fn create_session_snapshot(
     create_session_snapshot_in_workspace(state, owner, &workspace_id, checkout_ref_override).await
 }
 
+#[cfg(test)]
 fn legacy_session_workspace() -> NewWorkspace {
     NewWorkspace {
         name: "Workspace".to_string(),
@@ -80,12 +83,12 @@ async fn create_session_snapshot_in_workspace(
     let workspace = load_workspace_for_session(state, &owner.user.user_id, workspace_id).await?;
     let session = state
         .store
-        .create_session(&owner.principal.id, workspace_id)
+        .create_session(&owner.live_owner_id, workspace_id)
         .await?;
     persist_provisioning_session_lifecycle(state, &owner, &workspace, &session).await?;
     let (session, checkout) = prepare_session_startup(
         state,
-        &owner.principal.id,
+        &owner.live_owner_id,
         &owner.user,
         &workspace,
         session,
@@ -125,7 +128,8 @@ async fn persist_provisioning_session_lifecycle(
     )
     .await
     {
-        rollback_session_creation(state, &owner.principal.id, &session.id, error.message()).await?;
+        rollback_session_creation(state, &owner.live_owner_id, &session.id, error.message())
+            .await?;
         return Err(error);
     }
     Ok(())
@@ -149,7 +153,8 @@ async fn persist_started_session_metadata(
             error.message(),
         )
         .await;
-        rollback_session_creation(state, &owner.principal.id, &session.id, error.message()).await?;
+        rollback_session_creation(state, &owner.live_owner_id, &session.id, error.message())
+            .await?;
         return Err(error);
     }
     Ok(())
@@ -174,7 +179,7 @@ pub(super) async fn rename_session_title(
 
     let session = state
         .store
-        .rename_session(&owner.principal.id, session_id, title)
+        .rename_session(&owner.live_owner_id, session_id, title)
         .await?;
     if let Some(user) = owner.user.as_ref() {
         persist_session_metadata_best_effort(state, user, &session, false, None, "rename").await;
@@ -197,11 +202,11 @@ pub(super) async fn delete_live_session(
     };
     let snapshot = state
         .store
-        .session_snapshot(&owner.principal.id, session_id)
+        .session_snapshot(&owner.live_owner_id, session_id)
         .await?;
     state
         .store
-        .delete_session(&owner.principal.id, session_id)
+        .delete_session(&owner.live_owner_id, session_id)
         .await?;
     state.reply_provider.forget_session(session_id);
     if let Some(user) = owner.user.as_ref() {
@@ -231,11 +236,11 @@ pub(super) async fn submit_prompt(
     let owner = live_session_write_context(state, principal, "submit_prompt").await?;
     let pending = state
         .store
-        .submit_prompt(&owner.principal.id, session_id, text)
+        .submit_prompt(&owner.live_owner_id, session_id, text)
         .await?;
     let snapshot_result = state
         .store
-        .session_snapshot(&owner.principal.id, session_id)
+        .session_snapshot(&owner.live_owner_id, session_id)
         .await;
     if let Some(user) = owner.user.as_ref() {
         persist_prompt_snapshot_best_effort(state, user, session_id, snapshot_result).await;
@@ -243,7 +248,7 @@ pub(super) async fn submit_prompt(
     dispatch_assistant_request(
         state.clone(),
         state.reply_provider.clone(),
-        owner.principal.id.clone(),
+        owner.live_owner_id,
         owner.user,
         pending,
     );
@@ -257,14 +262,23 @@ pub(super) async fn close_live_session(
     session_id: &str,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = live_session_write_context(state, principal, "close").await?;
+    let checkout_cleanup_path = match owner.user.as_ref() {
+        Some(user) => {
+            load_checkout_cleanup_path_best_effort(state, user, session_id, "close").await
+        }
+        None => None,
+    };
     let session = state
         .store
-        .close_session(&owner.principal.id, session_id)
+        .close_session(&owner.live_owner_id, session_id)
         .await?;
     state.reply_provider.forget_session(session_id);
     if let Some(user) = owner.user.as_ref() {
         persist_session_metadata_best_effort(state, user, &session, false, Some("closed"), "close")
             .await;
+    }
+    if let Some(path) = checkout_cleanup_path.as_deref() {
+        cleanup_checkout_path_best_effort(path);
     }
 
     Ok(session)
@@ -333,15 +347,18 @@ async fn live_session_write_context(
     action: &'static str,
 ) -> Result<LiveSessionWriteContext, AppError> {
     match principal.kind {
-        AuthenticatedPrincipalKind::Bearer => Ok(LiveSessionWriteContext {
-            user: materialize_user_best_effort(state, &principal, action).await,
-            principal,
-        }),
+        AuthenticatedPrincipalKind::Bearer => {
+            let live_owner_id = live_owner_id_for_bearer(&principal);
+            Ok(LiveSessionWriteContext {
+                user: materialize_user_best_effort(state, &principal, action).await,
+                live_owner_id,
+            })
+        }
         AuthenticatedPrincipalKind::BrowserSession => {
             let owner = state.owner_context(principal).await?;
             Ok(LiveSessionWriteContext {
-                principal: owner.principal,
                 user: Some(owner.user),
+                live_owner_id: owner.live_owner_id,
             })
         }
     }

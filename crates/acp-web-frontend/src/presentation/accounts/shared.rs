@@ -127,6 +127,15 @@ pub(super) fn sign_out_handler(
     signing_out: RwSignal<bool>,
     redirect_path: String,
 ) -> Callback<web_sys::MouseEvent> {
+    sign_out_handler_from(error, signing_out, move || redirect_path.clone())
+}
+
+#[cfg(target_family = "wasm")]
+pub(super) fn sign_out_handler_from(
+    error: RwSignal<Option<String>>,
+    signing_out: RwSignal<bool>,
+    redirect_path: impl Fn() -> String + Send + Sync + 'static,
+) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_event: web_sys::MouseEvent| {
         if signing_out.get_untracked() {
             return;
@@ -134,7 +143,7 @@ pub(super) fn sign_out_handler(
 
         signing_out.set(true);
         error.set(None);
-        let redirect_path = redirect_path.clone();
+        let redirect_path = redirect_path();
         leptos::task::spawn_local(async move {
             match api::sign_out().await {
                 Ok(()) => {
@@ -158,7 +167,16 @@ pub(super) fn sign_out_handler(
 pub(super) fn sign_out_handler(
     error: RwSignal<Option<String>>,
     signing_out: RwSignal<bool>,
-    _redirect_path: String,
+    redirect_path: String,
+) -> Callback<web_sys::MouseEvent> {
+    sign_out_handler_from(error, signing_out, move || redirect_path.clone())
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn sign_out_handler_from(
+    error: RwSignal<Option<String>>,
+    signing_out: RwSignal<bool>,
+    _redirect_path: impl Fn() -> String + Send + Sync + 'static,
 ) -> Callback<web_sys::MouseEvent> {
     Callback::new(move |_event: web_sys::MouseEvent| sign_out_host(error, signing_out))
 }

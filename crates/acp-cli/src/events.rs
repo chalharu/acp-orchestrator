@@ -282,6 +282,7 @@ mod tests {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
+            active_turn: false,
         };
 
         let updates = stream_event_updates(StreamEvent::snapshot(snapshot.clone()), &mut None);
@@ -317,6 +318,7 @@ mod tests {
                     summary: "new".to_string(),
                 },
             ],
+            active_turn: false,
         };
         let known_snapshot_state = InitialSnapshotState::from_messages_and_permissions(
             &[assistant_message("m_known", "known")],

@@ -6,6 +6,10 @@ pub(crate) enum AppRoute {
     Accounts,
     Workspaces,
     Session(String),
+    WorkspaceSession {
+        workspace_id: String,
+        session_id: String,
+    },
     NotFound,
 }
 
@@ -42,15 +46,47 @@ fn static_app_route(pathname: &str) -> Option<AppRoute> {
 }
 
 fn session_route(pathname: &str) -> Option<AppRoute> {
-    pathname
-        .strip_prefix("/app/sessions/")
-        .filter(|session_id| !session_id.is_empty())
-        .and_then(decode_component)
-        .map(AppRoute::Session)
+    workspace_session_route(pathname).or_else(|| {
+        pathname
+            .strip_prefix("/app/sessions/")
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(decode_component)
+            .map(AppRoute::Session)
+    })
+}
+
+fn workspace_session_route(pathname: &str) -> Option<AppRoute> {
+    let rest = pathname.strip_prefix("/app/workspaces/")?;
+    let (workspace_id, session_part) = rest.split_once("/sessions/")?;
+    if workspace_id.is_empty() || session_part.is_empty() || session_part.contains('/') {
+        return None;
+    }
+    Some(AppRoute::WorkspaceSession {
+        workspace_id: decode_component(workspace_id)?,
+        session_id: decode_component(session_part)?,
+    })
 }
 
 pub(crate) fn app_session_path(session_id: &str) -> String {
     format!("/app/sessions/{}", encode_component(session_id))
+}
+
+pub(crate) fn app_workspace_session_path(workspace_id: &str, session_id: &str) -> String {
+    format!(
+        "/app/workspaces/{}/sessions/{}",
+        encode_component(workspace_id),
+        encode_component(session_id)
+    )
+}
+
+pub(crate) fn app_session_path_for_workspace(
+    workspace_id: Option<&str>,
+    session_id: &str,
+) -> String {
+    workspace_id
+        .filter(|workspace_id| !workspace_id.trim().is_empty())
+        .map(|workspace_id| app_workspace_session_path(workspace_id, session_id))
+        .unwrap_or_else(|| app_session_path(session_id))
 }
 
 pub(crate) fn encode_component(value: &str) -> String {
@@ -99,13 +135,25 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppRoute, app_session_path, current_route, decode_component, encode_component,
-        route_from_pathname,
+        AppRoute, app_session_path, app_session_path_for_workspace, app_workspace_session_path,
+        current_route, decode_component, encode_component, route_from_pathname,
     };
 
     #[test]
     fn app_session_path_encodes_reserved_session_id_characters() {
         assert_eq!(app_session_path("s/1"), "/app/sessions/s%2F1");
+        assert_eq!(
+            app_workspace_session_path("w/1", "s/1"),
+            "/app/workspaces/w%2F1/sessions/s%2F1"
+        );
+        assert_eq!(
+            app_session_path_for_workspace(Some("w/1"), "s/1"),
+            "/app/workspaces/w%2F1/sessions/s%2F1"
+        );
+        assert_eq!(
+            app_session_path_for_workspace(Some(" "), "s/1"),
+            "/app/sessions/s%2F1"
+        );
     }
 
     #[test]
@@ -125,7 +173,22 @@ mod tests {
             route_from_pathname("/app/sessions/s%2F1"),
             AppRoute::Session("s/1".to_string())
         );
+        assert_eq!(
+            route_from_pathname("/app/workspaces/w%2F1/sessions/s%2F1"),
+            AppRoute::WorkspaceSession {
+                workspace_id: "w/1".to_string(),
+                session_id: "s/1".to_string(),
+            }
+        );
         assert_eq!(route_from_pathname("/app/sessions/%ZZ"), AppRoute::NotFound);
+        assert_eq!(
+            route_from_pathname("/app/workspaces/%ZZ/sessions/s1"),
+            AppRoute::NotFound
+        );
+        assert_eq!(
+            route_from_pathname("/app/workspaces/w1/sessions/s1/extra"),
+            AppRoute::NotFound
+        );
     }
 
     #[test]

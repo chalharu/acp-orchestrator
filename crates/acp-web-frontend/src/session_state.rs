@@ -63,11 +63,16 @@ pub(crate) fn should_release_turn_state(current: TurnState) -> bool {
     matches!(current, TurnState::AwaitingReply | TurnState::Cancelling)
 }
 
-pub(crate) fn turn_state_for_snapshot(pending_permissions: &[PermissionRequest]) -> TurnState {
-    if pending_permissions.is_empty() {
-        TurnState::Idle
-    } else {
+pub(crate) fn turn_state_for_snapshot(
+    pending_permissions: &[PermissionRequest],
+    active_turn: bool,
+) -> TurnState {
+    if !pending_permissions.is_empty() {
         TurnState::AwaitingPermission
+    } else if active_turn {
+        TurnState::AwaitingReply
+    } else {
+        TurnState::Idle
     }
 }
 
@@ -136,12 +141,16 @@ mod tests {
     #[test]
     fn turn_state_helpers_match_permission_state() {
         assert!(should_release_turn_state(TurnState::AwaitingReply));
-        assert_eq!(turn_state_for_snapshot(&[]), TurnState::Idle);
+        assert_eq!(turn_state_for_snapshot(&[], false), TurnState::Idle);
+        assert_eq!(turn_state_for_snapshot(&[], true), TurnState::AwaitingReply);
         assert_eq!(
-            turn_state_for_snapshot(&[PermissionRequest {
-                request_id: "req_1".to_string(),
-                summary: "read README.md".to_string(),
-            }]),
+            turn_state_for_snapshot(
+                &[PermissionRequest {
+                    request_id: "req_1".to_string(),
+                    summary: "read README.md".to_string(),
+                }],
+                true,
+            ),
             TurnState::AwaitingPermission
         );
         assert!(session_action_busy(TurnState::Submitting, false, false));
@@ -219,7 +228,7 @@ mod tests {
         ));
         assert!(!should_apply_snapshot_turn_state(TurnState::Submitting));
         assert!(!should_release_turn_state(TurnState::Idle));
-        assert_eq!(turn_state_for_snapshot(&[]), TurnState::Idle);
+        assert_eq!(turn_state_for_snapshot(&[], false), TurnState::Idle);
         assert!(!session_action_busy(TurnState::Idle, false, false));
     }
 }

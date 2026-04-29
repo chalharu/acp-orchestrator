@@ -48,6 +48,7 @@ async fn persist_workspace_session(
                 latest_sequence: 0,
                 messages: Vec::new(),
                 pending_permissions: Vec::new(),
+                active_turn: false,
             },
             deletion_reason.is_none(),
             deletion_reason,

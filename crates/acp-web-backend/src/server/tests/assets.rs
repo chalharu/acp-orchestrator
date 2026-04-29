@@ -78,6 +78,28 @@ async fn app_shell_csp_permits_wasm_execution() {
 }
 
 #[tokio::test]
+async fn workspace_session_deep_link_serves_the_app_shell() {
+    let response = test_router()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/app/workspaces/w_test/sessions/s_test")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("router should respond");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("app shell should include a content type")
+        .to_str()
+        .expect("content type should be valid");
+    assert!(content_type.starts_with("text/html"), "got: {content_type}");
+}
+
+#[tokio::test]
 async fn wasm_init_script_responds_with_javascript_content_type() {
     let response = wasm_init_script().await;
     let ct = response

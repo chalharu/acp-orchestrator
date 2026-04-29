@@ -461,6 +461,7 @@ fn build_session_snapshot_record(
             latest_sequence,
             messages,
             pending_permissions: Vec::new(),
+            active_turn: false,
         },
         last_activity_at,
     })

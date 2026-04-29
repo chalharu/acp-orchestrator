@@ -15,7 +15,7 @@ use crate::components::{
 use crate::infrastructure::api;
 use crate::presentation::{AppIcon, app_icon_view};
 #[cfg(target_family = "wasm")]
-use crate::{browser::store_prepared_session_id, routing::app_session_path};
+use crate::{browser::store_prepared_session_id, routing::app_session_path_for_workspace};
 
 use super::shared::WorkspacesPageState;
 #[cfg(any(test, target_family = "wasm"))]
@@ -619,7 +619,10 @@ fn workspace_session_list(sessions: Signal<Option<Vec<SessionListItem>>>) -> Any
                 Some(list) => view! {
                     <ul class="workspace-card__session-list">
                         {list.into_iter().map(|session| {
-                            let href = app_session_path(&session.id);
+                            let href = app_session_path_for_workspace(
+                                Some(&session.workspace_id),
+                                &session.id,
+                            );
                             let title = session.title.clone();
                             view! {
                                 <li class="workspace-card__session-item">
@@ -953,49 +956,75 @@ fn workspace_start_chat_submit_handler(
 ) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
     move |event: web_sys::SubmitEvent| {
         event.prevent_default();
-        if state.opening_chat_workspace_id.get_untracked().is_some() {
-            return;
-        }
-
-        let Some(workspace_id) = state.start_chat_workspace_id.get_untracked() else {
-            state.error.set(Some(
-                "Choose a workspace before starting a chat.".to_string(),
-            ));
+        let Some((workspace_id, selected_branch)) = workspace_start_chat_request(state) else {
             return;
         };
-        let selected_branch = state.start_chat_selected_branch.get_untracked();
-        if selected_branch.trim().is_empty() {
-            state
-                .error
-                .set(Some("Choose a branch before starting a chat.".to_string()));
-            return;
-        }
-        state
-            .opening_chat_workspace_id
-            .set(Some(workspace_id.clone()));
-        state.error.set(None);
-        state.notice.set(None);
+        begin_workspace_start_chat(state, &workspace_id);
         leptos::task::spawn_local(async move {
-            match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
-                Ok(session_id) => {
-                    store_prepared_session_id(&session_id);
-                    if let Err(message) =
-                        crate::browser::navigate_to(&app_session_path(&session_id))
-                    {
-                        state.opening_chat_workspace_id.set(None);
-                        state.error.set(Some(message));
-                        return;
-                    }
-                    close_workspace_start_chat_modal(state);
-                    state.opening_chat_workspace_id.set(None);
-                }
-                Err(error) => {
-                    state.opening_chat_workspace_id.set(None);
-                    state.error.set(Some(error.into_message()));
-                }
-            }
+            start_workspace_chat(state, workspace_id, selected_branch).await;
         });
     }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_start_chat_request(state: WorkspacesPageState) -> Option<(String, String)> {
+    if state.opening_chat_workspace_id.get_untracked().is_some() {
+        return None;
+    }
+
+    let Some(workspace_id) = state.start_chat_workspace_id.get_untracked() else {
+        state.error.set(Some(
+            "Choose a workspace before starting a chat.".to_string(),
+        ));
+        return None;
+    };
+    let selected_branch = state.start_chat_selected_branch.get_untracked();
+    if selected_branch.trim().is_empty() {
+        state
+            .error
+            .set(Some("Choose a branch before starting a chat.".to_string()));
+        return None;
+    }
+    Some((workspace_id, selected_branch))
+}
+
+#[cfg(target_family = "wasm")]
+fn begin_workspace_start_chat(state: WorkspacesPageState, workspace_id: &str) {
+    state
+        .opening_chat_workspace_id
+        .set(Some(workspace_id.to_string()));
+    state.error.set(None);
+    state.notice.set(None);
+}
+
+#[cfg(target_family = "wasm")]
+async fn start_workspace_chat(
+    state: WorkspacesPageState,
+    workspace_id: String,
+    selected_branch: String,
+) {
+    match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
+        Ok(session_id) => open_started_workspace_chat(state, &workspace_id, &session_id),
+        Err(error) => {
+            state.opening_chat_workspace_id.set(None);
+            state.error.set(Some(error.into_message()));
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn open_started_workspace_chat(state: WorkspacesPageState, workspace_id: &str, session_id: &str) {
+    store_prepared_session_id(session_id);
+    if let Err(message) = crate::browser::navigate_to(&app_session_path_for_workspace(
+        Some(workspace_id),
+        session_id,
+    )) {
+        state.opening_chat_workspace_id.set(None);
+        state.error.set(Some(message));
+        return;
+    }
+    close_workspace_start_chat_modal(state);
+    state.opening_chat_workspace_id.set(None);
 }
 
 #[cfg(not(target_family = "wasm"))]

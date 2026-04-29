@@ -44,6 +44,37 @@ async fn expect_snapshot_without_pending_permissions(
 }
 
 #[tokio::test]
+async fn snapshots_report_active_turns_until_completion() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "cancel please".to_string())
+        .await
+        .expect("prompt submission should succeed");
+    let _cancel_rx = pending
+        .turn_handle()
+        .start_turn()
+        .await
+        .expect("starting the turn should succeed");
+
+    let active_snapshot = store
+        .session_snapshot("alice", &session.id)
+        .await
+        .expect("active turn snapshot should load");
+    assert!(active_snapshot.active_turn);
+
+    pending.complete_with_status("done").await;
+    let completed_snapshot = store
+        .session_snapshot("alice", &session.id)
+        .await
+        .expect("completed turn snapshot should load");
+    assert!(!completed_snapshot.active_turn);
+}
+
+#[tokio::test]
 async fn permission_requests_can_be_resolved_for_the_active_turn() {
     let store = SessionStore::new(4);
     let session = store

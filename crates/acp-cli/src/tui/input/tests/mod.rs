@@ -56,6 +56,7 @@ fn active_session(requests: Vec<PermissionRequest>) -> CreateSessionResponse {
             latest_sequence: 1,
             messages: Vec::new(),
             pending_permissions: requests,
+            active_turn: false,
         },
     }
 }

@@ -1473,7 +1473,7 @@ impl BrowserHarness {
             serde_json::to_string(previous_path).context("encoding previous browser path")?;
         self.wait_for_condition(
             &format!(
-                "return /\\/app\\/sessions\\/[^/]+$/.test(window.location.pathname)\
+                "return /^\\/app\\/(?:sessions\\/[^/]+|workspaces\\/[^/]+\\/sessions\\/[^/]+)$/.test(window.location.pathname)\
                  && window.location.pathname !== {encoded};"
             ),
             Duration::from_secs(15),
@@ -1588,7 +1588,7 @@ fn ensure_close_current_session_succeeded(close_result: &Value) -> Result<()> {
 }
 
 fn session_route_script() -> &'static str {
-    r#"return /\/app\/sessions\/[^/]+$/.test(window.location.pathname);"#
+    r#"return /^\/app\/(?:sessions\/[^/]+|workspaces\/[^/]+\/sessions\/[^/]+)$/.test(window.location.pathname);"#
 }
 
 fn workspaces_path_script() -> &'static str {

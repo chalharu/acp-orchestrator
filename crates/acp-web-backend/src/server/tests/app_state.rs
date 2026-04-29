@@ -555,7 +555,12 @@ async fn create_session_marks_starting_rows_failed_when_starting_persistence_fai
 #[tokio::test]
 async fn create_session_marks_sessions_failed_when_agent_runtime_launch_fails() {
     let store = Arc::new(SessionStore::new(4));
-    let workspace_repository = metadata_test_workspace_store();
+    let workspace_repository = Arc::new(RollbackFailingMetadataWorkspaceStore::new(
+        store.clone(),
+        "bearer:alice",
+        "metadata write failed",
+        false,
+    ));
     let forgotten_runtime_sessions = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),

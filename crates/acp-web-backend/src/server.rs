@@ -194,9 +194,14 @@ impl AppState {
             Some(AgentLaunchMode::Chroot) => WorkspaceCheckoutLayout::ChrootRuntime,
             None => WorkspaceCheckoutLayout::Standard,
         };
-        let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
-            FsWorkspaceCheckoutManager::with_layout(config.state_dir.clone(), checkout_layout),
-        );
+        let checkout_manager: DynWorkspaceCheckoutManager = match checkout_layout {
+            WorkspaceCheckoutLayout::Standard => {
+                Arc::new(FsWorkspaceCheckoutManager::new(config.state_dir.clone()))
+            }
+            WorkspaceCheckoutLayout::ChrootRuntime => Arc::new(
+                FsWorkspaceCheckoutManager::with_layout(config.state_dir.clone(), checkout_layout),
+            ),
+        };
         let agent_runtime_manager: DynAgentRuntimeManager = Arc::new(FsAgentRuntimeManager::new(
             config.state_dir,
             config.agent_launch,
@@ -243,7 +248,6 @@ impl AppState {
             new_ephemeral_workspace_repository(),
             reply_provider,
             test_checkout_manager(),
-            test_agent_runtime_manager(),
         )
     }
 
@@ -258,7 +262,6 @@ impl AppState {
             workspace_repository,
             reply_provider,
             test_checkout_manager(),
-            test_agent_runtime_manager(),
         )
     }
 

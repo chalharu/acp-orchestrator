@@ -8,6 +8,7 @@ use chrono::Utc;
 #[cfg(test)]
 use crate::workspace_repository::NewWorkspace;
 use crate::{
+    agent_runtime::{AgentRuntimeError, AgentSessionLaunch},
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::SessionSnapshot,
     mock_client::{ReplyProvider, ReplyResult},
@@ -143,7 +144,7 @@ async fn persist_started_session_metadata(
     checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
 ) -> Result<(), AppError> {
     if let Err(error) = persist_session_metadata(state, &owner.user, session, true, None).await {
-        cleanup_checkout_path_best_effort(&checkout.working_dir);
+        cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
         persist_failed_session_lifecycle(
             state,
             &owner.user,
@@ -209,6 +210,7 @@ pub(super) async fn delete_live_session(
         .delete_session(&owner.live_owner_id, session_id)
         .await?;
     state.reply_provider.forget_session(session_id);
+    state.agent_runtime_manager.forget_session(session_id);
     if let Some(user) = owner.user.as_ref() {
         persist_session_metadata_best_effort(
             state,
@@ -273,6 +275,7 @@ pub(super) async fn close_live_session(
         .close_session(&owner.live_owner_id, session_id)
         .await?;
     state.reply_provider.forget_session(session_id);
+    state.agent_runtime_manager.forget_session(session_id);
     if let Some(user) = owner.user.as_ref() {
         persist_session_metadata_best_effort(state, user, &session, false, Some("closed"), "close")
             .await;
@@ -449,6 +452,7 @@ async fn prepare_session_startup(
     .await?;
     persist_starting_session_lifecycle(state, live_owner_id, user, workspace, &session, &checkout)
         .await?;
+    launch_agent_runtime(state, live_owner_id, user, workspace, &session, &checkout).await?;
     bind_session_checkout(state, live_owner_id, user, workspace, &session, &checkout).await?;
     let session = prime_session_startup_or_rollback(
         state,
@@ -529,7 +533,7 @@ async fn persist_starting_session_lifecycle(
     )
     .await
     {
-        cleanup_checkout_path_best_effort(&checkout.working_dir);
+        cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
         persist_failed_session_lifecycle(
             state,
             user,
@@ -541,6 +545,46 @@ async fn persist_starting_session_lifecycle(
         .await;
         rollback_session_creation(state, live_owner_id, &session.id, error.message()).await?;
         return Err(error);
+    }
+    Ok(())
+}
+
+async fn launch_agent_runtime(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+) -> Result<(), AppError> {
+    let runtime_manager = state.agent_runtime_manager.clone();
+    let session_id = session.id.clone();
+    let workspace_id = workspace.workspace_id.clone();
+    let checkout_for_launch = checkout.clone();
+    let launch_result = match tokio::task::spawn_blocking(move || {
+        runtime_manager.launch_session(&AgentSessionLaunch {
+            session_id: &session_id,
+            workspace_id: &workspace_id,
+            checkout: &checkout_for_launch,
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(AgentRuntimeError::Io(format!(
+            "joining agent runtime launch failed: {error}"
+        ))),
+    };
+
+    if let Err(error) = launch_result {
+        let message = error.to_string();
+        cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
+        persist_failed_session_lifecycle(state, user, workspace, session, Some(checkout), &message)
+            .await;
+        rollback_session_creation(state, live_owner_id, &session.id, &message).await?;
+        return Err(AppError::Internal(format!(
+            "agent runtime launch failed: {message}"
+        )));
     }
     Ok(())
 }
@@ -558,7 +602,7 @@ async fn bind_session_checkout(
         .bind_session(&session.id, checkout.working_dir.clone())
         .await
     {
-        cleanup_checkout_path_best_effort(&checkout.working_dir);
+        cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
         persist_failed_session_lifecycle(state, user, workspace, session, Some(checkout), &error)
             .await;
         rollback_session_creation(state, live_owner_id, &session.id, &error).await?;
@@ -578,7 +622,7 @@ async fn prime_session_startup_or_rollback(
     match prime_session_startup(state, live_owner_id, session).await {
         Ok(session) => Ok(session),
         Err(error) => {
-            cleanup_checkout_path_best_effort(&checkout.working_dir);
+            cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
             persist_failed_session_lifecycle(
                 state,
                 user,
@@ -732,21 +776,44 @@ async fn load_checkout_cleanup_path_best_effort(
         .await
     {
         Ok(Some(metadata)) => match metadata.checkout_relpath.as_deref() {
-            Some(checkout_relpath) => match state
-                .checkout_manager
-                .resolve_checkout_path(checkout_relpath)
-            {
-                Some(path) => Some(path),
-                None => {
+            Some(checkout_relpath) => {
+                let Some(expected_relpath) = state
+                    .checkout_manager
+                    .checkout_relpath_for_session(session_id)
+                else {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        action,
+                        "checkout manager could not provide an expected cleanup path"
+                    );
+                    return None;
+                };
+                if checkout_relpath != expected_relpath {
                     tracing::warn!(
                         session_id = %session_id,
                         checkout_relpath,
+                        expected_relpath,
                         action,
-                        "persisted checkout path was invalid"
+                        "persisted checkout path did not match the session cleanup path"
                     );
-                    None
+                    return None;
                 }
-            },
+                match state
+                    .checkout_manager
+                    .resolve_checkout_path(checkout_relpath)
+                {
+                    Some(path) => Some(path),
+                    None => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            checkout_relpath,
+                            action,
+                            "persisted checkout path was invalid"
+                        );
+                        None
+                    }
+                }
+            }
             None => None,
         },
         Ok(None) => None,
@@ -771,6 +838,15 @@ fn cleanup_checkout_path_best_effort(path: &Path) {
     }
 }
 
+fn cleanup_runtime_and_checkout_best_effort(
+    state: &AppState,
+    session_id: &str,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+) {
+    state.agent_runtime_manager.forget_session(session_id);
+    cleanup_checkout_path_best_effort(&checkout.working_dir);
+}
+
 fn map_checkout_error(error: crate::workspace_checkout::WorkspaceCheckoutError) -> AppError {
     match error {
         crate::workspace_checkout::WorkspaceCheckoutError::Validation(message) => {
@@ -790,6 +866,7 @@ async fn rollback_failed_session(
     session_id: &str,
 ) -> Result<(), AppError> {
     state.reply_provider.forget_session(session_id);
+    state.agent_runtime_manager.forget_session(session_id);
     state
         .store
         .discard_session(owner, session_id)

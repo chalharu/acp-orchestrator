@@ -566,6 +566,7 @@ impl BrowserHarness {
             acp_server: String::new(),
             startup_hints: false,
             state_dir: test_state_dir(),
+            agent_launch: None,
             frontend_dist: Some(frontend_dist),
         })
         .await

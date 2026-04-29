@@ -82,6 +82,35 @@ Chroot mode は local development と最小 self-hosted deployment の最初の 
 Chroot mode は container runtime を要求しない代わりに、namespace / cgroup / network 制限は
 host 側の追加設定に依存する。multi-tenant deployment では Docker または K8s mode を優先する。
 
+### 現在の最小実装
+
+backend は任意設定の chroot agent process launch を持つ。未設定時は従来どおり mock / external
+ACP server への prompt transport だけを使い、agent process は起動しない。
+
+```text
+--agent-launch-mode chroot
+--agent-command <program>
+--agent-command-arg <arg>        # repeatable
+--agent-env-allowlist <NAME>     # repeatable
+--agent-launch-timeout-seconds <seconds>
+--agent-run-uid <uid>
+--agent-run-gid <gid>
+```
+
+command は shell string ではなく argv として扱われる。現在の chroot launch は Linux backend
+のみを対象とし、`cgroup.kill` を持つ writable な cgroup v2 hierarchy
+`/sys/fs/cgroup/acp-orchestrator` を使って session ごとの process lifetime を管理する。
+chroot mode では checkout は
+`state_dir/agent-runtimes/<session_id>/root/workspace` に配置され、agent には
+`ACP_SESSION_ID`、`ACP_WORKSPACE_ID`、`ACP_CHECKOUT_ROOT=/workspace`、
+`ACP_CHECKOUT_RELPATH`、`ACP_AGENT_LAUNCH_MODE=chroot` を注入する。環境変数は clear され、
+明示 allowlist と structured env だけが渡される。agent process は独立 process group
+として起動し、checkout tree を agent の non-root uid/gid に割り当て、cgroup へ参加してから
+`PR_SET_NO_NEW_PRIVS` を設定し chroot / uid/gid drop を行う。close / delete / rollback では
+cgroup kill と process group kill の best-effort cleanup を行う。resume 時に runtime を再作成
+できない場合や checkout metadata が欠落・session と不一致の場合でも transcript read は返し、
+write operation は `session runtime unavailable` として拒否する。
+
 ## Docker launch
 
 Docker mode は single-node deployment と container-based isolation の target とする。

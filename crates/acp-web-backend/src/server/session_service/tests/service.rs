@@ -233,6 +233,10 @@ impl WorkspaceCheckoutManager for InvalidCheckoutManager {
     fn resolve_checkout_path(&self, _checkout_relpath: &str) -> Option<PathBuf> {
         None
     }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(format!("session-checkouts/{session_id}"))
+    }
 }
 
 fn sample_user() -> UserRecord {

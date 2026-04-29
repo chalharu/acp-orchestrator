@@ -36,6 +36,7 @@ pub enum SessionStoreError {
     NotFound,
     Forbidden,
     Closed,
+    RuntimeUnavailable,
     EmptyPrompt,
     PermissionNotFound,
     SessionCapReached,
@@ -47,6 +48,7 @@ impl SessionStoreError {
             Self::NotFound => "session not found",
             Self::Forbidden => "session owner mismatch",
             Self::Closed => "session already closed",
+            Self::RuntimeUnavailable => "session runtime unavailable",
             Self::EmptyPrompt => "prompt must not be empty",
             Self::PermissionNotFound => "permission request not found",
             Self::SessionCapReached => "session cap reached for principal",
@@ -396,6 +398,16 @@ impl SessionStore {
                 prompt_order,
             },
         })
+    }
+
+    pub async fn mark_runtime_unavailable(
+        &self,
+        owner: &str,
+        session_id: &str,
+        reason: String,
+    ) -> Result<(), SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        handle.mark_runtime_unavailable(reason).await
     }
 
     pub async fn resolve_permission(

@@ -414,6 +414,11 @@ fn session_store_errors_map_to_matching_http_categories() {
             "session already closed",
         ),
         (
+            SessionStoreError::RuntimeUnavailable,
+            StatusCode::CONFLICT,
+            "session runtime unavailable",
+        ),
+        (
             SessionStoreError::EmptyPrompt,
             StatusCode::BAD_REQUEST,
             "prompt must not be empty",

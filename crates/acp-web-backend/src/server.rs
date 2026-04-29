@@ -15,10 +15,13 @@ use tower::util::BoxCloneSyncService;
 #[cfg(test)]
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::agent_runtime::NoopAgentRuntimeManager;
+use crate::agent_runtime::{AgentLaunchMode, DynAgentRuntimeManager, FsAgentRuntimeManager};
 use crate::contract_sessions::RenameSessionRequest as RenameSessionBody;
 #[cfg(test)]
 use crate::sessions::TurnHandle;
-use crate::workspace_checkout::FsWorkspaceCheckoutManager;
+use crate::workspace_checkout::{FsWorkspaceCheckoutManager, WorkspaceCheckoutLayout};
 #[cfg(test)]
 use crate::workspace_checkout::{
     PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutManager,
@@ -87,6 +90,7 @@ pub struct ServerConfig {
     pub acp_server: String,
     pub startup_hints: bool,
     pub state_dir: PathBuf,
+    pub agent_launch: Option<crate::agent_runtime::AgentLaunchConfig>,
     /// Directory containing the Trunk-compiled Leptos CSR bundle.
     /// The backend serves the fingerprinted files through stable alias routes.
     /// When `None`, the WASM asset routes return `503 Service Unavailable`.
@@ -100,6 +104,7 @@ impl Default for ServerConfig {
             acp_server: "127.0.0.1:8090".to_string(),
             startup_hints: false,
             state_dir: PathBuf::from(".acp-state"),
+            agent_launch: None,
             frontend_dist: None,
         }
     }
@@ -109,6 +114,7 @@ impl Default for ServerConfig {
 pub enum AppStateBuildError {
     ReplyProvider(MockClientError),
     WorkspaceStore(WorkspaceStoreError),
+    AgentRuntime(crate::agent_runtime::AgentRuntimeError),
 }
 
 impl AppStateBuildError {
@@ -116,6 +122,7 @@ impl AppStateBuildError {
         match self {
             Self::ReplyProvider(source) => source.to_string(),
             Self::WorkspaceStore(source) => source.to_string(),
+            Self::AgentRuntime(source) => source.to_string(),
         }
     }
 }
@@ -131,6 +138,7 @@ impl std::error::Error for AppStateBuildError {
         match self {
             Self::ReplyProvider(source) => Some(source),
             Self::WorkspaceStore(source) => Some(source),
+            Self::AgentRuntime(source) => Some(source),
         }
     }
 }
@@ -147,12 +155,19 @@ impl From<WorkspaceStoreError> for AppStateBuildError {
     }
 }
 
+impl From<crate::agent_runtime::AgentRuntimeError> for AppStateBuildError {
+    fn from(source: crate::agent_runtime::AgentRuntimeError) -> Self {
+        Self::AgentRuntime(source)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<SessionStore>,
     workspace_repository: Arc<dyn WorkspaceRepository>,
     reply_provider: Arc<dyn ReplyProvider>,
     checkout_manager: DynWorkspaceCheckoutManager,
+    agent_runtime_manager: DynAgentRuntimeManager,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
     frontend_dist: Option<Arc<PathBuf>>,
@@ -175,14 +190,24 @@ impl AppState {
     ) -> Result<Self, AppStateBuildError> {
         let store = Arc::new(SessionStore::new(config.session_cap));
         let reply_provider = Arc::new(MockClient::new(config.acp_server)?);
-        let checkout_manager: DynWorkspaceCheckoutManager =
-            Arc::new(FsWorkspaceCheckoutManager::new(config.state_dir));
+        let checkout_layout = match config.agent_launch.as_ref().map(|launch| launch.mode) {
+            Some(AgentLaunchMode::Chroot) => WorkspaceCheckoutLayout::ChrootRuntime,
+            None => WorkspaceCheckoutLayout::Standard,
+        };
+        let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
+            FsWorkspaceCheckoutManager::with_layout(config.state_dir.clone(), checkout_layout),
+        );
+        let agent_runtime_manager: DynAgentRuntimeManager = Arc::new(FsAgentRuntimeManager::new(
+            config.state_dir,
+            config.agent_launch,
+        )?);
 
         Ok(Self::with_services(
             store,
             workspace_repository,
             reply_provider,
             checkout_manager,
+            agent_runtime_manager,
             config.startup_hints,
             config.frontend_dist,
         ))
@@ -193,6 +218,7 @@ impl AppState {
         workspace_repository: Arc<dyn WorkspaceRepository>,
         reply_provider: Arc<dyn ReplyProvider>,
         checkout_manager: DynWorkspaceCheckoutManager,
+        agent_runtime_manager: DynAgentRuntimeManager,
         startup_hints: bool,
         frontend_dist: Option<PathBuf>,
     ) -> Self {
@@ -201,6 +227,7 @@ impl AppState {
             workspace_repository,
             reply_provider,
             checkout_manager,
+            agent_runtime_manager,
             startup_hints,
             frontend_dist: frontend_dist.map(Arc::new),
         }
@@ -216,6 +243,7 @@ impl AppState {
             new_ephemeral_workspace_repository(),
             reply_provider,
             test_checkout_manager(),
+            test_agent_runtime_manager(),
         )
     }
 
@@ -230,6 +258,7 @@ impl AppState {
             workspace_repository,
             reply_provider,
             test_checkout_manager(),
+            test_agent_runtime_manager(),
         )
     }
 
@@ -245,6 +274,7 @@ impl AppState {
             workspace_repository,
             reply_provider,
             checkout_manager,
+            test_agent_runtime_manager(),
             false,
             None,
         )
@@ -867,6 +897,11 @@ fn test_checkout_manager() -> DynWorkspaceCheckoutManager {
 }
 
 #[cfg(test)]
+fn test_agent_runtime_manager() -> DynAgentRuntimeManager {
+    Arc::new(NoopAgentRuntimeManager)
+}
+
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct TestWorkspaceCheckoutManager;
 
@@ -910,6 +945,10 @@ impl WorkspaceCheckoutManager for TestWorkspaceCheckoutManager {
 
     fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
         Some(test_checkout_path(checkout_relpath))
+    }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(format!("session-checkouts/{session_id}"))
     }
 
     async fn list_branches(
@@ -1001,7 +1040,9 @@ impl From<SessionStoreError> for AppError {
         match error {
             SessionStoreError::NotFound => Self::NotFound(error.message().to_string()),
             SessionStoreError::Forbidden => Self::Forbidden(error.message().to_string()),
-            SessionStoreError::Closed => Self::Conflict(error.message().to_string()),
+            SessionStoreError::Closed | SessionStoreError::RuntimeUnavailable => {
+                Self::Conflict(error.message().to_string())
+            }
             SessionStoreError::EmptyPrompt => Self::BadRequest(error.message().to_string()),
             SessionStoreError::PermissionNotFound => Self::NotFound(error.message().to_string()),
             SessionStoreError::SessionCapReached => {

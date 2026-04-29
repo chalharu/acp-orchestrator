@@ -20,6 +20,10 @@ impl crate::workspace_checkout::WorkspaceCheckoutManager for InvalidRestoredChec
     fn resolve_checkout_path(&self, _checkout_relpath: &str) -> Option<std::path::PathBuf> {
         None
     }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(format!("session-checkouts/{session_id}"))
+    }
 }
 
 #[derive(Debug)]
@@ -46,6 +50,69 @@ impl ReplyProvider for BindFailingReplyProvider {
             .expect("cleanup tracking should not poison")
             .push(session_id.to_string());
     }
+}
+
+#[derive(Debug)]
+struct TrackingAgentRuntimeManager {
+    launches: StdArc<Mutex<Vec<(String, String, String, std::path::PathBuf)>>>,
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+}
+
+impl TrackingAgentRuntimeManager {
+    fn new() -> Self {
+        Self {
+            launches: StdArc::new(Mutex::new(Vec::new())),
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn launched_sessions(&self) -> Vec<(String, String, String, std::path::PathBuf)> {
+        self.launches
+            .lock()
+            .expect("runtime launch tracking should not poison")
+            .clone()
+    }
+}
+
+impl crate::agent_runtime::AgentRuntimeManager for TrackingAgentRuntimeManager {
+    fn launch_session(
+        &self,
+        launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
+    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+        self.launches
+            .lock()
+            .expect("runtime launch tracking should not poison")
+            .push((
+                launch.session_id.to_string(),
+                launch.workspace_id.to_string(),
+                launch.checkout.checkout_relpath.clone(),
+                launch.checkout.working_dir.clone(),
+            ));
+        Ok(())
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        self.forgotten_sessions
+            .lock()
+            .expect("runtime cleanup tracking should not poison")
+            .push(session_id.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct RestoreFailingAgentRuntimeManager;
+
+impl crate::agent_runtime::AgentRuntimeManager for RestoreFailingAgentRuntimeManager {
+    fn launch_session(
+        &self,
+        _launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
+    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+        Err(crate::agent_runtime::AgentRuntimeError::Io(
+            "runtime relaunch failed".to_string(),
+        ))
+    }
+
+    fn forget_session(&self, _session_id: &str) {}
 }
 
 fn state_with_static_reply(reply: &str) -> (Arc<SessionStore>, AppState) {
@@ -139,6 +206,24 @@ fn checkout_path_from_metadata(
                 .expect("checkout relpath should be recorded"),
         )
         .expect("checkout relpath should resolve")
+}
+
+async fn point_session_checkout_metadata_at_other_session(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+    other_session_id: &str,
+) -> std::path::PathBuf {
+    let mut metadata = session_metadata_for_user(state, user_id, session_id).await;
+    let other_metadata = session_metadata_for_user(state, user_id, other_session_id).await;
+    let other_checkout_path = checkout_path_from_metadata(state, &other_metadata);
+    metadata.checkout_relpath = other_metadata.checkout_relpath;
+    state
+        .workspace_repository
+        .save_session_metadata(&metadata)
+        .await
+        .expect("metadata mutation should persist");
+    other_checkout_path
 }
 
 fn assert_checkout_metadata(
@@ -290,6 +375,7 @@ async fn create_session_seeds_startup_hints_when_enabled() {
             hint: "bundled mock verification ready".to_string(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -322,6 +408,7 @@ async fn create_session_skips_startup_hints_when_disabled() {
             hint: "should stay hidden".to_string(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -357,6 +444,7 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         workspace_repository: new_ephemeral_workspace_repository(),
         reply_provider: Arc::new(NoStartupHintProvider),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -386,6 +474,7 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -433,6 +522,7 @@ async fn create_session_reports_rollback_failures() {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: true,
         frontend_dist: None,
     };
@@ -539,11 +629,16 @@ async fn create_session_persists_checkout_metadata_and_binds_before_priming() {
 async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
     let store = Arc::new(SessionStore::new(4));
     let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
-    let state = AppState::with_workspace_repository(
-        store.clone(),
-        metadata_test_workspace_store(),
-        reply_provider.clone(),
-    );
+    let agent_runtime_manager = Arc::new(TrackingAgentRuntimeManager::new());
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository: metadata_test_workspace_store(),
+        reply_provider: reply_provider.clone(),
+        checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: agent_runtime_manager.clone(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
     let principal = bearer_principal("alice");
     let created = create_persisted_workspace_session(&state, principal.clone()).await;
     let user = durable_user_for_principal(&state, &principal).await;
@@ -555,12 +650,24 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
         .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
-    let restored = get_session(State(state), Path(created.id.clone()), principal)
+    let restored = get_session(State(state.clone()), Path(created.id.clone()), principal)
         .await
         .expect("durable session should restore and rebind");
 
     assert_eq!(restored.0.session.id, created.id);
     assert_binding_calls(&reply_provider, &["bind"], &[(created.id, checkout_path)]);
+    assert_eq!(
+        agent_runtime_manager.launched_sessions(),
+        vec![(
+            restored.0.session.id.clone(),
+            restored.0.session.workspace_id.clone(),
+            metadata
+                .checkout_relpath
+                .clone()
+                .expect("metadata should retain checkout relpath"),
+            checkout_path_from_metadata(&state, &metadata),
+        )]
+    );
 }
 
 #[tokio::test]
@@ -578,7 +685,7 @@ async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() 
     let created = create_persisted_workspace_session(&state, principal.clone()).await;
     let user = durable_user_for_principal(&state, &principal).await;
     let mut metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
-    metadata.checkout_relpath = Some("../escape".to_string());
+    metadata.checkout_relpath = Some(format!("session-checkouts/{}", created.id));
     workspace_repository
         .save_session_metadata(&metadata)
         .await
@@ -595,6 +702,7 @@ async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() 
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         checkout_manager: Arc::new(InvalidRestoredCheckoutManager),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -607,6 +715,60 @@ async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() 
         matches!(error, AppError::Internal(message) if message == "persisted checkout path is invalid")
     );
     assert_restored_session_cleanup(&store, &forgotten_sessions, &created.id).await;
+}
+
+#[tokio::test]
+async fn get_session_keeps_transcript_readable_when_runtime_relaunch_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let initial_state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&initial_state, principal.clone()).await;
+    store
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
+        .await;
+
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository,
+        reply_provider: reply_provider.clone(),
+        checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: Arc::new(RestoreFailingAgentRuntimeManager),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let restored = get_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+    )
+    .await
+    .expect("runtime failures should not block transcript reads");
+
+    assert_eq!(restored.0.session.id, created.id);
+    assert_binding_calls(&reply_provider, &[], &[]);
+    let error = post_message(
+        State(state),
+        Path(created.id),
+        principal,
+        Json(PromptRequest {
+            text: "hello".to_string(),
+        }),
+    )
+    .await
+    .expect_err("runtime-unavailable sessions should reject writes");
+
+    assert!(
+        matches!(error, AppError::Conflict(message) if message == "session runtime unavailable")
+    );
 }
 
 #[tokio::test]
@@ -634,6 +796,7 @@ async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -699,6 +862,38 @@ async fn delete_session_removes_the_persisted_checkout_directory() {
     assert!(
         !checkout_path.exists(),
         "session deletion should remove the checkout directory"
+    );
+}
+
+#[tokio::test]
+async fn delete_session_skips_mismatched_checkout_cleanup_paths() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state =
+        AppState::with_workspace_repository(store, metadata_test_workspace_store(), reply_provider);
+    let principal = bearer_principal("alice");
+    let session = create_persisted_workspace_session(&state, principal.clone()).await;
+    let other_session = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+    let other_checkout_path = point_session_checkout_metadata_at_other_session(
+        &state,
+        &user.user_id,
+        &session.id,
+        &other_session.id,
+    )
+    .await;
+
+    let _ = delete_session(State(state), Path(session.id), principal)
+        .await
+        .expect("session delete should succeed");
+
+    assert!(
+        other_checkout_path.exists(),
+        "deleting a session must not remove another session's checkout"
     );
 }
 
@@ -776,6 +971,38 @@ async fn close_session_removes_checkout_but_preserves_closed_metadata() {
         .await
         .expect("closed session should remain listable");
     assert!(listed.iter().any(|session| session.id == created.id));
+}
+
+#[tokio::test]
+async fn close_session_skips_mismatched_checkout_cleanup_paths() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state =
+        AppState::with_workspace_repository(store, metadata_test_workspace_store(), reply_provider);
+    let principal = bearer_principal("alice");
+    let session = create_persisted_workspace_session(&state, principal.clone()).await;
+    let other_session = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+    let other_checkout_path = point_session_checkout_metadata_at_other_session(
+        &state,
+        &user.user_id,
+        &session.id,
+        &other_session.id,
+    )
+    .await;
+
+    let _ = close_session(State(state), Path(session.id), principal)
+        .await
+        .expect("session close should succeed");
+
+    assert!(
+        other_checkout_path.exists(),
+        "closing a session must not remove another session's checkout"
+    );
 }
 
 #[tokio::test]

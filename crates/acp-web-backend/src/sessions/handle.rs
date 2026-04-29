@@ -69,6 +69,7 @@ struct SessionData {
     pending_completions: BTreeMap<u64, PromptCompletion>,
     pending_permissions: HashMap<String, PendingPermission>,
     active_turn: Option<ActiveTurn>,
+    runtime_unavailable_reason: Option<String>,
     messages: Vec<ConversationMessage>,
 }
 
@@ -100,6 +101,7 @@ impl SessionHandle {
                 pending_completions: BTreeMap::new(),
                 pending_permissions: HashMap::new(),
                 active_turn: None,
+                runtime_unavailable_reason: None,
                 messages: Vec::new(),
             }),
         }
@@ -140,6 +142,7 @@ impl SessionHandle {
                 pending_completions: BTreeMap::new(),
                 pending_permissions: HashMap::new(),
                 active_turn: None,
+                runtime_unavailable_reason: None,
                 messages: snapshot.messages,
             }),
         }
@@ -241,6 +244,9 @@ impl SessionHandle {
         if data.status == SessionStatus::Closed {
             return Err(SessionStoreError::Closed);
         }
+        if data.runtime_unavailable_reason.is_some() {
+            return Err(SessionStoreError::RuntimeUnavailable);
+        }
 
         // Auto-title from the first user prompt when the title has not been manually set.
         if data.title_is_auto
@@ -266,6 +272,9 @@ impl SessionHandle {
         let mut data = self.data.lock().await;
         if data.status == SessionStatus::Closed {
             return Err(SessionStoreError::Closed);
+        }
+        if data.runtime_unavailable_reason.is_some() {
+            return Err(SessionStoreError::RuntimeUnavailable);
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -392,6 +401,19 @@ impl SessionHandle {
         }
 
         Ok(events)
+    }
+
+    pub(super) async fn mark_runtime_unavailable(
+        &self,
+        reason: String,
+    ) -> Result<(), SessionStoreError> {
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+        Self::cancel_all_turns_locked(&mut data);
+        data.runtime_unavailable_reason = Some(reason);
+        Ok(())
     }
 
     fn message_event(data: &mut SessionData, role: MessageRole, text: String) -> StreamEvent {

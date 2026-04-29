@@ -5,8 +5,8 @@ use acp_cli::contract_sessions::{SessionHistoryResponse, SessionListResponse, Se
 use acp_cli::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web::{
-    AppState, DynWorkspaceCheckoutManager, MockClient, PreparedWorkspaceCheckout, ServerConfig,
-    WorkspaceCheckoutError, WorkspaceCheckoutManager,
+    AppState, DynWorkspaceCheckoutManager, MockClient, NoopAgentRuntimeManager,
+    PreparedWorkspaceCheckout, ServerConfig, WorkspaceCheckoutError, WorkspaceCheckoutManager,
     contract_workspaces::{CreateWorkspaceRequest, CreateWorkspaceResponse},
     serve_with_shutdown as serve_backend_with_shutdown,
     sessions::SessionStore,
@@ -81,6 +81,10 @@ impl WorkspaceCheckoutManager for CliTestWorkspaceCheckoutManager {
 
     fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
         Some(self.state_dir.join(checkout_relpath))
+    }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(Self::checkout_relpath(session_id))
     }
 }
 
@@ -630,6 +634,7 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
         acp_server: mock_address,
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     };
     let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
@@ -645,6 +650,7 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
         workspace_repository,
         reply_provider,
         checkout_manager,
+        Arc::new(NoopAgentRuntimeManager),
         config.startup_hints,
         config.frontend_dist,
     );

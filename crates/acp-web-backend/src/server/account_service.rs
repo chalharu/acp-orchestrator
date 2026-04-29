@@ -42,5 +42,6 @@ pub(super) async fn forget_live_sessions_for_owners(state: &AppState, owner_ids:
     let invalidated_sessions = state.store.delete_sessions_for_owners(owner_ids).await;
     for session_id in invalidated_sessions {
         state.reply_provider.forget_session(&session_id);
+        state.agent_runtime_manager.forget_session(&session_id);
     }
 }

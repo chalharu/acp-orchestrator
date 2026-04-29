@@ -96,6 +96,7 @@ async fn resolving_unknown_permission_requests_returns_not_found() -> Result<()>
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -125,6 +126,7 @@ async fn start_pending_permission_flow() -> Result<PendingPermissionFlow> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;

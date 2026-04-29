@@ -1,16 +1,16 @@
 use super::super::{
     CHECKOUTS_DIR_NAME, FsWorkspaceCheckoutManager, GIT_REMOTE_NAME, GitProxyConfig,
-    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutManager,
-    await_checkout_task, build_prepared_checkout, checkout_fetch_head, checkout_head_commit,
-    checkout_parent_dir, clone_local_repository, clone_remote_workspace, current_head_commit,
-    git_fetch_options, git_proxy_config_for_remote, git_proxy_config_for_remote_from_env,
-    git_symbolic_ref, list_local_workspace_branches, list_remote_workspace_branches,
-    local_source_root, local_source_root_from, map_git_error, no_proxy_entry_matches,
-    parse_remote_default_branch_name, prioritize_workspace_branch_ref, proxy_env_names_for_scheme,
-    proxy_options_from_config, reject_git_credentials, resolve_https_checkout_ref,
-    resolve_local_checkout_ref, resolve_remote_head_ref, should_bypass_git_proxy,
-    validate_branch_list_upstream_url, validate_checkout_ref, validate_https_upstream_url,
-    workspace_branches_from_refs,
+    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutLayout,
+    WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout, checkout_fetch_head,
+    checkout_head_commit, checkout_parent_dir, clone_local_repository, clone_remote_workspace,
+    current_head_commit, git_fetch_options, git_proxy_config_for_remote,
+    git_proxy_config_for_remote_from_env, git_symbolic_ref, list_local_workspace_branches,
+    list_remote_workspace_branches, local_source_root, local_source_root_from, map_git_error,
+    no_proxy_entry_matches, parse_remote_default_branch_name, prioritize_workspace_branch_ref,
+    proxy_env_names_for_scheme, proxy_options_from_config, reject_git_credentials,
+    resolve_https_checkout_ref, resolve_local_checkout_ref, resolve_remote_head_ref,
+    should_bypass_git_proxy, validate_branch_list_upstream_url, validate_checkout_ref,
+    validate_https_upstream_url, workspace_branches_from_refs,
 };
 use super::*;
 use async_trait::async_trait;
@@ -262,7 +262,7 @@ fn checkout_ref_validation_accepts_safe_refs_and_rejects_unsafe_values() {
 }
 
 #[tokio::test]
-async fn workspace_checkout_manager_defaults_to_unresolved_paths() {
+async fn noop_workspace_checkout_manager_leaves_paths_unresolved() {
     #[derive(Debug)]
     struct NoopCheckoutManager;
 
@@ -277,6 +277,10 @@ async fn workspace_checkout_manager_defaults_to_unresolved_paths() {
             Err(WorkspaceCheckoutError::Io(
                 "checkout preparation is intentionally unused".to_string(),
             ))
+        }
+
+        fn checkout_relpath_for_session(&self, _session_id: &str) -> Option<String> {
+            None
         }
     }
 
@@ -554,6 +558,32 @@ fn resolved_checkout_paths_stay_within_the_checkout_root() {
     assert_eq!(manager.resolve_checkout_path("../escape"), None);
     assert_eq!(manager.resolve_checkout_path("/tmp/escape"), None);
     assert_eq!(manager.resolve_checkout_path("other-root/s_test"), None);
+}
+
+#[test]
+fn chroot_runtime_checkout_layout_resolves_only_workspace_roots() {
+    let state_dir = unique_test_dir("acp-workspace-checkout-chroot-resolve");
+    let manager = FsWorkspaceCheckoutManager::with_layout(
+        state_dir.clone(),
+        WorkspaceCheckoutLayout::ChrootRuntime,
+    );
+
+    assert_eq!(
+        manager.resolve_checkout_path("agent-runtimes/s_test/root/workspace"),
+        Some(state_dir.join("agent-runtimes/s_test/root/workspace"))
+    );
+    assert_eq!(
+        manager.resolve_checkout_path("agent-runtimes/s_test/root/workspace/extra"),
+        None
+    );
+    assert_eq!(
+        manager.resolve_checkout_path("agent-runtimes/s_test/root/../escape"),
+        None
+    );
+    assert_eq!(
+        manager.resolve_checkout_path("session-checkouts/s_test"),
+        None
+    );
 }
 
 #[test]

@@ -44,6 +44,55 @@ impl crate::workspace_checkout::WorkspaceCheckoutManager for FailingCheckoutMana
             "sensitive git detail".to_string(),
         ))
     }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(format!("session-checkouts/{session_id}"))
+    }
+}
+
+#[derive(Debug)]
+struct FailingAgentRuntimeManager {
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+}
+
+impl crate::agent_runtime::AgentRuntimeManager for FailingAgentRuntimeManager {
+    fn launch_session(
+        &self,
+        _launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
+    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+        Err(crate::agent_runtime::AgentRuntimeError::Io(
+            "runtime launch exploded".to_string(),
+        ))
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        self.forgotten_sessions
+            .lock()
+            .expect("runtime cleanup tracking should not poison")
+            .push(session_id.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct CheckoutObservingAgentRuntimeManager {
+    checkout_exists_on_forget: StdArc<Mutex<Vec<bool>>>,
+}
+
+impl crate::agent_runtime::AgentRuntimeManager for CheckoutObservingAgentRuntimeManager {
+    fn launch_session(
+        &self,
+        _launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
+    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+        Ok(())
+    }
+
+    fn forget_session(&self, session_id: &str) {
+        let checkout_relpath = format!("session-checkouts/{session_id}");
+        self.checkout_exists_on_forget
+            .lock()
+            .expect("runtime cleanup observation should not poison")
+            .push(test_checkout_path(&checkout_relpath).exists());
+    }
 }
 
 fn first_forgotten_session_id(forgotten_sessions: &StdArc<Mutex<Vec<String>>>) -> String {
@@ -66,6 +115,20 @@ async fn assert_failed_session_rolled_back(store: &SessionStore, session_id: &st
         .await
         .expect_err("failed creations should be rolled back");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
+}
+
+fn assert_runtime_cleanup_precedes_checkout_removal(
+    checkout_exists_on_forget: &StdArc<Mutex<Vec<bool>>>,
+) {
+    assert_eq!(
+        checkout_exists_on_forget
+            .lock()
+            .expect("runtime cleanup observation should not poison")
+            .first()
+            .copied(),
+        Some(true),
+        "runtime cleanup should happen before checkout removal"
+    );
 }
 
 fn assert_saved_status_sequence(
@@ -332,6 +395,7 @@ async fn create_session_reports_metadata_rollback_failures() {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -355,6 +419,7 @@ async fn create_session_reports_metadata_rollback_failures() {
 #[tokio::test]
 async fn create_session_rolls_back_when_metadata_persistence_fails() {
     let store = Arc::new(SessionStore::new(1));
+    let checkout_exists_on_forget = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),
         workspace_repository: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
@@ -367,6 +432,9 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: Arc::new(CheckoutObservingAgentRuntimeManager {
+            checkout_exists_on_forget: checkout_exists_on_forget.clone(),
+        }),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -385,6 +453,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         .await
         .expect_err("failed creations should be rolled back");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
+    assert_runtime_cleanup_precedes_checkout_removal(&checkout_exists_on_forget);
 }
 
 #[tokio::test]
@@ -405,6 +474,7 @@ async fn create_session_marks_provisioning_rows_failed_when_cloning_persistence_
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -452,6 +522,7 @@ async fn create_session_marks_starting_rows_failed_when_starting_persistence_fai
             forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -479,6 +550,73 @@ async fn create_session_marks_starting_rows_failed_when_starting_persistence_fai
         "failed starting persistence should clean up the prepared checkout",
     );
     assert_failed_session_rolled_back(&store, &saved_metadata[0].session_id).await;
+}
+
+#[tokio::test]
+async fn create_session_marks_sessions_failed_when_agent_runtime_launch_fails() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let forgotten_runtime_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository: workspace_repository.clone(),
+        reply_provider: Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+        checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: Arc::new(FailingAgentRuntimeManager {
+            forgotten_sessions: forgotten_runtime_sessions.clone(),
+        }),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+    let workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
+
+    let error = create_workspace_session(
+        State(state),
+        Path(workspace.workspace_id),
+        bearer_principal("alice"),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect_err("runtime launch failures should fail session creation");
+
+    assert!(
+        matches!(error, AppError::Internal(message) if message.contains("agent runtime launch failed"))
+    );
+    let saved_metadata = workspace_repository
+        .saved_metadata
+        .lock()
+        .expect("saved metadata should not poison")
+        .clone();
+    assert_saved_status_sequence(
+        &saved_metadata,
+        &["provisioning", "cloning", "starting", "failed"],
+    );
+    assert_eq!(
+        saved_metadata[3].failure_reason.as_deref(),
+        Some("runtime launch exploded")
+    );
+    assert_checkout_relpath_removed(
+        saved_metadata[3]
+            .checkout_relpath
+            .as_deref()
+            .expect("failed metadata should retain the checkout path"),
+        "runtime launch failures should clean up the prepared checkout",
+    );
+    assert_failed_session_rolled_back(&store, &saved_metadata[0].session_id).await;
+    assert_eq!(
+        forgotten_runtime_sessions
+            .lock()
+            .expect("runtime cleanup tracking should not poison")
+            .clone(),
+        vec![
+            saved_metadata[0].session_id.clone(),
+            saved_metadata[0].session_id.clone()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -515,6 +653,7 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
     let store = Arc::new(SessionStore::new(4));
     let workspace_repository = metadata_test_workspace_store();
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
+    let checkout_exists_on_forget = StdArc::new(Mutex::new(Vec::new()));
     let state = AppState {
         store: store.clone(),
         workspace_repository: workspace_repository.clone(),
@@ -522,6 +661,9 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
             forgotten_sessions: forgotten_sessions.clone(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: Arc::new(CheckoutObservingAgentRuntimeManager {
+            checkout_exists_on_forget: checkout_exists_on_forget.clone(),
+        }),
         startup_hints: false,
         frontend_dist: None,
     };
@@ -542,6 +684,7 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
     assert_checkout_binding_failure_cleanup(&state, &forgotten_sessions).await;
     assert_failed_session_rolled_back(&store, &first_forgotten_session_id(&forgotten_sessions))
         .await;
+    assert_runtime_cleanup_precedes_checkout_removal(&checkout_exists_on_forget);
 }
 
 #[tokio::test]

@@ -4,13 +4,15 @@ use axum::{
 };
 
 use crate::contract_sessions::{
-    SessionHistoryResponse, SessionListResponse, SessionResponse, SessionSnapshot,
+    SessionHistoryResponse, SessionListResponse, SessionResponse, SessionSnapshot, SessionStatus,
 };
 use crate::contract_slash::SlashCompletionsResponse;
 use crate::{
+    agent_runtime::{AgentRuntimeError, AgentSessionLaunch},
     auth::AuthenticatedPrincipal,
     completions::resolve_slash_completions,
     sessions::SessionStoreError,
+    workspace_checkout::PreparedWorkspaceCheckout,
     workspace_records::{DurableSessionSnapshotRecord, SessionMetadataRecord},
 };
 
@@ -139,13 +141,26 @@ async fn bind_restored_session_to_checkout(
 ) -> Result<(), AppError> {
     let Some(checkout_relpath) = metadata.and_then(|record| record.checkout_relpath.as_deref())
     else {
+        mark_restored_runtime_unavailable(
+            state,
+            owner_id,
+            restored,
+            "persisted checkout path is missing".to_string(),
+        )
+        .await?;
         return Ok(());
     };
-    let checkout_path =
-        resolve_restored_checkout_path(state, owner_id, restored, checkout_relpath).await?;
+    let Some(checkout) =
+        resolve_restored_checkout(state, owner_id, restored, checkout_relpath, metadata).await?
+    else {
+        return Ok(());
+    };
+    if !launch_restored_agent_runtime(state, owner_id, restored, &checkout).await? {
+        return Ok(());
+    }
     match state
         .reply_provider
-        .bind_session(&restored.id, checkout_path)
+        .bind_session(&restored.id, checkout.working_dir.clone())
         .await
     {
         Ok(()) => Ok(()),
@@ -156,23 +171,112 @@ async fn bind_restored_session_to_checkout(
     }
 }
 
-async fn resolve_restored_checkout_path(
+async fn resolve_restored_checkout(
     state: &AppState,
     owner_id: &str,
     restored: &SessionSnapshot,
     checkout_relpath: &str,
-) -> Result<std::path::PathBuf, AppError> {
+    metadata: Option<&SessionMetadataRecord>,
+) -> Result<Option<PreparedWorkspaceCheckout>, AppError> {
+    let Some(expected_relpath) = state
+        .checkout_manager
+        .checkout_relpath_for_session(&restored.id)
+    else {
+        mark_restored_runtime_unavailable(
+            state,
+            owner_id,
+            restored,
+            "checkout manager could not provide the restored session path".to_string(),
+        )
+        .await?;
+        return Ok(None);
+    };
+    if checkout_relpath != expected_relpath {
+        mark_restored_runtime_unavailable(
+            state,
+            owner_id,
+            restored,
+            "persisted checkout path does not match the restored session".to_string(),
+        )
+        .await?;
+        return Ok(None);
+    }
     match state
         .checkout_manager
         .resolve_checkout_path(checkout_relpath)
     {
-        Some(path) => Ok(path),
+        Some(path) => Ok(Some(PreparedWorkspaceCheckout {
+            checkout_relpath: checkout_relpath.to_string(),
+            checkout_ref: metadata.and_then(|record| record.checkout_ref.clone()),
+            checkout_commit_sha: metadata.and_then(|record| record.checkout_commit_sha.clone()),
+            working_dir: path,
+        })),
         None => {
             let error = AppError::Internal("persisted checkout path is invalid".to_string());
             rollback_restored_session(state, owner_id, &restored.id, error.message()).await?;
             Err(error)
         }
     }
+}
+
+async fn launch_restored_agent_runtime(
+    state: &AppState,
+    owner_id: &str,
+    restored: &SessionSnapshot,
+    checkout: &PreparedWorkspaceCheckout,
+) -> Result<bool, AppError> {
+    if restored.status != SessionStatus::Active {
+        return Ok(true);
+    }
+
+    let runtime_manager = state.agent_runtime_manager.clone();
+    let session_id = restored.id.clone();
+    let workspace_id = restored.workspace_id.clone();
+    let checkout_for_launch = checkout.clone();
+    let launch_result = match tokio::task::spawn_blocking(move || {
+        runtime_manager.launch_session(&AgentSessionLaunch {
+            session_id: &session_id,
+            workspace_id: &workspace_id,
+            checkout: &checkout_for_launch,
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(AgentRuntimeError::Io(format!(
+            "joining agent runtime launch failed: {error}"
+        ))),
+    };
+
+    match launch_result {
+        Ok(()) | Err(AgentRuntimeError::AlreadyRunning(_)) => Ok(true),
+        Err(error) => {
+            let message = error.to_string();
+            mark_restored_runtime_unavailable(state, owner_id, restored, message).await?;
+            Ok(false)
+        }
+    }
+}
+
+async fn mark_restored_runtime_unavailable(
+    state: &AppState,
+    owner_id: &str,
+    restored: &SessionSnapshot,
+    message: String,
+) -> Result<(), AppError> {
+    if restored.status != SessionStatus::Active {
+        return Ok(());
+    }
+    state
+        .store
+        .mark_runtime_unavailable(owner_id, &restored.id, message.clone())
+        .await?;
+    tracing::warn!(
+        session_id = %restored.id,
+        workspace_id = %restored.workspace_id,
+        "restored session runtime is unavailable: {message}"
+    );
+    Ok(())
 }
 
 async fn rollback_restored_session(
@@ -182,6 +286,7 @@ async fn rollback_restored_session(
     error_message: &str,
 ) -> Result<(), AppError> {
     state.reply_provider.forget_session(session_id);
+    state.agent_runtime_manager.forget_session(session_id);
     state
         .store
         .discard_session(owner_id, session_id)
@@ -227,6 +332,30 @@ mod tests {
         }
     }
 
+    fn sample_session_metadata(
+        session_id: &str,
+        checkout_relpath: Option<String>,
+    ) -> SessionMetadataRecord {
+        let now = chrono::Utc::now();
+        SessionMetadataRecord {
+            session_id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            owner_user_id: "alice".to_string(),
+            title: "Test session".to_string(),
+            status: "active".to_string(),
+            checkout_relpath,
+            checkout_ref: None,
+            checkout_commit_sha: None,
+            failure_reason: None,
+            detach_deadline_at: None,
+            restartable_deadline_at: None,
+            created_at: now,
+            last_activity_at: now,
+            closed_at: None,
+            deleted_at: None,
+        }
+    }
+
     async fn sample_turn_handle() -> crate::sessions::TurnHandle {
         let store = SessionStore::new(4);
         let session = store
@@ -251,16 +380,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restored_sessions_skip_rebinding_without_a_persisted_checkout_path() {
-        let state = AppState::with_dependencies(
-            Arc::new(SessionStore::new(4)),
-            Arc::new(NoopReplyProvider),
-        );
+    async fn restored_active_sessions_become_unavailable_without_checkout_metadata() {
+        let store = Arc::new(SessionStore::new(4));
+        let state = AppState::with_dependencies(store.clone(), Arc::new(NoopReplyProvider));
         let restored = sample_session_snapshot("s_restore");
+        store
+            .restore_session("alice", restored.clone(), chrono::Utc::now())
+            .await
+            .expect("restored session should enter live store");
 
         bind_restored_session_to_checkout(&state, "alice", &restored, None)
             .await
-            .expect("missing checkout metadata should skip rebinding");
+            .expect("missing checkout metadata should leave transcript readable");
+
+        let error = store
+            .submit_prompt("alice", &restored.id, "hello".to_string())
+            .await
+            .expect_err("runtime-unavailable restored sessions should reject writes");
+        assert_eq!(error, SessionStoreError::RuntimeUnavailable);
+    }
+
+    #[tokio::test]
+    async fn restored_active_sessions_become_unavailable_when_checkout_belongs_to_another_session()
+    {
+        let store = Arc::new(SessionStore::new(4));
+        let state = AppState::with_dependencies(store.clone(), Arc::new(NoopReplyProvider));
+        let restored = sample_session_snapshot("s_restore");
+        let metadata =
+            sample_session_metadata(&restored.id, Some("session-checkouts/s_other".to_string()));
+        store
+            .restore_session("alice", restored.clone(), chrono::Utc::now())
+            .await
+            .expect("restored session should enter live store");
+
+        bind_restored_session_to_checkout(&state, "alice", &restored, Some(&metadata))
+            .await
+            .expect("mismatched checkout metadata should not block transcript reads");
+
+        let error = store
+            .submit_prompt("alice", &restored.id, "hello".to_string())
+            .await
+            .expect_err("runtime-unavailable restored sessions should reject writes");
+        assert_eq!(error, SessionStoreError::RuntimeUnavailable);
     }
 
     #[tokio::test]

@@ -200,6 +200,26 @@ async fn session_metadata_for_user(
         .expect("session metadata should exist")
 }
 
+async fn assert_runtime_unavailable_write_rejected(
+    state: AppState,
+    session_id: String,
+    principal: Extension<AuthenticatedPrincipal>,
+) {
+    let error = post_message(
+        State(state),
+        Path(session_id),
+        principal,
+        Json(PromptRequest {
+            text: "hello".to_string(),
+        }),
+    )
+    .await
+    .expect_err("runtime-unavailable sessions should reject writes");
+    assert!(
+        matches!(error, AppError::Conflict(message) if message == "session runtime unavailable")
+    );
+}
+
 fn checkout_path_from_metadata(
     state: &AppState,
     metadata: &SessionMetadataRecord,
@@ -763,20 +783,7 @@ async fn get_session_keeps_transcript_readable_when_runtime_relaunch_fails() {
 
     assert_eq!(restored.0.session.id, created.id);
     assert_binding_calls(&reply_provider, &[], &[]);
-    let error = post_message(
-        State(state),
-        Path(created.id),
-        principal,
-        Json(PromptRequest {
-            text: "hello".to_string(),
-        }),
-    )
-    .await
-    .expect_err("runtime-unavailable sessions should reject writes");
-
-    assert!(
-        matches!(error, AppError::Conflict(message) if message == "session runtime unavailable")
-    );
+    assert_runtime_unavailable_write_rejected(state, created.id, principal).await;
 }
 
 #[tokio::test]

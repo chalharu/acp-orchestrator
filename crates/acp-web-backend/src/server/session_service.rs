@@ -775,47 +775,12 @@ async fn load_checkout_cleanup_path_best_effort(
         .load_session_metadata(&user.user_id, session_id)
         .await
     {
-        Ok(Some(metadata)) => match metadata.checkout_relpath.as_deref() {
-            Some(checkout_relpath) => {
-                let Some(expected_relpath) = state
-                    .checkout_manager
-                    .checkout_relpath_for_session(session_id)
-                else {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        action,
-                        "checkout manager could not provide an expected cleanup path"
-                    );
-                    return None;
-                };
-                if checkout_relpath != expected_relpath {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        checkout_relpath,
-                        expected_relpath,
-                        action,
-                        "persisted checkout path did not match the session cleanup path"
-                    );
-                    return None;
-                }
-                match state
-                    .checkout_manager
-                    .resolve_checkout_path(checkout_relpath)
-                {
-                    Some(path) => Some(path),
-                    None => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            checkout_relpath,
-                            action,
-                            "persisted checkout path was invalid"
-                        );
-                        None
-                    }
-                }
-            }
-            None => None,
-        },
+        Ok(Some(metadata)) => resolve_checkout_cleanup_path(
+            state,
+            session_id,
+            metadata.checkout_relpath.as_deref(),
+            action,
+        ),
         Ok(None) => None,
         Err(error) => {
             let error_message = error.message();
@@ -828,6 +793,74 @@ async fn load_checkout_cleanup_path_best_effort(
             None
         }
     }
+}
+
+fn resolve_checkout_cleanup_path(
+    state: &AppState,
+    session_id: &str,
+    checkout_relpath: Option<&str>,
+    action: &'static str,
+) -> Option<PathBuf> {
+    let checkout_relpath = checkout_relpath?;
+    let expected_relpath = expected_cleanup_relpath(state, session_id, action)?;
+    if !cleanup_relpath_matches(session_id, checkout_relpath, &expected_relpath, action) {
+        return None;
+    }
+    state
+        .checkout_manager
+        .resolve_checkout_path(checkout_relpath)
+        .or_else(|| warn_invalid_cleanup_relpath(session_id, checkout_relpath, action))
+}
+
+fn expected_cleanup_relpath(
+    state: &AppState,
+    session_id: &str,
+    action: &'static str,
+) -> Option<String> {
+    state
+        .checkout_manager
+        .checkout_relpath_for_session(session_id)
+        .or_else(|| {
+            tracing::warn!(
+                session_id = %session_id,
+                action,
+                "checkout manager could not provide an expected cleanup path"
+            );
+            None
+        })
+}
+
+fn cleanup_relpath_matches(
+    session_id: &str,
+    checkout_relpath: &str,
+    expected_relpath: &str,
+    action: &'static str,
+) -> bool {
+    if checkout_relpath == expected_relpath {
+        return true;
+    }
+    tracing::warn!(
+        session_id = %session_id,
+        checkout_relpath,
+        expected_relpath,
+        action,
+        "persisted checkout path did not match the session cleanup path"
+    );
+    false
+}
+
+fn warn_invalid_cleanup_relpath(
+    session_id: &str,
+    checkout_relpath: &str,
+    action: &'static str,
+) -> Option<PathBuf> {
+    tracing::warn!(
+        session_id = %session_id,
+        checkout_relpath,
+        action,
+        "persisted checkout path was invalid"
+    );
+    None
 }
 
 fn cleanup_checkout_path_best_effort(path: &Path) {

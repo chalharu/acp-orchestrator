@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_launch_config_rejects_incomplete_or_invalid_chroot_options() {
+    fn agent_launch_config_rejects_missing_chroot_command() {
         let missing_command = Cli::try_parse_from([
             "acp-web-backend",
             "--acp-server",
@@ -326,7 +326,10 @@ mod tests {
             agent_launch_config(&missing_command).is_err(),
             "chroot mode should require a command"
         );
+    }
 
+    #[test]
+    fn agent_launch_config_rejects_invalid_env_allowlist_name() {
         let invalid_env = Cli::try_parse_from([
             "acp-web-backend",
             "--acp-server",
@@ -343,7 +346,10 @@ mod tests {
             agent_launch_config(&invalid_env).is_err(),
             "unsafe environment variable names should be rejected"
         );
+    }
 
+    #[test]
+    fn agent_launch_config_rejects_root_uid() {
         let root_uid = Cli::try_parse_from([
             "acp-web-backend",
             "--acp-server",
@@ -360,7 +366,10 @@ mod tests {
             agent_launch_config(&root_uid).is_err(),
             "chroot agents should not run as root"
         );
+    }
 
+    #[test]
+    fn agent_launch_config_rejects_root_gid() {
         let root_gid = Cli::try_parse_from([
             "acp-web-backend",
             "--acp-server",

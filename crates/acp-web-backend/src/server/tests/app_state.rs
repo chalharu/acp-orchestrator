@@ -178,6 +178,39 @@ async fn assert_checkout_binding_failure_cleanup(
     );
 }
 
+async fn assert_runtime_launch_failure_cleanup(
+    store: &SessionStore,
+    saved_metadata: &[SessionMetadataRecord],
+    forgotten_runtime_sessions: &StdArc<Mutex<Vec<String>>>,
+) {
+    assert_saved_status_sequence(
+        saved_metadata,
+        &["provisioning", "cloning", "starting", "failed"],
+    );
+    assert_eq!(
+        saved_metadata[3].failure_reason.as_deref(),
+        Some("runtime launch exploded")
+    );
+    assert_checkout_relpath_removed(
+        saved_metadata[3]
+            .checkout_relpath
+            .as_deref()
+            .expect("failed metadata should retain the checkout path"),
+        "runtime launch failures should clean up the prepared checkout",
+    );
+    assert_failed_session_rolled_back(store, &saved_metadata[0].session_id).await;
+    assert_eq!(
+        forgotten_runtime_sessions
+            .lock()
+            .expect("runtime cleanup tracking should not poison")
+            .clone(),
+        vec![
+            saved_metadata[0].session_id.clone(),
+            saved_metadata[0].session_id.clone()
+        ]
+    );
+}
+
 #[test]
 fn app_state_build_errors_format_and_expose_sources() {
     let reply_error = AppStateBuildError::from(MockClientError::TurnRuntime {
@@ -592,32 +625,8 @@ async fn create_session_marks_sessions_failed_when_agent_runtime_launch_fails() 
         .lock()
         .expect("saved metadata should not poison")
         .clone();
-    assert_saved_status_sequence(
-        &saved_metadata,
-        &["provisioning", "cloning", "starting", "failed"],
-    );
-    assert_eq!(
-        saved_metadata[3].failure_reason.as_deref(),
-        Some("runtime launch exploded")
-    );
-    assert_checkout_relpath_removed(
-        saved_metadata[3]
-            .checkout_relpath
-            .as_deref()
-            .expect("failed metadata should retain the checkout path"),
-        "runtime launch failures should clean up the prepared checkout",
-    );
-    assert_failed_session_rolled_back(&store, &saved_metadata[0].session_id).await;
-    assert_eq!(
-        forgotten_runtime_sessions
-            .lock()
-            .expect("runtime cleanup tracking should not poison")
-            .clone(),
-        vec![
-            saved_metadata[0].session_id.clone(),
-            saved_metadata[0].session_id.clone()
-        ]
-    );
+    assert_runtime_launch_failure_cleanup(&store, &saved_metadata, &forgotten_runtime_sessions)
+        .await;
 }
 
 #[tokio::test]

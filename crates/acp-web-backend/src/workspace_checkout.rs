@@ -15,12 +15,10 @@ use git2::{
 };
 use reqwest::Url;
 
-use crate::{
-    agent_runtime::AGENT_RUNTIMES_DIR_NAME, contract_workspaces::WorkspaceBranch,
-    workspace_records::WorkspaceRecord,
-};
+use crate::{contract_workspaces::WorkspaceBranch, workspace_records::WorkspaceRecord};
 
 const CHECKOUTS_DIR_NAME: &str = "session-checkouts";
+pub(crate) const AGENT_RUNTIMES_DIR_NAME: &str = "agent-runtimes";
 const GIT_FETCH_HEAD: &str = "FETCH_HEAD";
 const GIT_HOME_DIR_NAME: &str = "git-home";
 const GIT_REMOTE_NAME: &str = "origin";

@@ -12,7 +12,7 @@ use std::{
 
 use crate::workspace_checkout::PreparedWorkspaceCheckout;
 
-pub const AGENT_RUNTIMES_DIR_NAME: &str = "agent-runtimes";
+pub const AGENT_RUNTIMES_DIR_NAME: &str = crate::workspace_checkout::AGENT_RUNTIMES_DIR_NAME;
 pub const CHROOT_CHECKOUT_ROOT: &str = "/workspace";
 pub const DEFAULT_AGENT_RUN_UID: u32 = 65_534;
 pub const DEFAULT_AGENT_RUN_GID: u32 = 65_534;
@@ -82,11 +82,20 @@ impl AgentLaunchConfig {
         if let Some(name) = self
             .env_allowlist
             .iter()
-            .find(|name| !is_safe_env_name(name))
+            .find(|name| !Self::is_safe_env_name(name))
         {
             return Err(AgentLaunchConfigError::InvalidEnvName(name.clone()));
         }
         Ok(())
+    }
+
+    fn is_safe_env_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        (first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
     }
 }
 
@@ -440,15 +449,6 @@ impl Drop for FsAgentRuntimeManager {
     }
 }
 
-fn is_safe_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
 #[cfg(target_os = "linux")]
 fn default_agent_cgroup_root() -> Option<PathBuf> {
     Some(PathBuf::from(DEFAULT_AGENT_CGROUP_ROOT))
@@ -603,32 +603,49 @@ fn configure_chroot_command(
 
     unsafe {
         command.pre_exec(move || {
-            move_current_process_to_cgroup(&cgroup_procs)?;
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::chroot(root.as_ptr()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::chdir(workspace.as_ptr()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::setgroups(0, std::ptr::null()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::setgid(run_gid) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::setuid(run_uid) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
+            prepare_chroot_child(&root, &workspace, &cgroup_procs, run_uid, run_gid)
         });
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_chroot_child(
+    root: &CString,
+    workspace: &CString,
+    cgroup_procs: &CString,
+    run_uid: u32,
+    run_gid: u32,
+) -> std::io::Result<()> {
+    move_current_process_to_cgroup(cgroup_procs)?;
+    unsafe {
+        check_nonnegative_syscall(libc::setsid())?;
+        check_zero_syscall(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))?;
+        check_zero_syscall(libc::chroot(root.as_ptr()))?;
+        check_zero_syscall(libc::chdir(workspace.as_ptr()))?;
+        check_zero_syscall(libc::setgroups(0, std::ptr::null()))?;
+        check_zero_syscall(libc::setgid(run_gid))?;
+        check_zero_syscall(libc::setuid(run_uid))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn check_nonnegative_syscall(result: libc::c_int) -> std::io::Result<()> {
+    if result >= 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_zero_syscall(result: libc::c_int) -> std::io::Result<()> {
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -688,40 +705,53 @@ fn spawn_with_timeout(
     let (sender, receiver) = std::sync::mpsc::sync_channel(0);
     let cgroup_for_timeout = cgroup.clone();
     std::thread::spawn(move || {
-        let spawn_result = match command.spawn() {
-            Ok(child) => Ok(AgentChild {
-                child,
-                cgroup: cgroup.clone(),
-            }),
-            Err(error) => {
-                if let Some(cgroup) = cgroup.as_ref() {
-                    cgroup.remove();
-                }
-                Err(error)
-            }
-        };
+        let spawn_result = spawn_agent_child(&mut command, cgroup.clone());
         if let Err(std::sync::mpsc::SendError(result)) = sender.send(spawn_result) {
-            match result {
-                Ok(mut child) => terminate_agent_child(&mut child),
-                Err(_) => {
-                    if let Some(cgroup) = cgroup.as_ref() {
-                        cgroup.remove();
-                    }
-                }
-            }
+            cleanup_unsent_spawn_result(result, cgroup.as_ref());
         }
     });
     match receiver.recv_timeout(timeout) {
         Ok(result) => result.map_err(|error| {
             AgentRuntimeError::Io(format!("spawning agent process failed: {error}"))
         }),
-        Err(_) => {
-            if let Some(cgroup) = cgroup_for_timeout.as_ref() {
-                cgroup.kill();
+        Err(_) => launch_timed_out(timeout, cgroup_for_timeout.as_ref()),
+    }
+}
+
+fn spawn_agent_child(
+    command: &mut Command,
+    cgroup: Option<AgentCgroup>,
+) -> std::io::Result<AgentChild> {
+    match command.spawn() {
+        Ok(child) => Ok(AgentChild { child, cgroup }),
+        Err(error) => {
+            if let Some(cgroup) = cgroup.as_ref() {
+                cgroup.remove();
             }
-            Err(AgentRuntimeError::LaunchTimedOut(timeout))
+            Err(error)
         }
     }
+}
+
+fn cleanup_unsent_spawn_result(result: std::io::Result<AgentChild>, cgroup: Option<&AgentCgroup>) {
+    match result {
+        Ok(mut child) => terminate_agent_child(&mut child),
+        Err(_) => {
+            if let Some(cgroup) = cgroup {
+                cgroup.remove();
+            }
+        }
+    }
+}
+
+fn launch_timed_out(
+    timeout: Duration,
+    cgroup: Option<&AgentCgroup>,
+) -> Result<AgentChild, AgentRuntimeError> {
+    if let Some(cgroup) = cgroup {
+        cgroup.kill();
+    }
+    Err(AgentRuntimeError::LaunchTimedOut(timeout))
 }
 
 fn terminate_agent_child(child: &mut AgentChild) {
@@ -774,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_config_validation_rejects_unsafe_values() {
+    fn launch_config_validation_requires_command() {
         assert_eq!(
             AgentLaunchConfig::chroot(
                 Vec::new(),
@@ -786,6 +816,10 @@ mod tests {
             .expect_err("missing commands should fail"),
             AgentLaunchConfigError::MissingCommand
         );
+    }
+
+    #[test]
+    fn launch_config_validation_rejects_empty_argv_element() {
         assert_eq!(
             AgentLaunchConfig::chroot(
                 vec!["agent".to_string(), String::new()],
@@ -797,6 +831,10 @@ mod tests {
             .expect_err("empty argv should fail"),
             AgentLaunchConfigError::EmptyArgvElement
         );
+    }
+
+    #[test]
+    fn launch_config_validation_rejects_unsafe_env_name() {
         assert_eq!(
             AgentLaunchConfig::chroot(
                 vec!["agent".to_string()],
@@ -808,6 +846,10 @@ mod tests {
             .expect_err("unsafe env names should fail"),
             AgentLaunchConfigError::InvalidEnvName("bad-name".to_string())
         );
+    }
+
+    #[test]
+    fn launch_config_validation_requires_nonzero_timeout() {
         assert_eq!(
             AgentLaunchConfig::chroot(
                 vec!["agent".to_string()],
@@ -819,6 +861,10 @@ mod tests {
             .expect_err("zero timeout should fail"),
             AgentLaunchConfigError::InvalidTimeout
         );
+    }
+
+    #[test]
+    fn launch_config_validation_rejects_root_uid() {
         assert_eq!(
             AgentLaunchConfig::chroot(
                 vec!["agent".to_string()],
@@ -830,6 +876,10 @@ mod tests {
             .expect_err("root run uid should fail"),
             AgentLaunchConfigError::RootRunUid
         );
+    }
+
+    #[test]
+    fn launch_config_validation_rejects_root_gid() {
         assert_eq!(
             AgentLaunchConfig::chroot(
                 vec!["agent".to_string()],

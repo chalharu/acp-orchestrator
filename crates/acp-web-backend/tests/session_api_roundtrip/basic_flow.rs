@@ -1,6 +1,26 @@
 use super::support::*;
 use acp_mock::MANUAL_FAILURE_TRIGGER;
 
+async fn assert_legacy_session_get_ok(
+    stack: &TestStack,
+    owner: &str,
+    session_id: &str,
+    context: &'static str,
+) -> Result<()> {
+    let response = stack
+        .client
+        .get(format!(
+            "{}/api/v1/sessions/{session_id}",
+            stack.backend_url
+        ))
+        .bearer_auth(owner)
+        .send()
+        .await
+        .context(context)?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
 async fn assert_invalid_rename_title(title: String, expected_message: &str) -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
@@ -462,31 +482,20 @@ async fn retention_prunes_oldest_closed_sessions_from_live_cache_only() -> Resul
         stack.close_session("alice", &created.session.id).await?;
     }
 
-    let first_session_response = stack
-        .client
-        .get(format!(
-            "{}/api/v1/sessions/{}",
-            stack.backend_url,
-            first_session_id.expect("first session id should exist")
-        ))
-        .bearer_auth("alice")
-        .send()
-        .await
-        .context("loading the oldest closed session")?;
-    assert_eq!(first_session_response.status(), StatusCode::OK);
-
-    let last_session_response = stack
-        .client
-        .get(format!(
-            "{}/api/v1/sessions/{}",
-            stack.backend_url,
-            last_session_id.expect("last session id should exist")
-        ))
-        .bearer_auth("alice")
-        .send()
-        .await
-        .context("loading the newest closed session")?;
-    assert_eq!(last_session_response.status(), StatusCode::OK);
+    assert_legacy_session_get_ok(
+        &stack,
+        "alice",
+        &first_session_id.expect("first session id should exist"),
+        "loading the oldest closed session",
+    )
+    .await?;
+    assert_legacy_session_get_ok(
+        &stack,
+        "alice",
+        &last_session_id.expect("last session id should exist"),
+        "loading the newest closed session",
+    )
+    .await?;
 
     Ok(())
 }

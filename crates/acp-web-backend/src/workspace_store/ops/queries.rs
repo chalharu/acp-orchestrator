@@ -96,7 +96,10 @@ SELECT
     status,
     last_activity_at
 FROM sessions
-WHERE owner_user_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
+WHERE owner_user_id = ?1
+  AND workspace_id = ?2
+  AND status IN ('active', 'closed')
+  AND deleted_at IS NULL
 ORDER BY last_activity_at DESC, session_id ASC
 "#;
 
@@ -110,7 +113,10 @@ SELECT
     messages_json,
     last_activity_at
 FROM sessions
-WHERE owner_user_id = ?1 AND session_id = ?2 AND deleted_at IS NULL
+WHERE owner_user_id = ?1
+  AND session_id = ?2
+  AND status IN ('active', 'closed')
+  AND deleted_at IS NULL
 "#;
 
 pub(in crate::workspace_store) fn load_user_by_principal(

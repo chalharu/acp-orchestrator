@@ -8,6 +8,7 @@ mod tests;
 use std::{
     collections::HashMap,
     future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -15,9 +16,16 @@ use std::{
     time::Duration,
 };
 
-use agent_client_protocol::{self as acp, schema};
+use agent_client_protocol::{self as acp, ConnectTo, schema};
+use futures_util::{
+    Sink, Stream,
+    future::{self, BoxFuture, Either},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sink::unfold,
+};
 use prompt::{
-    prompt_requires_permission, prompt_text, reply_for, response_delay_for, wait_for_cancel,
+    prompt_requires_permission, prompt_should_fail, prompt_text, reply_for, response_delay_for,
+    wait_for_cancel,
 };
 use tokio::{
     net::{
@@ -29,7 +37,7 @@ use tokio::{
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info};
 
-pub use prompt::{MANUAL_CANCEL_TRIGGER, MANUAL_PERMISSION_TRIGGER};
+pub use prompt::{MANUAL_CANCEL_TRIGGER, MANUAL_FAILURE_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 pub use runtime::{MockAppError, run_with_args};
 
 #[derive(Debug, Clone)]
@@ -288,6 +296,10 @@ impl MockAgent {
         .await
         {
             return Ok(cancelled_prompt_response());
+        }
+
+        if prompt_should_fail(&prompt) {
+            return Err(acp::Error::internal_error());
         }
 
         self.send_prompt_reply(notifier, session_id, &prompt).await
@@ -624,14 +636,59 @@ impl acp::HandleDispatchFrom<acp::Client> for MockDispatchHandler {
     }
 }
 
-fn build_mock_agent_builder(
-    agent: MockAgent,
-) -> acp::Builder<acp::Agent, MockDispatchHandler, acp::NullRun> {
-    acp::Builder::new_with(acp::Agent, MockDispatchHandler::new(agent)).name("acp-mock")
+fn build_mock_agent_connector(agent: MockAgent) -> acp::DynConnectTo<acp::Client> {
+    acp::DynConnectTo::new(
+        acp::Builder::new_with(acp::Agent, MockDispatchHandler::new(agent)).name("acp-mock"),
+    )
+}
+
+type DynRd = Box<dyn AsyncRead + Send + Unpin>;
+type DynWr = Box<dyn AsyncWrite + Send + Unpin>;
+type LineSink = Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>>;
+type LineStream = Pin<Box<dyn Stream<Item = std::io::Result<String>> + Send>>;
+
+struct MockIo {
+    outgoing: DynWr,
+    incoming: DynRd,
+}
+
+impl MockIo {
+    fn new(reader: OwnedReadHalf, writer: OwnedWriteHalf) -> Self {
+        Self {
+            outgoing: Box::new(writer.compat_write()) as DynWr,
+            incoming: Box::new(reader.compat()) as DynRd,
+        }
+    }
+}
+
+async fn write_mock_io_line(mut writer: DynWr, line: String) -> std::io::Result<DynWr> {
+    let mut bytes = line.into_bytes();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    Ok(writer)
+}
+
+impl<R: acp::Role> ConnectTo<R> for MockIo {
+    async fn connect_to(self, client: impl ConnectTo<R::Counterpart>) -> Result<(), acp::Error> {
+        let (channel, serve_io) = <MockIo as ConnectTo<R>>::into_channel_and_future(self);
+        let client = acp::DynConnectTo::new(client);
+        let serve_client: BoxFuture<'static, acp::Result<()>> =
+            Box::pin(client.connect_to(channel));
+        match future::select(serve_client, serve_io).await {
+            Either::Left((result, _)) | Either::Right((result, _)) => result,
+        }
+    }
+
+    fn into_channel_and_future(self) -> (acp::Channel, BoxFuture<'static, acp::Result<()>>) {
+        let Self { outgoing, incoming } = self;
+        let incoming_lines: LineStream = Box::pin(BufReader::new(incoming).lines());
+        let outgoing_sink: LineSink = Box::pin(unfold(outgoing, write_mock_io_line));
+        ConnectTo::<R>::into_channel_and_future(acp::Lines::new(outgoing_sink, incoming_lines))
+    }
 }
 
 #[rustfmt::skip]
-async fn connect_mock_agent(reader: OwnedReadHalf, writer: OwnedWriteHalf, agent: MockAgent) -> Result<(), acp::Error> { build_mock_agent_builder(agent).connect_to(acp::ByteStreams::new(writer.compat_write(), reader.compat())).await }
+async fn connect_mock_agent(reader: OwnedReadHalf, writer: OwnedWriteHalf, agent: MockAgent) -> Result<(), acp::Error> { ConnectTo::<acp::Agent>::connect_to(MockIo::new(reader, writer), build_mock_agent_connector(agent)).await }
 
 #[rustfmt::skip]
 async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Result<(), acp::Error> { let (reader, writer) = stream.into_split(); connect_mock_agent(reader, writer, MockAgent::new(state)).await }
@@ -640,7 +697,7 @@ async fn handle_connection(stream: TcpStream, state: Arc<MockServerState>) -> Re
 mod coverage_tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use agent_client_protocol::{HandleDispatchFrom, JsonRpcMessage, schema};
+    use agent_client_protocol::{ConnectTo, HandleDispatchFrom, JsonRpcMessage, schema};
     use tokio::{
         io::{duplex, split},
         net::{TcpListener, TcpStream},
@@ -649,8 +706,9 @@ mod coverage_tests {
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     use super::{
-        MANUAL_PERMISSION_TRIGGER, MockAgent, MockConfig, MockDispatchHandler, MockServerState,
-        prompt_response_for_permission_outcome, spawn_with_shutdown_task,
+        MANUAL_PERMISSION_TRIGGER, MockAgent, MockConfig, MockDispatchHandler, MockIo,
+        MockServerState, connect_mock_agent, prompt_response_for_permission_outcome,
+        spawn_with_shutdown_task,
     };
     use agent_client_protocol as acp;
 
@@ -879,6 +937,73 @@ mod coverage_tests {
 
         finish_roundtrip(shutdown_tx, server).await;
         Ok(result)
+    }
+
+    #[rustfmt::skip]
+    async fn accept_mock_agent_connection(listener: TcpListener, state: Arc<MockServerState>) -> Result<(), acp::Error> { let (stream, _) = listener.accept().await.expect("test listener should accept"); let (reader, writer) = stream.into_split(); connect_mock_agent(reader, writer, MockAgent::new(state)).await }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_mock_agent_accepts_direct_acp_roundtrips() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose a local address");
+        let state = Arc::new(MockServerState::new(MockConfig {
+            response_delay: Duration::from_millis(1),
+            startup_hints: false,
+        }));
+        let server = tokio::spawn(accept_mock_agent_connection(listener, state));
+
+        let stream = connect_roundtrip_stream(address).await;
+        let (reader, writer) = stream.into_split();
+        let working_dir = std::env::current_dir().expect("current directory should be available");
+        let result = acp::Client
+            .builder()
+            .name("acp-mock-connect-agent-test")
+            .connect_with(
+                acp::ByteStreams::new(writer.compat_write(), reader.compat()),
+                move |connection: acp::ConnectionTo<acp::Agent>| async move {
+                    initialize_roundtrip_connection(&connection).await?;
+                    connection
+                        .send_request(schema::LoadSessionRequest::new("mock_0", working_dir))
+                        .block_task()
+                        .await
+                },
+            )
+            .await
+            .expect("direct ACP roundtrip should succeed");
+
+        assert_eq!(result, schema::LoadSessionResponse::new());
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mock_io_connect_to_completes_when_peer_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose a local address");
+        let (client_stream, accepted) =
+            tokio::join!(TcpStream::connect(address), listener.accept());
+        let client_stream = client_stream.expect("test client should connect");
+        let (server_stream, _) = accepted.expect("test listener should accept");
+        let (reader, writer) = server_stream.into_split();
+        let (channel, counterpart) = acp::Channel::duplex();
+
+        drop(channel);
+        drop(client_stream);
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            ConnectTo::<acp::Agent>::connect_to(MockIo::new(reader, writer), counterpart),
+        )
+        .await
+        .expect("MockIo should stop promptly when the peer closes");
     }
 
     #[rustfmt::skip]

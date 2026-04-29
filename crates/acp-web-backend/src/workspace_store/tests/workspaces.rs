@@ -1,5 +1,6 @@
 use super::*;
 use crate::workspace_repository::{NewWorkspace, WorkspaceRepository, WorkspaceUpdatePatch};
+use chrono::Utc;
 
 async fn materialized_user(repository: &SqliteWorkspaceRepository) -> UserRecord {
     repository
@@ -53,6 +54,35 @@ async fn persist_workspace_session(
         )
         .await
         .expect("session metadata should persist");
+}
+
+#[tokio::test]
+async fn repository_recreates_schema_after_database_file_deletion() {
+    let repository = test_repository();
+    let db_path = repository.db_path.as_ref().clone();
+
+    let user = materialized_user(&repository).await;
+    let listed = repository
+        .list_workspaces(&user.user_id)
+        .await
+        .expect("workspace listing should succeed before database deletion");
+    assert!(listed.is_empty());
+
+    std::fs::remove_file(&db_path).expect("database file should be removable");
+
+    let (bootstrap_required, authenticated_user) = repository
+        .auth_status(None)
+        .await
+        .expect("auth status should recreate schema after database deletion");
+    assert!(bootstrap_required);
+    assert!(authenticated_user.is_none());
+
+    let recreated_user = materialized_user(&repository).await;
+    let listed = repository
+        .list_workspaces(&recreated_user.user_id)
+        .await
+        .expect("workspace listing should succeed after schema recreation");
+    assert!(listed.is_empty());
 }
 
 #[tokio::test]
@@ -384,6 +414,58 @@ async fn loading_session_snapshots_rejects_invalid_payload_columns() {
     ));
 }
 
+#[tokio::test]
+async fn failed_sessions_are_hidden_from_user_facing_durable_queries() {
+    let repository = test_repository();
+    let user = materialized_user(&repository).await;
+    let workspace = create_workspace_record(&repository, &user, "Repo").await;
+    let now = Utc::now();
+
+    repository
+        .save_session_metadata(&SessionMetadataRecord {
+            session_id: "s_failed".to_string(),
+            workspace_id: workspace.workspace_id.clone(),
+            owner_user_id: user.user_id.clone(),
+            title: "Failed".to_string(),
+            status: "failed".to_string(),
+            checkout_relpath: Some("session-checkouts/s_failed".to_string()),
+            checkout_ref: Some("refs/heads/main".to_string()),
+            checkout_commit_sha: Some("deadbeef".to_string()),
+            failure_reason: Some("startup failed".to_string()),
+            detach_deadline_at: None,
+            restartable_deadline_at: None,
+            created_at: now,
+            last_activity_at: now,
+            closed_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("failed metadata should save");
+
+    let listed = repository
+        .list_workspace_sessions(&user.user_id, &workspace.workspace_id)
+        .await
+        .expect("workspace listing should succeed");
+    let loaded = repository
+        .load_session_snapshot(&user.user_id, "s_failed")
+        .await
+        .expect("durable lookup should succeed");
+    let metadata = repository
+        .load_session_metadata(&user.user_id, "s_failed")
+        .await
+        .expect("metadata lookup should succeed");
+
+    assert!(listed.is_empty());
+    assert!(loaded.is_none());
+    assert_eq!(
+        metadata
+            .expect("failed metadata should remain durable")
+            .failure_reason
+            .as_deref(),
+        Some("startup failed")
+    );
+}
+
 #[test]
 fn workspace_name_validation_rejects_blank_and_long_values() {
     assert_eq!(
@@ -450,6 +532,11 @@ fn default_refs_and_credentials_are_trimmed_and_validated() {
     assert_eq!(
         validate_workspace_default_ref(Some("refs/heads/feature branch"))
             .expect_err("invalid refs should fail"),
+        WorkspaceStoreError::Validation("default_ref is invalid".to_string())
+    );
+    assert_eq!(
+        validate_workspace_default_ref(Some("-branch"))
+            .expect_err("dash-prefixed refs should fail"),
         WorkspaceStoreError::Validation("default_ref is invalid".to_string())
     );
     assert_eq!(

@@ -54,7 +54,7 @@ fn pane_layout(area: Rect, completion_open: bool) -> PaneLayout {
     let composer = *vertical.last().expect("layout must include composer");
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
+        .constraints(vec![
             Constraint::Length(30),
             Constraint::Min(30),
             Constraint::Length(34),
@@ -158,7 +158,7 @@ fn render_tool_status_pane(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     let (permission_height, status_height) = tool_status_section_heights(inner, &permission_lines);
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
+        .constraints(vec![
             Constraint::Length(permission_height),
             Constraint::Min(status_height),
         ])
@@ -263,9 +263,10 @@ fn render_tail_section(frame: &mut Frame<'_>, area: Rect, title: &str, body: &[S
 }
 
 fn section_lines(title: &str, body: &[String]) -> Vec<String> {
-    std::iter::once(title.to_string())
-        .chain(body.iter().cloned())
-        .collect()
+    let mut lines = Vec::with_capacity(body.len() + 1);
+    lines.push(title.to_string());
+    lines.extend(body.iter().cloned());
+    lines
 }
 
 fn section_row_count(title: &str, body: &[String], width: usize) -> usize {

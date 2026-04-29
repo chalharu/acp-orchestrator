@@ -8,8 +8,6 @@ pub struct WorkspaceSummary {
     #[serde(default)]
     pub upstream_url: Option<String>,
     #[serde(default)]
-    pub default_ref: Option<String>,
-    #[serde(default)]
     pub bootstrap_kind: Option<String>,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -23,8 +21,6 @@ pub struct WorkspaceDetail {
     #[serde(default)]
     pub upstream_url: Option<String>,
     #[serde(default)]
-    pub default_ref: Option<String>,
-    #[serde(default)]
     pub credential_reference_id: Option<String>,
     #[serde(default)]
     pub bootstrap_kind: Option<String>,
@@ -36,10 +32,7 @@ pub struct WorkspaceDetail {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateWorkspaceRequest {
     pub name: String,
-    #[serde(default)]
-    pub upstream_url: Option<String>,
-    #[serde(default)]
-    pub default_ref: Option<String>,
+    pub upstream_url: String,
     #[serde(default)]
     pub credential_reference_id: Option<String>,
 }
@@ -48,8 +41,6 @@ pub struct CreateWorkspaceRequest {
 pub struct UpdateWorkspaceRequest {
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub default_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,13 +57,24 @@ pub type CreateWorkspaceResponse = WorkspaceResponse;
 pub type UpdateWorkspaceResponse = WorkspaceResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceBranch {
+    pub name: String,
+    pub ref_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceBranchListResponse {
+    pub branches: Vec<WorkspaceBranch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeleteWorkspaceResponse {
     pub deleted: bool,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateWorkspaceRequest, WorkspaceDetail};
+    use super::{UpdateWorkspaceRequest, WorkspaceBranchListResponse, WorkspaceDetail};
 
     #[test]
     fn workspace_details_deserialize_optional_fields() {
@@ -87,7 +89,6 @@ mod tests {
 
         assert_eq!(detail.workspace_id, "w_test");
         assert_eq!(detail.upstream_url, None);
-        assert_eq!(detail.default_ref, None);
         assert_eq!(detail.credential_reference_id, None);
         assert_eq!(detail.bootstrap_kind, None);
     }
@@ -98,6 +99,19 @@ mod tests {
             .expect("update requests should deserialize");
 
         assert_eq!(request.name, None);
-        assert_eq!(request.default_ref, None);
+    }
+
+    #[test]
+    fn workspace_branch_lists_round_trip() {
+        let response: WorkspaceBranchListResponse = serde_json::from_value(serde_json::json!({
+            "branches": [
+                { "name": "main", "ref_name": "refs/heads/main" }
+            ]
+        }))
+        .expect("branch list should deserialize");
+
+        assert_eq!(response.branches.len(), 1);
+        assert_eq!(response.branches[0].name, "main");
+        assert_eq!(response.branches[0].ref_name, "refs/heads/main");
     }
 }

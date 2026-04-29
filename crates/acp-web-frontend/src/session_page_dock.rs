@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 
-use crate::components::composer::{Composer, ComposerControls, ComposerSlashProps};
+use crate::components::composer::{
+    ComposerControls, ComposerProps, ComposerSlashProps, render_composer,
+};
 use crate::session_page_callbacks::SessionViewCallbacks;
 use crate::session_page_composer_signals::SessionComposerSignals;
 
@@ -12,17 +14,17 @@ pub(crate) fn SessionDock(
 ) -> impl IntoView {
     view! {
         <div class="chat-dock">
-            <Composer
-                draft=draft
-                on_submit=callbacks.submit
-                controls=ComposerControls {
+            {render_composer(ComposerProps {
+                draft,
+                on_submit: callbacks.submit,
+                controls: ComposerControls {
                     disabled: composer.disabled,
                     status_text: composer.status,
                     show_cancel: composer.cancel_visible,
                     cancel_disabled: composer.cancel_busy,
                     on_cancel: callbacks.cancel,
-                }
-                slash=ComposerSlashProps {
+                },
+                slash: ComposerSlashProps {
                     visible: composer.slash_palette_visible,
                     candidates: composer.slash_candidates,
                     selected_index: composer.slash_selected_index,
@@ -32,8 +34,8 @@ pub(crate) fn SessionDock(
                     on_apply_selected: callbacks.slash.apply_selected,
                     on_apply_index: callbacks.slash.apply_index,
                     on_dismiss: callbacks.slash.dismiss,
-                }
-            />
+                },
+            })}
         </div>
     }
 }

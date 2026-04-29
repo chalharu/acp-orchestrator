@@ -7,7 +7,7 @@ use crate::{application::auth::WorkspacesRouteAccess, components::ErrorBanner};
 use super::shared::workspaces_back_to_chat_path_from_location;
 use super::{
     create_workspace::{CreateWorkspaceButton, CreateWorkspaceModal},
-    registry::WorkspaceRegistrySection,
+    registry::workspace_registry_section,
     shared::{WorkspacesPageState, initialize_workspaces_page},
 };
 
@@ -122,7 +122,7 @@ fn workspaces_page_content_body(
 ) -> AnyView {
     match access {
         Some(WorkspacesRouteAccess::SignedIn) => view! {
-            <WorkspaceRegistrySection state />
+            {workspace_registry_section(state)}
         }
         .into_any(),
         Some(WorkspacesRouteAccess::RegisterRequired) => view! {

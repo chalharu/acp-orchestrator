@@ -1,5 +1,14 @@
+#[cfg(target_family = "wasm")]
+use crate::components::{
+    ErrorBanner, workspace_branch_modal_actions, workspace_branch_select_field,
+    workspace_branch_status_message,
+};
+#[cfg(any(test, target_family = "wasm"))]
+use acp_contracts_workspaces::WorkspaceBranch;
 use leptos::prelude::*;
 
+#[cfg(any(test, target_family = "wasm"))]
+use crate::presentation::default_branch_ref_name;
 #[cfg(target_family = "wasm")]
 use crate::{
     browser::{navigate_to, store_prepared_session_id},
@@ -109,6 +118,11 @@ fn session_sidebar_new_chat_label(creating: bool) -> &'static str {
     if creating { "Creating…" } else { "New chat" }
 }
 
+#[cfg(any(test, target_family = "wasm"))]
+fn session_sidebar_branch_required_message() -> &'static str {
+    "Choose a branch before starting a chat."
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionSidebarPrimaryActionKind {
     NewChat,
@@ -126,6 +140,31 @@ fn session_sidebar_primary_action_kind(
 }
 
 #[cfg(any(test, target_family = "wasm"))]
+#[derive(Clone, Copy)]
+struct SessionSidebarNewChatState {
+    show_modal: RwSignal<bool>,
+    workspace_id: RwSignal<Option<String>>,
+    branches: RwSignal<Vec<WorkspaceBranch>>,
+    selected_branch: RwSignal<String>,
+    loading_branches: RwSignal<bool>,
+    creating: RwSignal<bool>,
+}
+
+#[cfg(any(test, target_family = "wasm"))]
+impl SessionSidebarNewChatState {
+    fn new() -> Self {
+        Self {
+            show_modal: RwSignal::new(false),
+            workspace_id: RwSignal::new(None::<String>),
+            branches: RwSignal::new(Vec::<WorkspaceBranch>::new()),
+            selected_branch: RwSignal::new(String::new()),
+            loading_branches: RwSignal::new(false),
+            creating: RwSignal::new(false),
+        }
+    }
+}
+
+#[cfg(any(test, target_family = "wasm"))]
 fn session_sidebar_new_chat_unavailable_message() -> &'static str {
     "Current workspace is unavailable. Open Workspaces to choose another workspace."
 }
@@ -134,7 +173,7 @@ fn session_sidebar_new_chat_unavailable_message() -> &'static str {
 fn session_sidebar_begin_new_chat(
     current_workspace_id: Option<String>,
     sidebar_error: RwSignal<Option<String>>,
-    creating: RwSignal<bool>,
+    state: SessionSidebarNewChatState,
 ) -> Option<String> {
     let Some(workspace_id) = session_sidebar_new_chat_workspace_id(current_workspace_id) else {
         sidebar_error.set(Some(
@@ -143,19 +182,68 @@ fn session_sidebar_begin_new_chat(
         return None;
     };
 
-    creating.set(true);
+    state.show_modal.set(true);
+    state.workspace_id.set(Some(workspace_id.clone()));
+    state.branches.set(Vec::new());
+    state.selected_branch.set(String::new());
+    state.loading_branches.set(true);
+    state.creating.set(false);
     sidebar_error.set(None);
     Some(workspace_id)
 }
 
 #[cfg(any(test, target_family = "wasm"))]
 fn session_sidebar_finish_new_chat_failure(
-    creating: RwSignal<bool>,
+    state: SessionSidebarNewChatState,
     sidebar_error: RwSignal<Option<String>>,
     message: String,
 ) {
-    creating.set(false);
+    state.creating.set(false);
     sidebar_error.set(Some(message));
+}
+
+#[cfg(any(test, target_family = "wasm"))]
+fn session_sidebar_complete_branch_load(
+    state: SessionSidebarNewChatState,
+    workspace_id: &str,
+    branches: Vec<WorkspaceBranch>,
+) {
+    if state.workspace_id.get_untracked().as_deref() != Some(workspace_id) {
+        return;
+    }
+    state.loading_branches.set(false);
+    state
+        .selected_branch
+        .set(default_branch_ref_name(&branches));
+    state.branches.set(branches);
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_finish_branch_load_failure(
+    state: SessionSidebarNewChatState,
+    sidebar_error: RwSignal<Option<String>>,
+    workspace_id: &str,
+    message: String,
+) {
+    if state.workspace_id.get_untracked().as_deref() != Some(workspace_id) {
+        return;
+    }
+    state.loading_branches.set(false);
+    sidebar_error.set(Some(message));
+}
+
+#[cfg(any(test, target_family = "wasm"))]
+fn session_sidebar_close_new_chat_modal(
+    state: SessionSidebarNewChatState,
+    sidebar_error: RwSignal<Option<String>>,
+) {
+    state.show_modal.set(false);
+    state.workspace_id.set(None);
+    state.branches.set(Vec::new());
+    state.selected_branch.set(String::new());
+    state.loading_branches.set(false);
+    state.creating.set(false);
+    sidebar_error.set(None);
 }
 
 fn session_sidebar_workspaces_icon() -> AppIcon {
@@ -200,7 +288,13 @@ fn session_sidebar_primary_action(
         {move || {
             match action_kind.get() {
                 SessionSidebarPrimaryActionKind::NewChat => {
-                    session_sidebar_new_chat_button(current_workspace_id, sidebar_error)
+                    view! {
+                        <SessionSidebarNewChatAction
+                            current_workspace_id=current_workspace_id
+                            sidebar_error=sidebar_error
+                        />
+                    }
+                    .into_any()
                 }
                 SessionSidebarPrimaryActionKind::Workspaces => {
                     session_sidebar_workspaces_link(&workspaces_href)
@@ -227,14 +321,29 @@ fn session_sidebar_primary_action(
 }
 
 #[cfg(target_family = "wasm")]
-fn session_sidebar_new_chat_button(
+#[component]
+fn SessionSidebarNewChatAction(
     current_workspace_id: Signal<Option<String>>,
     sidebar_error: RwSignal<Option<String>>,
-) -> AnyView {
-    let creating = RwSignal::new(false);
+) -> impl IntoView {
+    let state = SessionSidebarNewChatState::new();
     let on_click =
-        session_sidebar_new_chat_click_handler(current_workspace_id, sidebar_error, creating);
+        session_sidebar_new_chat_click_handler(current_workspace_id, sidebar_error, state);
+    let creating = Signal::derive(move || state.creating.get());
 
+    view! {
+        <>
+            {session_sidebar_new_chat_button_view(creating, on_click)}
+            {session_sidebar_new_chat_modal(state, sidebar_error)}
+        </>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_button_view(
+    creating: Signal<bool>,
+    on_click: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
     view! {
         <button
             type="button"
@@ -242,58 +351,141 @@ fn session_sidebar_new_chat_button(
             prop:disabled=move || creating.get()
             aria-label=move || session_sidebar_new_chat_label(creating.get())
             title=move || session_sidebar_new_chat_label(creating.get())
-            on:click=on_click
+            on:click=move |event| on_click.run(event)
         >
             <span class="session-sidebar__new-link-icon" aria-hidden="true">
                 {move || app_icon_view(session_sidebar_new_chat_icon(creating.get()))}
             </span>
-            <span class="sr-only">
-                {move || session_sidebar_new_chat_label(creating.get())}
-            </span>
+            <span class="sr-only">{move || session_sidebar_new_chat_label(creating.get())}</span>
         </button>
     }
-    .into_any()
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_modal(
+    state: SessionSidebarNewChatState,
+    sidebar_error: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let error = Signal::derive(move || sidebar_error.get());
+    let on_submit = session_sidebar_new_chat_submit_handler(sidebar_error, state);
+    let on_cancel = session_sidebar_new_chat_cancel_handler(sidebar_error, state);
+
+    view! {
+        <Show when=move || state.show_modal.get()>
+            {session_sidebar_new_chat_modal_view(state, error, on_submit, on_cancel)}
+        </Show>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_modal_view(
+    state: SessionSidebarNewChatState,
+    error: Signal<Option<String>>,
+    on_submit: Callback<web_sys::SubmitEvent>,
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    let branches = Signal::derive(move || state.branches.get());
+    let selected_branch = Signal::derive(move || state.selected_branch.get());
+    let loading_branches = Signal::derive(move || state.loading_branches.get());
+    let creating = Signal::derive(move || state.creating.get());
+
+    view! {
+        <div
+            class="workspace-modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Start new chat"
+        >
+            <div class="workspace-modal">
+                {session_sidebar_new_chat_modal_header(on_cancel)}
+                <p class="muted">
+                    {move || workspace_branch_status_message(loading_branches.get())}
+                </p>
+                <ErrorBanner message=error />
+                <form
+                    class="account-form workspace-modal__form"
+                    on:submit=move |event| on_submit.run(event)
+                >
+                    {session_sidebar_new_chat_branch_field(
+                        state,
+                        branches,
+                        selected_branch,
+                        loading_branches,
+                    )}
+                    {session_sidebar_new_chat_modal_actions(
+                        creating,
+                        loading_branches,
+                        selected_branch,
+                        branches,
+                        on_cancel,
+                    )}
+                </form>
+            </div>
+        </div>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_modal_header(
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <div class="workspace-modal__header">
+            <h2 class="workspace-modal__title">"Start new chat"</h2>
+            <button
+                type="button"
+                class="workspace-modal__close"
+                on:click=move |event| on_cancel.run(event)
+                aria-label="Close"
+                title="Close"
+            >
+                {app_icon_view(AppIcon::Cancel)}
+                <span class="sr-only">"Close"</span>
+            </button>
+        </div>
+    }
 }
 
 #[cfg(target_family = "wasm")]
 fn session_sidebar_new_chat_click_handler(
     current_workspace_id: Signal<Option<String>>,
     sidebar_error: RwSignal<Option<String>>,
-    creating: RwSignal<bool>,
-) -> impl Fn(web_sys::MouseEvent) {
-    move |_| {
-        if creating.get_untracked() {
+    state: SessionSidebarNewChatState,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_| {
+        if state.creating.get_untracked() {
             return;
         }
 
         let Some(workspace_id) = session_sidebar_begin_new_chat(
             current_workspace_id.get_untracked(),
             sidebar_error,
-            creating,
+            state,
         ) else {
             return;
         };
 
-        session_sidebar_spawn_new_chat_request(workspace_id, sidebar_error, creating);
-    }
+        session_sidebar_spawn_branch_request(workspace_id, sidebar_error, state);
+    })
 }
 
 #[cfg(target_family = "wasm")]
-fn session_sidebar_spawn_new_chat_request(
+fn session_sidebar_spawn_branch_request(
     workspace_id: String,
     sidebar_error: RwSignal<Option<String>>,
-    creating: RwSignal<bool>,
+    state: SessionSidebarNewChatState,
 ) {
     leptos::task::spawn_local(async move {
-        match api::create_workspace_session(&workspace_id).await {
-            Ok(session_id) => {
-                session_sidebar_complete_new_chat(session_id, sidebar_error, creating);
+        match api::list_workspace_branches(&workspace_id).await {
+            Ok(branches) => {
+                session_sidebar_complete_branch_load(state, &workspace_id, branches);
             }
-            Err(create_error) => {
-                session_sidebar_finish_new_chat_failure(
-                    creating,
+            Err(message) => {
+                session_sidebar_finish_branch_load_failure(
+                    state,
                     sidebar_error,
-                    create_error.into_message(),
+                    &workspace_id,
+                    message,
                 );
             }
         }
@@ -301,15 +493,88 @@ fn session_sidebar_spawn_new_chat_request(
 }
 
 #[cfg(target_family = "wasm")]
-fn session_sidebar_complete_new_chat(
-    session_id: String,
+fn session_sidebar_new_chat_branch_field(
+    state: SessionSidebarNewChatState,
+    branches: Signal<Vec<WorkspaceBranch>>,
+    selected_branch: Signal<String>,
+    loading_branches: Signal<bool>,
+) -> impl IntoView {
+    workspace_branch_select_field(branches, selected_branch, loading_branches, move |event| {
+        state.selected_branch.set(event_target_value(&event))
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_modal_actions(
+    creating: Signal<bool>,
+    loading_branches: Signal<bool>,
+    selected_branch: Signal<String>,
+    branches: Signal<Vec<WorkspaceBranch>>,
+    on_cancel: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    workspace_branch_modal_actions(
+        move || session_sidebar_new_chat_label(creating.get()),
+        creating,
+        loading_branches,
+        selected_branch,
+        branches,
+        move |event| on_cancel.run(event),
+    )
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_submit_handler(
     sidebar_error: RwSignal<Option<String>>,
-    creating: RwSignal<bool>,
-) {
-    store_prepared_session_id(&session_id);
-    if let Err(message) = navigate_to(&app_session_path(&session_id)) {
-        session_sidebar_finish_new_chat_failure(creating, sidebar_error, message);
-    }
+    state: SessionSidebarNewChatState,
+) -> Callback<web_sys::SubmitEvent> {
+    Callback::new(move |event: web_sys::SubmitEvent| {
+        event.prevent_default();
+        if state.creating.get_untracked() || state.loading_branches.get_untracked() {
+            return;
+        }
+
+        let Some(workspace_id) = state.workspace_id.get_untracked() else {
+            sidebar_error.set(Some(
+                session_sidebar_new_chat_unavailable_message().to_string(),
+            ));
+            return;
+        };
+        let selected_branch = state.selected_branch.get_untracked();
+        if selected_branch.trim().is_empty() {
+            sidebar_error.set(Some(session_sidebar_branch_required_message().to_string()));
+            return;
+        }
+
+        state.creating.set(true);
+        sidebar_error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
+                Ok(session_id) => {
+                    store_prepared_session_id(&session_id);
+                    if let Err(message) = navigate_to(&app_session_path(&session_id)) {
+                        session_sidebar_finish_new_chat_failure(state, sidebar_error, message);
+                        return;
+                    }
+                    session_sidebar_close_new_chat_modal(state, sidebar_error);
+                }
+                Err(create_error) => {
+                    session_sidebar_finish_new_chat_failure(
+                        state,
+                        sidebar_error,
+                        create_error.into_message(),
+                    );
+                }
+            }
+        });
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_cancel_handler(
+    sidebar_error: RwSignal<Option<String>>,
+    state: SessionSidebarNewChatState,
+) -> Callback<web_sys::MouseEvent> {
+    Callback::new(move |_| session_sidebar_close_new_chat_modal(state, sidebar_error))
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -340,6 +605,13 @@ mod tests {
     use leptos::prelude::*;
 
     use super::*;
+
+    fn sample_sidebar_branch() -> WorkspaceBranch {
+        WorkspaceBranch {
+            name: "main".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+        }
+    }
 
     #[test]
     fn session_sidebar_header_builds_without_panicking() {
@@ -405,6 +677,10 @@ mod tests {
         assert_eq!(session_sidebar_new_chat_label(false), "New chat");
         assert_eq!(session_sidebar_new_chat_label(true), "Creating…");
         assert_eq!(
+            session_sidebar_branch_required_message(),
+            "Choose a branch before starting a chat."
+        );
+        assert_eq!(
             session_sidebar_new_chat_unavailable_message(),
             "Current workspace is unavailable. Open Workspaces to choose another workspace."
         );
@@ -417,41 +693,108 @@ mod tests {
     }
 
     #[test]
-    fn session_sidebar_new_chat_state_helpers_update_local_signals() {
+    fn session_sidebar_begin_new_chat_sets_modal_state() {
         let owner = Owner::new();
         owner.with(|| {
             let sidebar_error = RwSignal::new(Some("old".to_string()));
-            let creating = RwSignal::new(false);
+            let state = SessionSidebarNewChatState::new();
 
             assert_eq!(
                 session_sidebar_begin_new_chat(
                     Some("workspace-1".to_string()),
                     sidebar_error,
-                    creating,
+                    state,
                 ),
                 Some("workspace-1".to_string())
             );
-            assert!(creating.get());
+            assert!(state.show_modal.get());
+            assert_eq!(state.workspace_id.get(), Some("workspace-1".to_string()));
+            assert!(state.loading_branches.get());
             assert_eq!(sidebar_error.get(), None);
 
-            creating.set(false);
+            session_sidebar_complete_branch_load(
+                state,
+                "workspace-1",
+                vec![sample_sidebar_branch()],
+            );
+            assert!(!state.loading_branches.get());
+            assert_eq!(state.selected_branch.get(), "refs/heads/main");
+            assert_eq!(state.branches.get().len(), 1);
+        });
+    }
+
+    #[test]
+    fn session_sidebar_branch_load_ignores_stale_workspace_updates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(None::<String>);
+            let state = SessionSidebarNewChatState::new();
+            let _ = session_sidebar_begin_new_chat(
+                Some("workspace-1".to_string()),
+                sidebar_error,
+                state,
+            );
+
+            session_sidebar_complete_branch_load(
+                state,
+                "workspace-2",
+                vec![sample_sidebar_branch()],
+            );
+
+            assert!(state.loading_branches.get());
+            assert!(state.selected_branch.get().is_empty());
+            assert!(state.branches.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn session_sidebar_begin_new_chat_reports_missing_workspace() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(Some("old".to_string()));
+            let state = SessionSidebarNewChatState::new();
             assert_eq!(
-                session_sidebar_begin_new_chat(None, sidebar_error, creating),
+                session_sidebar_begin_new_chat(None, sidebar_error, state),
                 None
             );
-            assert!(!creating.get());
             assert_eq!(
                 sidebar_error.get(),
                 Some(session_sidebar_new_chat_unavailable_message().to_string())
             );
+        });
+    }
 
+    #[test]
+    fn session_sidebar_finish_new_chat_failure_and_close_modal_reset_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(None::<String>);
+            let state = SessionSidebarNewChatState::new();
+            let _ = session_sidebar_begin_new_chat(
+                Some("workspace-1".to_string()),
+                sidebar_error,
+                state,
+            );
+            session_sidebar_complete_branch_load(
+                state,
+                "workspace-1",
+                vec![sample_sidebar_branch()],
+            );
             session_sidebar_finish_new_chat_failure(
-                creating,
+                state,
                 sidebar_error,
                 "unable to create".to_string(),
             );
-            assert!(!creating.get());
+            assert!(!state.creating.get());
             assert_eq!(sidebar_error.get(), Some("unable to create".to_string()));
+
+            session_sidebar_close_new_chat_modal(state, sidebar_error);
+            assert!(!state.show_modal.get());
+            assert!(state.workspace_id.get().is_none());
+            assert!(state.branches.get().is_empty());
+            assert!(state.selected_branch.get().is_empty());
+            assert!(!state.loading_branches.get());
+            assert!(sidebar_error.get().is_none());
         });
     }
 

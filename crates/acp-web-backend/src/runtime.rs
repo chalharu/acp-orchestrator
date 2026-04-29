@@ -99,7 +99,7 @@ fn resolve_acp_server(
 async fn run(cli: Cli) -> Result<()> {
     let acp_server = resolve_acp_server(cli.acp_server.clone(), env::var("ACP_MOCK_ADDRESS").ok())
         .context(ParseArgsSnafu)?;
-    let listener = bind_listener(&cli.listen.host, cli.port, "web backend")
+    let listener = bind_listener(cli.listen.resolved_host(), cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
     let endpoint = listener_endpoint(&listener, "web backend", "https://")
@@ -150,7 +150,7 @@ mod tests {
     fn test_cli(acp_server: Option<&str>) -> Cli {
         Cli {
             listen: RuntimeListenArgs {
-                host: "127.0.0.1".to_string(),
+                host: Some("127.0.0.1".to_string()),
                 exit_after_ms: None,
             },
             port: 0,

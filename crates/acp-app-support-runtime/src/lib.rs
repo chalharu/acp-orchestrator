@@ -14,13 +14,20 @@ use tokio::{
 use acp_app_support_errors::BoxError;
 
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeListenArgs {
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
+    #[arg(long)]
+    pub host: Option<String>,
     #[arg(long, hide = true)]
     pub exit_after_ms: Option<u64>,
+}
+
+impl RuntimeListenArgs {
+    pub fn resolved_host(&self) -> &str {
+        self.host.as_deref().unwrap_or(DEFAULT_LISTEN_HOST)
+    }
 }
 
 pub fn shutdown_signal(exit_after_ms: Option<u64>) -> ShutdownSignal {

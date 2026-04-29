@@ -51,6 +51,12 @@ pub struct SessionResponse {
 
 pub type CreateSessionResponse = SessionResponse;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CreateSessionRequest {
+    #[serde(default)]
+    pub checkout_ref: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenameSessionRequest {
     pub title: String,
@@ -84,7 +90,7 @@ pub struct CloseSessionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionListItem, SessionSnapshot};
+    use super::{CreateSessionRequest, SessionListItem, SessionSnapshot};
 
     #[test]
     fn session_snapshots_deserialize_default_titles_empty_permissions_and_workspace() {
@@ -112,5 +118,13 @@ mod tests {
 
         assert!(item.workspace_id.is_empty());
         assert_eq!(item.title, "New chat");
+    }
+
+    #[test]
+    fn create_session_requests_default_optional_checkout_ref() {
+        let request: CreateSessionRequest = serde_json::from_value(serde_json::json!({}))
+            .expect("create requests should deserialize");
+
+        assert_eq!(request.checkout_ref, None);
     }
 }

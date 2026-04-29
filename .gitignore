@@ -212,4 +212,6 @@ marimo/_lsp/
 __marimo__/
 
 .tmp/
+.acp-state/
+**/.acp-state/
 containers/control-plane/hooks/preToolUse/node_modules/

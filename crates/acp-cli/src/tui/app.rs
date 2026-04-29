@@ -472,9 +472,9 @@ fn formatted_message_lines(role: MessageRole, text: &str) -> Vec<String> {
     };
     let mut lines = text.lines();
     let first = lines.next().unwrap_or_default();
-    std::iter::once(format!("{prefix} {first}"))
-        .chain(lines.map(|line| format!("  {line}")))
-        .collect()
+    let mut formatted = vec![format!("{prefix} {first}")];
+    formatted.extend(lines.map(|line| format!("  {line}")));
+    formatted
 }
 
 fn completion_start(prefix: &str) -> usize {

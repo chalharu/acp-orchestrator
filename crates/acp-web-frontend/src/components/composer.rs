@@ -82,13 +82,21 @@ pub(crate) struct ComposerSlashProps {
     pub(crate) on_dismiss: Callback<()>,
 }
 
-#[component]
-pub(crate) fn Composer(
-    draft: RwSignal<String>,
-    on_submit: Callback<String>,
-    controls: ComposerControls,
-    slash: ComposerSlashProps,
-) -> impl IntoView {
+#[derive(Clone)]
+pub(crate) struct ComposerProps {
+    pub(crate) draft: RwSignal<String>,
+    pub(crate) on_submit: Callback<String>,
+    pub(crate) controls: ComposerControls,
+    pub(crate) slash: ComposerSlashProps,
+}
+
+pub(crate) fn render_composer(props: ComposerProps) -> AnyView {
+    let ComposerProps {
+        draft,
+        on_submit,
+        controls,
+        slash,
+    } = props;
     let form = NodeRef::<leptos_html::Form>::new();
     let textarea = NodeRef::<leptos_html::Textarea>::new();
     let restore_focus_after_submit = RwSignal::new(false);
@@ -126,6 +134,7 @@ pub(crate) fn Composer(
             {composer_panel_body(draft, slash_signals, slash_callbacks, submit_runtime, controls)}
         </form>
     }
+    .into_any()
 }
 
 fn submit_handler<E>(
@@ -502,9 +511,9 @@ mod tests {
 
     use super::super::composer_palette::slash_option_id;
     use super::{
-        Composer, ComposerControls, ComposerSlashProps, SlashTestCallbacks, SlashTestSignals,
+        ComposerControls, ComposerProps, ComposerSlashProps, SlashTestCallbacks, SlashTestSignals,
         SubmitDraftRuntime, composer_active_descendant, composer_submit_handler,
-        current_submit_value, submit_draft, submit_handler, submit_text,
+        current_submit_value, render_composer, submit_draft, submit_handler, submit_text,
     };
     #[cfg(target_family = "wasm")]
     use super::{ComposerKeyAction, apply_composer_key_action, composer_key_action};
@@ -647,30 +656,28 @@ mod tests {
                 on_slash_dismiss,
             ) = make_slash_callbacks();
 
-            let _ = view! {
-                <Composer
-                    draft=draft
-                    on_submit=Callback::new(|_: String| {})
-                    controls=ComposerControls {
-                        disabled: Signal::derive(|| false),
-                        status_text: Signal::derive(String::new),
-                        show_cancel: Signal::derive(|| false),
-                        cancel_disabled: Signal::derive(|| false),
-                        on_cancel: Callback::new(|()| {}),
-                    }
-                    slash=ComposerSlashProps {
-                        visible: slash_visible,
-                        candidates: slash_candidates,
-                        selected_index: slash_selected_index,
-                        apply_selected: slash_apply_selected,
-                        on_select_next: on_slash_select_next,
-                        on_select_previous: on_slash_select_previous,
-                        on_apply_selected: on_slash_apply_selected,
-                        on_apply_index: on_slash_apply_index,
-                        on_dismiss: on_slash_dismiss,
-                    }
-                />
-            };
+            let _ = render_composer(ComposerProps {
+                draft,
+                on_submit: Callback::new(|_: String| {}),
+                controls: ComposerControls {
+                    disabled: Signal::derive(|| false),
+                    status_text: Signal::derive(String::new),
+                    show_cancel: Signal::derive(|| false),
+                    cancel_disabled: Signal::derive(|| false),
+                    on_cancel: Callback::new(|()| {}),
+                },
+                slash: ComposerSlashProps {
+                    visible: slash_visible,
+                    candidates: slash_candidates,
+                    selected_index: slash_selected_index,
+                    apply_selected: slash_apply_selected,
+                    on_select_next: on_slash_select_next,
+                    on_select_previous: on_slash_select_previous,
+                    on_apply_selected: on_slash_apply_selected,
+                    on_apply_index: on_slash_apply_index,
+                    on_dismiss: on_slash_dismiss,
+                },
+            });
         });
     }
 

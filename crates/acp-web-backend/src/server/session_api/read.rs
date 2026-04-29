@@ -8,8 +8,10 @@ use crate::contract_sessions::{
 };
 use crate::contract_slash::SlashCompletionsResponse;
 use crate::{
-    auth::AuthenticatedPrincipal, completions::resolve_slash_completions,
+    auth::AuthenticatedPrincipal,
+    completions::resolve_slash_completions,
     sessions::SessionStoreError,
+    workspace_records::{DurableSessionSnapshotRecord, SessionMetadataRecord},
 };
 
 use super::super::{AppError, AppState, OwnerContext, assets::SlashCompletionsQuery};
@@ -89,21 +91,190 @@ async fn restore_durable_session(
     owner: &OwnerContext,
     session_id: &str,
 ) -> Result<SessionSnapshot, AppError> {
-    let Some(durable) = state
+    let (metadata, durable) = load_restorable_session(state, owner, session_id).await?;
+    let restored = restore_durable_snapshot(state, owner, durable).await?;
+    bind_restored_session_to_checkout(state, &owner.principal.id, &restored, metadata.as_ref())
+        .await?;
+    Ok(restored)
+}
+
+async fn load_restorable_session(
+    state: &AppState,
+    owner: &OwnerContext,
+    session_id: &str,
+) -> Result<(Option<SessionMetadataRecord>, DurableSessionSnapshotRecord), AppError> {
+    let metadata = state
+        .workspace_repository
+        .load_session_metadata(&owner.user.user_id, session_id)
+        .await?;
+    let durable = state
         .workspace_repository
         .load_session_snapshot(&owner.user.user_id, session_id)
         .await?
-    else {
-        return Err(AppError::NotFound("session not found".to_string()));
-    };
-    let crate::workspace_records::DurableSessionSnapshotRecord {
+        .ok_or_else(|| AppError::NotFound("session not found".to_string()))?;
+    Ok((metadata, durable))
+}
+
+async fn restore_durable_snapshot(
+    state: &AppState,
+    owner: &OwnerContext,
+    durable: DurableSessionSnapshotRecord,
+) -> Result<SessionSnapshot, AppError> {
+    let DurableSessionSnapshotRecord {
         session,
         last_activity_at,
     } = durable;
-
     state
         .store
         .restore_session(&owner.principal.id, session, last_activity_at)
         .await
         .map_err(AppError::from)
+}
+
+async fn bind_restored_session_to_checkout(
+    state: &AppState,
+    owner_id: &str,
+    restored: &SessionSnapshot,
+    metadata: Option<&SessionMetadataRecord>,
+) -> Result<(), AppError> {
+    let Some(checkout_relpath) = metadata.and_then(|record| record.checkout_relpath.as_deref())
+    else {
+        return Ok(());
+    };
+    let checkout_path =
+        resolve_restored_checkout_path(state, owner_id, restored, checkout_relpath).await?;
+    match state
+        .reply_provider
+        .bind_session(&restored.id, checkout_path)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            rollback_restored_session(state, owner_id, &restored.id, &error).await?;
+            Err(AppError::Internal(error))
+        }
+    }
+}
+
+async fn resolve_restored_checkout_path(
+    state: &AppState,
+    owner_id: &str,
+    restored: &SessionSnapshot,
+    checkout_relpath: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    match state
+        .checkout_manager
+        .resolve_checkout_path(checkout_relpath)
+    {
+        Some(path) => Ok(path),
+        None => {
+            let error = AppError::Internal("persisted checkout path is invalid".to_string());
+            rollback_restored_session(state, owner_id, &restored.id, error.message()).await?;
+            Err(error)
+        }
+    }
+}
+
+async fn rollback_restored_session(
+    state: &AppState,
+    owner_id: &str,
+    session_id: &str,
+    error_message: &str,
+) -> Result<(), AppError> {
+    state.reply_provider.forget_session(session_id);
+    state
+        .store
+        .discard_session(owner_id, session_id)
+        .await
+        .map_err(|rollback_error| {
+            AppError::Internal(format!(
+                "{error_message}; restored session rollback failed: {}",
+                rollback_error.message()
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        contract_sessions::SessionStatus,
+        mock_client::{ReplyFuture, ReplyProvider, ReplyResult},
+        sessions::SessionStore,
+    };
+
+    #[derive(Debug)]
+    struct NoopReplyProvider;
+
+    impl ReplyProvider for NoopReplyProvider {
+        fn request_reply<'a>(&'a self, _turn: crate::sessions::TurnHandle) -> ReplyFuture<'a> {
+            Box::pin(async { Ok(ReplyResult::NoOutput) })
+        }
+    }
+
+    fn sample_session_snapshot(session_id: &str) -> SessionSnapshot {
+        SessionSnapshot {
+            id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            title: "Test session".to_string(),
+            status: SessionStatus::Active,
+            latest_sequence: 0,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+        }
+    }
+
+    async fn sample_turn_handle() -> crate::sessions::TurnHandle {
+        let store = SessionStore::new(4);
+        let session = store
+            .create_session("alice", "w_test")
+            .await
+            .expect("session creation should succeed");
+        store
+            .submit_prompt("alice", &session.id, "hello".to_string())
+            .await
+            .expect("prompt submission should succeed")
+            .turn_handle()
+    }
+
+    #[tokio::test]
+    async fn noop_reply_provider_returns_no_output() {
+        let reply = NoopReplyProvider
+            .request_reply(sample_turn_handle().await)
+            .await
+            .expect("noop reply providers should return successfully");
+
+        assert_eq!(reply, ReplyResult::NoOutput);
+    }
+
+    #[tokio::test]
+    async fn restored_sessions_skip_rebinding_without_a_persisted_checkout_path() {
+        let state = AppState::with_dependencies(
+            Arc::new(SessionStore::new(4)),
+            Arc::new(NoopReplyProvider),
+        );
+        let restored = sample_session_snapshot("s_restore");
+
+        bind_restored_session_to_checkout(&state, "alice", &restored, None)
+            .await
+            .expect("missing checkout metadata should skip rebinding");
+    }
+
+    #[tokio::test]
+    async fn rollback_restored_session_reports_discard_failures_with_context() {
+        let state = AppState::with_dependencies(
+            Arc::new(SessionStore::new(4)),
+            Arc::new(NoopReplyProvider),
+        );
+
+        let error =
+            rollback_restored_session(&state, "alice", "missing", "binding checkout failed")
+                .await
+                .expect_err("missing restored sessions should surface rollback failures");
+
+        assert!(matches!(error, AppError::Internal(message)
+                if message == "binding checkout failed; restored session rollback failed: session not found"));
+    }
 }

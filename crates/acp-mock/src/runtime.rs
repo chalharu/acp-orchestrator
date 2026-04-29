@@ -12,6 +12,8 @@ use crate::support::service::{run_service_with_readiness, shutdown_signal};
 use crate::{MockConfig, serve_with_shutdown};
 
 type Result<T, E = MockAppError> = std::result::Result<T, E>;
+const DEFAULT_PORT: u16 = 8090;
+const DEFAULT_RESPONSE_DELAY_MS: u64 = 120;
 const READY_CHECK_ATTEMPTS: usize = 300;
 const READY_CHECK_DELAY: Duration = Duration::from_millis(100);
 
@@ -43,23 +45,29 @@ pub enum MockAppError {
 struct Cli {
     #[command(flatten)]
     listen: RuntimeListenArgs,
-    #[arg(long, default_value_t = 8090)]
-    port: u16,
-    #[arg(long, default_value_t = 120)]
-    response_delay_ms: u64,
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    response_delay_ms: Option<u64>,
+    #[arg(long)]
     startup_hints: bool,
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let listener = bind_listener(&cli.listen.host, cli.port, "mock server")
-        .await
-        .map_err(|source| MockAppError::Setup { source })?;
+    let listener = bind_listener(
+        cli.listen.resolved_host(),
+        cli.port.unwrap_or(DEFAULT_PORT),
+        "mock server",
+    )
+    .await
+    .map_err(|source| MockAppError::Setup { source })?;
     let endpoint = listener_endpoint(&listener, "mock server", "")
         .map_err(|source| MockAppError::Setup { source })?;
 
     let config = MockConfig {
-        response_delay: Duration::from_millis(cli.response_delay_ms),
+        response_delay: Duration::from_millis(
+            cli.response_delay_ms.unwrap_or(DEFAULT_RESPONSE_DELAY_MS),
+        ),
         startup_hints: cli.startup_hints,
     };
     let ready = wait_for_tcp_connect(&endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);

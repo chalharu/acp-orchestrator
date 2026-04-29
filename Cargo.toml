@@ -63,6 +63,7 @@ crossterm = "=0.29.0"
 dirs = "=6.0.0"
 eventsource-stream = "=0.2.3"
 futures-util = "=0.3.32"
+git2 = "=0.20.4"
 hyper = { version = "=1.9.0", features = ["http1", "server"] }
 hyper-util = { version = "=0.1.20", features = [
   "http1",

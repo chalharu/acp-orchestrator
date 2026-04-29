@@ -8,7 +8,13 @@ use std::{
     time::Duration,
 };
 
-use agent_client_protocol::{self as acp, schema};
+use agent_client_protocol::{self as acp, ConnectTo, schema};
+use futures_util::{
+    Sink, Stream,
+    future::{self, BoxFuture, Either},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sink::unfold,
+};
 use snafu::prelude::*;
 use tokio::net::{
     TcpStream,
@@ -27,10 +33,36 @@ use backend_client::BackendAcpClient;
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
 pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Send + 'a>>;
 pub type PrimeSessionFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
+pub type BindSessionFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>>;
+type DynRd = Box<dyn AsyncRead + Send + Unpin>;
+type DynWr = Box<dyn AsyncWrite + Send + Unpin>;
+type LineSink = Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>>;
+type LineStream = Pin<Box<dyn Stream<Item = std::io::Result<String>> + Send>>;
+type OperationFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
+type ConnectedOperation<T> = Box<
+    dyn FnOnce(
+            acp::ConnectionTo<acp::Agent>,
+            PathBuf,
+            String,
+            BackendAcpClient,
+            UpstreamSessions,
+        ) -> OperationFuture<T>
+        + Send,
+>;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
+type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
 type SessionLock = Arc<tokio::sync::Mutex<()>>;
 type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
+
+struct ConnectedMainState<T> {
+    working_dir: PathBuf,
+    backend_session_id: String,
+    client: BackendAcpClient,
+    upstream_sessions: UpstreamSessions,
+    operation: ConnectedOperation<T>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyResult {
@@ -41,6 +73,14 @@ pub enum ReplyResult {
 
 pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
     fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a>;
+
+    fn bind_session<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _working_dir: PathBuf,
+    ) -> BindSessionFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
 
     fn prime_session<'a>(&'a self, _session_id: &'a str) -> PrimeSessionFuture<'a> {
         Box::pin(async { Ok(None) })
@@ -53,7 +93,8 @@ pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
 pub struct MockClient {
     mock_address: String,
     request_timeout: Duration,
-    working_dir: PathBuf,
+    default_working_dir: PathBuf,
+    session_working_dirs: SessionWorkingDirs,
     upstream_sessions: UpstreamSessions,
     session_locks: SessionLocks,
 }
@@ -113,7 +154,8 @@ impl MockClient {
         Ok(Self {
             mock_address,
             request_timeout,
-            working_dir,
+            default_working_dir: working_dir,
+            session_working_dirs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             upstream_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -162,6 +204,10 @@ impl MockClient {
     }
 
     async fn forget_session(&self, backend_session_id: &str) {
+        self.session_working_dirs
+            .lock()
+            .await
+            .remove(backend_session_id);
         self.upstream_sessions
             .lock()
             .await
@@ -187,7 +233,7 @@ impl MockClient {
         F: FnOnce(String, PathBuf, Duration, UpstreamSessions) -> Result<T> + Send + 'static,
     {
         let mock_address = self.mock_address.clone();
-        let working_dir = self.working_dir.clone();
+        let working_dir = self.session_working_dir(&backend_session_id).await;
         let request_timeout = self.request_timeout;
         let upstream_sessions = self.upstream_sessions.clone();
         let session_lock = self.session_lock(&backend_session_id).await;
@@ -213,11 +259,34 @@ impl MockClient {
             .get(backend_session_id)
             .cloned()
     }
+
+    async fn session_working_dir(&self, backend_session_id: &str) -> PathBuf {
+        self.session_working_dirs
+            .lock()
+            .await
+            .get(backend_session_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_working_dir.clone())
+    }
 }
 
 impl ReplyProvider for MockClient {
     fn request_reply<'a>(&'a self, turn: TurnHandle) -> ReplyFuture<'a> {
         Box::pin(MockClient::request_reply(self, turn))
+    }
+
+    fn bind_session<'a>(
+        &'a self,
+        session_id: &'a str,
+        working_dir: PathBuf,
+    ) -> BindSessionFuture<'a> {
+        Box::pin(async move {
+            self.session_working_dirs
+                .lock()
+                .await
+                .insert(session_id.to_string(), working_dir);
+            Ok(())
+        })
     }
 
     fn prime_session<'a>(&'a self, session_id: &'a str) -> PrimeSessionFuture<'a> {
@@ -248,28 +317,32 @@ async fn drive_acp_roundtrip(
         backend_session_id,
         upstream_sessions,
         client,
-        move |conn, working_dir, backend_session_id, client, upstream_sessions| async move {
-            let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
-            let session_id = load_or_create_session(
-                &conn,
-                &working_dir,
-                &backend_session_id,
-                &upstream_sessions,
-            )
-            .await?;
-            if *cancel_rx.borrow() {
-                return Ok(ReplyResult::Status("turn cancelled".to_string()));
-            }
+        Box::new(
+            move |conn, working_dir, backend_session_id, client, upstream_sessions| {
+                Box::pin(async move {
+                    let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
+                    let session_id = load_or_create_session(
+                        &conn,
+                        &working_dir,
+                        &backend_session_id,
+                        &upstream_sessions,
+                    )
+                    .await?;
+                    if *cancel_rx.borrow() {
+                        return Ok(ReplyResult::Status("turn cancelled".to_string()));
+                    }
 
-            prompt_session(
-                &conn,
-                &client,
-                &mut cancel_rx,
-                session_id,
-                turn.prompt_text(),
-            )
-            .await
-        },
+                    prompt_session(
+                        &conn,
+                        &client,
+                        &mut cancel_rx,
+                        session_id,
+                        turn.prompt_text(),
+                    )
+                    .await
+                })
+            },
+        ),
     )
     .await
 }
@@ -286,18 +359,22 @@ async fn drive_acp_session_prime(
         backend_session_id,
         upstream_sessions,
         BackendAcpClient::without_turn(),
-        move |conn, working_dir, backend_session_id, client, upstream_sessions| async move {
-            let session_id = load_or_create_session(
-                &conn,
-                &working_dir,
-                &backend_session_id,
-                &upstream_sessions,
-            )
-            .await?;
-            let _ = session_id;
-            let reply = client.take_reply_text();
-            Ok((!reply.is_empty()).then_some(reply))
-        },
+        Box::new(
+            move |conn, working_dir, backend_session_id, client, upstream_sessions| {
+                Box::pin(async move {
+                    let session_id = load_or_create_session(
+                        &conn,
+                        &working_dir,
+                        &backend_session_id,
+                        &upstream_sessions,
+                    )
+                    .await?;
+                    let _ = session_id;
+                    let reply = client.take_reply_text();
+                    Ok((!reply.is_empty()).then_some(reply))
+                })
+            },
+        ),
     )
     .await
 }
@@ -406,24 +483,147 @@ async fn forward_session_notification(
     client.session_notification(args).await
 }
 
-async fn run_connected_operation<T, F, Fut>(
+struct BackendIo {
+    outgoing: DynWr,
+    incoming: DynRd,
+}
+
+impl BackendIo {
+    fn new(reader: OwnedReadHalf, writer: OwnedWriteHalf) -> Self {
+        Self {
+            outgoing: Box::new(writer.compat_write()) as DynWr,
+            incoming: Box::new(reader.compat()) as DynRd,
+        }
+    }
+}
+
+async fn write_backend_io_line(mut writer: DynWr, line: String) -> std::io::Result<DynWr> {
+    let mut bytes = line.into_bytes();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    Ok(writer)
+}
+
+impl<R: acp::Role> ConnectTo<R> for BackendIo {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<R::Counterpart>,
+    ) -> std::result::Result<(), acp::Error> {
+        let (channel, serve_io) = <BackendIo as ConnectTo<R>>::into_channel_and_future(self);
+        let client = acp::DynConnectTo::new(client);
+        let serve_client: BoxFuture<'static, std::result::Result<(), acp::Error>> =
+            Box::pin(client.connect_to(channel));
+        match future::select(serve_client, serve_io).await {
+            Either::Left((result, _)) | Either::Right((result, _)) => result,
+        }
+    }
+
+    fn into_channel_and_future(
+        self,
+    ) -> (
+        acp::Channel,
+        BoxFuture<'static, std::result::Result<(), acp::Error>>,
+    ) {
+        let Self { outgoing, incoming } = self;
+        let incoming_lines: LineStream = Box::pin(BufReader::new(incoming).lines());
+        let outgoing_sink: LineSink = Box::pin(unfold(outgoing, write_backend_io_line));
+        ConnectTo::<R>::into_channel_and_future(acp::Lines::new(outgoing_sink, incoming_lines))
+    }
+}
+
+#[derive(Clone)]
+struct BackendDispatchHandler {
+    request_client: BackendAcpClient,
+    notification_client: BackendAcpClient,
+}
+
+impl BackendDispatchHandler {
+    fn new(request_client: BackendAcpClient, notification_client: BackendAcpClient) -> Self {
+        Self {
+            request_client,
+            notification_client,
+        }
+    }
+
+    async fn handle_permission_request(
+        &self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Agent>,
+    ) -> std::result::Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_request::<schema::RequestPermissionRequest>()? {
+            Ok((args, responder)) => {
+                respond_permission_request(
+                    self.request_client.clone(),
+                    args,
+                    responder,
+                    connection,
+                )
+                .await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+
+    async fn handle_session_notification(
+        &self,
+        dispatch: acp::Dispatch,
+    ) -> std::result::Result<Option<acp::Dispatch>, acp::Error> {
+        match dispatch.into_notification::<schema::SessionNotification>()? {
+            Ok(args) => {
+                forward_session_notification(self.notification_client.clone(), args).await?;
+                Ok(None)
+            }
+            Err(dispatch) => Ok(Some(dispatch)),
+        }
+    }
+}
+
+impl acp::HandleDispatchFrom<acp::Agent> for BackendDispatchHandler {
+    fn describe_chain(&self) -> impl std::fmt::Debug {
+        "BackendDispatchHandler"
+    }
+
+    async fn handle_dispatch_from(
+        &mut self,
+        dispatch: acp::Dispatch,
+        connection: acp::ConnectionTo<acp::Agent>,
+    ) -> std::result::Result<acp::Handled<acp::Dispatch>, acp::Error> {
+        let Some(dispatch) = self
+            .handle_permission_request(dispatch, connection.clone())
+            .await?
+        else {
+            return Ok(acp::Handled::Yes);
+        };
+        let Some(dispatch) = self.handle_session_notification(dispatch).await? else {
+            return Ok(acp::Handled::Yes);
+        };
+        Ok(acp::Handled::No {
+            message: dispatch,
+            retry: false,
+        })
+    }
+}
+
+fn build_backend_client_builder(
+    request_client: BackendAcpClient,
+    notification_client: BackendAcpClient,
+) -> acp::Builder<acp::Client, BackendDispatchHandler, acp::NullRun> {
+    acp::Builder::new_with(
+        acp::Client,
+        BackendDispatchHandler::new(request_client, notification_client),
+    )
+    .name("acp-web-backend-mock-client")
+}
+
+async fn run_connected_operation<T: 'static>(
     conn: acp::ConnectionTo<acp::Agent>,
     working_dir: PathBuf,
     backend_session_id: String,
     client: BackendAcpClient,
     upstream_sessions: UpstreamSessions,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce(
-        acp::ConnectionTo<acp::Agent>,
-        PathBuf,
-        String,
-        BackendAcpClient,
-        UpstreamSessions,
-    ) -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
+    operation: ConnectedOperation<T>,
+) -> Result<T> {
     initialize_connection(&conn).await?;
     operation(
         conn,
@@ -435,35 +635,17 @@ where
     .await
 }
 
-async fn connect_backend_mock_client<T, F, Fut>(
+async fn connect_backend_mock_client<T: 'static>(
     reader: OwnedReadHalf,
     writer: OwnedWriteHalf,
     request_client: BackendAcpClient,
     notification_client: BackendAcpClient,
-    main_fn: F,
-) -> std::result::Result<T, acp::Error>
-where
-    F: FnOnce(acp::ConnectionTo<acp::Agent>) -> Fut,
-    Fut: Future<Output = std::result::Result<T, acp::Error>>,
-{
-    acp::Client
-        .builder()
-        .name("acp-web-backend-mock-client")
-        .on_receive_request(
-            async move |args: schema::RequestPermissionRequest, responder, cx| {
-                respond_permission_request(request_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_notification(
-            async move |args: schema::SessionNotification, _cx| {
-                forward_session_notification(notification_client.clone(), args).await
-            },
-            acp::on_receive_notification!(),
-        )
+    connected_main: ConnectedMainState<T>,
+) -> std::result::Result<Result<T>, acp::Error> {
+    build_backend_client_builder(request_client, notification_client)
         .connect_with(
-            acp::ByteStreams::new(writer.compat_write(), reader.compat()),
-            async move |conn| main_fn(conn).await,
+            acp::DynConnectTo::new(BackendIo::new(reader, writer)),
+            move |conn| run_connected_main(conn, connected_main),
         )
         .await
 }
@@ -517,50 +699,59 @@ where
     })
 }
 
-async fn drive_acp_operation<T, F, Fut>(
+async fn drive_acp_operation<T: 'static>(
     mock_address: String,
     working_dir: PathBuf,
     backend_session_id: String,
     upstream_sessions: UpstreamSessions,
     client: BackendAcpClient,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce(
-        acp::ConnectionTo<acp::Agent>,
-        PathBuf,
-        String,
-        BackendAcpClient,
-        UpstreamSessions,
-    ) -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
+    operation: ConnectedOperation<T>,
+) -> Result<T> {
     let stream = connect_stream(&mock_address).await?;
     let (reader, writer) = stream.into_split();
     let request_client = client.clone();
     let notification_client = client.clone();
+
+    let connected_main = ConnectedMainState {
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    };
 
     connect_backend_mock_client(
         reader,
         writer,
         request_client,
         notification_client,
-        async move |conn| {
-            Ok::<_, acp::Error>(
-                run_connected_operation(
-                    conn,
-                    working_dir,
-                    backend_session_id,
-                    client,
-                    upstream_sessions,
-                    operation,
-                )
-                .await,
-            )
-        },
+        connected_main,
     )
     .await
     .context(ConnectionClosedSnafu)?
+}
+
+async fn run_connected_main<T: 'static>(
+    conn: acp::ConnectionTo<acp::Agent>,
+    state: ConnectedMainState<T>,
+) -> std::result::Result<Result<T>, acp::Error> {
+    let ConnectedMainState {
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    } = state;
+
+    Ok(run_connected_operation(
+        conn,
+        working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    )
+    .await)
 }
 
 async fn initialize_connection(conn: &acp::ConnectionTo<acp::Agent>) -> Result<()> {

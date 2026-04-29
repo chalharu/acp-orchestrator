@@ -89,6 +89,7 @@ fn create_workspace_modal_view(
     let on_cancel = create_workspace_modal_cancel_handler(state);
     let creating = Signal::derive(move || state.creating.get());
     let create_name = Signal::derive(move || state.create_name.get());
+    let create_upstream_url = Signal::derive(move || state.create_upstream_url.get());
     let error = Signal::derive(move || state.error.get());
 
     view! {
@@ -97,8 +98,9 @@ fn create_workspace_modal_view(
                 {create_workspace_modal_header(on_cancel)}
                 <p class="muted">"Add a new workspace for organising agent sessions."</p>
                 <ErrorBanner message=error />
-                <form class="account-form account-form--create" on:submit=on_submit>
+                <form class="account-form workspace-modal__form" on:submit=on_submit>
                     {create_workspace_name_field(state, create_name)}
+                    {create_workspace_upstream_field(state, create_upstream_url)}
                     {create_workspace_modal_actions(creating, on_cancel)}
                 </form>
             </div>
@@ -117,10 +119,17 @@ fn create_workspace_submit_handler(
         }
 
         let name = state.create_name.get_untracked();
+        let upstream_url = state.create_upstream_url.get_untracked();
         if name.trim().is_empty() {
             state
                 .error
                 .set(Some("Workspace name is required.".to_string()));
+            return;
+        }
+        if upstream_url.trim().is_empty() {
+            state
+                .error
+                .set(Some("Repository URL is required.".to_string()));
             return;
         }
 
@@ -128,10 +137,9 @@ fn create_workspace_submit_handler(
         state.error.set(None);
         state.notice.set(None);
         leptos::task::spawn_local(async move {
-            match api::create_workspace(&name).await {
+            match api::create_workspace(&name, upstream_url).await {
                 Ok(_) => {
-                    state.create_name.set(String::new());
-                    state.show_create_modal.set(false);
+                    close_create_workspace_modal(state);
                     state.notice.set(Some("Workspace created.".to_string()));
                     state.creating.set(false);
                     spawn_workspace_reload(state);
@@ -196,6 +204,25 @@ fn create_workspace_name_field(
                 prop:value=create_name
                 on:input=move |event| state.create_name.set(event_target_value(&event))
                 autofocus
+                required
+            />
+        </label>
+    }
+}
+
+fn create_workspace_upstream_field(
+    state: WorkspacesPageState,
+    create_upstream_url: Signal<String>,
+) -> impl IntoView {
+    view! {
+        <label class="account-form__field">
+            <span>"Repository URL"</span>
+            <input
+                type="url"
+                prop:value=create_upstream_url
+                on:input=move |event| state.create_upstream_url.set(event_target_value(&event))
+                placeholder="https://example.com/repo.git"
+                required
             />
         </label>
     }
@@ -236,6 +263,7 @@ fn create_workspace_modal_cancel_handler(
 
 fn close_create_workspace_modal(state: WorkspacesPageState) {
     state.create_name.set(String::new());
+    state.create_upstream_url.set(String::new());
     state.error.set(None);
     state.show_create_modal.set(false);
 }
@@ -246,10 +274,24 @@ pub(super) fn create_workspace_submit_host(state: WorkspacesPageState) {
         return;
     }
 
+    if state.create_name.get_untracked().trim().is_empty() {
+        state
+            .error
+            .set(Some("Workspace name is required.".to_string()));
+        return;
+    }
+    if state.create_upstream_url.get_untracked().trim().is_empty() {
+        state
+            .error
+            .set(Some("Repository URL is required.".to_string()));
+        return;
+    }
+
     state.creating.set(true);
     state.error.set(None);
     state.notice.set(None);
     let _name = state.create_name.get_untracked();
+    let _upstream_url = state.create_upstream_url.get_untracked();
     close_create_workspace_modal(state);
     state.notice.set(Some("Workspace created.".to_string()));
     state.creating.set(false);
@@ -334,12 +376,54 @@ mod tests {
         owner.with(|| {
             let state = WorkspacesPageState::new();
             state.create_name.set("My Workspace".to_string());
+            state
+                .create_upstream_url
+                .set("https://example.com/repo.git".to_string());
             state.show_create_modal.set(true);
             create_workspace_submit_host(state);
             assert!(!state.creating.get());
             assert!(state.create_name.get().is_empty());
+            assert!(state.create_upstream_url.get().is_empty());
             assert!(!state.show_create_modal.get());
             assert_eq!(state.notice.get(), Some("Workspace created.".to_string()));
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn create_workspace_submit_host_requires_workspace_name() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state
+                .create_upstream_url
+                .set("https://example.com/repo.git".to_string());
+
+            create_workspace_submit_host(state);
+
+            assert_eq!(
+                state.error.get(),
+                Some("Workspace name is required.".to_string())
+            );
+            assert!(!state.creating.get());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn create_workspace_submit_host_requires_repository_url() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.create_name.set("My Workspace".to_string());
+
+            create_workspace_submit_host(state);
+
+            assert_eq!(
+                state.error.get(),
+                Some("Repository URL is required.".to_string())
+            );
+            assert!(!state.creating.get());
         });
     }
 
@@ -350,12 +434,16 @@ mod tests {
         owner.with(|| {
             let state = WorkspacesPageState::new();
             state.create_name.set("My Workspace".to_string());
+            state
+                .create_upstream_url
+                .set("https://example.com/repo.git".to_string());
             state.error.set(Some("Create failed".to_string()));
             state.show_create_modal.set(true);
 
             close_create_workspace_modal(state);
 
             assert!(state.create_name.get().is_empty());
+            assert!(state.create_upstream_url.get().is_empty());
             assert!(state.error.get().is_none());
             assert!(!state.show_create_modal.get());
         });

@@ -2,7 +2,7 @@ use acp_contracts_sessions::SessionListItem;
 use leptos::prelude::*;
 
 use crate::{
-    session_page_sidebar_list::SessionSidebarList,
+    session_page_sidebar_list::{SessionSidebarListProps, session_sidebar_list},
     session_page_sidebar_styles::session_sidebar_empty_message,
 };
 
@@ -20,20 +20,36 @@ struct SessionSidebarNavArgs {
     on_delete_session: Callback<String>,
 }
 
-#[component]
-pub(super) fn SessionSidebarNav(
-    current_session_id: String,
-    #[prop(into)] sessions: Signal<Vec<SessionListItem>>,
-    #[prop(into)] session_list_loaded: Signal<bool>,
-    #[prop(into)] session_list_error: Signal<Option<String>>,
-    #[prop(into)] deleting_session_id: Signal<Option<String>>,
-    #[prop(into)] delete_disabled: Signal<bool>,
-    renaming_session_id: RwSignal<Option<String>>,
-    #[prop(into)] saving_rename_session_id: Signal<Option<String>>,
-    rename_draft: RwSignal<String>,
-    on_rename_session: Callback<(String, String)>,
-    on_delete_session: Callback<String>,
-) -> impl IntoView {
+#[derive(Clone)]
+pub(super) struct SessionSidebarNavProps {
+    pub(super) current_session_id: String,
+    pub(super) sessions: Signal<Vec<SessionListItem>>,
+    pub(super) session_list_loaded: Signal<bool>,
+    pub(super) session_list_error: Signal<Option<String>>,
+    pub(super) deleting_session_id: Signal<Option<String>>,
+    pub(super) delete_disabled: Signal<bool>,
+    pub(super) renaming_session_id: RwSignal<Option<String>>,
+    pub(super) saving_rename_session_id: Signal<Option<String>>,
+    pub(super) rename_draft: RwSignal<String>,
+    pub(super) on_rename_session: Callback<(String, String)>,
+    pub(super) on_delete_session: Callback<String>,
+}
+
+pub(super) fn session_sidebar_nav(props: SessionSidebarNavProps) -> AnyView {
+    let SessionSidebarNavProps {
+        current_session_id,
+        sessions,
+        session_list_loaded,
+        session_list_error,
+        deleting_session_id,
+        delete_disabled,
+        renaming_session_id,
+        saving_rename_session_id,
+        rename_draft,
+        on_rename_session,
+        on_delete_session,
+    } = props;
+
     session_sidebar_nav_view(SessionSidebarNavArgs {
         current_session_id,
         sessions,
@@ -47,6 +63,7 @@ pub(super) fn SessionSidebarNav(
         on_rename_session,
         on_delete_session,
     })
+    .into_any()
 }
 
 #[cfg(target_family = "wasm")]
@@ -173,17 +190,17 @@ fn session_sidebar_loaded_view(args: SessionSidebarListArgs) -> impl IntoView {
 
     view! {
         <nav class="session-sidebar__nav" aria-label="Sessions">
-            <SessionSidebarList
-                current_session_id=current_session_id
-                sessions=sessions
-                deleting_session_id=deleting_session_id
-                delete_disabled=delete_disabled
-                renaming_session_id=renaming_session_id
-                saving_rename_session_id=saving_rename_session_id
-                rename_draft=rename_draft
-                on_rename_session=on_rename_session
-                on_delete_session=on_delete_session
-            />
+            {session_sidebar_list(SessionSidebarListProps {
+                current_session_id,
+                sessions,
+                deleting_session_id,
+                delete_disabled,
+                renaming_session_id,
+                saving_rename_session_id,
+                rename_draft,
+                on_rename_session,
+                on_delete_session,
+            })}
         </nav>
     }
 }
@@ -194,7 +211,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
 
-    use super::SessionSidebarNav;
+    use super::{SessionSidebarNavProps, session_sidebar_nav};
 
     fn sample_sidebar_session() -> SessionListItem {
         SessionListItem {
@@ -216,21 +233,19 @@ mod tests {
             let rename_draft = RwSignal::new("Draft".to_string());
             let renaming_session_id = RwSignal::new(None::<String>);
 
-            let _ = view! {
-                <SessionSidebarNav
-                    current_session_id="s1".to_string()
-                    sessions=sessions
-                    session_list_loaded=Signal::derive(|| true)
-                    session_list_error=Signal::derive(|| None::<String>)
-                    deleting_session_id=deleting_session_id
-                    delete_disabled=Signal::derive(|| false)
-                    renaming_session_id=renaming_session_id
-                    saving_rename_session_id=saving_rename_session_id
-                    rename_draft=rename_draft
-                    on_rename_session=Callback::new(|_: (String, String)| {})
-                    on_delete_session=Callback::new(|_: String| {})
-                />
-            };
+            let _ = session_sidebar_nav(SessionSidebarNavProps {
+                current_session_id: "s1".to_string(),
+                sessions,
+                session_list_loaded: Signal::derive(|| true),
+                session_list_error: Signal::derive(|| None::<String>),
+                deleting_session_id,
+                delete_disabled: Signal::derive(|| false),
+                renaming_session_id,
+                saving_rename_session_id,
+                rename_draft,
+                on_rename_session: Callback::new(|_: (String, String)| {}),
+                on_delete_session: Callback::new(|_: String| {}),
+            });
         });
     }
 
@@ -239,21 +254,19 @@ mod tests {
     fn session_sidebar_nav_builds_empty_state_without_panicking() {
         let owner = Owner::new();
         owner.with(|| {
-            let _ = view! {
-                <SessionSidebarNav
-                    current_session_id="s1".to_string()
-                    sessions=Signal::derive(Vec::<SessionListItem>::new)
-                    session_list_loaded=Signal::derive(|| true)
-                    session_list_error=Signal::derive(|| Some("temporary".to_string()))
-                    deleting_session_id=Signal::derive(|| None::<String>)
-                    delete_disabled=Signal::derive(|| false)
-                    renaming_session_id=RwSignal::new(None::<String>)
-                    saving_rename_session_id=Signal::derive(|| None::<String>)
-                    rename_draft=RwSignal::new(String::new())
-                    on_rename_session=Callback::new(|_: (String, String)| {})
-                    on_delete_session=Callback::new(|_: String| {})
-                />
-            };
+            let _ = session_sidebar_nav(SessionSidebarNavProps {
+                current_session_id: "s1".to_string(),
+                sessions: Signal::derive(Vec::<SessionListItem>::new),
+                session_list_loaded: Signal::derive(|| true),
+                session_list_error: Signal::derive(|| Some("temporary".to_string())),
+                deleting_session_id: Signal::derive(|| None::<String>),
+                delete_disabled: Signal::derive(|| false),
+                renaming_session_id: RwSignal::new(None::<String>),
+                saving_rename_session_id: Signal::derive(|| None::<String>),
+                rename_draft: RwSignal::new(String::new()),
+                on_rename_session: Callback::new(|_: (String, String)| {}),
+                on_delete_session: Callback::new(|_: String| {}),
+            });
         });
     }
 }

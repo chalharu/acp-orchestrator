@@ -2,7 +2,8 @@ use leptos::prelude::*;
 
 use crate::{
     session_page_shell_signals::SessionShellSignals,
-    session_page_sidebar_header::SessionSidebarHeader, session_page_sidebar_nav::SessionSidebarNav,
+    session_page_sidebar_header::SessionSidebarHeader,
+    session_page_sidebar_nav::{SessionSidebarNavProps, session_sidebar_nav},
     session_page_sidebar_status::SessionSidebarStatus,
     session_page_sidebar_styles::session_sidebar_class,
 };
@@ -43,19 +44,19 @@ pub(super) fn SessionSidebar(
                 session_list_error=shell_signals.list.error
                 has_session_items=has_session_items
             />
-            <SessionSidebarNav
-                current_session_id=current_session_id_for_nav
-                sessions=shell_signals.sessions
-                session_list_loaded=shell_signals.list.loaded
-                session_list_error=shell_signals.list.error
-                deleting_session_id=shell_signals.list.deleting_id
-                delete_disabled=shell_signals.delete_disabled
-                renaming_session_id=list_controls.renaming_session_id
-                saving_rename_session_id=list_controls.saving_rename_session_id
-                rename_draft=list_controls.rename_draft
-                on_rename_session=list_controls.on_rename_session
-                on_delete_session=list_controls.on_delete_session
-            />
+            {session_sidebar_nav(SessionSidebarNavProps {
+                current_session_id: current_session_id_for_nav,
+                sessions: shell_signals.sessions,
+                session_list_loaded: shell_signals.list.loaded.into(),
+                session_list_error: shell_signals.list.error.into(),
+                deleting_session_id: shell_signals.list.deleting_id.into(),
+                delete_disabled: shell_signals.delete_disabled,
+                renaming_session_id: list_controls.renaming_session_id,
+                saving_rename_session_id: list_controls.saving_rename_session_id.into(),
+                rename_draft: list_controls.rename_draft,
+                on_rename_session: list_controls.on_rename_session,
+                on_delete_session: list_controls.on_delete_session,
+            })}
         </aside>
     }
 }

@@ -246,6 +246,36 @@ async fn empty_prompts_are_rejected() {
 }
 
 #[tokio::test]
+async fn runtime_unavailable_sessions_reject_new_prompts_and_turns() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "hello".to_string())
+        .await
+        .expect("initial prompt should be accepted");
+
+    store
+        .mark_runtime_unavailable("alice", &session.id, "runtime failed".to_string())
+        .await
+        .expect("active sessions can be marked runtime-unavailable");
+
+    let prompt_error = store
+        .submit_prompt("alice", &session.id, "again".to_string())
+        .await
+        .expect_err("runtime-unavailable sessions should reject prompts");
+    assert_eq!(prompt_error, SessionStoreError::RuntimeUnavailable);
+    let turn_error = pending
+        .turn_handle()
+        .start_turn()
+        .await
+        .expect_err("runtime-unavailable sessions should reject turns");
+    assert_eq!(turn_error, SessionStoreError::RuntimeUnavailable);
+}
+
+#[tokio::test]
 async fn pending_prompts_can_broadcast_status_updates() {
     let store = SessionStore::new(4);
     let session = store

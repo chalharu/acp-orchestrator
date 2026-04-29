@@ -219,6 +219,9 @@ fn app_state_build_errors_format_and_expose_sources() {
     let workspace_error = AppStateBuildError::from(WorkspaceStoreError::Database(
         "workspace store failed".to_string(),
     ));
+    let runtime_error = AppStateBuildError::from(crate::agent_runtime::AgentRuntimeError::Io(
+        "runtime failed".to_string(),
+    ));
 
     assert_eq!(
         reply_error.to_string(),
@@ -237,6 +240,13 @@ fn app_state_build_errors_format_and_expose_sources() {
             .to_string(),
         "workspace store failed"
     );
+    assert_eq!(runtime_error.to_string(), "runtime failed");
+    assert_eq!(
+        std::error::Error::source(&runtime_error)
+            .expect("runtime sources should exist")
+            .to_string(),
+        "runtime failed"
+    );
 }
 
 #[test]
@@ -253,6 +263,38 @@ fn app_state_debug_reports_public_fields() {
     assert!(debug.contains("AppState"));
     assert!(debug.contains("startup_hints"));
     assert!(debug.contains("frontend_dist"));
+}
+
+#[test]
+fn app_state_new_uses_chroot_checkout_layout_for_agent_launch() {
+    let state_dir = std::env::temp_dir().join(format!(
+        "acp-server-chroot-layout-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let agent_launch = crate::agent_runtime::AgentLaunchConfig::chroot(
+        vec!["/bin/agent".to_string()],
+        Vec::new(),
+        crate::agent_runtime::DEFAULT_AGENT_LAUNCH_TIMEOUT,
+        crate::agent_runtime::DEFAULT_AGENT_RUN_UID,
+        crate::agent_runtime::DEFAULT_AGENT_RUN_GID,
+    )
+    .expect("agent launch config should validate");
+    let state = AppState::new(
+        ServerConfig {
+            state_dir,
+            agent_launch: Some(agent_launch),
+            ..ServerConfig::default()
+        },
+        metadata_test_workspace_store(),
+    )
+    .expect("app state should build");
+
+    assert_eq!(
+        state
+            .checkout_manager
+            .checkout_relpath_for_session("s_test"),
+        Some("agent-runtimes/s_test/root/workspace".to_string())
+    );
 }
 
 #[test]

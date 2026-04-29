@@ -573,6 +573,10 @@ fn chroot_runtime_checkout_layout_resolves_only_workspace_roots() {
         Some(state_dir.join("agent-runtimes/s_test/root/workspace"))
     );
     assert_eq!(
+        manager.checkout_relpath_for_session("s_test"),
+        Some("agent-runtimes/s_test/root/workspace".to_string())
+    );
+    assert_eq!(
         manager.resolve_checkout_path("agent-runtimes/s_test/root/workspace/extra"),
         None
     );

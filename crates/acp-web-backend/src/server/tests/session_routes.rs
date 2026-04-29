@@ -27,6 +27,28 @@ impl crate::workspace_checkout::WorkspaceCheckoutManager for InvalidRestoredChec
 }
 
 #[derive(Debug)]
+struct MissingExpectedCheckoutManager;
+
+#[async_trait::async_trait]
+impl crate::workspace_checkout::WorkspaceCheckoutManager for MissingExpectedCheckoutManager {
+    async fn prepare_checkout(
+        &self,
+        _workspace: &WorkspaceRecord,
+        _session_id: &str,
+        _checkout_ref_override: Option<&str>,
+    ) -> Result<
+        crate::workspace_checkout::PreparedWorkspaceCheckout,
+        crate::workspace_checkout::WorkspaceCheckoutError,
+    > {
+        unreachable!("restoration tests only resolve persisted checkout paths");
+    }
+
+    fn checkout_relpath_for_session(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+}
+
+#[derive(Debug)]
 struct BindFailingReplyProvider {
     forgotten_sessions: StdArc<Mutex<Vec<String>>>,
 }
@@ -198,6 +220,32 @@ async fn session_metadata_for_user(
         .await
         .expect("metadata should load")
         .expect("session metadata should exist")
+}
+
+async fn create_restorable_session_with_metadata(
+    store: &Arc<SessionStore>,
+    workspace_repository: &Arc<SqliteWorkspaceRepository>,
+    principal: &Extension<AuthenticatedPrincipal>,
+    mutate_metadata: impl FnOnce(&mut SessionMetadataRecord),
+) -> crate::contract_sessions::SessionSnapshot {
+    let initial_state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(TrackingReplyProvider {
+            forgotten_sessions: StdArc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let created = create_persisted_workspace_session(&initial_state, principal.clone()).await;
+    let user = durable_user_for_principal(&initial_state, principal).await;
+    let mut metadata = session_metadata_for_user(&initial_state, &user.user_id, &created.id).await;
+    mutate_metadata(&mut metadata);
+    workspace_repository
+        .save_session_metadata(&metadata)
+        .await
+        .expect("metadata mutation should persist");
+    let live_owner_id = live_owner_id_for_bearer(&principal.0);
+    store.delete_sessions_for_owners(&[live_owner_id]).await;
+    created
 }
 
 async fn assert_runtime_unavailable_write_rejected(
@@ -787,6 +835,102 @@ async fn get_session_keeps_transcript_readable_when_runtime_relaunch_fails() {
 }
 
 #[tokio::test]
+async fn get_session_marks_runtime_unavailable_without_checkout_metadata() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let principal = bearer_principal("alice");
+    let created = create_restorable_session_with_metadata(
+        &store,
+        &workspace_repository,
+        &principal,
+        |meta| {
+            meta.checkout_relpath = None;
+        },
+    )
+    .await;
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository,
+        reply_provider.clone(),
+    );
+
+    let restored = get_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+    )
+    .await
+    .expect("missing checkout metadata should not block transcript reads");
+
+    assert_eq!(restored.0.session.id, created.id);
+    assert_binding_calls(&reply_provider, &[], &[]);
+    assert_runtime_unavailable_write_rejected(state, created.id, principal).await;
+}
+
+#[tokio::test]
+async fn get_session_marks_runtime_unavailable_for_mismatched_checkout_metadata() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let principal = bearer_principal("alice");
+    let created = create_restorable_session_with_metadata(
+        &store,
+        &workspace_repository,
+        &principal,
+        |meta| {
+            meta.checkout_relpath = Some("session-checkouts/s_other".to_string());
+        },
+    )
+    .await;
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository,
+        Arc::new(BindingTrackingReplyProvider::new()),
+    );
+
+    let restored = get_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+    )
+    .await
+    .expect("mismatched checkout metadata should not block transcript reads");
+
+    assert_eq!(restored.0.session.id, created.id);
+    assert_runtime_unavailable_write_rejected(state, created.id, principal).await;
+}
+
+#[tokio::test]
+async fn get_session_marks_runtime_unavailable_without_expected_checkout_path() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let principal = bearer_principal("alice");
+    let created =
+        create_restorable_session_with_metadata(&store, &workspace_repository, &principal, |_| {})
+            .await;
+    let state = AppState {
+        store: store.clone(),
+        workspace_repository,
+        reply_provider: Arc::new(BindingTrackingReplyProvider::new()),
+        checkout_manager: Arc::new(MissingExpectedCheckoutManager),
+        agent_runtime_manager: test_agent_runtime_manager(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let restored = get_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+    )
+    .await
+    .expect("missing expected checkout path should not block transcript reads");
+
+    assert_eq!(restored.0.session.id, created.id);
+    assert_runtime_unavailable_write_rejected(state, created.id, principal).await;
+}
+
+#[tokio::test]
 async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
     let store = Arc::new(SessionStore::new(4));
     let workspace_repository = metadata_test_workspace_store();
@@ -1017,6 +1161,71 @@ async fn close_session_skips_mismatched_checkout_cleanup_paths() {
     assert!(
         other_checkout_path.exists(),
         "closing a session must not remove another session's checkout"
+    );
+}
+
+#[tokio::test]
+async fn close_session_skips_cleanup_when_expected_checkout_path_is_unavailable() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let initial_state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(BindingTrackingReplyProvider::new()),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&initial_state, principal.clone()).await;
+    let user = durable_user_for_principal(&initial_state, &principal).await;
+    let metadata = session_metadata_for_user(&initial_state, &user.user_id, &created.id).await;
+    let checkout_path = checkout_path_from_metadata(&initial_state, &metadata);
+    let state = AppState {
+        store,
+        workspace_repository,
+        reply_provider: Arc::new(BindingTrackingReplyProvider::new()),
+        checkout_manager: Arc::new(MissingExpectedCheckoutManager),
+        agent_runtime_manager: test_agent_runtime_manager(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let _ = close_session(State(state), Path(created.id), principal)
+        .await
+        .expect("session close should succeed");
+
+    assert!(checkout_path.exists(), "cleanup should fail closed");
+}
+
+#[tokio::test]
+async fn close_session_skips_cleanup_when_checkout_path_no_longer_resolves() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let initial_state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(BindingTrackingReplyProvider::new()),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&initial_state, principal.clone()).await;
+    let user = durable_user_for_principal(&initial_state, &principal).await;
+    let metadata = session_metadata_for_user(&initial_state, &user.user_id, &created.id).await;
+    let checkout_path = checkout_path_from_metadata(&initial_state, &metadata);
+    let state = AppState {
+        store,
+        workspace_repository,
+        reply_provider: Arc::new(BindingTrackingReplyProvider::new()),
+        checkout_manager: Arc::new(InvalidRestoredCheckoutManager),
+        agent_runtime_manager: test_agent_runtime_manager(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let _ = close_session(State(state), Path(created.id), principal)
+        .await
+        .expect("session close should succeed");
+
+    assert!(
+        checkout_path.exists(),
+        "invalid cleanup paths should be skipped"
     );
 }
 

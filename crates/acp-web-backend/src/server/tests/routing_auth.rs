@@ -357,19 +357,31 @@ async fn sign_in_switches_browser_accounts_without_exposing_previous_live_sessio
     let state = auth_test_state();
     let browser = BrowserAuthContext::spawn().await;
     bootstrap_admin_account(&state, &browser).await;
-    let admin_user = state
+    let admin_user = authenticated_browser_user(&state, &browser).await;
+    let created = create_browser_default_session(&state, &browser, "Browser Workspace").await;
+    state
         .workspace_repository
-        .authenticate_browser_session(&browser.principal.id)
+        .create_local_account("member", "password123", false)
         .await
-        .expect("browser session lookup should succeed")
-        .expect("admin browser session should be authenticated");
+        .expect("member creation should succeed");
+    let _signed_in = sign_in_browser_account(&state, &browser, "member", "password123").await;
+
+    assert_browser_session_owner_mismatch(&state, &browser, &created.id).await;
+    assert_browser_user_still_owns_session(&state, &admin_user, &created.id).await;
+}
+
+async fn create_browser_default_session(
+    state: &AppState,
+    browser: &BrowserAuthContext,
+    workspace_name: &str,
+) -> SessionSnapshot {
     let _workspace = create_owned_workspace_for_principal(
-        &state,
+        state,
         Extension(browser.principal.clone()),
-        "Browser Workspace",
+        workspace_name,
     )
     .await;
-    let created = create_session(
+    create_session(
         State(state.clone()),
         Extension(browser.principal.clone()),
         axum::body::Bytes::new(),
@@ -378,27 +390,17 @@ async fn sign_in_switches_browser_accounts_without_exposing_previous_live_sessio
     .expect("session creation should succeed")
     .1
     .0
-    .session;
-    state
-        .workspace_repository
-        .create_local_account("member", "password123", false)
-        .await
-        .expect("member creation should succeed");
+    .session
+}
 
-    let _signed_in = sign_in(
-        State(state.clone()),
-        Extension(browser.principal.clone()),
-        Json(SignInRequest {
-            username: "member".to_string(),
-            password: "password123".to_string(),
-        }),
-    )
-    .await
-    .expect("sign-in should succeed");
-
+async fn assert_browser_session_owner_mismatch(
+    state: &AppState,
+    browser: &BrowserAuthContext,
+    session_id: &str,
+) {
     let member_snapshot_error = get_session(
         State(state.clone()),
-        Path(created.id.clone()),
+        Path(session_id.to_string()),
         Extension(browser.principal.clone()),
     )
     .await
@@ -407,13 +409,19 @@ async fn sign_in_switches_browser_accounts_without_exposing_previous_live_sessio
         member_snapshot_error,
         AppError::Forbidden(message) if message == "session owner mismatch"
     ));
+}
 
+async fn assert_browser_user_still_owns_session(
+    state: &AppState,
+    user: &UserRecord,
+    session_id: &str,
+) {
     let admin_snapshot = state
         .store
-        .session_snapshot(&live_owner_id_for_browser_user(&admin_user), &created.id)
+        .session_snapshot(&live_owner_id_for_browser_user(user), session_id)
         .await
         .expect("previous account live chats should remain available to that account");
-    assert_eq!(admin_snapshot.id, created.id);
+    assert_eq!(admin_snapshot.id, session_id);
 }
 
 #[tokio::test]
@@ -500,12 +508,7 @@ async fn create_browser_session_with_pending_permission(
     browser: &BrowserAuthContext,
     workspace_name: &str,
 ) -> (UserRecord, SessionSnapshot) {
-    let user = state
-        .workspace_repository
-        .authenticate_browser_session(&browser.principal.id)
-        .await
-        .expect("browser session lookup should succeed")
-        .expect("browser session should be authenticated");
+    let user = authenticated_browser_user(state, browser).await;
     let workspace = create_owned_workspace_for_principal(
         state,
         Extension(browser.principal.clone()),
@@ -525,6 +528,15 @@ async fn create_browser_session_with_pending_permission(
     .session;
     register_test_pending_permission(state, &user, &session).await;
     (user, session)
+}
+
+async fn authenticated_browser_user(state: &AppState, browser: &BrowserAuthContext) -> UserRecord {
+    state
+        .workspace_repository
+        .authenticate_browser_session(&browser.principal.id)
+        .await
+        .expect("browser session lookup should succeed")
+        .expect("browser session should be authenticated")
 }
 
 async fn register_test_pending_permission(

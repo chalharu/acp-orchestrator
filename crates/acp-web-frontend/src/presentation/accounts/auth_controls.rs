@@ -49,15 +49,11 @@ pub fn SessionSidebarAuthControls(
         signed_in,
         signing_out,
     };
-    let sign_out = sign_out_handler_from(error, signing_out, {
-        let current_session_id = current_session_id.clone();
-        move || {
-            session_sidebar_sign_in_href(
-                current_workspace_id.get_untracked().as_deref(),
-                &current_session_id,
-            )
-        }
-    });
+    let sign_out = sign_out_handler_from(
+        error,
+        signing_out,
+        session_sidebar_sign_out_redirect(current_workspace_id, current_session_id.clone()),
+    );
 
     initialize_session_sidebar_auth_controls(checked, signed_in, is_admin, error);
 
@@ -72,6 +68,18 @@ fn session_sidebar_sign_in_href(
         current_workspace_id,
         current_session_id,
     ))
+}
+
+fn session_sidebar_sign_out_redirect(
+    current_workspace_id: Signal<Option<String>>,
+    current_session_id: String,
+) -> impl Fn() -> String + Send + Sync + 'static {
+    move || {
+        session_sidebar_sign_in_href(
+            current_workspace_id.get_untracked().as_deref(),
+            &current_session_id,
+        )
+    }
 }
 
 #[cfg(target_family = "wasm")]
@@ -326,5 +334,27 @@ mod tests {
             session_sidebar_sign_in_href(None, "s/1"),
             "/app/sign-in/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
         );
+    }
+
+    #[test]
+    fn session_sidebar_sign_out_redirect_tracks_workspace_signal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let workspace_id = RwSignal::new(Some("w/1".to_string()));
+            let redirect = session_sidebar_sign_out_redirect(
+                Signal::derive(move || workspace_id.get()),
+                "s/1".to_string(),
+            );
+
+            assert_eq!(
+                redirect(),
+                "/app/sign-in/?return_to=%2Fapp%2Fworkspaces%2Fw%252F1%2Fsessions%2Fs%252F1"
+            );
+            workspace_id.set(None);
+            assert_eq!(
+                redirect(),
+                "/app/sign-in/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+            );
+        });
     }
 }

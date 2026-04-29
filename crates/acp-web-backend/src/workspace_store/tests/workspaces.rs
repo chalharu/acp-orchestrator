@@ -57,6 +57,35 @@ async fn persist_workspace_session(
 }
 
 #[tokio::test]
+async fn repository_recreates_schema_after_database_file_deletion() {
+    let repository = test_repository();
+    let db_path = repository.db_path.as_ref().clone();
+
+    let user = materialized_user(&repository).await;
+    let listed = repository
+        .list_workspaces(&user.user_id)
+        .await
+        .expect("workspace listing should succeed before database deletion");
+    assert!(listed.is_empty());
+
+    std::fs::remove_file(&db_path).expect("database file should be removable");
+
+    let (bootstrap_required, authenticated_user) = repository
+        .auth_status(None)
+        .await
+        .expect("auth status should recreate schema after database deletion");
+    assert!(bootstrap_required);
+    assert!(authenticated_user.is_none());
+
+    let recreated_user = materialized_user(&repository).await;
+    let listed = repository
+        .list_workspaces(&recreated_user.user_id)
+        .await
+        .expect("workspace listing should succeed after schema recreation");
+    assert!(listed.is_empty());
+}
+
+#[tokio::test]
 async fn workspaces_can_be_created_and_listed() {
     let repository = test_repository();
     let user = materialized_user(&repository).await;

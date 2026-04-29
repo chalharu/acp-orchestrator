@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, io::ErrorKind, path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::Utc;
 #[cfg(test)]
@@ -60,11 +60,25 @@ impl SqliteWorkspaceRepository {
     }
 
     fn initialize(&self) -> Result<(), WorkspaceStoreError> {
-        let mut connection = self.open_connection()?;
+        let mut connection = self.open_raw_connection()?;
+        Self::initialize_connection_schema(&mut connection)
+    }
+
+    fn open_raw_connection(&self) -> Result<Connection, WorkspaceStoreError> {
+        let connection = Connection::open(self.db_path.as_ref()).map_err(database_error)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(database_error)?;
+        Ok(connection)
+    }
+
+    fn initialize_connection_schema(
+        connection: &mut Connection,
+    ) -> Result<(), WorkspaceStoreError> {
         connection
             .pragma_update(None, "foreign_keys", false)
             .map_err(database_error)?;
-        let tx = open_immediate_transaction(&mut connection)?;
+        let tx = open_immediate_transaction(connection)?;
         initialize_schema(&tx)?;
         tx.commit().map_err(database_error)?;
         connection
@@ -73,14 +87,26 @@ impl SqliteWorkspaceRepository {
         Ok(())
     }
 
+    fn database_file_needs_schema(&self) -> Result<bool, WorkspaceStoreError> {
+        match fs::metadata(self.db_path.as_ref()) {
+            Ok(metadata) => Ok(metadata.len() == 0),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(database_error(format!(
+                "failed to inspect workspace database: {error}"
+            ))),
+        }
+    }
+
     fn open_connection(&self) -> Result<Connection, WorkspaceStoreError> {
-        let connection = Connection::open(self.db_path.as_ref()).map_err(database_error)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(database_error)?;
-        connection
-            .pragma_update(None, "foreign_keys", true)
-            .map_err(database_error)?;
+        let initialize_schema = self.database_file_needs_schema()?;
+        let mut connection = self.open_raw_connection()?;
+        if initialize_schema || self.database_file_needs_schema()? {
+            Self::initialize_connection_schema(&mut connection)?;
+        } else {
+            connection
+                .pragma_update(None, "foreign_keys", true)
+                .map_err(database_error)?;
+        }
         Ok(connection)
     }
 

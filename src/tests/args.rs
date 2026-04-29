@@ -222,25 +222,23 @@ fn cli_server_url_is_explicit_accepts_both_supported_forms() {
 
 #[test]
 fn workspace_less_new_chat_detects_workspace_arguments() {
-    assert!(is_workspace_less_new_chat(&[
-        OsString::from("chat"),
-        OsString::from("--new"),
-    ]));
-    assert!(!is_workspace_less_new_chat(&[
-        OsString::from("chat"),
-        OsString::from("--new"),
-        OsString::from("--workspace"),
-        OsString::from("w_test"),
-    ]));
-    assert!(!is_workspace_less_new_chat(&[
-        OsString::from("chat"),
-        OsString::from("--new"),
-        OsString::from("--workspace=w_test"),
-    ]));
-    assert!(!is_workspace_less_new_chat(&[
-        OsString::from("session"),
-        OsString::from("list"),
-    ]));
+    assert!(is_workspace_less_new_chat(&os_args(&["chat", "--new"])));
+    assert!(!is_workspace_less_new_chat(&os_args(&[
+        "chat",
+        "--new",
+        "--workspace",
+        "w_test",
+    ])));
+    assert!(!is_workspace_less_new_chat(&os_args(&[
+        "chat",
+        "--new",
+        "--workspace=w_test",
+    ])));
+    assert!(!is_workspace_less_new_chat(&os_args(&["session", "list",])));
+}
+
+fn os_args(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
 }
 
 #[tokio::test]

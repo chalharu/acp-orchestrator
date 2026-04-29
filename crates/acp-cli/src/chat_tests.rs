@@ -20,19 +20,8 @@ use tokio::{
 #[tokio::test]
 async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
     let server_url = spawn_ordered_http_server(vec![json_response(
-        &serde_json::to_vec(&CreateSessionResponse {
-            session: SessionSnapshot {
-                id: "s_new".to_string(),
-                workspace_id: "w_test".to_string(),
-                title: "New chat".to_string(),
-                status: SessionStatus::Active,
-                latest_sequence: 1,
-                messages: Vec::new(),
-                pending_permissions: Vec::new(),
-                active_turn: false,
-            },
-        })
-        .expect("session response should serialize"),
+        &serde_json::to_vec(&active_session_response("s_new", "w_test"))
+            .expect("session response should serialize"),
     )])
     .await;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -64,19 +53,8 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
 async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(
-            &serde_json::to_vec(&CreateSessionResponse {
-                session: SessionSnapshot {
-                    id: "s_line".to_string(),
-                    workspace_id: "w_test".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Active,
-                    latest_sequence: 1,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                    active_turn: false,
-                },
-            })
-            .expect("session response should serialize"),
+            &serde_json::to_vec(&active_session_response("s_line", "w_test"))
+                .expect("session response should serialize"),
         ),
         sse_response(b"data: {\"sequence\":1,\"kind\":\"status\",\"message\":\"working\"}\n\n"),
     ])
@@ -290,19 +268,8 @@ async fn load_chat_session_surfaces_missing_sessions() {
 #[tokio::test]
 async fn load_chat_session_creates_new_chat_in_explicit_workspace() {
     let server_url = spawn_ordered_http_server(vec![json_response(
-        &serde_json::to_vec(&CreateSessionResponse {
-            session: SessionSnapshot {
-                id: "s_workspace".to_string(),
-                workspace_id: "w_explicit".to_string(),
-                title: "New chat".to_string(),
-                status: SessionStatus::Active,
-                latest_sequence: 1,
-                messages: Vec::new(),
-                pending_permissions: Vec::new(),
-                active_turn: false,
-            },
-        })
-        .expect("session response should serialize"),
+        &serde_json::to_vec(&active_session_response("s_workspace", "w_explicit"))
+            .expect("session response should serialize"),
     )])
     .await;
     let client = Client::builder().build().expect("client should build");
@@ -356,19 +323,8 @@ async fn load_chat_session_auto_selects_the_only_workspace() {
             .expect("workspace list response should serialize"),
         ),
         json_response(
-            &serde_json::to_vec(&CreateSessionResponse {
-                session: SessionSnapshot {
-                    id: "s_auto".to_string(),
-                    workspace_id: "w_only".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Active,
-                    latest_sequence: 1,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                    active_turn: false,
-                },
-            })
-            .expect("session response should serialize"),
+            &serde_json::to_vec(&active_session_response("s_auto", "w_only"))
+                .expect("session response should serialize"),
         ),
     ])
     .await;
@@ -478,31 +434,12 @@ async fn run_workspace_list_and_create_cover_workspace_commands() {
 async fn run_session_list_and_close_cover_in_process_session_commands() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(
-            &serde_json::to_vec(&SessionListResponse {
-                sessions: vec![SessionListItem {
-                    id: "s_close".to_string(),
-                    workspace_id: "w_test".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Active,
-                    last_activity_at: chrono::Utc::now(),
-                }],
-            })
-            .expect("session list response should serialize"),
+            &serde_json::to_vec(&session_list_response("s_close"))
+                .expect("session list response should serialize"),
         ),
         json_response(
-            &serde_json::to_vec(&CloseSessionResponse {
-                session: SessionSnapshot {
-                    id: "s_close".to_string(),
-                    workspace_id: "w_test".to_string(),
-                    title: "New chat".to_string(),
-                    status: SessionStatus::Closed,
-                    latest_sequence: 3,
-                    messages: Vec::new(),
-                    pending_permissions: Vec::new(),
-                    active_turn: false,
-                },
-            })
-            .expect("close response should serialize"),
+            &serde_json::to_vec(&close_session_response("s_close"))
+                .expect("close response should serialize"),
         ),
     ])
     .await;
@@ -525,6 +462,33 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
     })
     .await
     .expect("session close should succeed");
+}
+
+fn session_list_response(session_id: &str) -> SessionListResponse {
+    SessionListResponse {
+        sessions: vec![SessionListItem {
+            id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            title: "New chat".to_string(),
+            status: SessionStatus::Active,
+            last_activity_at: chrono::Utc::now(),
+        }],
+    }
+}
+
+fn close_session_response(session_id: &str) -> CloseSessionResponse {
+    CloseSessionResponse {
+        session: SessionSnapshot {
+            id: session_id.to_string(),
+            workspace_id: "w_test".to_string(),
+            title: "New chat".to_string(),
+            status: SessionStatus::Closed,
+            latest_sequence: 3,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+            active_turn: false,
+        },
+    }
 }
 
 async fn spawn_ordered_http_server(responses: Vec<Vec<u8>>) -> String {
@@ -575,6 +539,21 @@ fn raw_http_response(status: &str, content_type: &str, payload: &[u8]) -> Vec<u8
     .into_iter()
     .chain(payload.iter().copied())
     .collect()
+}
+
+fn active_session_response(session_id: &str, workspace_id: &str) -> CreateSessionResponse {
+    CreateSessionResponse {
+        session: SessionSnapshot {
+            id: session_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            title: "New chat".to_string(),
+            status: SessionStatus::Active,
+            latest_sequence: 1,
+            messages: Vec::new(),
+            pending_permissions: Vec::new(),
+            active_turn: false,
+        },
+    }
 }
 
 fn resumed_chat_args(server_url: &str) -> ChatArgs {

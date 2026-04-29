@@ -946,6 +946,30 @@ mod tests {
             .expect("test workspace repository should initialize")
     }
 
+    #[test]
+    fn database_file_needs_schema_reports_metadata_errors() {
+        let blocked_parent = std::env::temp_dir().join(format!(
+            "acp-workspace-store-blocked-parent-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&blocked_parent, b"not a directory")
+            .expect("blocked parent file should be writable");
+        let repository = SqliteWorkspaceRepository {
+            db_path: Arc::new(blocked_parent.join("db.sqlite")),
+        };
+
+        let error = repository
+            .database_file_needs_schema()
+            .expect_err("metadata errors should be surfaced");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to inspect workspace database")
+        );
+        std::fs::remove_file(blocked_parent).expect("blocked parent file should be removable");
+    }
+
     fn bearer_principal(subject: &str) -> AuthenticatedPrincipal {
         AuthenticatedPrincipal {
             id: subject.to_string(),

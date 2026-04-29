@@ -72,6 +72,13 @@ impl TrackingAgentRuntimeManager {
             .expect("runtime launch tracking should not poison")
             .clone()
     }
+
+    fn clear_launches(&self) {
+        self.launches
+            .lock()
+            .expect("runtime launch tracking should not poison")
+            .clear();
+    }
 }
 
 impl crate::agent_runtime::AgentRuntimeManager for TrackingAgentRuntimeManager {
@@ -646,6 +653,7 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
     let checkout_path = checkout_path_from_metadata(&state, &metadata);
 
     reset_binding_tracking(&reply_provider);
+    agent_runtime_manager.clear_launches();
     store
         .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;

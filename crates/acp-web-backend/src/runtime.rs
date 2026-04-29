@@ -88,7 +88,7 @@ struct Cli {
     agent_launch_mode: Option<AgentLaunchModeArg>,
     #[arg(long)]
     agent_command: Option<String>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     agent_command_arg: Vec<String>,
     #[arg(long)]
     agent_env_allowlist: Vec<String>,

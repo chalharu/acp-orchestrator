@@ -575,13 +575,9 @@ async fn create_session_marks_sessions_failed_when_agent_runtime_launch_fails() 
         startup_hints: false,
         frontend_dist: None,
     };
-    let workspace =
-        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
-            .await;
-
     let error = create_workspace_session(
         State(state),
-        Path(workspace.workspace_id),
+        Path("w_test".to_string()),
         bearer_principal("alice"),
         axum::body::Bytes::new(),
     )

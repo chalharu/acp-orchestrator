@@ -8,6 +8,7 @@ use crate::session_page_entries::{SessionEntry, SessionEntryRole};
 pub(crate) struct SessionBootstrap {
     pub(crate) entries: Vec<SessionEntry>,
     pub(crate) pending_permissions: Vec<PermissionRequest>,
+    pub(crate) active_turn: bool,
     pub(crate) session_status: SessionLifecycle,
     pub(crate) workspace_id: String,
 }
@@ -18,6 +19,7 @@ pub(crate) fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> Sessi
         workspace_id,
         messages,
         pending_permissions,
+        active_turn,
         ..
     } = session;
     let session_status = session_status_label(status);
@@ -32,6 +34,7 @@ pub(crate) fn session_bootstrap_from_snapshot(session: SessionSnapshot) -> Sessi
     SessionBootstrap {
         entries,
         pending_permissions: pending_permissions_to_items(pending_permissions),
+        active_turn,
         session_status,
         workspace_id,
     }
@@ -96,6 +99,7 @@ mod tests {
                     request_id: "req_1".to_string(),
                     summary: "read README.md".to_string(),
                 }],
+                active_turn: false,
             },
         }
     }
@@ -127,6 +131,7 @@ mod tests {
             }]
         );
         assert_eq!(bootstrap.workspace_id, "w_test");
+        assert!(!bootstrap.active_turn);
     }
 
     #[test]

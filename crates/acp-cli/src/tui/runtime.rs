@@ -197,6 +197,7 @@ mod tests {
                 latest_sequence: 2,
                 messages: Vec::new(),
                 pending_permissions,
+                active_turn: false,
             },
         }
     }

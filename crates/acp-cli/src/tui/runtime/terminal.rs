@@ -170,6 +170,7 @@ mod tests {
                     latest_sequence: 0,
                     messages: Vec::new(),
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
                 resume_history: Vec::new(),
                 resumed: false,

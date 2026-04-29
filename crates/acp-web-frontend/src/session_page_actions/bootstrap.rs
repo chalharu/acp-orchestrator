@@ -117,7 +117,8 @@ fn workspace_name_by_id(workspaces: &[WorkspaceSummary], workspace_id: &str) -> 
 
 fn apply_loaded_session(session: SessionSnapshot, signals: SessionSignals) {
     let bootstrap = session_bootstrap_from_snapshot(session);
-    let turn_state_for_session = turn_state_for_snapshot(&bootstrap.pending_permissions);
+    let turn_state_for_session =
+        turn_state_for_snapshot(&bootstrap.pending_permissions, bootstrap.active_turn);
     let should_clear =
         should_clear_prepared_session_on_load(bootstrap.session_status, &bootstrap.entries);
     set_current_workspace_id(bootstrap.workspace_id, signals);
@@ -207,6 +208,7 @@ mod tests {
                 request_id: "perm-1".to_string(),
                 summary: "Read README".to_string(),
             }],
+            active_turn: false,
         }
     }
 
@@ -276,6 +278,25 @@ mod tests {
                 Some("w_test".to_string())
             );
             assert_eq!(signals.current_workspace_name.get(), None);
+        });
+    }
+
+    #[test]
+    fn apply_loaded_session_restores_active_turn_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let mut snapshot = sample_snapshot(
+                SessionStatus::Active,
+                vec![message("user-1", MessageRole::User, "verify cancel")],
+            );
+            snapshot.pending_permissions.clear();
+            snapshot.active_turn = true;
+
+            apply_loaded_session(snapshot, signals);
+
+            assert_eq!(signals.turn_state.get(), TurnState::AwaitingReply);
+            assert!(signals.pending_permissions.get().is_empty());
         });
     }
 

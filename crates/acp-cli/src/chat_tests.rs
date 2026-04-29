@@ -29,6 +29,7 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
                 latest_sequence: 1,
                 messages: Vec::new(),
                 pending_permissions: Vec::new(),
+                active_turn: false,
             },
         })
         .expect("session response should serialize"),
@@ -72,6 +73,7 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
                     latest_sequence: 1,
                     messages: Vec::new(),
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("session response should serialize"),
@@ -118,6 +120,7 @@ async fn run_chat_with_handlers_does_not_start_repl_for_closed_sessions() {
                     latest_sequence: 2,
                     messages: Vec::new(),
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("session response should serialize"),
@@ -199,6 +202,7 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
                         created_at: chrono::Utc::now(),
                     }],
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("session response should serialize"),
@@ -295,6 +299,7 @@ async fn load_chat_session_creates_new_chat_in_explicit_workspace() {
                 latest_sequence: 1,
                 messages: Vec::new(),
                 pending_permissions: Vec::new(),
+                active_turn: false,
             },
         })
         .expect("session response should serialize"),
@@ -360,6 +365,7 @@ async fn load_chat_session_auto_selects_the_only_workspace() {
                     latest_sequence: 1,
                     messages: Vec::new(),
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("session response should serialize"),
@@ -493,6 +499,7 @@ async fn run_session_list_and_close_cover_in_process_session_commands() {
                     latest_sequence: 3,
                     messages: Vec::new(),
                     pending_permissions: Vec::new(),
+                    active_turn: false,
                 },
             })
             .expect("close response should serialize"),
@@ -617,6 +624,7 @@ fn resumed_session_response() -> CreateSessionResponse {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
+            active_turn: false,
         },
     }
 }

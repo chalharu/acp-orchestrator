@@ -530,6 +530,17 @@ async fn create_browser_session_with_pending_permission(
     (user, session)
 }
 
+async fn create_browser_session_with_active_turn(
+    state: &AppState,
+    browser: &BrowserAuthContext,
+    workspace_name: &str,
+) -> SessionSnapshot {
+    let user = authenticated_browser_user(state, browser).await;
+    let session = create_browser_default_session(state, browser, workspace_name).await;
+    start_test_active_turn(state, &user, &session).await;
+    session
+}
+
 async fn authenticated_browser_user(state: &AppState, browser: &BrowserAuthContext) -> UserRecord {
     state
         .workspace_repository
@@ -568,6 +579,23 @@ async fn register_test_pending_permission(
         .expect("permission request should register");
 }
 
+async fn start_test_active_turn(state: &AppState, user: &UserRecord, session: &SessionSnapshot) {
+    let pending = state
+        .store
+        .submit_prompt(
+            &live_owner_id_for_browser_user(user),
+            &session.id,
+            "verify cancel".to_string(),
+        )
+        .await
+        .expect("prompt submission should create a turn");
+    let turn = pending.turn_handle();
+    let _cancel_rx = turn
+        .start_turn()
+        .await
+        .expect("turn should start before auth roundtrip");
+}
+
 #[tokio::test]
 async fn pending_permissions_survive_browser_sign_out_and_sign_in() {
     let state = auth_test_state();
@@ -599,6 +627,35 @@ async fn pending_permissions_survive_browser_sign_out_and_sign_in() {
         returned_session.pending_permissions[0].summary,
         "read_text_file README.md"
     );
+}
+
+#[tokio::test]
+async fn active_turns_survive_browser_sign_out_and_sign_in() {
+    let state = auth_test_state();
+    let browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &browser).await;
+    let session =
+        create_browser_session_with_active_turn(&state, &browser, "Cancel Workspace").await;
+
+    let _signed_out = sign_out(State(state.clone()), Extension(browser.principal.clone()))
+        .await
+        .expect("sign-out should succeed");
+    let returning_browser = BrowserAuthContext::spawn().await;
+    let _signed_in =
+        sign_in_browser_account(&state, &returning_browser, "admin", "password123").await;
+
+    let returned_session = get_session(
+        State(state),
+        Path(session.id),
+        Extension(returning_browser.principal),
+    )
+    .await
+    .expect("returning browser should load the live session")
+    .0
+    .session;
+
+    assert!(returned_session.active_turn);
+    assert!(returned_session.pending_permissions.is_empty());
 }
 
 #[tokio::test]

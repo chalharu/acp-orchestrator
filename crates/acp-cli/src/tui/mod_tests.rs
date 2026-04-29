@@ -28,6 +28,7 @@ fn chat_session() -> ChatSession {
             latest_sequence: 1,
             messages: Vec::new(),
             pending_permissions: Vec::new(),
+            active_turn: false,
         },
         resume_history: Vec::new(),
         resumed: false,
@@ -47,6 +48,7 @@ fn resumed_chat_session() -> ChatSession {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
+            active_turn: false,
         },
         resume_history: vec![crate::contract_messages::ConversationMessage {
             id: "m_1".to_string(),

@@ -181,6 +181,7 @@ impl SessionHandle {
             latest_sequence: data.latest_sequence,
             messages: data.messages.clone(),
             pending_permissions: collect_pending_permissions(&data),
+            active_turn: data.active_turn.is_some(),
         }
     }
 

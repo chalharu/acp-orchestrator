@@ -257,6 +257,7 @@ fn render_event_covers_all_display_variants() {
             request_id: "req_1".to_string(),
             summary: "read_text_file README.md".to_string(),
         }],
+        active_turn: false,
     };
 
     render_event(&StreamEvent {
@@ -305,6 +306,7 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
+            active_turn: false,
         },
         resume_history: vec![crate::contract_messages::ConversationMessage {
             id: "m_history".to_string(),
@@ -338,6 +340,7 @@ fn print_chat_status_handles_pending_permissions() {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
             }],
+            active_turn: false,
         },
         resume_history: Vec::new(),
         resumed: false,
@@ -357,6 +360,7 @@ fn cli_helpers_cover_missing_urls_closed_sessions_and_not_found_errors() {
             latest_sequence: 1,
             messages: Vec::new(),
             pending_permissions: Vec::new(),
+            active_turn: false,
         },
         resume_history: Vec::new(),
         resumed: true,

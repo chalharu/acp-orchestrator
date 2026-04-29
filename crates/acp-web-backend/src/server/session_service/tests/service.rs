@@ -297,6 +297,7 @@ fn sample_snapshot(session_id: &str) -> crate::contract_sessions::SessionSnapsho
         latest_sequence: 0,
         messages: Vec::new(),
         pending_permissions: Vec::new(),
+        active_turn: false,
     }
 }
 

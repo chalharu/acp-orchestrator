@@ -22,6 +22,8 @@ pub struct SessionSnapshot {
     pub messages: Vec<ConversationMessage>,
     #[serde(default)]
     pub pending_permissions: Vec<PermissionRequest>,
+    #[serde(default)]
+    pub active_turn: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,6 +107,7 @@ mod tests {
         assert!(snapshot.workspace_id.is_empty());
         assert_eq!(snapshot.title, "New chat");
         assert!(snapshot.pending_permissions.is_empty());
+        assert!(!snapshot.active_turn);
     }
 
     #[test]

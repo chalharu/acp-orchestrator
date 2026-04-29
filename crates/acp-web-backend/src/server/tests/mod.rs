@@ -577,6 +577,7 @@ fn sample_snapshot(session_id: &str) -> SessionSnapshot {
         latest_sequence: 0,
         messages: Vec::new(),
         pending_permissions: Vec::new(),
+        active_turn: false,
     }
 }
 #[derive(Debug)]

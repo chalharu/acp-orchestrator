@@ -142,6 +142,7 @@ async fn restore_session_rejects_foreign_owners_when_the_live_session_already_ex
                     created_at: Utc::now(),
                 }],
                 pending_permissions: Vec::new(),
+                active_turn: false,
             },
             Utc::now(),
         )

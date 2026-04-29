@@ -223,6 +223,7 @@ mod tests {
             latest_sequence: 0,
             messages: Vec::new(),
             pending_permissions: Vec::new(),
+            active_turn: false,
         }
     }
 

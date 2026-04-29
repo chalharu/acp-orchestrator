@@ -19,7 +19,7 @@ pub(in crate::server) async fn stream_session_events(
     let owner = state.owner_context(principal).await?;
     let (snapshot, receiver) = state
         .store
-        .session_events(&owner.principal.id, &session_id)
+        .session_events(&owner.live_owner_id, &session_id)
         .await?;
 
     let initial_event = stream::once(async move {

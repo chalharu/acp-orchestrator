@@ -140,7 +140,7 @@ pub(in crate::server) async fn cancel_turn(
     let owner = state.owner_context(principal).await?;
     let cancelled = state
         .store
-        .cancel_active_turn(&owner.principal.id, &session_id)
+        .cancel_active_turn(&owner.live_owner_id, &session_id)
         .await?;
 
     Ok(Json(CancelTurnResponse { cancelled }))
@@ -156,7 +156,7 @@ pub(in crate::server) async fn resolve_permission(
     let resolution = state
         .store
         .resolve_permission(
-            &owner.principal.id,
+            &owner.live_owner_id,
             &session_id,
             &request_id,
             request.decision,

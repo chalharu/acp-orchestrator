@@ -218,7 +218,7 @@ async fn workspace_session_routes_list_durable_sessions_after_live_state_is_clea
 
     state
         .store
-        .delete_sessions_for_owners(&["alice".to_string()])
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
         .await;
 
     let response = list_workspace_sessions(

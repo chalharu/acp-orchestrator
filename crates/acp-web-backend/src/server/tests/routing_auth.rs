@@ -1,4 +1,5 @@
 use super::*;
+use crate::contract_permissions::{PermissionDecision, ResolvePermissionRequest};
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -352,10 +353,16 @@ async fn sign_in_rejects_non_browser_principals() {
 }
 
 #[tokio::test]
-async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
+async fn sign_in_switches_browser_accounts_without_exposing_previous_live_sessions() {
     let state = auth_test_state();
     let browser = BrowserAuthContext::spawn().await;
     bootstrap_admin_account(&state, &browser).await;
+    let admin_user = state
+        .workspace_repository
+        .authenticate_browser_session(&browser.principal.id)
+        .await
+        .expect("browser session lookup should succeed")
+        .expect("admin browser session should be authenticated");
     let _workspace = create_owned_workspace_for_principal(
         &state,
         Extension(browser.principal.clone()),
@@ -389,12 +396,24 @@ async fn sign_in_clears_live_sessions_before_rebinding_a_browser_session() {
     .await
     .expect("sign-in should succeed");
 
-    let snapshot_error = state
+    let member_snapshot_error = get_session(
+        State(state.clone()),
+        Path(created.id.clone()),
+        Extension(browser.principal.clone()),
+    )
+    .await
+    .expect_err("rebound browser sessions should not access previous account chats");
+    assert!(matches!(
+        member_snapshot_error,
+        AppError::Forbidden(message) if message == "session owner mismatch"
+    ));
+
+    let admin_snapshot = state
         .store
-        .session_snapshot(&browser.principal.id, &created.id)
+        .session_snapshot(&live_owner_id_for_browser_user(&admin_user), &created.id)
         .await
-        .expect_err("rebound browser sessions should lose prior live chats");
-    assert_eq!(snapshot_error, SessionStoreError::NotFound);
+        .expect("previous account live chats should remain available to that account");
+    assert_eq!(admin_snapshot.id, created.id);
 }
 
 #[tokio::test]
@@ -402,12 +421,12 @@ async fn list_sessions_returns_owned_sessions_for_the_authenticated_principal() 
     let state = auth_test_state();
     let session = state
         .store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     state
         .store
-        .create_session("bob", "w_test")
+        .create_session("bearer:bob", "w_test")
         .await
         .expect("other session creation should succeed");
 
@@ -426,7 +445,7 @@ async fn get_session_returns_the_requested_owned_session() {
     let state = auth_test_state();
     let session = state
         .store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
 
@@ -474,6 +493,136 @@ async fn sign_out_clears_browser_authentication_and_cookies() {
     }));
     assert!(!after.0.bootstrap_required);
     assert!(after.0.account.is_none());
+}
+
+async fn create_browser_session_with_pending_permission(
+    state: &AppState,
+    browser: &BrowserAuthContext,
+    workspace_name: &str,
+) -> (UserRecord, SessionSnapshot) {
+    let user = state
+        .workspace_repository
+        .authenticate_browser_session(&browser.principal.id)
+        .await
+        .expect("browser session lookup should succeed")
+        .expect("browser session should be authenticated");
+    let workspace = create_owned_workspace_for_principal(
+        state,
+        Extension(browser.principal.clone()),
+        workspace_name,
+    )
+    .await;
+    let session = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id),
+        Extension(browser.principal.clone()),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .expect("workspace session should create")
+    .1
+    .0
+    .session;
+    register_test_pending_permission(state, &user, &session).await;
+    (user, session)
+}
+
+async fn register_test_pending_permission(
+    state: &AppState,
+    user: &UserRecord,
+    session: &SessionSnapshot,
+) {
+    let pending = state
+        .store
+        .submit_prompt(
+            &live_owner_id_for_browser_user(user),
+            &session.id,
+            "verify permission".to_string(),
+        )
+        .await
+        .expect("prompt submission should create a turn");
+    let turn = pending.turn_handle();
+    let _cancel_rx = turn
+        .start_turn()
+        .await
+        .expect("turn should start before requesting permission");
+    let _resolution = turn
+        .register_permission_request(
+            "read_text_file README.md".to_string(),
+            "allow_once".to_string(),
+            "reject_once".to_string(),
+        )
+        .await
+        .expect("permission request should register");
+}
+
+#[tokio::test]
+async fn pending_permissions_survive_browser_sign_out_and_sign_in() {
+    let state = auth_test_state();
+    let browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &browser).await;
+    let (_admin_user, session) =
+        create_browser_session_with_pending_permission(&state, &browser, "Permission Workspace")
+            .await;
+
+    let _signed_out = sign_out(State(state.clone()), Extension(browser.principal.clone()))
+        .await
+        .expect("sign-out should succeed");
+    let returning_browser = BrowserAuthContext::spawn().await;
+    let _signed_in =
+        sign_in_browser_account(&state, &returning_browser, "admin", "password123").await;
+
+    let returned_session = get_session(
+        State(state),
+        Path(session.id),
+        Extension(returning_browser.principal),
+    )
+    .await
+    .expect("returning browser should load the live session")
+    .0
+    .session;
+
+    assert_eq!(returned_session.pending_permissions.len(), 1);
+    assert_eq!(
+        returned_session.pending_permissions[0].summary,
+        "read_text_file README.md"
+    );
+}
+
+#[tokio::test]
+async fn bearer_user_id_cannot_resolve_browser_pending_permissions() {
+    let state = auth_test_state();
+    let browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &browser).await;
+    let (admin_user, session) = create_browser_session_with_pending_permission(
+        &state,
+        &browser,
+        "Bearer Collision Workspace",
+    )
+    .await;
+
+    let error = resolve_permission(
+        State(state.clone()),
+        Path((session.id.clone(), "req_1".to_string())),
+        bearer_principal(&admin_user.user_id),
+        Json(ResolvePermissionRequest {
+            decision: PermissionDecision::Approve,
+        }),
+    )
+    .await
+    .expect_err("bearer user-id collisions should not resolve browser permissions");
+
+    assert!(matches!(
+        error,
+        AppError::Forbidden(message) if message == "session owner mismatch"
+    ));
+    let session = state
+        .store
+        .session_snapshot(&live_owner_id_for_browser_user(&admin_user), &session.id)
+        .await
+        .expect("browser-owned live session should remain intact");
+    assert_eq!(session.pending_permissions.len(), 1);
+    assert_eq!(session.pending_permissions[0].request_id, "req_1");
 }
 
 #[tokio::test]
@@ -530,17 +679,19 @@ async fn admin_account_deletions_forget_live_sessions() {
     let admin_browser = BrowserAuthContext::spawn().await;
     bootstrap_admin_account(&state, &admin_browser).await;
     let member = create_member_account(&state, &admin_browser, "member", "password123").await;
+    let member_user_id = member.user_id.clone();
+    let member_live_owner_id = live_owner_id_for_browser_user_id(&member_user_id);
     let member_browser = BrowserAuthContext::spawn().await;
     sign_in_browser_account(&state, &member_browser, "member", "password123").await;
     let live_session = state
         .store
-        .create_session(&member_browser.principal.id, "w_test")
+        .create_session(&member_live_owner_id, "w_test")
         .await
         .expect("member live session should create");
 
     let deleted = delete_account(
         State(state.clone()),
-        Path(member.user_id),
+        Path(member_user_id.clone()),
         Extension(admin_browser.principal),
     )
     .await
@@ -549,7 +700,7 @@ async fn admin_account_deletions_forget_live_sessions() {
     assert_eq!(
         state
             .store
-            .session_snapshot(&member_browser.principal.id, &live_session.id)
+            .session_snapshot(&member_live_owner_id, &live_session.id)
             .await,
         Err(SessionStoreError::NotFound)
     );

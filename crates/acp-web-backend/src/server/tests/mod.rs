@@ -141,7 +141,7 @@ async fn metadata_test_context() -> MetadataTestContext {
         store,
         workspace_repository,
         state,
-        live_owner_id: "alice".to_string(),
+        live_owner_id: live_owner_id_for_bearer(&bearer_principal("alice").0),
         principal: bearer_principal("alice"),
         user,
     }
@@ -182,7 +182,7 @@ async fn browser_metadata_test_context() -> MetadataTestContext {
         store,
         workspace_repository,
         state,
-        live_owner_id: principal.id.clone(),
+        live_owner_id: live_owner_id_for_browser_user(&user),
         principal: Extension(principal),
         user,
     }

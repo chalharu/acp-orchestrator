@@ -29,11 +29,11 @@ fn workspace_store_errors_map_to_the_expected_app_errors() {
 async fn tracking_reply_provider_returns_no_output() {
     let store = SessionStore::new(4);
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let pending = store
-        .submit_prompt("alice", &session.id, "hello".to_string())
+        .submit_prompt("bearer:alice", &session.id, "hello".to_string())
         .await
         .expect("prompt submission should succeed");
     let provider = TrackingReplyProvider {
@@ -58,7 +58,7 @@ async fn slash_completion_handler_returns_catalog_entries_for_the_owner() {
         }),
     );
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = get_slash_completions(

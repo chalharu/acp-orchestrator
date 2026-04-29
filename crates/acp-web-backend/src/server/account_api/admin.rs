@@ -73,6 +73,8 @@ pub(in crate::server) async fn delete_account(
         .workspace_repository
         .delete_local_account(&user_id, &owner.user.user_id)
         .await?;
-    forget_live_sessions_for_owners(&state, &invalidated_browser_sessions).await;
+    let mut invalidated_live_owners = invalidated_browser_sessions;
+    invalidated_live_owners.push(super::super::live_owner_id_for_browser_user_id(&user_id));
+    forget_live_sessions_for_owners(&state, &invalidated_live_owners).await;
     Ok(Json(DeleteAccountResponse { deleted: true }))
 }

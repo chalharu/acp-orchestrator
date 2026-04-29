@@ -62,7 +62,7 @@ fn assert_checkout_relpath_removed(checkout_relpath: &str, message: &str) {
 
 async fn assert_failed_session_rolled_back(store: &SessionStore, session_id: &str) {
     let snapshot_error = store
-        .session_snapshot("alice", session_id)
+        .session_snapshot("bearer:alice", session_id)
         .await
         .expect_err("failed creations should be rolled back");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
@@ -324,7 +324,7 @@ async fn create_session_reports_metadata_rollback_failures() {
         store: store.clone(),
         workspace_repository: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
             store,
-            "alice",
+            "bearer:alice",
             "metadata write failed",
             true,
         )),
@@ -359,7 +359,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         store: store.clone(),
         workspace_repository: Arc::new(RollbackFailingMetadataWorkspaceStore::new(
             store.clone(),
-            "alice",
+            "bearer:alice",
             "metadata write failed",
             false,
         )),
@@ -381,7 +381,7 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
 
     assert!(matches!(error, AppError::Internal(message) if message == "internal server error"));
     let snapshot_error = store
-        .session_snapshot("alice", "s_1")
+        .session_snapshot("bearer:alice", "s_1")
         .await
         .expect_err("failed creations should be rolled back");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
@@ -393,7 +393,7 @@ async fn create_session_marks_provisioning_rows_failed_when_cloning_persistence_
     let workspace_repository = Arc::new(
         RollbackFailingMetadataWorkspaceStore::with_save_failure_on_attempt(
             store.clone(),
-            "alice",
+            "bearer:alice",
             "cloning lifecycle failed",
             2,
         ),
@@ -428,7 +428,7 @@ async fn create_session_marks_provisioning_rows_failed_when_cloning_persistence_
     assert_eq!(saved_metadata[1].status, "failed");
     assert_eq!(saved_metadata[0].session_id, saved_metadata[1].session_id);
     let snapshot_error = store
-        .session_snapshot("alice", &saved_metadata[0].session_id)
+        .session_snapshot("bearer:alice", &saved_metadata[0].session_id)
         .await
         .expect_err("failed creations should be rolled back");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);
@@ -440,7 +440,7 @@ async fn create_session_marks_starting_rows_failed_when_starting_persistence_fai
     let workspace_repository = Arc::new(
         RollbackFailingMetadataWorkspaceStore::with_save_failure_on_attempt(
             store.clone(),
-            "alice",
+            "bearer:alice",
             "starting lifecycle failed",
             3,
         ),
@@ -548,7 +548,7 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
 async fn rename_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let state = AppState::with_workspace_repository(
@@ -577,7 +577,7 @@ async fn rename_session_keeps_working_when_workspace_materialization_fails() {
 async fn post_message_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let state = AppState::with_workspace_repository(
@@ -602,7 +602,7 @@ async fn post_message_keeps_working_when_workspace_materialization_fails() {
     timeout(std::time::Duration::from_secs(1), async {
         loop {
             let snapshot = store
-                .session_snapshot("alice", &session.id)
+                .session_snapshot("bearer:alice", &session.id)
                 .await
                 .expect("live session should stay accessible");
             if snapshot.messages.len() == 2 {
@@ -623,7 +623,7 @@ async fn post_message_keeps_working_when_workspace_materialization_fails() {
 async fn close_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let response = close_session(
@@ -641,7 +641,7 @@ async fn close_session_keeps_working_when_workspace_materialization_fails() {
 async fn delete_session_keeps_working_when_workspace_materialization_fails() {
     let store = Arc::new(SessionStore::new(4));
     let session = store
-        .create_session("alice", "w_test")
+        .create_session("bearer:alice", "w_test")
         .await
         .expect("session creation should succeed");
     let state = failing_workspace_state(store.clone());
@@ -656,7 +656,7 @@ async fn delete_session_keeps_working_when_workspace_materialization_fails() {
 
     assert!(response.0.deleted);
     let snapshot_error = store
-        .session_snapshot("alice", &session.id)
+        .session_snapshot("bearer:alice", &session.id)
         .await
         .expect_err("deleted sessions should be removed from the live store");
     assert_eq!(snapshot_error, SessionStoreError::NotFound);

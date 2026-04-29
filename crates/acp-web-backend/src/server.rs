@@ -268,7 +268,11 @@ impl AppState {
                     AppError::Unauthorized("account authentication required".to_string())
                 })?,
         };
-        Ok(OwnerContext { principal, user })
+        let live_owner_id = live_owner_id_for_principal(&principal, &user);
+        Ok(OwnerContext {
+            user,
+            live_owner_id,
+        })
     }
 }
 
@@ -284,8 +288,29 @@ pub fn app(state: AppState) -> Router {
 
 #[derive(Debug, Clone)]
 struct OwnerContext {
-    principal: AuthenticatedPrincipal,
     user: UserRecord,
+    live_owner_id: String,
+}
+
+fn live_owner_id_for_principal(principal: &AuthenticatedPrincipal, user: &UserRecord) -> String {
+    match principal.kind {
+        crate::auth::AuthenticatedPrincipalKind::Bearer => live_owner_id_for_bearer(principal),
+        crate::auth::AuthenticatedPrincipalKind::BrowserSession => {
+            live_owner_id_for_browser_user(user)
+        }
+    }
+}
+
+fn live_owner_id_for_bearer(principal: &AuthenticatedPrincipal) -> String {
+    format!("bearer:{}", principal.id)
+}
+
+fn live_owner_id_for_browser_user(user: &UserRecord) -> String {
+    live_owner_id_for_browser_user_id(&user.user_id)
+}
+
+fn live_owner_id_for_browser_user_id(user_id: &str) -> String {
+    format!("browser-user:{user_id}")
 }
 
 type BoxedRouteService = BoxCloneSyncService<Request<Body>, Response, Infallible>;

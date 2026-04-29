@@ -298,6 +298,28 @@ fn app_state_new_uses_chroot_checkout_layout_for_agent_launch() {
 }
 
 #[test]
+fn app_state_new_uses_standard_checkout_layout_without_agent_launch() {
+    let state = AppState::new(
+        ServerConfig {
+            state_dir: std::env::temp_dir().join(format!(
+                "acp-server-standard-layout-{}",
+                uuid::Uuid::new_v4().simple()
+            )),
+            ..ServerConfig::default()
+        },
+        metadata_test_workspace_store(),
+    )
+    .expect("app state should build");
+
+    assert_eq!(
+        state
+            .checkout_manager
+            .checkout_relpath_for_session("s_test"),
+        Some("session-checkouts/s_test".to_string())
+    );
+}
+
+#[test]
 fn workspace_store_initialization_failures_map_into_app_state_build_errors() {
     let blocking_path = std::env::temp_dir().join(format!(
         "acp-web-backend-state-blocker-{}",

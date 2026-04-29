@@ -276,6 +276,26 @@ async fn runtime_unavailable_sessions_reject_new_prompts_and_turns() {
 }
 
 #[tokio::test]
+async fn closed_sessions_cannot_be_marked_runtime_unavailable() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    store
+        .close_session("alice", &session.id)
+        .await
+        .expect("session close should succeed");
+
+    let error = store
+        .mark_runtime_unavailable("alice", &session.id, "runtime failed".to_string())
+        .await
+        .expect_err("closed sessions should reject runtime-unavailable marking");
+
+    assert_eq!(error, SessionStoreError::Closed);
+}
+
+#[tokio::test]
 async fn pending_prompts_can_broadcast_status_updates() {
     let store = SessionStore::new(4);
     let session = store

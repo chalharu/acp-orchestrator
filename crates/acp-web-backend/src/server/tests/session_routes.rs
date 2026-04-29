@@ -144,6 +144,22 @@ impl crate::agent_runtime::AgentRuntimeManager for RestoreFailingAgentRuntimeMan
     fn forget_session(&self, _session_id: &str) {}
 }
 
+#[derive(Debug)]
+struct RestoreAlreadyRunningAgentRuntimeManager;
+
+impl crate::agent_runtime::AgentRuntimeManager for RestoreAlreadyRunningAgentRuntimeManager {
+    fn launch_session(
+        &self,
+        launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
+    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+        Err(crate::agent_runtime::AgentRuntimeError::AlreadyRunning(
+            launch.session_id.to_string(),
+        ))
+    }
+
+    fn forget_session(&self, _session_id: &str) {}
+}
+
 fn state_with_static_reply(reply: &str) -> (Arc<SessionStore>, AppState) {
     let store = Arc::new(SessionStore::new(4));
     let state = AppState::with_dependencies(
@@ -832,6 +848,78 @@ async fn get_session_keeps_transcript_readable_when_runtime_relaunch_fails() {
     assert_eq!(restored.0.session.id, created.id);
     assert_binding_calls(&reply_provider, &[], &[]);
     assert_runtime_unavailable_write_rejected(state, created.id, principal).await;
+}
+
+#[tokio::test]
+async fn get_session_rebinds_when_restored_runtime_is_already_running() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let principal = bearer_principal("alice");
+    let created =
+        create_restorable_session_with_metadata(&store, &workspace_repository, &principal, |_| {})
+            .await;
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state = AppState {
+        store,
+        workspace_repository,
+        reply_provider: reply_provider.clone(),
+        checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: Arc::new(RestoreAlreadyRunningAgentRuntimeManager),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let restored = get_session(State(state), Path(created.id.clone()), principal)
+        .await
+        .expect("already-running runtime should allow restored checkout binding");
+
+    assert_eq!(restored.0.session.id, created.id);
+    let expected_binding = (
+        created.id.clone(),
+        test_checkout_path(&format!("session-checkouts/{}", created.id)),
+    );
+    assert_binding_calls(&reply_provider, &["bind"], &[expected_binding]);
+}
+
+#[tokio::test]
+async fn get_session_restores_closed_sessions_without_runtime_relaunch() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let initial_state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        reply_provider.clone(),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&initial_state, principal.clone()).await;
+    let _ = close_session(
+        State(initial_state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+    )
+    .await
+    .expect("session close should persist closed metadata");
+    store
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
+        .await;
+    let runtime_manager = Arc::new(TrackingAgentRuntimeManager::new());
+    let state = AppState {
+        store,
+        workspace_repository,
+        reply_provider,
+        checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: runtime_manager.clone(),
+        startup_hints: false,
+        frontend_dist: None,
+    };
+
+    let restored = get_session(State(state), Path(created.id.clone()), principal)
+        .await
+        .expect("closed sessions should restore");
+
+    assert_eq!(restored.0.session.status, SessionStatus::Closed);
+    assert!(runtime_manager.launched_sessions().is_empty());
 }
 
 #[tokio::test]

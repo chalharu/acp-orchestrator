@@ -356,19 +356,25 @@ impl FsAgentRuntimeManager {
             terminate_agent_child(&mut child);
             AgentRuntimeError::Poisoned("agent runtime child registry is poisoned".to_string())
         })?;
-        match registry.slots.get_mut(session_id) {
-            Some(slot @ AgentChildSlot::Launching(existing_id)) if *existing_id == launch_id => {
-                *slot = AgentChildSlot::Running(child);
-                self.launch_notifications.notify_all();
-                Ok(())
-            }
-            Some(AgentChildSlot::Launching(_)) | None => {
+        let Some(slot) = registry.slots.get_mut(session_id) else {
+            terminate_agent_child(&mut child);
+            return Err(AgentRuntimeError::Io(
+                "agent runtime launch was cancelled".to_string(),
+            ));
+        };
+        if matches!(slot, AgentChildSlot::Launching(existing_id) if *existing_id == launch_id) {
+            *slot = AgentChildSlot::Running(child);
+            self.launch_notifications.notify_all();
+            return Ok(());
+        }
+        match slot {
+            AgentChildSlot::Launching(_) => {
                 terminate_agent_child(&mut child);
                 Err(AgentRuntimeError::Io(
                     "agent runtime launch was cancelled".to_string(),
                 ))
             }
-            Some(AgentChildSlot::Running(_)) => {
+            AgentChildSlot::Running(_) => {
                 terminate_agent_child(&mut child);
                 Err(AgentRuntimeError::AlreadyRunning(session_id.to_string()))
             }

@@ -297,3 +297,16 @@ fn encode_path_segment(value: &str) -> String {
     }
     encoded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::encode_path_segment;
+
+    #[test]
+    fn encode_path_segment_escapes_reserved_characters() {
+        assert_eq!(
+            encode_path_segment("workspace/one two"),
+            "workspace%2Fone%20two"
+        );
+    }
+}

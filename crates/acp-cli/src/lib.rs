@@ -55,6 +55,14 @@ impl ChatSession {
     }
 }
 
+#[derive(Debug)]
+struct ChatRuntime {
+    client: Client,
+    server_url: String,
+    auth_token: String,
+    chat_session: ChatSession,
+}
+
 #[derive(Debug, Snafu)]
 pub enum CliError {
     #[snafu(display("choose either `--new` or `--session <id>`"))]
@@ -274,6 +282,24 @@ where
     RunRepl: FnOnce(Client, String, String, String) -> ReplFuture,
     ReplFuture: Future<Output = Result<()>>,
 {
+    let runtime = prepare_chat_runtime(args).await?;
+    if runtime.chat_session.is_read_only() {
+        return render_read_only_chat(&runtime.chat_session, &runtime.server_url);
+    }
+    if interactive_ui {
+        return run_ui(
+            runtime.client,
+            runtime.server_url,
+            runtime.auth_token,
+            runtime.chat_session,
+        )
+        .await;
+    }
+
+    run_repl_chat(runtime, run_repl).await
+}
+
+async fn prepare_chat_runtime(args: ChatArgs) -> Result<ChatRuntime> {
     ensure!(args.new || args.session_id.is_some(), ChatModeRequiredSnafu);
 
     let server_url = require_server_url("chat", args.server_url.clone())?;
@@ -288,17 +314,34 @@ where
         &auth_token,
     )
     .await?;
-    let session_id = chat_session.session.id.clone();
-    if chat_session.is_read_only() {
-        print_chat_banner(&chat_session.session.id, &server_url);
-        print_chat_status(&chat_session, false);
-        let _ = render_resume_history(&chat_session);
-        return Ok(());
-    }
-    if interactive_ui {
-        return run_ui(client, server_url, auth_token, chat_session).await;
-    }
 
+    Ok(ChatRuntime {
+        client,
+        server_url,
+        auth_token,
+        chat_session,
+    })
+}
+
+fn render_read_only_chat(chat_session: &ChatSession, server_url: &str) -> Result<()> {
+    print_chat_banner(&chat_session.session.id, server_url);
+    print_chat_status(chat_session, false);
+    let _ = render_resume_history(chat_session);
+    Ok(())
+}
+
+async fn run_repl_chat<RunRepl, ReplFuture>(runtime: ChatRuntime, run_repl: RunRepl) -> Result<()>
+where
+    RunRepl: FnOnce(Client, String, String, String) -> ReplFuture,
+    ReplFuture: Future<Output = Result<()>>,
+{
+    let ChatRuntime {
+        client,
+        server_url,
+        auth_token,
+        chat_session,
+    } = runtime;
+    let session_id = chat_session.session.id.clone();
     print_chat_banner(&chat_session.session.id, &server_url);
     print_chat_status(&chat_session, false);
     let initial_snapshot_state = render_resume_history(&chat_session);
@@ -505,48 +548,66 @@ async fn run_session(args: SessionArgs) -> Result<()> {
 
 async fn run_workspace(args: WorkspaceArgs) -> Result<()> {
     match args.command {
-        WorkspaceCommand::List(args) => {
-            let server_url = require_server_url("listing workspaces", args.server_url)?;
-            let auth_token = resolved_auth_token(args.auth_token);
-            let client =
-                build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-            let workspaces = list_workspaces(&client, &server_url, &auth_token).await?;
-            if workspaces.workspaces.is_empty() {
-                println!("no workspaces found for the current owner");
-                return Ok(());
-            }
-            for workspace in workspaces.workspaces {
-                println!(
-                    "{}\t{}\t{}",
-                    workspace.workspace_id,
-                    workspace.name,
-                    workspace.upstream_url.unwrap_or_else(|| "-".to_string())
-                );
-            }
-            Ok(())
-        }
-        WorkspaceCommand::Create(args) => {
-            let server_url = require_server_url("creating a workspace", args.server_url)?;
-            let auth_token = resolved_auth_token(args.auth_token);
-            let client =
-                build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
-            let workspace = create_workspace(
-                &client,
-                &server_url,
-                &auth_token,
-                &args.name,
-                &args.upstream_url,
-            )
-            .await?;
-            println!(
-                "{}\t{}\t{}",
-                workspace.workspace_id,
-                workspace.name,
-                workspace.upstream_url.unwrap_or_else(|| "-".to_string())
-            );
-            Ok(())
-        }
+        WorkspaceCommand::List(args) => run_workspace_list(args).await,
+        WorkspaceCommand::Create(args) => run_workspace_create(args).await,
     }
+}
+
+async fn run_workspace_list(args: WorkspaceListArgs) -> Result<()> {
+    let (client, server_url, auth_token) =
+        workspace_command_client("listing workspaces", args.server_url, args.auth_token)?;
+    let workspaces = list_workspaces(&client, &server_url, &auth_token).await?;
+    if workspaces.workspaces.is_empty() {
+        println!("no workspaces found for the current owner");
+        return Ok(());
+    }
+    for workspace in workspaces.workspaces {
+        print_workspace_summary(
+            &workspace.workspace_id,
+            &workspace.name,
+            workspace.upstream_url.as_deref(),
+        );
+    }
+    Ok(())
+}
+
+async fn run_workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
+    let (client, server_url, auth_token) =
+        workspace_command_client("creating a workspace", args.server_url, args.auth_token)?;
+    let workspace = create_workspace(
+        &client,
+        &server_url,
+        &auth_token,
+        &args.name,
+        &args.upstream_url,
+    )
+    .await?;
+    print_workspace_summary(
+        &workspace.workspace_id,
+        &workspace.name,
+        workspace.upstream_url.as_deref(),
+    );
+    Ok(())
+}
+
+fn workspace_command_client(
+    command: &'static str,
+    server_url: Option<String>,
+    auth_token: Option<String>,
+) -> Result<(Client, String, String)> {
+    let server_url = require_server_url(command, server_url)?;
+    let auth_token = resolved_auth_token(auth_token);
+    let client = build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+    Ok((client, server_url, auth_token))
+}
+
+fn print_workspace_summary(workspace_id: &str, name: &str, upstream_url: Option<&str>) {
+    println!(
+        "{}\t{}\t{}",
+        workspace_id,
+        name,
+        upstream_url.unwrap_or("-")
+    );
 }
 
 fn session_status_label(status: &SessionStatus) -> &'static str {

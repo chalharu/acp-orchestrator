@@ -261,7 +261,10 @@ fn session_sidebar_workspaces_label() -> &'static str {
     "Workspaces"
 }
 
-fn session_sidebar_workspaces_href(current_workspace_id: Option<&str>, current_session_id: &str) -> String {
+fn session_sidebar_workspaces_href(
+    current_workspace_id: Option<&str>,
+    current_session_id: &str,
+) -> String {
     workspaces_path_with_return_to(&app_session_path_for_workspace(
         current_workspace_id,
         current_session_id,

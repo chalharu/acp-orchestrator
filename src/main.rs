@@ -113,6 +113,9 @@ enum LauncherError {
     #[snafu(display("bootstrapping the launcher workspace request failed"))]
     BootstrapLauncherWorkspaceRequest { source: reqwest::Error },
 
+    #[snafu(display("reading the launcher workspace failure response failed"))]
+    ReadLauncherWorkspaceFailure { source: reqwest::Error },
+
     #[snafu(display("bootstrapping the launcher workspace failed with HTTP {status}: {message}"))]
     BootstrapLauncherWorkspaceStatus {
         status: reqwest::StatusCode,
@@ -448,9 +451,10 @@ async fn bootstrap_launcher_workspace(backend_url: &str, auth_token: &str) -> Re
         .context(BootstrapLauncherWorkspaceRequestSnafu)?;
     if !response.status().is_success() {
         let status = response.status();
-        let message = response.text().await.unwrap_or_else(|error| {
-            format!("response body unavailable after workspace bootstrap failure: {error}")
-        });
+        let message = response
+            .text()
+            .await
+            .context(ReadLauncherWorkspaceFailureSnafu)?;
         return Err(LauncherError::BootstrapLauncherWorkspaceStatus { status, message });
     }
 

@@ -221,6 +221,78 @@ fn cli_server_url_is_explicit_accepts_both_supported_forms() {
 }
 
 #[test]
+fn workspace_less_new_chat_detects_workspace_arguments() {
+    assert!(is_workspace_less_new_chat(&[
+        OsString::from("chat"),
+        OsString::from("--new"),
+    ]));
+    assert!(!is_workspace_less_new_chat(&[
+        OsString::from("chat"),
+        OsString::from("--new"),
+        OsString::from("--workspace"),
+        OsString::from("w_test"),
+    ]));
+    assert!(!is_workspace_less_new_chat(&[
+        OsString::from("chat"),
+        OsString::from("--new"),
+        OsString::from("--workspace=w_test"),
+    ]));
+    assert!(!is_workspace_less_new_chat(&[
+        OsString::from("session"),
+        OsString::from("list"),
+    ]));
+}
+
+#[tokio::test]
+async fn prepare_cli_launcher_args_skips_without_backend_context() {
+    let args = vec![OsString::from("chat"), OsString::from("--new")];
+
+    assert_eq!(
+        prepare_cli_launcher_args(args.clone(), None, Some("developer"))
+            .await
+            .expect("missing backend URL should skip bootstrap"),
+        args
+    );
+}
+
+#[test]
+fn append_workspace_arg_adds_cli_workspace_selection() {
+    assert_eq!(
+        append_workspace_arg(
+            vec![OsString::from("chat"), OsString::from("--new")],
+            "w_test".to_string()
+        ),
+        vec![
+            OsString::from("chat"),
+            OsString::from("--new"),
+            OsString::from("--workspace"),
+            OsString::from("w_test"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_launcher_workspace_surfaces_http_failures() {
+    let (server_url, handle) = spawn_single_response_http_server(
+        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 16\r\n\r\nbootstrap failed",
+    )
+    .await;
+
+    let error = bootstrap_launcher_workspace(&server_url, "developer")
+        .await
+        .expect_err("HTTP failure should be surfaced");
+    handle.abort();
+
+    match error {
+        LauncherError::BootstrapLauncherWorkspaceStatus { status, message } => {
+            assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(message, "bootstrap failed");
+        }
+        other => panic!("unexpected bootstrap error: {other:?}"),
+    }
+}
+
+#[test]
 fn launcher_state_path_uses_data_dir_before_home_dir() {
     let path = launcher_state_path_from(
         None,

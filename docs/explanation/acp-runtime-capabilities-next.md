@@ -5,7 +5,7 @@
 次の実装 slice では、session を「会話ログを持つ HTTP/SSE リソース」から、
 agent process と tool execution capability を持つ runtime に引き上げる。
 対象は Agent Client Protocol tool calls、filesystem、terminal、Docker/Kubernetes
-launch の最小設計である。
+launch の最小設計です。
 
 ## Runtime model
 

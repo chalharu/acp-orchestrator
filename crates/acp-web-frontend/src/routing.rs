@@ -6,7 +6,10 @@ pub(crate) enum AppRoute {
     Accounts,
     Workspaces,
     Session(String),
-    WorkspaceSession { workspace_id: String, session_id: String },
+    WorkspaceSession {
+        workspace_id: String,
+        session_id: String,
+    },
     NotFound,
 }
 
@@ -44,10 +47,11 @@ fn static_app_route(pathname: &str) -> Option<AppRoute> {
 
 fn session_route(pathname: &str) -> Option<AppRoute> {
     workspace_session_route(pathname).or_else(|| {
-        pathname.strip_prefix("/app/sessions/")
-        .filter(|session_id| !session_id.is_empty())
-        .and_then(decode_component)
-        .map(AppRoute::Session)
+        pathname
+            .strip_prefix("/app/sessions/")
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(decode_component)
+            .map(AppRoute::Session)
     })
 }
 
@@ -179,6 +183,10 @@ mod tests {
         assert_eq!(route_from_pathname("/app/sessions/%ZZ"), AppRoute::NotFound);
         assert_eq!(
             route_from_pathname("/app/workspaces/%ZZ/sessions/s1"),
+            AppRoute::NotFound
+        );
+        assert_eq!(
+            route_from_pathname("/app/workspaces/w1/sessions/s1/extra"),
             AppRoute::NotFound
         );
     }

@@ -46,7 +46,9 @@ pub fn SessionSidebarAuthControls(
     ));
     let view_state = SessionSidebarAuthViewState {
         accounts_href: Signal::derive(move || accounts_path_with_return_to(&session_path.get())),
-        workspaces_href: Signal::derive(move || workspaces_path_with_return_to(&session_path.get())),
+        workspaces_href: Signal::derive(move || {
+            workspaces_path_with_return_to(&session_path.get())
+        }),
         is_admin,
         signed_in,
         signing_out,

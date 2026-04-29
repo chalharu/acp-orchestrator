@@ -68,6 +68,10 @@ pub(super) fn install_frontend_routes(router: Router, state: AppState) -> Router
             "/app/sessions/{session_id}",
             get_route(&state, app_session_entrypoint),
         )
+        .route(
+            "/app/workspaces/{workspace_id}/sessions/{session_id}",
+            get_route(&state, app_workspace_session_entrypoint),
+        )
 }
 
 pub(super) async fn healthz() -> axum::Json<HealthResponse> {
@@ -118,6 +122,13 @@ pub(super) async fn app_workspaces_entrypoint(headers: HeaderMap) -> Response {
 
 pub(super) async fn app_session_entrypoint(
     Path(_session_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    app_shell_response(&headers)
+}
+
+pub(super) async fn app_workspace_session_entrypoint(
+    Path((_workspace_id, _session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
     app_shell_response(&headers)

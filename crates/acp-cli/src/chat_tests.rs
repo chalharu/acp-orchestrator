@@ -342,6 +342,85 @@ async fn load_chat_session_requires_workspace_when_auto_selection_is_ambiguous()
 }
 
 #[tokio::test]
+async fn load_chat_session_auto_selects_the_only_workspace() {
+    let server_url = spawn_ordered_http_server(vec![
+        json_response(
+            &serde_json::to_vec(&WorkspaceListResponse {
+                workspaces: vec![workspace_summary("w_only", "Only")],
+            })
+            .expect("workspace list response should serialize"),
+        ),
+        json_response(
+            &serde_json::to_vec(&CreateSessionResponse {
+                session: SessionSnapshot {
+                    id: "s_auto".to_string(),
+                    workspace_id: "w_only".to_string(),
+                    title: "New chat".to_string(),
+                    status: SessionStatus::Active,
+                    latest_sequence: 1,
+                    messages: Vec::new(),
+                    pending_permissions: Vec::new(),
+                },
+            })
+            .expect("session response should serialize"),
+        ),
+    ])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let chat_session = load_chat_session(&client, &server_url, true, None, None, "developer")
+        .await
+        .expect("single workspace should be auto-selected");
+
+    assert_eq!(chat_session.session.workspace_id, "w_only");
+    assert!(!chat_session.resumed);
+}
+
+#[tokio::test]
+async fn load_chat_session_requires_workspace_when_none_exist() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&WorkspaceListResponse {
+            workspaces: Vec::new(),
+        })
+        .expect("workspace list response should serialize"),
+    )])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let error = load_chat_session(&client, &server_url, true, None, None, "developer")
+        .await
+        .expect_err("missing workspace should require --workspace");
+
+    assert!(matches!(
+        error,
+        CliError::WorkspaceSelectionRequired { reason } if reason == "no workspaces exist"
+    ));
+}
+
+#[tokio::test]
+async fn run_with_args_routes_workspace_list_and_allows_empty_results() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&WorkspaceListResponse {
+            workspaces: Vec::new(),
+        })
+        .expect("workspace list response should serialize"),
+    )])
+    .await;
+
+    run_with_args([
+        "acp",
+        "workspace",
+        "list",
+        "--server-url",
+        &server_url,
+        "--auth-token",
+        "developer",
+    ])
+    .await
+    .expect("empty workspace list should still succeed");
+}
+
+#[tokio::test]
 async fn run_workspace_list_and_create_cover_workspace_commands() {
     let server_url = spawn_ordered_http_server(vec![
         json_response(

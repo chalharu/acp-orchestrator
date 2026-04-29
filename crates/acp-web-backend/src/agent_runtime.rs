@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     env,
-    ffi::CString,
     fmt::Display,
     fs,
     path::{Path, PathBuf},
@@ -9,6 +8,9 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
+
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 
 use crate::workspace_checkout::PreparedWorkspaceCheckout;
 
@@ -242,10 +244,15 @@ struct AgentChild {
     cgroup: Option<AgentCgroup>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 struct AgentCgroup {
     path: PathBuf,
 }
+
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, Clone)]
+struct AgentCgroup;
 
 impl FsAgentRuntimeManager {
     pub fn new(

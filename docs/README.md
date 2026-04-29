@@ -10,6 +10,7 @@
 | リポジトリの目的と現在地を知りたい | `README.md` |
 | ACP ベースの backend・Web・CLI の目標アーキテクチャを知りたい | `docs/explanation/acp-web-cli-architecture.md` |
 | User / Workspace / Session の所有構造と clone / cleanup を知りたい | `docs/explanation/user-workspace-session-architecture.md` |
+| 次の runtime capability（tool calls / filesystem / terminal / Docker / Kubernetes）を知りたい | `docs/explanation/acp-runtime-capabilities-next.md` |
 | 最小 CLI の出し方と設計を知りたい | `docs/explanation/cli-feedback-first-mvp.md` |
 | 最小 Web の出し方と設計を知りたい | `docs/explanation/web-feedback-first-mvp.md` |
 
@@ -26,6 +27,9 @@
 - Explanation: `docs/explanation/user-workspace-session-architecture.md`
   - `User -> Workspace -> Session` の所有構造、Git upstream、session checkout、
     cleanup の設計を理解する
+- Explanation: `docs/explanation/acp-runtime-capabilities-next.md`
+  - ACP tool calls、filesystem / terminal capability、Docker / Kubernetes agent launch、
+    Kubernetes PVC 上の session checkout の次 slice を理解する
 - Explanation: `docs/explanation/cli-feedback-first-mvp.md`
   - feedback-first な CLI の段階的な出し方と、最初のユーザー確認面を理解する
 - Explanation: `docs/explanation/web-feedback-first-mvp.md`
@@ -37,5 +41,6 @@
 1. 全体像は `README.md`
 2. 設計判断と境界は `docs/explanation/acp-web-cli-architecture.md`
 3. `User -> Workspace -> Session` の階層と clone / cleanup は `docs/explanation/user-workspace-session-architecture.md`
-4. 最初の CLI をどう刻んで出すかは `docs/explanation/cli-feedback-first-mvp.md`
-5. 最初の Web をどう刻んで出すかは `docs/explanation/web-feedback-first-mvp.md`
+4. 次の runtime capability slice は `docs/explanation/acp-runtime-capabilities-next.md`
+5. 最初の CLI をどう刻んで出すかは `docs/explanation/cli-feedback-first-mvp.md`
+6. 最初の Web をどう刻んで出すかは `docs/explanation/web-feedback-first-mvp.md`

@@ -1,7 +1,7 @@
 use acp_contracts_sessions::{SessionListItem, SessionStatus};
 use leptos::prelude::*;
 
-use crate::routing::app_session_path;
+use crate::routing::app_session_path_for_workspace;
 use crate::session_page_sidebar_item::{SessionSidebarItemProps, session_sidebar_item};
 
 struct SessionSidebarListArgs {
@@ -150,7 +150,7 @@ fn session_sidebar_list_item_view(
     runtime: SessionSidebarItemRuntime,
 ) -> impl IntoView {
     let id = item.id.clone();
-    let href = app_session_path(&item.id);
+    let href = app_session_path_for_workspace(Some(&item.workspace_id), &item.id);
     let title = session_sidebar_title(item.title);
     let activity_label = format!(
         "Updated {}",
@@ -191,6 +191,7 @@ mod tests {
     use leptos::prelude::*;
 
     use super::{SessionSidebarListProps, session_sidebar_list, session_sidebar_title};
+    use crate::routing::app_session_path_for_workspace;
 
     fn sample_sidebar_session() -> SessionListItem {
         SessionListItem {
@@ -224,6 +225,15 @@ mod tests {
                 on_delete_session: Callback::new(|_: String| {}),
             });
         });
+    }
+
+    #[test]
+    fn session_sidebar_links_prefer_workspace_session_paths() {
+        let session = sample_sidebar_session();
+        assert_eq!(
+            app_session_path_for_workspace(Some(&session.workspace_id), &session.id),
+            "/app/workspaces/w_test/sessions/s1"
+        );
     }
 
     #[test]

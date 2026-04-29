@@ -5,9 +5,16 @@ use acp_cli::contract_sessions::{SessionHistoryResponse, SessionListResponse, Se
 use acp_cli::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web::{
-    AppState, ServerConfig, serve_with_shutdown as serve_backend_with_shutdown,
-    workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
+    AppState, DynWorkspaceCheckoutManager, MockClient, PreparedWorkspaceCheckout, ServerConfig,
+    WorkspaceCheckoutError, WorkspaceCheckoutManager,
+    contract_workspaces::{CreateWorkspaceRequest, CreateWorkspaceResponse},
+    serve_with_shutdown as serve_backend_with_shutdown,
+    sessions::SessionStore,
+    workspace_records::WorkspaceRecord,
+    workspace_repository::WorkspaceRepository,
+    workspace_store::SqliteWorkspaceRepository,
 };
+use async_trait::async_trait;
 use reqwest::Client;
 use tokio::{
     io::AsyncWriteExt,
@@ -24,6 +31,57 @@ fn test_state_dir() -> PathBuf {
         "acp-cli-backend-test-{}",
         uuid::Uuid::new_v4().simple()
     ))
+}
+
+#[derive(Debug, Clone)]
+struct CliTestWorkspaceCheckoutManager {
+    state_dir: PathBuf,
+}
+
+impl CliTestWorkspaceCheckoutManager {
+    fn new(state_dir: PathBuf) -> Self {
+        Self { state_dir }
+    }
+
+    fn checkout_relpath(session_id: &str) -> String {
+        format!("session-checkouts/{session_id}")
+    }
+
+    fn checkout_path(&self, session_id: &str) -> PathBuf {
+        self.state_dir.join(Self::checkout_relpath(session_id))
+    }
+}
+
+#[async_trait]
+impl WorkspaceCheckoutManager for CliTestWorkspaceCheckoutManager {
+    async fn prepare_checkout(
+        &self,
+        _workspace: &WorkspaceRecord,
+        session_id: &str,
+        checkout_ref_override: Option<&str>,
+    ) -> std::result::Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+        let working_dir = self.checkout_path(session_id);
+        if working_dir.exists() {
+            std::fs::remove_dir_all(&working_dir).map_err(|error| {
+                WorkspaceCheckoutError::Io(format!(
+                    "clearing test checkout directory failed: {error}"
+                ))
+            })?;
+        }
+        std::fs::create_dir_all(&working_dir).map_err(|error| {
+            WorkspaceCheckoutError::Io(format!("creating test checkout directory failed: {error}"))
+        })?;
+        Ok(PreparedWorkspaceCheckout {
+            checkout_relpath: Self::checkout_relpath(session_id),
+            checkout_ref: checkout_ref_override.map(str::to_string),
+            checkout_commit_sha: Some("test-commit".to_string()),
+            working_dir,
+        })
+    }
+
+    fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
+        Some(self.state_dir.join(checkout_relpath))
+    }
 }
 
 #[tokio::test]
@@ -89,18 +147,30 @@ async fn chat_command_reports_usage_and_http_errors() -> Result<()> {
 #[tokio::test]
 async fn chat_exits_cleanly_on_immediate_eof() -> Result<()> {
     let stack = TestStack::spawn("eof").await?;
-    let mut child =
-        spawn_interactive_command(["chat", "--new", "--server-url", stack.backend_url.as_str()])?;
+    let mut child = spawn_interactive_command([
+        "chat",
+        "--new",
+        "--workspace",
+        stack.workspace_id.as_str(),
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])?;
     drop(take_child_stdin(&mut child, "missing eof chat stdin")?);
     let output = child.wait_with_output().await?;
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
 struct TestStack {
     client: Client,
     backend_url: String,
+    workspace_id: String,
     backend_shutdown: Option<oneshot::Sender<()>>,
     mock_shutdown: Option<oneshot::Sender<()>>,
 }
@@ -112,10 +182,12 @@ impl TestStack {
         let (backend_url, backend_shutdown) = spawn_backend_server(mock_address).await?;
         let client = build_http_client_for_url(&backend_url, None)?;
         wait_for_health(&client, &backend_url, 100, Duration::from_millis(20)).await?;
+        let workspace_id = create_test_workspace(&client, &backend_url, label).await?;
 
         Ok(Self {
             client,
             backend_url,
+            workspace_id,
             backend_shutdown: Some(backend_shutdown),
             mock_shutdown: Some(mock_shutdown),
         })
@@ -134,8 +206,14 @@ impl Drop for TestStack {
 }
 
 async fn run_new_chat_roundtrip(stack: &TestStack) -> Result<(String, String)> {
-    let mut chat =
-        spawn_interactive_command(["chat", "--new", "--server-url", stack.backend_url.as_str()])?;
+    let mut chat = spawn_interactive_command([
+        "chat",
+        "--new",
+        "--workspace",
+        stack.workspace_id.as_str(),
+        "--server-url",
+        stack.backend_url.as_str(),
+    ])?;
     let mut stdin = take_child_stdin(&mut chat, "missing chat stdin")?;
     let session_id = wait_for_session_id(stack).await?;
 
@@ -210,7 +288,12 @@ fn cancel_roundtrip_delay() -> Duration {
 
 async fn wait_for_chat_exit(chat: Child) -> Result<String> {
     let output = chat.wait_with_output().await?;
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).map_err(Into::into)
 }
 
@@ -481,6 +564,23 @@ async fn fetch_history(
         .map_err(Into::into)
 }
 
+async fn create_test_workspace(client: &Client, backend_url: &str, label: &str) -> Result<String> {
+    let response: CreateWorkspaceResponse = client
+        .post(format!("{backend_url}/api/v1/workspaces"))
+        .bearer_auth("developer")
+        .json(&CreateWorkspaceRequest {
+            name: format!("CLI {label} workspace"),
+            upstream_url: format!("https://example.com/{label}.git"),
+            credential_reference_id: None,
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(response.workspace.workspace_id)
+}
+
 fn spawn_interactive_command<'a, I>(args: I) -> Result<Child>
 where
     I: IntoIterator<Item = &'a str>,
@@ -535,7 +635,19 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
     let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
         SqliteWorkspaceRepository::new(config.state_dir.join("db.sqlite"))?,
     );
-    let state = AppState::new(config, workspace_repository)?;
+    let store = Arc::new(SessionStore::new(config.session_cap));
+    let reply_provider = Arc::new(MockClient::new(config.acp_server.clone())?);
+    let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
+        CliTestWorkspaceCheckoutManager::new(config.state_dir.clone()),
+    );
+    let state = AppState::with_services(
+        store,
+        workspace_repository,
+        reply_provider,
+        checkout_manager,
+        config.startup_hints,
+        config.frontend_dist,
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

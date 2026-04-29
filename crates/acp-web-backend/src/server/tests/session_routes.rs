@@ -703,35 +703,6 @@ async fn delete_session_removes_the_persisted_checkout_directory() {
 }
 
 #[tokio::test]
-async fn create_session_requires_explicit_workspace_selection_when_multiple_workspaces_exist() {
-    let state = AppState::with_dependencies(
-        Arc::new(SessionStore::new(4)),
-        Arc::new(StaticReplyProvider {
-            reply: String::new(),
-        }),
-    );
-    let _first =
-        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
-            .await;
-    let _second =
-        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace B")
-            .await;
-
-    let error = create_session(
-        State(state),
-        bearer_principal("alice"),
-        axum::body::Bytes::new(),
-    )
-    .await
-    .expect_err("root create should reject ambiguous workspace selection");
-
-    assert!(matches!(
-        error,
-        AppError::Conflict(message) if message == "workspace selection required"
-    ));
-}
-
-#[tokio::test]
 async fn closing_sessions_notifies_reply_provider_cleanup() {
     let store = Arc::new(SessionStore::new(4));
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
@@ -761,6 +732,50 @@ async fn closing_sessions_notifies_reply_provider_cleanup() {
             .as_slice(),
         [session.id]
     );
+}
+
+#[tokio::test]
+async fn close_session_removes_checkout_but_preserves_closed_metadata() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state =
+        AppState::with_workspace_repository(store, metadata_test_workspace_store(), reply_provider);
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&state, principal.clone()).await;
+    let user = state
+        .workspace_repository
+        .materialize_user(&principal.0)
+        .await
+        .expect("principal materialization should succeed");
+    let metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
+    let checkout_relpath = metadata.checkout_relpath.clone();
+    let checkout_path = checkout_path_from_metadata(&state, &metadata);
+    assert!(
+        checkout_path.exists(),
+        "session startup should create a checkout"
+    );
+
+    let response = close_session(State(state.clone()), Path(created.id.clone()), principal)
+        .await
+        .expect("session close should succeed");
+
+    assert_eq!(
+        response.0.session.status,
+        crate::contract_sessions::SessionStatus::Closed
+    );
+    assert!(
+        !checkout_path.exists(),
+        "session close should remove the checkout directory"
+    );
+    let metadata = session_metadata_for_user(&state, &user.user_id, &created.id).await;
+    assert_eq!(metadata.status, "closed");
+    assert_eq!(metadata.checkout_relpath, checkout_relpath);
+    let listed = state
+        .workspace_repository
+        .list_workspace_sessions(&user.user_id, &metadata.workspace_id)
+        .await
+        .expect("closed session should remain listable");
+    assert!(listed.iter().any(|session| session.id == created.id));
 }
 
 #[tokio::test]

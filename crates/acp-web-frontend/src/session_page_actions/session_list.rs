@@ -10,7 +10,7 @@ use crate::browser::{clear_draft, clear_prepared_session_id_if_matches, navigate
 #[cfg(target_family = "wasm")]
 use crate::infrastructure::api;
 #[cfg(target_family = "wasm")]
-use crate::routing::app_session_path;
+use crate::routing::app_session_path_for_workspace;
 use crate::session_lifecycle::{SessionLifecycle, TurnState};
 use crate::session_page_signals::SessionSignals;
 use crate::session_state::session_action_busy;
@@ -190,8 +190,8 @@ fn remove_session_from_list(
 fn next_session_destination(sessions: &[acp_contracts_sessions::SessionListItem]) -> String {
     sessions
         .first()
-        .map(|session| app_session_path(&session.id))
-        .unwrap_or_else(|| "/app/".to_string())
+        .map(|session| app_session_path_for_workspace(Some(&session.workspace_id), &session.id))
+        .unwrap_or_else(|| "/app/workspaces/".to_string())
 }
 
 fn rename_session_in_list(

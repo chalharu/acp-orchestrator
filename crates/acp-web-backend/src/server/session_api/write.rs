@@ -1,6 +1,5 @@
 use axum::{
     Json,
-    body::Bytes,
     extract::{Extension, Path, State},
     http::{HeaderMap, header},
 };
@@ -10,22 +9,26 @@ use crate::auth::AuthenticatedPrincipal;
 use crate::contract_messages::{PromptRequest, PromptResponse};
 use crate::contract_permissions::{ResolvePermissionRequest, ResolvePermissionResponse};
 use crate::contract_sessions::{
-    CancelTurnResponse, CloseSessionResponse, CreateSessionRequest, CreateSessionResponse,
-    DeleteSessionResponse, RenameSessionRequest, RenameSessionResponse,
+    CancelTurnResponse, CloseSessionResponse, DeleteSessionResponse, RenameSessionRequest,
+    RenameSessionResponse,
 };
+#[cfg(test)]
+use crate::contract_sessions::{CreateSessionRequest, CreateSessionResponse};
 
+#[cfg(test)]
+use super::super::session_service::create_session_snapshot;
 use super::super::{
     AppError, AppState,
     session_service::{
-        close_live_session, create_session_snapshot, delete_live_session, rename_session_title,
-        submit_prompt,
+        close_live_session, delete_live_session, rename_session_title, submit_prompt,
     },
 };
 
+#[cfg(test)]
 pub(in crate::server) async fn create_session(
     State(state): State<AppState>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    body: Bytes,
+    body: axum::body::Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateSessionResponse>), AppError> {
     let request = parse_optional_json_body::<CreateSessionRequest>(&body)?.unwrap_or_default();
     let session = create_session_snapshot(&state, principal, request.checkout_ref).await?;

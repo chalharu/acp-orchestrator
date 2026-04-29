@@ -6,6 +6,7 @@ use crate::contract_sessions::{
     CloseSessionResponse, CreateSessionResponse, SessionHistoryResponse, SessionListItem,
     SessionListResponse, SessionSnapshot, SessionStatus,
 };
+use crate::contract_workspaces::{WorkspaceListResponse, WorkspaceSummary};
 use reqwest::Client;
 use std::sync::{
     Arc,
@@ -39,6 +40,7 @@ async fn run_chat_with_ui_loads_new_sessions_before_launching_the_ui() {
         ChatArgs {
             new: true,
             session_id: None,
+            workspace_id: Some("w_test".to_string()),
             server_url: Some(server_url.clone()),
             auth_token: Some("developer".to_string()),
         },
@@ -83,6 +85,7 @@ async fn run_chat_with_handlers_uses_the_noninteractive_repl_path() {
         ChatArgs {
             new: true,
             session_id: None,
+            workspace_id: Some("w_test".to_string()),
             server_url: Some(server_url.clone()),
             auth_token: Some("developer".to_string()),
         },
@@ -164,6 +167,7 @@ async fn load_chat_session_loads_history_for_resumed_sessions() {
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -210,6 +214,7 @@ async fn load_chat_session_falls_back_to_snapshot_messages_when_history_is_missi
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -238,6 +243,7 @@ async fn load_chat_session_returns_non_404_history_errors() {
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -265,6 +271,7 @@ async fn load_chat_session_surfaces_missing_sessions() {
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         args.auth_token.as_deref().unwrap_or("developer"),
     )
     .await
@@ -274,6 +281,112 @@ async fn load_chat_session_surfaces_missing_sessions() {
         error,
         CliError::HttpStatus { status, .. } if status == StatusCode::NOT_FOUND
     ));
+}
+
+#[tokio::test]
+async fn load_chat_session_creates_new_chat_in_explicit_workspace() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&CreateSessionResponse {
+            session: SessionSnapshot {
+                id: "s_workspace".to_string(),
+                workspace_id: "w_explicit".to_string(),
+                title: "New chat".to_string(),
+                status: SessionStatus::Active,
+                latest_sequence: 1,
+                messages: Vec::new(),
+                pending_permissions: Vec::new(),
+            },
+        })
+        .expect("session response should serialize"),
+    )])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let chat_session = load_chat_session(
+        &client,
+        &server_url,
+        true,
+        None,
+        Some("w_explicit"),
+        "developer",
+    )
+    .await
+    .expect("explicit workspace should create a new chat");
+
+    assert_eq!(chat_session.session.workspace_id, "w_explicit");
+    assert!(!chat_session.resumed);
+}
+
+#[tokio::test]
+async fn load_chat_session_requires_workspace_when_auto_selection_is_ambiguous() {
+    let server_url = spawn_ordered_http_server(vec![json_response(
+        &serde_json::to_vec(&WorkspaceListResponse {
+            workspaces: vec![
+                workspace_summary("w_one", "One"),
+                workspace_summary("w_two", "Two"),
+            ],
+        })
+        .expect("workspace list response should serialize"),
+    )])
+    .await;
+    let client = Client::builder().build().expect("client should build");
+
+    let error = load_chat_session(&client, &server_url, true, None, None, "developer")
+        .await
+        .expect_err("multiple workspaces should require --workspace");
+
+    assert!(matches!(
+        error,
+        CliError::WorkspaceSelectionRequired { reason } if reason == "multiple workspaces exist"
+    ));
+}
+
+#[tokio::test]
+async fn run_workspace_list_and_create_cover_workspace_commands() {
+    let server_url = spawn_ordered_http_server(vec![
+        json_response(
+            &serde_json::to_vec(&WorkspaceListResponse {
+                workspaces: vec![workspace_summary("w_list", "Listed")],
+            })
+            .expect("workspace list response should serialize"),
+        ),
+        json_response(
+            &serde_json::to_vec(&crate::contract_workspaces::CreateWorkspaceResponse {
+                workspace: acp_contracts_workspaces::WorkspaceDetail {
+                    workspace_id: "w_created".to_string(),
+                    name: "Created".to_string(),
+                    upstream_url: Some("https://example.com/repo.git".to_string()),
+                    credential_reference_id: None,
+                    bootstrap_kind: None,
+                    status: "active".to_string(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            })
+            .expect("workspace create response should serialize"),
+        ),
+    ])
+    .await;
+
+    run_workspace(WorkspaceArgs {
+        command: WorkspaceCommand::List(WorkspaceListArgs {
+            server_url: Some(server_url.clone()),
+            auth_token: Some("developer".to_string()),
+        }),
+    })
+    .await
+    .expect("workspace list should succeed");
+
+    run_workspace(WorkspaceArgs {
+        command: WorkspaceCommand::Create(WorkspaceCreateArgs {
+            name: "Created".to_string(),
+            upstream_url: "https://example.com/repo.git".to_string(),
+            server_url: Some(server_url),
+            auth_token: Some("developer".to_string()),
+        }),
+    })
+    .await
+    .expect("workspace create should succeed");
 }
 
 #[tokio::test]
@@ -382,8 +495,21 @@ fn resumed_chat_args(server_url: &str) -> ChatArgs {
     ChatArgs {
         new: false,
         session_id: Some("s_resume".to_string()),
+        workspace_id: None,
         server_url: Some(server_url.to_string()),
         auth_token: Some("developer".to_string()),
+    }
+}
+
+fn workspace_summary(workspace_id: &str, name: &str) -> WorkspaceSummary {
+    WorkspaceSummary {
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        upstream_url: Some(format!("https://example.com/{workspace_id}.git")),
+        bootstrap_kind: None,
+        status: "active".to_string(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
 

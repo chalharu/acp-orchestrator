@@ -15,7 +15,7 @@ use crate::components::{
 use crate::infrastructure::api;
 use crate::presentation::{AppIcon, app_icon_view};
 #[cfg(target_family = "wasm")]
-use crate::{browser::store_prepared_session_id, routing::app_session_path};
+use crate::{browser::store_prepared_session_id, routing::app_session_path_for_workspace};
 
 use super::shared::WorkspacesPageState;
 #[cfg(any(test, target_family = "wasm"))]
@@ -619,7 +619,10 @@ fn workspace_session_list(sessions: Signal<Option<Vec<SessionListItem>>>) -> Any
                 Some(list) => view! {
                     <ul class="workspace-card__session-list">
                         {list.into_iter().map(|session| {
-                            let href = app_session_path(&session.id);
+                            let href = app_session_path_for_workspace(
+                                Some(&session.workspace_id),
+                                &session.id,
+                            );
                             let title = session.title.clone();
                             view! {
                                 <li class="workspace-card__session-item">
@@ -980,7 +983,10 @@ fn workspace_start_chat_submit_handler(
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
                     if let Err(message) =
-                        crate::browser::navigate_to(&app_session_path(&session_id))
+                        crate::browser::navigate_to(&app_session_path_for_workspace(
+                            Some(&workspace_id),
+                            &session_id,
+                        ))
                     {
                         state.opening_chat_workspace_id.set(None);
                         state.error.set(Some(message));

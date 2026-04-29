@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use acp_web::contract_workspaces::WorkspaceResponse;
 use snafu::prelude::*;
 
 mod frontend_bundle;
@@ -105,6 +106,21 @@ enum LauncherError {
 
     #[snafu(display("building the web launch client failed"))]
     BuildWebClient { source: reqwest::Error },
+
+    #[snafu(display("building the backend API client failed"))]
+    BuildBackendClient { source: reqwest::Error },
+
+    #[snafu(display("bootstrapping the launcher workspace request failed"))]
+    BootstrapLauncherWorkspaceRequest { source: reqwest::Error },
+
+    #[snafu(display("bootstrapping the launcher workspace failed with HTTP {status}: {message}"))]
+    BootstrapLauncherWorkspaceStatus {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+
+    #[snafu(display("decoding the launcher workspace response failed"))]
+    DecodeLauncherWorkspace { source: reqwest::Error },
 
     #[snafu(display("waiting for the web browser entrypoint failed"))]
     WaitForWebEntryPoint { source: BoxError },
@@ -319,12 +335,17 @@ async fn run_cli_launcher(
     cli_args: Vec<OsString>,
     stack: &mut launcher_stack::LauncherStack,
 ) -> Result<()> {
-    let cli_status = run_cli_foreground(
-        current_executable,
-        cli_args,
-        stack.backend_url(),
-        stack.auth_token(),
-    )
+    let cli_status = async {
+        let cli_args =
+            prepare_cli_launcher_args(cli_args, stack.backend_url(), stack.auth_token()).await?;
+        run_cli_foreground(
+            current_executable,
+            cli_args,
+            stack.backend_url(),
+            stack.auth_token(),
+        )
+        .await
+    }
     .await;
     let shutdown_result = stack.shutdown().await;
     finish_cli_launch(cli_status, shutdown_result)
@@ -366,6 +387,84 @@ async fn run_cli_foreground(
     }
 
     spawn_foreground_role(current_executable, "cli frontend", "cli", cli_args, &envs).await
+}
+
+async fn prepare_cli_launcher_args(
+    cli_args: Vec<OsString>,
+    backend_url: Option<&str>,
+    auth_token: Option<&str>,
+) -> Result<Vec<OsString>> {
+    let (Some(backend_url), Some(auth_token)) = (backend_url, auth_token) else {
+        return Ok(cli_args);
+    };
+    if !is_workspace_less_new_chat(&cli_args) {
+        return Ok(cli_args);
+    }
+
+    let workspace_id = bootstrap_launcher_workspace(backend_url, auth_token).await?;
+    Ok(append_workspace_arg(cli_args, workspace_id))
+}
+
+fn is_workspace_less_new_chat(cli_args: &[OsString]) -> bool {
+    if cli_args.first().and_then(|arg| arg.to_str()) != Some("chat") {
+        return false;
+    }
+
+    let mut has_new = false;
+    let mut has_workspace = false;
+    let mut args = cli_args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg.as_os_str() == "--new" {
+            has_new = true;
+            continue;
+        }
+        if arg.as_os_str() == "--workspace" {
+            has_workspace = true;
+            let _ = args.next();
+            continue;
+        }
+        if arg
+            .to_str()
+            .is_some_and(|value| value.starts_with("--workspace="))
+        {
+            has_workspace = true;
+        }
+    }
+
+    has_new && !has_workspace
+}
+
+async fn bootstrap_launcher_workspace(backend_url: &str, auth_token: &str) -> Result<String> {
+    let client = build_http_client_for_url(backend_url, Some(Duration::from_secs(5)))
+        .context(BuildBackendClientSnafu)?;
+    let response = client
+        .post(format!(
+            "{}/api/v1/workspaces/bootstrap",
+            backend_url.trim_end_matches('/')
+        ))
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .context(BootstrapLauncherWorkspaceRequestSnafu)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let message = response.text().await.unwrap_or_else(|error| {
+            format!("response body unavailable after workspace bootstrap failure: {error}")
+        });
+        return Err(LauncherError::BootstrapLauncherWorkspaceStatus { status, message });
+    }
+
+    let response: WorkspaceResponse = response
+        .json()
+        .await
+        .context(DecodeLauncherWorkspaceSnafu)?;
+    Ok(response.workspace.workspace_id)
+}
+
+fn append_workspace_arg(mut cli_args: Vec<OsString>, workspace_id: String) -> Vec<OsString> {
+    cli_args.push("--workspace".into());
+    cli_args.push(workspace_id.into());
+    cli_args
 }
 
 async fn run_web_foreground(stack: &launcher_stack::LauncherStack) -> Result<()> {

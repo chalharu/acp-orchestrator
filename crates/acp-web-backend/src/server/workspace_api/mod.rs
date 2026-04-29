@@ -5,5 +5,6 @@ pub(super) use read::{
     get_workspace, list_workspace_branches, list_workspace_sessions, list_workspaces,
 };
 pub(super) use write::{
-    create_workspace, create_workspace_session, delete_workspace, update_workspace,
+    bootstrap_workspace, create_workspace, create_workspace_session, delete_workspace,
+    update_workspace,
 };

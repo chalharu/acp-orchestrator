@@ -11,6 +11,7 @@ pub mod contract_permissions;
 pub mod contract_sessions;
 pub mod contract_slash;
 pub mod contract_stream;
+pub mod contract_workspaces;
 mod events;
 mod input;
 mod repl_commands;
@@ -23,7 +24,8 @@ mod chat_tests;
 mod tests;
 
 use api::{
-    close_session, create_session, ensure_success, get_session, get_session_history, list_sessions,
+    close_session, create_workspace, create_workspace_session, ensure_success, get_session,
+    get_session_history, list_sessions, list_workspaces,
 };
 use contract_errors::ErrorResponse;
 use contract_messages::{ConversationMessage, MessageRole, PromptRequest, PromptResponse};
@@ -57,6 +59,11 @@ impl ChatSession {
 pub enum CliError {
     #[snafu(display("choose either `--new` or `--session <id>`"))]
     ChatModeRequired,
+
+    #[snafu(display(
+        "workspace selection required for new chat ({reason}); run `acp workspace list` or `acp workspace create <name> <upstream-url>`, then pass `acp chat --new --workspace <id>`"
+    ))]
+    WorkspaceSelectionRequired { reason: String },
 
     #[snafu(display(
         "{command} requires `--server-url` or ACP_SERVER_URL to point at a running backend"
@@ -160,6 +167,7 @@ struct Cli {
 enum Command {
     Chat(ChatArgs),
     Session(SessionArgs),
+    Workspace(WorkspaceArgs),
 }
 
 #[derive(Args, Debug)]
@@ -168,6 +176,8 @@ struct ChatArgs {
     new: bool,
     #[arg(long = "session")]
     session_id: Option<String>,
+    #[arg(long = "workspace")]
+    workspace_id: Option<String>,
     #[arg(long, env = "ACP_SERVER_URL")]
     server_url: Option<String>,
     #[arg(long, env = "ACP_AUTH_TOKEN")]
@@ -178,6 +188,36 @@ struct ChatArgs {
 struct SessionArgs {
     #[command(subcommand)]
     command: SessionCommand,
+}
+
+#[derive(Args, Debug)]
+struct WorkspaceArgs {
+    #[command(subcommand)]
+    command: WorkspaceCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum WorkspaceCommand {
+    List(WorkspaceListArgs),
+    Create(WorkspaceCreateArgs),
+}
+
+#[derive(Args, Debug)]
+struct WorkspaceListArgs {
+    #[arg(long, env = "ACP_SERVER_URL")]
+    server_url: Option<String>,
+    #[arg(long, env = "ACP_AUTH_TOKEN")]
+    auth_token: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct WorkspaceCreateArgs {
+    name: String,
+    upstream_url: String,
+    #[arg(long, env = "ACP_SERVER_URL")]
+    server_url: Option<String>,
+    #[arg(long, env = "ACP_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -214,6 +254,7 @@ where
     match cli.command {
         Command::Chat(args) => run_chat(args).await,
         Command::Session(args) => run_session(args).await,
+        Command::Workspace(args) => run_workspace(args).await,
     }
 }
 
@@ -243,6 +284,7 @@ where
         &server_url,
         args.new,
         args.session_id.as_deref(),
+        args.workspace_id.as_deref(),
         &auth_token,
     )
     .await?;
@@ -301,10 +343,13 @@ async fn load_chat_session(
     server_url: &str,
     new_session: bool,
     session_id: Option<&str>,
+    workspace_id: Option<&str>,
     auth_token: &str,
 ) -> Result<ChatSession> {
     if new_session {
-        return create_session(client, server_url, auth_token)
+        let workspace_id =
+            resolve_workspace_for_new_chat(client, server_url, auth_token, workspace_id).await?;
+        return create_workspace_session(client, server_url, auth_token, &workspace_id)
             .await
             .map(|session| ChatSession {
                 session,
@@ -327,6 +372,30 @@ async fn load_chat_session(
         resume_history,
         resumed: true,
     })
+}
+
+async fn resolve_workspace_for_new_chat(
+    client: &Client,
+    server_url: &str,
+    auth_token: &str,
+    workspace_id: Option<&str>,
+) -> Result<String> {
+    if let Some(workspace_id) = workspace_id.filter(|id| !id.trim().is_empty()) {
+        return Ok(workspace_id.to_string());
+    }
+
+    let workspaces = list_workspaces(client, server_url, auth_token)
+        .await?
+        .workspaces;
+    match workspaces.as_slice() {
+        [workspace] => Ok(workspace.workspace_id.clone()),
+        [] => Err(CliError::WorkspaceSelectionRequired {
+            reason: "no workspaces exist".to_string(),
+        }),
+        _ => Err(CliError::WorkspaceSelectionRequired {
+            reason: "multiple workspaces exist".to_string(),
+        }),
+    }
 }
 
 fn resolved_auth_token(auth_token: Option<String>) -> String {
@@ -429,6 +498,52 @@ async fn run_session(args: SessionArgs) -> Result<()> {
                 build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
             close_session(&client, &server_url, &auth_token, &args.session_id).await?;
             println!("[status] session {} closed", args.session_id);
+            Ok(())
+        }
+    }
+}
+
+async fn run_workspace(args: WorkspaceArgs) -> Result<()> {
+    match args.command {
+        WorkspaceCommand::List(args) => {
+            let server_url = require_server_url("listing workspaces", args.server_url)?;
+            let auth_token = resolved_auth_token(args.auth_token);
+            let client =
+                build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+            let workspaces = list_workspaces(&client, &server_url, &auth_token).await?;
+            if workspaces.workspaces.is_empty() {
+                println!("no workspaces found for the current owner");
+                return Ok(());
+            }
+            for workspace in workspaces.workspaces {
+                println!(
+                    "{}\t{}\t{}",
+                    workspace.workspace_id,
+                    workspace.name,
+                    workspace.upstream_url.unwrap_or_else(|| "-".to_string())
+                );
+            }
+            Ok(())
+        }
+        WorkspaceCommand::Create(args) => {
+            let server_url = require_server_url("creating a workspace", args.server_url)?;
+            let auth_token = resolved_auth_token(args.auth_token);
+            let client =
+                build_http_client_for_url(&server_url, None).context(BuildHttpClientSnafu)?;
+            let workspace = create_workspace(
+                &client,
+                &server_url,
+                &auth_token,
+                &args.name,
+                &args.upstream_url,
+            )
+            .await?;
+            println!(
+                "{}\t{}\t{}",
+                workspace.workspace_id,
+                workspace.name,
+                workspace.upstream_url.unwrap_or_else(|| "-".to_string())
+            );
             Ok(())
         }
     }

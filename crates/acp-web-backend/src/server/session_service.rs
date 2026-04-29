@@ -5,6 +5,8 @@ use std::{
 
 use chrono::Utc;
 
+#[cfg(test)]
+use crate::workspace_repository::NewWorkspace;
 use crate::{
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::SessionSnapshot,
@@ -12,7 +14,6 @@ use crate::{
     sessions::{PendingPrompt, SessionStoreError},
     workspace_records::UserRecord,
     workspace_records::{SessionMetadataRecord, WorkspaceRecord},
-    workspace_repository::NewWorkspace,
 };
 
 use super::{AppError, AppState};
@@ -23,6 +24,7 @@ pub(super) struct LiveSessionWriteContext {
     pub(super) user: Option<UserRecord>,
 }
 
+#[cfg(test)]
 pub(super) async fn create_session_snapshot(
     state: &AppState,
     principal: AuthenticatedPrincipal,
@@ -52,6 +54,7 @@ pub(super) async fn create_session_snapshot(
     create_session_snapshot_in_workspace(state, owner, &workspace_id, checkout_ref_override).await
 }
 
+#[cfg(test)]
 fn legacy_session_workspace() -> NewWorkspace {
     NewWorkspace {
         name: "Workspace".to_string(),
@@ -257,6 +260,12 @@ pub(super) async fn close_live_session(
     session_id: &str,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = live_session_write_context(state, principal, "close").await?;
+    let checkout_cleanup_path = match owner.user.as_ref() {
+        Some(user) => {
+            load_checkout_cleanup_path_best_effort(state, user, session_id, "close").await
+        }
+        None => None,
+    };
     let session = state
         .store
         .close_session(&owner.principal.id, session_id)
@@ -265,6 +274,9 @@ pub(super) async fn close_live_session(
     if let Some(user) = owner.user.as_ref() {
         persist_session_metadata_best_effort(state, user, &session, false, Some("closed"), "close")
             .await;
+    }
+    if let Some(path) = checkout_cleanup_path.as_deref() {
+        cleanup_checkout_path_best_effort(path);
     }
 
     Ok(session)

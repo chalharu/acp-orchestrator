@@ -163,10 +163,14 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
 
     let first = stack.create_legacy_session("alice").await?;
     assert!(first.session.id.starts_with("s_"));
+    let workspace_id = first.session.workspace_id.clone();
 
     let response = stack
         .client
-        .post(format!("{}/api/v1/sessions", stack.backend_url))
+        .post(format!(
+            "{}/api/v1/workspaces/{workspace_id}/sessions",
+            stack.backend_url
+        ))
         .bearer_auth("alice")
         .send()
         .await

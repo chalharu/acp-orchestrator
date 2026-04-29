@@ -26,7 +26,10 @@ pub(super) fn session_return_to_path_from_location() -> Option<String> {
 
 pub(super) fn session_return_to_path(search: &str) -> Option<String> {
     query_param(search, "return_to")
-        .filter(|path| matches!(route_from_pathname(path), AppRoute::Session(_)))
+        .filter(|path| matches!(
+            route_from_pathname(path),
+            AppRoute::Session(_) | AppRoute::WorkspaceSession { .. }
+        ))
 }
 
 fn query_param(search: &str, name: &str) -> Option<String> {
@@ -55,6 +58,12 @@ mod tests {
         assert_eq!(
             session_return_to_path("?return_to=%2Fapp%2Fsessions%2Fs%252F1"),
             Some("/app/sessions/s%2F1".to_string())
+        );
+        assert_eq!(
+            session_return_to_path(
+                "?return_to=%2Fapp%2Fworkspaces%2Fw%252F1%2Fsessions%2Fs%252F1"
+            ),
+            Some("/app/workspaces/w%2F1/sessions/s%2F1".to_string())
         );
         assert_eq!(session_return_to_path("?return_to=%2Fapp%2F"), None);
         assert_eq!(

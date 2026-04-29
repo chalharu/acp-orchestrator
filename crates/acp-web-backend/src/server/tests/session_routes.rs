@@ -923,6 +923,42 @@ async fn get_session_restores_closed_sessions_without_runtime_relaunch() {
 }
 
 #[tokio::test]
+async fn get_session_keeps_closed_transcript_readable_without_checkout_metadata() {
+    let store = Arc::new(SessionStore::new(4));
+    let workspace_repository = metadata_test_workspace_store();
+    let initial_state = AppState::with_workspace_repository(
+        store.clone(),
+        workspace_repository.clone(),
+        Arc::new(BindingTrackingReplyProvider::new()),
+    );
+    let principal = bearer_principal("alice");
+    let created = create_persisted_workspace_session(&initial_state, principal.clone()).await;
+    let user = durable_user_for_principal(&initial_state, &principal).await;
+    let _ = close_session(
+        State(initial_state.clone()),
+        Path(created.id.clone()),
+        principal.clone(),
+    )
+    .await
+    .expect("session close should persist closed metadata");
+    let mut metadata = session_metadata_for_user(&initial_state, &user.user_id, &created.id).await;
+    metadata.checkout_relpath = None;
+    workspace_repository
+        .save_session_metadata(&metadata)
+        .await
+        .expect("metadata mutation should persist");
+    store
+        .delete_sessions_for_owners(&["bearer:alice".to_string()])
+        .await;
+
+    let restored = get_session(State(initial_state), Path(created.id), principal)
+        .await
+        .expect("closed sessions should restore without checkout metadata");
+
+    assert_eq!(restored.0.session.status, SessionStatus::Closed);
+}
+
+#[tokio::test]
 async fn get_session_marks_runtime_unavailable_without_checkout_metadata() {
     let store = Arc::new(SessionStore::new(4));
     let workspace_repository = metadata_test_workspace_store();

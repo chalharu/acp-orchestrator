@@ -8,7 +8,7 @@ use crate::contract_sessions::{
 };
 use crate::contract_slash::SlashCompletionsResponse;
 use crate::{
-    agent_runtime::{AgentRuntimeError, AgentSessionLaunch},
+    agent_runtime::{AgentRuntimeError, launch_session_blocking},
     auth::AuthenticatedPrincipal,
     completions::resolve_slash_completions,
     sessions::SessionStoreError,
@@ -229,25 +229,13 @@ async fn launch_restored_agent_runtime(
         return Ok(true);
     }
 
-    let runtime_manager = state.agent_runtime_manager.clone();
-    let session_id = restored.id.clone();
-    let workspace_id = restored.workspace_id.clone();
-    let checkout_for_launch = checkout.clone();
-    let launch_result = match tokio::task::spawn_blocking(move || {
-        runtime_manager.launch_session(&AgentSessionLaunch {
-            session_id: &session_id,
-            workspace_id: &workspace_id,
-            checkout: &checkout_for_launch,
-        })
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => Err(AgentRuntimeError::Io(format!(
-            "joining agent runtime launch failed: {error}"
-        ))),
-    };
-
+    let launch_result = launch_session_blocking(
+        state.agent_runtime_manager.clone(),
+        restored.id.clone(),
+        restored.workspace_id.clone(),
+        checkout.clone(),
+    )
+    .await;
     match launch_result {
         Ok(()) | Err(AgentRuntimeError::AlreadyRunning(_)) => Ok(true),
         Err(error) => {

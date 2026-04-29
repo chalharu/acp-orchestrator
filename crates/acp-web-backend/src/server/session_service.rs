@@ -8,7 +8,7 @@ use chrono::Utc;
 #[cfg(test)]
 use crate::workspace_repository::NewWorkspace;
 use crate::{
-    agent_runtime::{AgentRuntimeError, AgentSessionLaunch},
+    agent_runtime::launch_session_blocking,
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::SessionSnapshot,
     mock_client::{ReplyProvider, ReplyResult},
@@ -557,25 +557,13 @@ async fn launch_agent_runtime(
     session: &SessionSnapshot,
     checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
 ) -> Result<(), AppError> {
-    let runtime_manager = state.agent_runtime_manager.clone();
-    let session_id = session.id.clone();
-    let workspace_id = workspace.workspace_id.clone();
-    let checkout_for_launch = checkout.clone();
-    let launch_result = match tokio::task::spawn_blocking(move || {
-        runtime_manager.launch_session(&AgentSessionLaunch {
-            session_id: &session_id,
-            workspace_id: &workspace_id,
-            checkout: &checkout_for_launch,
-        })
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => Err(AgentRuntimeError::Io(format!(
-            "joining agent runtime launch failed: {error}"
-        ))),
-    };
-
+    let launch_result = launch_session_blocking(
+        state.agent_runtime_manager.clone(),
+        session.id.clone(),
+        workspace.workspace_id.clone(),
+        checkout.clone(),
+    )
+    .await;
     if let Err(error) = launch_result {
         let message = error.to_string();
         cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);

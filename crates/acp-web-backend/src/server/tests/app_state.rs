@@ -320,6 +320,31 @@ fn app_state_new_uses_standard_checkout_layout_without_agent_launch() {
 }
 
 #[test]
+fn app_state_new_surfaces_agent_runtime_config_errors() {
+    let error = AppState::new(
+        ServerConfig {
+            state_dir: std::env::temp_dir().join(format!(
+                "acp-server-invalid-runtime-{}",
+                uuid::Uuid::new_v4().simple()
+            )),
+            agent_launch: Some(crate::agent_runtime::AgentLaunchConfig {
+                mode: crate::agent_runtime::AgentLaunchMode::Chroot,
+                command: Vec::new(),
+                env_allowlist: Vec::new(),
+                timeout: crate::agent_runtime::DEFAULT_AGENT_LAUNCH_TIMEOUT,
+                run_uid: crate::agent_runtime::DEFAULT_AGENT_RUN_UID,
+                run_gid: crate::agent_runtime::DEFAULT_AGENT_RUN_GID,
+            }),
+            ..ServerConfig::default()
+        },
+        metadata_test_workspace_store(),
+    )
+    .expect_err("invalid runtime config should fail AppState construction");
+
+    assert!(matches!(error, AppStateBuildError::AgentRuntime(_)));
+}
+
+#[test]
 fn workspace_store_initialization_failures_map_into_app_state_build_errors() {
     let blocking_path = std::env::temp_dir().join(format!(
         "acp-web-backend-state-blocker-{}",

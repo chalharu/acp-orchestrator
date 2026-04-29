@@ -182,6 +182,28 @@ pub trait AgentRuntimeManager: Send + Sync + std::fmt::Debug {
 
 pub type DynAgentRuntimeManager = Arc<dyn AgentRuntimeManager>;
 
+pub async fn launch_session_blocking(
+    runtime_manager: DynAgentRuntimeManager,
+    session_id: String,
+    workspace_id: String,
+    checkout: PreparedWorkspaceCheckout,
+) -> Result<(), AgentRuntimeError> {
+    match tokio::task::spawn_blocking(move || {
+        runtime_manager.launch_session(&AgentSessionLaunch {
+            session_id: &session_id,
+            workspace_id: &workspace_id,
+            checkout: &checkout,
+        })
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(AgentRuntimeError::Io(format!(
+            "joining agent runtime launch failed: {error}"
+        ))),
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NoopAgentRuntimeManager;
 

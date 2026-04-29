@@ -9,7 +9,7 @@ use crate::routing::app_session_path_for_workspace;
 use super::super::{AppIcon, app_icon_view, workspaces_path_with_return_to};
 use super::shared::{
     accounts_path_with_return_to, sign_in_path_with_return_to, sign_out_button_label,
-    sign_out_handler,
+    sign_out_handler_from,
 };
 
 #[derive(Clone)]
@@ -40,10 +40,6 @@ pub fn SessionSidebarAuthControls(
             )
         }
     });
-    let sign_in_href = sign_in_path_with_return_to(&app_session_path_for_workspace(
-        current_workspace_id.get_untracked().as_deref(),
-        &current_session_id,
-    ));
     let view_state = SessionSidebarAuthViewState {
         accounts_href: Signal::derive(move || accounts_path_with_return_to(&session_path.get())),
         workspaces_href: Signal::derive(move || {
@@ -53,11 +49,29 @@ pub fn SessionSidebarAuthControls(
         signed_in,
         signing_out,
     };
-    let sign_out = sign_out_handler(error, signing_out, sign_in_href);
+    let sign_out = sign_out_handler_from(error, signing_out, {
+        let current_session_id = current_session_id.clone();
+        move || {
+            session_sidebar_sign_in_href(
+                current_workspace_id.get_untracked().as_deref(),
+                &current_session_id,
+            )
+        }
+    });
 
     initialize_session_sidebar_auth_controls(checked, signed_in, is_admin, error);
 
     session_sidebar_auth_controls_view(view_state, sign_out)
+}
+
+fn session_sidebar_sign_in_href(
+    current_workspace_id: Option<&str>,
+    current_session_id: &str,
+) -> String {
+    sign_in_path_with_return_to(&app_session_path_for_workspace(
+        current_workspace_id,
+        current_session_id,
+    ))
 }
 
 #[cfg(target_family = "wasm")]
@@ -300,5 +314,17 @@ mod tests {
             initialize_session_sidebar_auth_controls_host(checked);
             assert!(checked.get());
         });
+    }
+
+    #[test]
+    fn session_sidebar_sign_in_href_uses_workspace_session_path_when_available() {
+        assert_eq!(
+            session_sidebar_sign_in_href(Some("w/1"), "s/1"),
+            "/app/sign-in/?return_to=%2Fapp%2Fworkspaces%2Fw%252F1%2Fsessions%2Fs%252F1"
+        );
+        assert_eq!(
+            session_sidebar_sign_in_href(None, "s/1"),
+            "/app/sign-in/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+        );
     }
 }

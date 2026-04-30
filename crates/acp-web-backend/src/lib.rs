@@ -28,7 +28,10 @@ pub use agent_runtime::{
 };
 pub use mock_client::{MockClient, MockClientError, ReplyFuture, ReplyProvider, ReplyResult};
 pub use runtime::{BackendAppError, run_with_args};
-pub use server::{AppError, AppState, AppStateBuildError, ServerConfig, app, serve_with_shutdown};
+pub use server::{
+    AppError, AppState, AppStateBuildError, AppStateServices, ServerConfig, app,
+    serve_with_shutdown,
+};
 pub use sessions::TurnHandle;
 pub use workspace_checkout::{
     DynWorkspaceCheckoutManager, PreparedWorkspaceCheckout, WorkspaceCheckoutError,

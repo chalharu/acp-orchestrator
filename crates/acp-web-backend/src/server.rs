@@ -188,6 +188,18 @@ pub struct AppState {
     frontend_dist: Option<Arc<PathBuf>>,
 }
 
+pub struct AppStateServices {
+    pub store: Arc<SessionStore>,
+    pub workspace_repository: Arc<dyn WorkspaceRepository>,
+    pub reply_provider: Arc<dyn ReplyProvider>,
+    pub checkout_manager: DynWorkspaceCheckoutManager,
+    pub agent_runtime_manager: DynAgentRuntimeManager,
+    pub agent_profile_store: Arc<AgentProfileStore>,
+    pub default_agent_layout: WorkspaceCheckoutLayout,
+    pub startup_hints: bool,
+    pub frontend_dist: Option<PathBuf>,
+}
+
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
@@ -223,40 +235,30 @@ impl AppState {
         )?);
         let agent_profile_store = Arc::new(AgentProfileStore::new(&config.state_dir)?);
 
-        Ok(Self::with_services(
+        Ok(Self::with_services(AppStateServices {
             store,
             workspace_repository,
             reply_provider,
             checkout_manager,
             agent_runtime_manager,
             agent_profile_store,
-            checkout_layout,
-            config.startup_hints,
-            config.frontend_dist,
-        ))
+            default_agent_layout: checkout_layout,
+            startup_hints: config.startup_hints,
+            frontend_dist: config.frontend_dist,
+        }))
     }
 
-    pub fn with_services(
-        store: Arc<SessionStore>,
-        workspace_repository: Arc<dyn WorkspaceRepository>,
-        reply_provider: Arc<dyn ReplyProvider>,
-        checkout_manager: DynWorkspaceCheckoutManager,
-        agent_runtime_manager: DynAgentRuntimeManager,
-        agent_profile_store: Arc<AgentProfileStore>,
-        default_agent_layout: WorkspaceCheckoutLayout,
-        startup_hints: bool,
-        frontend_dist: Option<PathBuf>,
-    ) -> Self {
+    pub fn with_services(services: AppStateServices) -> Self {
         Self {
-            store,
-            workspace_repository,
-            reply_provider,
-            checkout_manager,
-            agent_runtime_manager,
-            agent_profile_store,
-            default_agent_layout,
-            startup_hints,
-            frontend_dist: frontend_dist.map(Arc::new),
+            store: services.store,
+            workspace_repository: services.workspace_repository,
+            reply_provider: services.reply_provider,
+            checkout_manager: services.checkout_manager,
+            agent_runtime_manager: services.agent_runtime_manager,
+            agent_profile_store: services.agent_profile_store,
+            default_agent_layout: services.default_agent_layout,
+            startup_hints: services.startup_hints,
+            frontend_dist: services.frontend_dist.map(Arc::new),
         }
     }
 
@@ -294,17 +296,17 @@ impl AppState {
         reply_provider: Arc<dyn ReplyProvider>,
         checkout_manager: DynWorkspaceCheckoutManager,
     ) -> Self {
-        Self::with_services(
+        Self::with_services(AppStateServices {
             store,
             workspace_repository,
             reply_provider,
             checkout_manager,
-            test_agent_runtime_manager(),
-            test_agent_profile_store(),
-            WorkspaceCheckoutLayout::Standard,
-            false,
-            None,
-        )
+            agent_runtime_manager: test_agent_runtime_manager(),
+            agent_profile_store: test_agent_profile_store(),
+            default_agent_layout: WorkspaceCheckoutLayout::Standard,
+            startup_hints: false,
+            frontend_dist: None,
+        })
     }
 
     async fn owner_context(

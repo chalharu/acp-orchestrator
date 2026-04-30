@@ -265,6 +265,13 @@ struct AgentChild {
     metadata: AgentLaunchMetadata,
 }
 
+struct PreparedChrootLaunch {
+    command: Command,
+    cgroup: AgentCgroup,
+    acp_endpoint: Option<AcpEndpoint>,
+    port_reservation: Option<TcpListener>,
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 struct AgentCgroup {
@@ -321,39 +328,12 @@ impl FsAgentRuntimeManager {
         config: &AgentLaunchConfig,
         launch: &AgentSessionLaunch<'_>,
     ) -> Result<(AgentChild, AgentLaunchMetadata), AgentRuntimeError> {
-        let root_dir = self.root_dir(launch.session_id);
-        fs::create_dir_all(&root_dir).map_err(|error| {
-            AgentRuntimeError::Io(format!("creating agent chroot root failed: {error}"))
-        })?;
-        chown_workspace_for_agent(&launch.checkout.working_dir, config.run_uid, config.run_gid)?;
-        let cgroup = self.prepare_session_cgroup(launch.session_id)?;
-        let reserved_endpoint = AcpEndpoint::reserve_for_command(&config.command)?;
-        let acp_endpoint = reserved_endpoint
-            .as_ref()
-            .map(|reserved| reserved.endpoint.clone());
-        let argv = expand_agent_argv(&config.command, acp_endpoint.as_ref());
-
-        let mut command = Command::new(&argv[0]);
-        command.args(&argv[1..]);
-        command.env_clear();
-        for name in &config.env_allowlist {
-            if let Some(value) = env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        apply_structured_agent_env(&mut command, launch, acp_endpoint.as_ref());
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
-
-        configure_chroot_command(
-            &mut command,
-            &root_dir,
-            &cgroup,
-            config.run_uid,
-            config.run_gid,
-        )?;
-        let port_reservation = reserved_endpoint.map(ReservedAcpEndpoint::into_listener);
+        let PreparedChrootLaunch {
+            command,
+            cgroup,
+            acp_endpoint,
+            port_reservation,
+        } = self.prepare_chroot_launch(config, launch)?;
         let mut child =
             spawn_with_timeout(command, config.timeout, Some(cgroup), port_reservation)?;
         if let Err(error) =
@@ -367,6 +347,37 @@ impl FsAgentRuntimeManager {
         };
         child.metadata = metadata.clone();
         Ok((child, metadata))
+    }
+
+    fn prepare_chroot_launch(
+        &self,
+        config: &AgentLaunchConfig,
+        launch: &AgentSessionLaunch<'_>,
+    ) -> Result<PreparedChrootLaunch, AgentRuntimeError> {
+        let root_dir = self.root_dir(launch.session_id);
+        fs::create_dir_all(&root_dir).map_err(|error| {
+            AgentRuntimeError::Io(format!("creating agent chroot root failed: {error}"))
+        })?;
+        chown_workspace_for_agent(&launch.checkout.working_dir, config.run_uid, config.run_gid)?;
+        let cgroup = self.prepare_session_cgroup(launch.session_id)?;
+        let reserved_endpoint = AcpEndpoint::reserve_for_command(&config.command)?;
+        let acp_endpoint = reserved_endpoint
+            .as_ref()
+            .map(|reserved| reserved.endpoint.clone());
+        let mut command = build_agent_command(config, launch, acp_endpoint.as_ref());
+        configure_chroot_command(
+            &mut command,
+            &root_dir,
+            &cgroup,
+            config.run_uid,
+            config.run_gid,
+        )?;
+        Ok(PreparedChrootLaunch {
+            command,
+            cgroup,
+            acp_endpoint,
+            port_reservation: reserved_endpoint.map(ReservedAcpEndpoint::into_listener),
+        })
     }
 
     fn prepare_session_cgroup(&self, session_id: &str) -> Result<AgentCgroup, AgentRuntimeError> {
@@ -622,6 +633,27 @@ fn expand_agent_argv(command: &[String], endpoint: Option<&AcpEndpoint>) -> Vec<
         .iter()
         .map(|arg| expand_agent_arg(arg, endpoint))
         .collect()
+}
+
+fn build_agent_command(
+    config: &AgentLaunchConfig,
+    launch: &AgentSessionLaunch<'_>,
+    endpoint: Option<&AcpEndpoint>,
+) -> Command {
+    let argv = expand_agent_argv(&config.command, endpoint);
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.env_clear();
+    for name in &config.env_allowlist {
+        if let Some(value) = env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    apply_structured_agent_env(&mut command, launch, endpoint);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command
 }
 
 fn expand_agent_arg(arg: &str, endpoint: Option<&AcpEndpoint>) -> String {

@@ -18,9 +18,9 @@ use acp_web::contract_workspaces::{
 };
 use acp_web::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_web::{
-    AgentProfileStore, DynWorkspaceCheckoutManager, MockClient, NoopAgentRuntimeManager,
-    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutLayout,
-    WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
+    AgentProfileStore, AppStateServices, DynWorkspaceCheckoutManager, MockClient,
+    NoopAgentRuntimeManager, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
+    WorkspaceCheckoutLayout, WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
     workspace_store::SqliteWorkspaceRepository,
 };
 use acp_web::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
@@ -829,21 +829,19 @@ fn build_backend_state(backend_config: ServerConfig) -> Result<AppState> {
     let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
         IntegrationTestWorkspaceCheckoutManager::new(backend_config.state_dir.clone()),
     );
-    Ok(AppState::with_services(
+    Ok(AppState::with_services(AppStateServices {
         store,
         workspace_repository,
         reply_provider,
         checkout_manager,
-        Arc::new(NoopAgentRuntimeManager),
-        Arc::new(
-            AgentProfileStore::new(&backend_config.state_dir).map_err(|error| {
-                anyhow::anyhow!("building agent profile store: {}", error.message())
-            })?,
-        ),
-        WorkspaceCheckoutLayout::Standard,
-        backend_config.startup_hints,
-        backend_config.frontend_dist,
-    ))
+        agent_runtime_manager: Arc::new(NoopAgentRuntimeManager),
+        agent_profile_store: Arc::new(AgentProfileStore::new(&backend_config.state_dir).map_err(
+            |error| anyhow::anyhow!("building agent profile store: {}", error.message()),
+        )?),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
+        startup_hints: backend_config.startup_hints,
+        frontend_dist: backend_config.frontend_dist,
+    }))
 }
 
 #[derive(Debug, Clone)]

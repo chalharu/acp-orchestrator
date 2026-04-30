@@ -1265,43 +1265,56 @@ async fn local_workspace_fallback_prepares_a_checkout_from_the_current_repo() {
     assert!(checkout.working_dir.join("Cargo.toml").exists());
 }
 
+fn maybe_run_detached_head_checkout_child() -> bool {
+    const CHILD_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_CHILD";
+    const SOURCE_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_SOURCE";
+    const EXPECTED_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_EXPECTED";
+
+    if std::env::var_os(CHILD_ENV).is_none() {
+        return false;
+    }
+    let source_root =
+        PathBuf::from(std::env::var(SOURCE_ENV).expect("detached source root env should exist"));
+    let expected_commit =
+        std::env::var(EXPECTED_ENV).expect("detached source commit env should exist");
+    let original_dir = std::env::current_dir().expect("current dir should be readable");
+    std::env::set_current_dir(&source_root)
+        .expect("child should be able to chdir into the detached source");
+    let state_dir = detached_head_child_state_dir(&source_root);
+    let checkout = FsWorkspaceCheckoutManager::new(state_dir)
+        .prepare_checkout_sync(
+            &sample_workspace_record(None, None),
+            "s_detached",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
+        .expect("detached source local checkout should prepare");
+
+    assert_eq!(checkout.checkout_ref, None);
+    assert_eq!(checkout.checkout_commit_sha, Some(expected_commit));
+    assert!(checkout.working_dir.join("detached.txt").exists());
+    std::env::set_current_dir(original_dir)
+        .expect("child should restore the original working directory");
+    true
+}
+
+fn detached_head_child_state_dir(source_root: &Path) -> PathBuf {
+    source_root
+        .parent()
+        .expect("detached source should have a parent")
+        .join(format!(
+            "acp-workspace-checkout-detached-head-state-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+}
+
 #[test]
 fn local_workspace_fallback_prepares_a_checkout_from_detached_head_sources() {
     const CHILD_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_CHILD";
     const SOURCE_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_SOURCE";
     const EXPECTED_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_EXPECTED";
 
-    if std::env::var_os(CHILD_ENV).is_some() {
-        let source_root = PathBuf::from(
-            std::env::var(SOURCE_ENV).expect("detached source root env should exist"),
-        );
-        let expected_commit =
-            std::env::var(EXPECTED_ENV).expect("detached source commit env should exist");
-        let original_dir = std::env::current_dir().expect("current dir should be readable");
-        std::env::set_current_dir(&source_root)
-            .expect("child should be able to chdir into the detached source");
-        let state_dir = source_root
-            .parent()
-            .expect("detached source should have a parent")
-            .join(format!(
-                "acp-workspace-checkout-detached-head-state-{}",
-                uuid::Uuid::new_v4().simple()
-            ));
-        let manager = FsWorkspaceCheckoutManager::new(state_dir);
-        let checkout = manager
-            .prepare_checkout_sync(
-                &sample_workspace_record(None, None),
-                "s_detached",
-                None,
-                WorkspaceCheckoutLayout::Standard,
-            )
-            .expect("detached source local checkout should prepare");
-
-        assert_eq!(checkout.checkout_ref, None);
-        assert_eq!(checkout.checkout_commit_sha, Some(expected_commit));
-        assert!(checkout.working_dir.join("detached.txt").exists());
-        std::env::set_current_dir(original_dir)
-            .expect("child should restore the original working directory");
+    if maybe_run_detached_head_checkout_child() {
         return;
     }
 

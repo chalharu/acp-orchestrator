@@ -5,8 +5,9 @@ use acp_cli::contract_sessions::{SessionHistoryResponse, SessionListResponse, Se
 use acp_cli::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use acp_web::{
-    AppState, DynWorkspaceCheckoutManager, MockClient, NoopAgentRuntimeManager,
-    PreparedWorkspaceCheckout, ServerConfig, WorkspaceCheckoutError, WorkspaceCheckoutManager,
+    AgentProfileStore, AppState, AppStateServices, DynWorkspaceCheckoutManager, MockClient,
+    NoopAgentRuntimeManager, PreparedWorkspaceCheckout, ServerConfig, WorkspaceCheckoutError,
+    WorkspaceCheckoutLayout, WorkspaceCheckoutManager,
     contract_workspaces::{CreateWorkspaceRequest, CreateWorkspaceResponse},
     serve_with_shutdown as serve_backend_with_shutdown,
     sessions::SessionStore,
@@ -645,15 +646,17 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
     let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
         CliTestWorkspaceCheckoutManager::new(config.state_dir.clone()),
     );
-    let state = AppState::with_services(
+    let state = AppState::with_services(AppStateServices {
         store,
         workspace_repository,
         reply_provider,
         checkout_manager,
-        Arc::new(NoopAgentRuntimeManager),
-        config.startup_hints,
-        config.frontend_dist,
-    );
+        agent_runtime_manager: Arc::new(NoopAgentRuntimeManager),
+        agent_profile_store: Arc::new(AgentProfileStore::new(&config.state_dir)?),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
+        startup_hints: config.startup_hints,
+        frontend_dist: config.frontend_dist,
+    });
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();

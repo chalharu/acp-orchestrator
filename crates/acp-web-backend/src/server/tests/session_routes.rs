@@ -287,6 +287,67 @@ async fn assert_runtime_unavailable_write_rejected(
     );
 }
 
+fn save_opencode_agent_profile(state: &AppState) {
+    state
+        .agent_profile_store
+        .upsert_profile(
+            "opencode",
+            crate::contract_sessions::UpsertAgentProfileRequest {
+                name: "OpenCode ACP".to_string(),
+                mode: crate::contract_sessions::AgentProfileMode::Chroot,
+                command_argv: vec!["opencode".to_string(), "acp".to_string()],
+                env_allowlist: Vec::new(),
+                timeout_seconds: 30,
+                run_uid: 65_534,
+                run_gid: 65_534,
+            },
+        )
+        .expect("profile should save");
+}
+
+async fn create_workspace_session_with_agent_profile(
+    state: &AppState,
+    workspace_id: &str,
+    profile_id: &str,
+) -> String {
+    create_workspace_session(
+        State(state.clone()),
+        Path(workspace_id.to_string()),
+        bearer_principal("alice"),
+        axum::body::Bytes::from(
+            serde_json::to_vec(&crate::contract_sessions::CreateSessionRequest {
+                checkout_ref: None,
+                agent_profile_id: Some(profile_id.to_string()),
+            })
+            .expect("request should serialize"),
+        ),
+    )
+    .await
+    .expect("session creation should succeed")
+    .1
+    .0
+    .session
+    .id
+}
+
+fn app_state_with_bind_failing_reply_provider(
+    store: Arc<SessionStore>,
+    workspace_repository: Arc<SqliteWorkspaceRepository>,
+    forgotten_sessions: StdArc<Mutex<Vec<String>>>,
+) -> AppState {
+    AppState {
+        store,
+        workspace_repository,
+        reply_provider: Arc::new(BindFailingReplyProvider { forgotten_sessions }),
+        checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
+        startup_hints: false,
+        frontend_dist: None,
+    }
+}
+
 fn checkout_path_from_metadata(
     state: &AppState,
     metadata: &SessionMetadataRecord,
@@ -739,40 +800,14 @@ async fn create_session_with_agent_profile_uses_chroot_checkout_layout() {
         metadata_test_workspace_store(),
         reply_provider.clone(),
     );
-    state
-        .agent_profile_store
-        .upsert_profile(
-            "opencode",
-            crate::contract_sessions::UpsertAgentProfileRequest {
-                name: "OpenCode ACP".to_string(),
-                mode: crate::contract_sessions::AgentProfileMode::Chroot,
-                command_argv: vec!["opencode".to_string(), "acp".to_string()],
-                env_allowlist: Vec::new(),
-                timeout_seconds: 30,
-                run_uid: 65_534,
-                run_gid: 65_534,
-            },
-        )
-        .expect("profile should save");
+    save_opencode_agent_profile(&state);
     let workspace =
         create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
             .await;
 
-    let response = create_workspace_session(
-        State(state.clone()),
-        Path(workspace.workspace_id.clone()),
-        bearer_principal("alice"),
-        axum::body::Bytes::from(
-            serde_json::to_vec(&crate::contract_sessions::CreateSessionRequest {
-                checkout_ref: None,
-                agent_profile_id: Some("opencode".to_string()),
-            })
-            .expect("request should serialize"),
-        ),
-    )
-    .await
-    .expect("session creation should succeed");
-    let session_id = response.1.0.session.id;
+    let session_id =
+        create_workspace_session_with_agent_profile(&state, &workspace.workspace_id, "opencode")
+            .await;
     let principal = bearer_principal("alice");
     let user = durable_user_for_principal(&state, &principal).await;
     let metadata = session_metadata_for_user(&state, &user.user_id, &session_id).await;
@@ -1157,19 +1192,11 @@ async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
         .await;
 
     let forgotten_sessions = StdArc::new(Mutex::new(Vec::new()));
-    let state = AppState {
-        store: store.clone(),
+    let state = app_state_with_bind_failing_reply_provider(
+        store.clone(),
         workspace_repository,
-        reply_provider: Arc::new(BindFailingReplyProvider {
-            forgotten_sessions: forgotten_sessions.clone(),
-        }),
-        checkout_manager: test_checkout_manager(),
-        agent_runtime_manager: test_agent_runtime_manager(),
-        agent_profile_store: test_agent_profile_store(),
-        default_agent_layout: WorkspaceCheckoutLayout::Standard,
-        startup_hints: false,
-        frontend_dist: None,
-    };
+        forgotten_sessions.clone(),
+    );
 
     let error = get_session(State(state), Path(created.id.clone()), principal)
         .await

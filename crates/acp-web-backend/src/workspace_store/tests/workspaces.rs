@@ -57,6 +57,35 @@ async fn persist_workspace_session(
         .expect("session metadata should persist");
 }
 
+async fn save_failed_session_metadata(
+    repository: &SqliteWorkspaceRepository,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+) {
+    let now = Utc::now();
+    repository
+        .save_session_metadata(&SessionMetadataRecord {
+            session_id: "s_failed".to_string(),
+            workspace_id: workspace.workspace_id.clone(),
+            owner_user_id: user.user_id.clone(),
+            title: "Failed".to_string(),
+            status: "failed".to_string(),
+            checkout_relpath: Some("session-checkouts/s_failed".to_string()),
+            checkout_ref: Some("refs/heads/main".to_string()),
+            checkout_commit_sha: Some("deadbeef".to_string()),
+            agent_profile_id: None,
+            failure_reason: Some("startup failed".to_string()),
+            detach_deadline_at: None,
+            restartable_deadline_at: None,
+            created_at: now,
+            last_activity_at: now,
+            closed_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("failed metadata should save");
+}
+
 #[tokio::test]
 async fn repository_recreates_schema_after_database_file_deletion() {
     let repository = test_repository();
@@ -420,29 +449,8 @@ async fn failed_sessions_are_hidden_from_user_facing_durable_queries() {
     let repository = test_repository();
     let user = materialized_user(&repository).await;
     let workspace = create_workspace_record(&repository, &user, "Repo").await;
-    let now = Utc::now();
 
-    repository
-        .save_session_metadata(&SessionMetadataRecord {
-            session_id: "s_failed".to_string(),
-            workspace_id: workspace.workspace_id.clone(),
-            owner_user_id: user.user_id.clone(),
-            title: "Failed".to_string(),
-            status: "failed".to_string(),
-            checkout_relpath: Some("session-checkouts/s_failed".to_string()),
-            checkout_ref: Some("refs/heads/main".to_string()),
-            checkout_commit_sha: Some("deadbeef".to_string()),
-            agent_profile_id: None,
-            failure_reason: Some("startup failed".to_string()),
-            detach_deadline_at: None,
-            restartable_deadline_at: None,
-            created_at: now,
-            last_activity_at: now,
-            closed_at: None,
-            deleted_at: None,
-        })
-        .await
-        .expect("failed metadata should save");
+    save_failed_session_metadata(&repository, &user, &workspace).await;
 
     let listed = repository
         .list_workspace_sessions(&user.user_id, &workspace.workspace_id)

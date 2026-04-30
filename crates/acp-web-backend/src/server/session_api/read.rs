@@ -180,6 +180,20 @@ async fn resolve_restored_checkout(
     checkout_relpath: &str,
     metadata: Option<&SessionMetadataRecord>,
 ) -> Result<Option<PreparedWorkspaceCheckout>, AppError> {
+    if state
+        .checkout_manager
+        .checkout_relpath_for_session(&restored.id)
+        .is_none()
+    {
+        mark_restored_runtime_unavailable(
+            state,
+            owner_id,
+            restored,
+            "expected checkout path is missing".to_string(),
+        )
+        .await?;
+        return Ok(None);
+    }
     if !restored_checkout_relpath_matches(state, &restored.id, checkout_relpath) {
         mark_restored_runtime_unavailable(
             state,

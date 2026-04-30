@@ -2085,9 +2085,17 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn process_stat_is_zombie(stat: &str) -> bool {
-        stat.rsplit_once(") ")
-            .and_then(|(_, rest)| rest.chars().next())
-            == Some('Z')
+        let bytes = stat.as_bytes();
+        let close_paren = match bytes.iter().rposition(|byte| *byte == 41) {
+            Some(index) => index,
+            None => return false,
+        };
+        process_stat_state(&stat[close_paren + 1..]) == Some('Z')
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_stat_state(rest: &str) -> Option<char> {
+        rest.trim_start().chars().next()
     }
 
     #[cfg(unix)]

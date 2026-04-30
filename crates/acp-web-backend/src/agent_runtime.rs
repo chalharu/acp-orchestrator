@@ -906,7 +906,7 @@ fn chown_workspace_for_agent(_path: &Path, _uid: u32, _gid: u32) -> Result<(), A
     ))
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(target_os = "linux")]
 fn configure_chroot_command(
     command: &mut Command,
     root_dir: &Path,
@@ -916,6 +916,11 @@ fn configure_chroot_command(
 ) -> Result<(), AgentRuntimeError> {
     use std::os::unix::{ffi::OsStrExt, process::CommandExt};
 
+    #[cfg(test)]
+    if root_dir.join(TEST_SKIP_CHROOT_PREEXEC_MARKER).exists() {
+        return Ok(());
+    }
+
     let root = CString::new(root_dir.as_os_str().as_bytes()).map_err(|_| {
         AgentRuntimeError::Io("agent chroot root path contains a NUL byte".to_string())
     })?;
@@ -924,31 +929,29 @@ fn configure_chroot_command(
     let cgroup_procs = cgroup.procs_cstring()?;
 
     unsafe {
-        command.pre_exec(move || {
-            prepare_chroot_child(&root, &workspace, &cgroup_procs, run_uid, run_gid)
-        });
+        command.pre_exec(chroot_pre_exec(
+            root,
+            workspace,
+            cgroup_procs,
+            run_uid,
+            run_gid,
+        ));
     }
     Ok(())
 }
 
-#[cfg(all(target_os = "linux", test))]
-fn configure_chroot_command(
-    _command: &mut Command,
-    root_dir: &Path,
-    cgroup: &AgentCgroup,
-    _run_uid: u32,
-    _run_gid: u32,
-) -> Result<(), AgentRuntimeError> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let _root = CString::new(root_dir.as_os_str().as_bytes()).map_err(|_| {
-        AgentRuntimeError::Io("agent chroot root path contains a NUL byte".to_string())
-    })?;
-    let _cgroup_procs = cgroup.procs_cstring()?;
-    Ok(())
+#[cfg(target_os = "linux")]
+fn chroot_pre_exec(
+    root: CString,
+    workspace: CString,
+    cgroup_procs: CString,
+    run_uid: u32,
+    run_gid: u32,
+) -> impl FnMut() -> std::io::Result<()> {
+    move || prepare_chroot_child(&root, &workspace, &cgroup_procs, run_uid, run_gid)
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(target_os = "linux")]
 fn prepare_chroot_child(
     root: &CString,
     workspace: &CString,
@@ -956,17 +959,61 @@ fn prepare_chroot_child(
     run_uid: u32,
     run_gid: u32,
 ) -> std::io::Result<()> {
+    prepare_chroot_child_with(
+        root,
+        workspace,
+        cgroup_procs,
+        run_uid,
+        run_gid,
+        real_chroot_child_syscalls(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct ChrootChildSyscalls {
+    setsid: unsafe extern "C" fn() -> libc::pid_t,
+    prctl: unsafe extern "C" fn(libc::c_int, ...) -> libc::c_int,
+    chroot: unsafe extern "C" fn(*const libc::c_char) -> libc::c_int,
+    chdir: unsafe extern "C" fn(*const libc::c_char) -> libc::c_int,
+    setgroups: unsafe extern "C" fn(libc::size_t, *const libc::gid_t) -> libc::c_int,
+    setgid: unsafe extern "C" fn(libc::gid_t) -> libc::c_int,
+    setuid: unsafe extern "C" fn(libc::uid_t) -> libc::c_int,
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_chroot_child_with(
+    root: &CString,
+    workspace: &CString,
+    cgroup_procs: &CString,
+    run_uid: u32,
+    run_gid: u32,
+    syscalls: ChrootChildSyscalls,
+) -> std::io::Result<()> {
     move_current_process_to_cgroup(cgroup_procs)?;
     unsafe {
-        check_nonnegative_syscall(libc::setsid())?;
-        check_zero_syscall(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))?;
-        check_zero_syscall(libc::chroot(root.as_ptr()))?;
-        check_zero_syscall(libc::chdir(workspace.as_ptr()))?;
-        check_zero_syscall(libc::setgroups(0, std::ptr::null()))?;
-        check_zero_syscall(libc::setgid(run_gid))?;
-        check_zero_syscall(libc::setuid(run_uid))?;
+        check_nonnegative_syscall((syscalls.setsid)())?;
+        check_zero_syscall((syscalls.prctl)(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))?;
+        check_zero_syscall((syscalls.chroot)(root.as_ptr()))?;
+        check_zero_syscall((syscalls.chdir)(workspace.as_ptr()))?;
+        check_zero_syscall((syscalls.setgroups)(0, std::ptr::null()))?;
+        check_zero_syscall((syscalls.setgid)(run_gid))?;
+        check_zero_syscall((syscalls.setuid)(run_uid))?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn real_chroot_child_syscalls() -> ChrootChildSyscalls {
+    ChrootChildSyscalls {
+        setsid: libc::setsid,
+        prctl: libc::prctl,
+        chroot: libc::chroot,
+        chdir: libc::chdir,
+        setgroups: libc::setgroups,
+        setgid: libc::setgid,
+        setuid: libc::setuid,
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2360,6 +2407,117 @@ mod tests {
             matches!(error, AgentRuntimeError::Io(message) if message.contains("chroot root path contains a NUL"))
         );
         let _ = std::fs::remove_dir_all(cgroup.path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_chroot_command_skips_pre_exec_for_test_marker() {
+        let root_dir = temp_state_dir("acp-agent-configure-chroot-skip");
+        std::fs::create_dir_all(&root_dir).expect("root fixture should be creatable");
+        std::fs::write(root_dir.join(TEST_SKIP_CHROOT_PREEXEC_MARKER), b"")
+            .expect("skip marker should be writable");
+        let cgroup = fake_agent_cgroup("configure-skip");
+        let (uid, gid) = test_agent_identity();
+        let mut command = Command::new("/bin/true");
+
+        configure_chroot_command(&mut command, &root_dir, &cgroup, uid, gid)
+            .expect("test marker should skip chroot pre-exec setup");
+
+        let _ = std::fs::remove_dir_all(root_dir);
+        let _ = std::fs::remove_dir_all(cgroup.path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn chroot_pre_exec_reports_missing_cgroup_before_privileged_syscalls() {
+        let root = CString::new("/tmp").expect("static root path has no NUL");
+        let workspace =
+            CString::new(CHROOT_CHECKOUT_ROOT).expect("static workspace path has no NUL");
+        let cgroup_procs =
+            CString::new("/tmp/acp-missing-cgroup.procs").expect("static procs path has no NUL");
+        let mut pre_exec = chroot_pre_exec(root, workspace, cgroup_procs, 0, 0);
+
+        assert!(pre_exec().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepare_chroot_child_with_uses_injected_syscalls() {
+        if std::env::var_os("ACP_TEST_PREPARE_CHROOT_CHILD").is_none() {
+            let status = Command::new(std::env::current_exe().expect("test executable path"))
+                .arg("agent_runtime::tests::prepare_chroot_child_with_uses_injected_syscalls")
+                .arg("--exact")
+                .env("ACP_TEST_PREPARE_CHROOT_CHILD", "1")
+                .status()
+                .expect("isolated chroot child test should run");
+            assert!(status.success(), "isolated chroot child test failed");
+            return;
+        }
+
+        let root = CString::new("/tmp").expect("static root path has no NUL");
+        let workspace =
+            CString::new(CHROOT_CHECKOUT_ROOT).expect("static workspace path has no NUL");
+        let procs_path = temp_state_dir("acp-agent-prepare-child").join("cgroup.procs");
+        std::fs::create_dir_all(procs_path.parent().expect("procs parent"))
+            .expect("procs parent should be creatable");
+        std::fs::write(&procs_path, b"").expect("procs file should be writable");
+        let cgroup_procs = CString::new(procs_path.as_os_str().as_encoded_bytes())
+            .expect("test path should not contain NUL");
+
+        prepare_chroot_child_with(
+            &root,
+            &workspace,
+            &cgroup_procs,
+            1000,
+            1000,
+            fake_chroot_child_syscalls(),
+        )
+        .expect("fake syscall sequence should succeed");
+
+        let _ = std::fs::remove_dir_all(procs_path.parent().expect("procs parent"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_chroot_child_syscalls() -> ChrootChildSyscalls {
+        ChrootChildSyscalls {
+            setsid: fake_setsid,
+            // libc::prctl is C-variadic, so Rust cannot define a stable fake with this signature.
+            // The caller runs this bundle in an isolated test process.
+            prctl: libc::prctl,
+            chroot: fake_path_syscall,
+            chdir: fake_path_syscall,
+            setgroups: fake_setgroups,
+            setgid: fake_setgid,
+            setuid: fake_setuid,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn fake_setsid() -> libc::pid_t {
+        1
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn fake_path_syscall(_path: *const libc::c_char) -> libc::c_int {
+        0
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn fake_setgroups(
+        _size: libc::size_t,
+        _list: *const libc::gid_t,
+    ) -> libc::c_int {
+        0
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn fake_setgid(_gid: libc::gid_t) -> libc::c_int {
+        0
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn fake_setuid(_uid: libc::uid_t) -> libc::c_int {
+        0
     }
 
     #[cfg(target_os = "linux")]

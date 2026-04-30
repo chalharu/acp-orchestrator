@@ -561,7 +561,7 @@ fn resolved_checkout_paths_stay_within_the_checkout_root() {
 }
 
 #[test]
-fn chroot_runtime_checkout_layout_resolves_only_workspace_roots() {
+fn checkout_path_resolution_accepts_standard_and_chroot_roots() {
     let state_dir = unique_test_dir("acp-workspace-checkout-chroot-resolve");
     let manager = FsWorkspaceCheckoutManager::with_layout(
         state_dir.clone(),
@@ -586,7 +586,7 @@ fn chroot_runtime_checkout_layout_resolves_only_workspace_roots() {
     );
     assert_eq!(
         manager.resolve_checkout_path("session-checkouts/s_test"),
-        None
+        Some(state_dir.join("session-checkouts/s_test"))
     );
 }
 

@@ -2085,17 +2085,23 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn process_stat_is_zombie(stat: &str) -> bool {
-        let bytes = stat.as_bytes();
-        let close_paren = match bytes.iter().rposition(|byte| *byte == 41) {
-            Some(index) => index,
-            None => return false,
-        };
-        process_stat_state(&stat[close_paren + 1..]) == Some('Z')
+        let mut close_paren = None;
+        for (index, byte) in stat.bytes().enumerate() {
+            if byte == 41 {
+                close_paren = Some(index);
+            }
+        }
+        if let Some(index) = close_paren {
+            let (_, rest) = stat.split_at(index + 1);
+            process_stat_state(rest) == Some('Z')
+        } else {
+            false
+        }
     }
 
     #[cfg(target_os = "linux")]
     fn process_stat_state(rest: &str) -> Option<char> {
-        rest.trim_start().chars().next()
+        rest.chars().find(|ch| !ch.is_whitespace())
     }
 
     #[cfg(unix)]

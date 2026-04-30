@@ -44,6 +44,7 @@ pub(super) struct WorkspacesPageState {
     pub(super) agent_profiles: RwSignal<Vec<AgentProfile>>,
     pub(super) agent_profiles_loading: RwSignal<bool>,
     pub(super) show_agent_settings: RwSignal<bool>,
+    pub(super) agent_settings_profile_name: RwSignal<String>,
     pub(super) agent_settings_command: RwSignal<String>,
     pub(super) agent_settings_saving: RwSignal<bool>,
     pub(super) checked: RwSignal<bool>,
@@ -77,6 +78,7 @@ impl WorkspacesPageState {
             agent_profiles: RwSignal::new(Vec::<AgentProfile>::new()),
             agent_profiles_loading: RwSignal::new(false),
             show_agent_settings: RwSignal::new(false),
+            agent_settings_profile_name: RwSignal::new(String::new()),
             agent_settings_command: RwSignal::new(String::new()),
             agent_settings_saving: RwSignal::new(false),
             checked: RwSignal::new(false),
@@ -282,9 +284,23 @@ mod tests {
             assert!(state.agent_profiles.get().is_empty());
             assert!(!state.agent_profiles_loading.get());
             assert!(!state.show_agent_settings.get());
+            assert!(state.agent_settings_profile_name.get().is_empty());
             assert!(state.agent_settings_command.get().is_empty());
             assert!(!state.agent_settings_saving.get());
             assert!(!state.checked.get());
+        });
+    }
+
+    #[test]
+    fn host_agent_profile_reload_clears_loading_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.agent_profiles_loading.set(true);
+
+            spawn_agent_profiles_reload(state);
+
+            assert!(!state.agent_profiles_loading.get());
         });
     }
 

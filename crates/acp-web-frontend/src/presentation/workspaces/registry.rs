@@ -1410,6 +1410,7 @@ mod tests {
                 loading_branches,
             );
             let _ = workspace_start_chat_profile_field(state);
+            let _ = profile_option_view(sample_agent_profile("claude", "Claude ACP"));
             let _ = workspace_start_chat_modal_actions(
                 opening,
                 loading_branches,
@@ -1420,6 +1421,19 @@ mod tests {
             assert_eq!(title(), "Test Workspace");
             assert_eq!(submit_label(), "New chat");
         });
+    }
+
+    fn sample_agent_profile(id: &str, name: &str) -> AgentProfile {
+        AgentProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            mode: acp_contracts_sessions::AgentProfileMode::Chroot,
+            command_argv: vec!["claude".to_string(), "acp".to_string()],
+            env_allowlist: Vec::new(),
+            timeout_seconds: 30,
+            run_uid: 65_534,
+            run_gid: 65_534,
+        }
     }
 
     #[cfg(not(target_family = "wasm"))]

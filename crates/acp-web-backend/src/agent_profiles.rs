@@ -84,9 +84,30 @@ impl AgentProfileStore {
         let profile = normalize_profile(profile_id, request)?;
         profile_to_config(&profile)?;
         let mut profiles = self.lock_profiles()?;
+        ensure_unique_profile_name(&profiles, Some(profile_id), &profile.name)?;
         profiles.insert(profile.id.clone(), profile.clone());
         write_profiles(&self.path, &profiles)?;
         Ok(profile)
+    }
+
+    pub fn create_profile(
+        &self,
+        request: UpsertAgentProfileRequest,
+    ) -> Result<AgentProfile, AgentProfileStoreError> {
+        let mut profile = normalize_profile("profile-pending", request)?;
+        profile_to_config(&profile)?;
+        let mut profiles = self.lock_profiles()?;
+        ensure_unique_profile_name(&profiles, None, &profile.name)?;
+        loop {
+            let profile_id = format!("profile-{}", uuid::Uuid::new_v4().simple());
+            if profiles.contains_key(&profile_id) {
+                continue;
+            }
+            profile.id = profile_id;
+            profiles.insert(profile.id.clone(), profile.clone());
+            write_profiles(&self.path, &profiles)?;
+            return Ok(profile);
+        }
     }
 
     fn lock_profiles(
@@ -169,6 +190,23 @@ fn normalize_profile(
         run_uid: request.run_uid,
         run_gid: request.run_gid,
     })
+}
+
+fn ensure_unique_profile_name(
+    profiles: &BTreeMap<String, AgentProfile>,
+    allowed_profile_id: Option<&str>,
+    name: &str,
+) -> Result<(), AgentProfileStoreError> {
+    let duplicate = profiles.iter().any(|(profile_id, profile)| {
+        Some(profile_id.as_str()) != allowed_profile_id && profile.name == name
+    });
+    if duplicate {
+        Err(AgentProfileStoreError::Validation(
+            "profile name already exists".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn normalize_command_argv(
@@ -296,5 +334,66 @@ mod tests {
             .expect_err("zero timeout should fail");
 
         assert!(matches!(error, AgentProfileStoreError::Validation(_)));
+    }
+
+    #[test]
+    fn profile_store_creates_generated_profile_ids_for_arbitrary_names() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-create-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let mut request = request(vec!["claude".to_string(), "acp".to_string()]);
+        request.name = "Claude ACP".to_string();
+
+        let profile = store.create_profile(request).expect("profile should save");
+
+        assert!(profile.id.starts_with("profile-"));
+        assert_eq!(profile.name, "Claude ACP");
+        assert_eq!(profile.command_argv, vec!["claude", "acp"]);
+    }
+
+    #[test]
+    fn profile_store_rejects_duplicate_profile_names() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-duplicate-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let mut base_request = request(vec!["claude".to_string(), "acp".to_string()]);
+        base_request.name = "Claude ACP".to_string();
+        store
+            .upsert_profile("claude", base_request.clone())
+            .expect("first profile should save");
+
+        let mut duplicate_create = request(vec!["copilot".to_string(), "acp".to_string()]);
+        duplicate_create.name = "Claude ACP".to_string();
+        let create_error = store
+            .create_profile(duplicate_create)
+            .expect_err("duplicate create should fail");
+        assert!(matches!(
+            create_error,
+            AgentProfileStoreError::Validation(message) if message == "profile name already exists"
+        ));
+
+        let mut renamed = base_request;
+        renamed.command_argv = vec![
+            "claude".to_string(),
+            "acp".to_string(),
+            "--verbose".to_string(),
+        ];
+        store
+            .upsert_profile("claude", renamed)
+            .expect("same id can update the existing profile name");
+
+        let mut duplicate_upsert = request(vec!["claude".to_string(), "acp".to_string()]);
+        duplicate_upsert.name = "Claude ACP".to_string();
+        let upsert_error = store
+            .upsert_profile("claude-copy", duplicate_upsert)
+            .expect_err("duplicate upsert should fail");
+        assert!(matches!(
+            upsert_error,
+            AgentProfileStoreError::Validation(message) if message == "profile name already exists"
+        ));
     }
 }

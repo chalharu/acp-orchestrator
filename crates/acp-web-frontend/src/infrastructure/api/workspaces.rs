@@ -22,7 +22,6 @@ use super::{csrf_token, encode_component, patch_json_with_csrf, post_json_with_c
 
 const WORKSPACES_URL: &str = "/api/v1/workspaces";
 const AGENT_PROFILES_URL: &str = "/api/v1/agent-profiles";
-const OPENCODE_AGENT_PROFILE_ID: &str = "opencode";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceSessionCreateError {
@@ -201,10 +200,13 @@ pub(crate) async fn list_agent_profiles() -> Result<Vec<AgentProfile>, String> {
 }
 
 #[cfg(target_family = "wasm")]
-pub(crate) async fn save_opencode_agent_profile(command: String) -> Result<AgentProfile, String> {
-    let body = opencode_agent_profile_body(command)?;
+pub(crate) async fn create_agent_profile(
+    name: String,
+    command: String,
+) -> Result<AgentProfile, String> {
+    let body = agent_profile_body(name, command)?;
     let csrf = csrf_token();
-    let response = Request::put(&agent_profile_url(OPENCODE_AGENT_PROFILE_ID))
+    let response = Request::post(AGENT_PROFILES_URL)
         .header("x-csrf-token", &csrf)
         .header("content-type", "application/json")
         .body(body)
@@ -220,12 +222,12 @@ pub(crate) async fn save_opencode_agent_profile(command: String) -> Result<Agent
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) async fn save_opencode_agent_profile(command: String) -> Result<AgentProfile, String> {
-    let _ = opencode_agent_profile_body(command)?;
-    Err(non_wasm_api_error(
-        "PUT",
-        &agent_profile_url(OPENCODE_AGENT_PROFILE_ID),
-    ))
+pub(crate) async fn create_agent_profile(
+    name: String,
+    command: String,
+) -> Result<AgentProfile, String> {
+    let _ = agent_profile_body(name, command)?;
+    Err(non_wasm_api_error("POST", AGENT_PROFILES_URL))
 }
 
 #[cfg(target_family = "wasm")]
@@ -303,10 +305,11 @@ fn create_workspace_session_body(
     .map_err(|error| error.to_string())
 }
 
-fn opencode_agent_profile_body(command: String) -> Result<String, String> {
-    let command_argv = command_lines_to_argv(&command)?;
+fn agent_profile_body(name: String, command: String) -> Result<String, String> {
+    let name = normalize_profile_name(name)?;
+    let command_argv = command_line_to_argv(&command)?;
     serde_json::to_string(&UpsertAgentProfileRequest {
-        name: "OpenCode ACP".to_string(),
+        name,
         mode: AgentProfileMode::Chroot,
         command_argv,
         env_allowlist: Vec::new(),
@@ -317,17 +320,137 @@ fn opencode_agent_profile_body(command: String) -> Result<String, String> {
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn command_lines_to_argv(command: &str) -> Result<Vec<String>, String> {
-    let argv: Vec<String> = command
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
-    if argv.is_empty() {
-        Err("OpenCode ACP command is required".to_string())
-    } else {
-        Ok(argv)
+fn normalize_profile_name(name: String) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Profile name is required".to_string());
+    }
+    Ok(name)
+}
+
+pub(crate) fn command_line_to_argv(command: &str) -> Result<Vec<String>, String> {
+    let mut parser = CommandLineParser::default();
+    for ch in command.trim().chars() {
+        parser.push_char(ch);
+    }
+    parser.finish()
+}
+
+#[derive(Default)]
+struct CommandLineParser {
+    argv: Vec<String>,
+    current: String,
+    quote: Option<QuoteMode>,
+    escaped: bool,
+    started_arg: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuoteMode {
+    Single,
+    Double,
+}
+
+impl QuoteMode {
+    const fn as_char(self) -> char {
+        match self {
+            Self::Single => '\'',
+            Self::Double => '"',
+        }
+    }
+}
+
+impl CommandLineParser {
+    fn push_char(&mut self, ch: char) {
+        if self.escaped {
+            self.push_escaped(ch);
+            return;
+        }
+
+        match self.quote {
+            Some(QuoteMode::Single) => self.push_single_quoted(ch),
+            Some(QuoteMode::Double) => self.push_double_quoted(ch),
+            None => self.push_unquoted(ch),
+        }
+    }
+
+    fn push_escaped(&mut self, ch: char) {
+        if self.quote == Some(QuoteMode::Double) && ch != '"' && ch != '\\' {
+            self.current.push('\\');
+        }
+        self.push_literal(ch);
+        self.escaped = false;
+    }
+
+    fn push_single_quoted(&mut self, ch: char) {
+        if ch == '\'' {
+            self.end_quote();
+        } else {
+            self.push_literal(ch);
+        }
+    }
+
+    fn push_double_quoted(&mut self, ch: char) {
+        match ch {
+            '\\' => self.start_escape(),
+            '"' => self.end_quote(),
+            _ => self.push_literal(ch),
+        }
+    }
+
+    fn push_unquoted(&mut self, ch: char) {
+        match ch {
+            '\\' => self.start_escape(),
+            '\'' => self.start_quote(QuoteMode::Single),
+            '"' => self.start_quote(QuoteMode::Double),
+            _ if ch.is_whitespace() => self.finish_arg(),
+            _ => self.push_literal(ch),
+        }
+    }
+
+    fn start_escape(&mut self) {
+        self.escaped = true;
+        self.started_arg = true;
+    }
+
+    fn start_quote(&mut self, quote: QuoteMode) {
+        self.quote = Some(quote);
+        self.started_arg = true;
+    }
+
+    fn end_quote(&mut self) {
+        self.quote = None;
+        self.started_arg = true;
+    }
+
+    fn push_literal(&mut self, ch: char) {
+        self.current.push(ch);
+        self.started_arg = true;
+    }
+
+    fn finish_arg(&mut self) {
+        if self.started_arg {
+            self.argv.push(std::mem::take(&mut self.current));
+            self.started_arg = false;
+        }
+    }
+
+    fn finish(mut self) -> Result<Vec<String>, String> {
+        if self.escaped {
+            return Err("ACP launch command has a trailing backslash escape".to_string());
+        }
+        if let Some(quote) = self.quote {
+            let quote_char = quote.as_char();
+            return Err(format!(
+                "ACP launch command has an unterminated {quote_char} quote"
+            ));
+        }
+        self.finish_arg();
+        if self.argv.is_empty() {
+            Err("ACP launch command is required".to_string())
+        } else {
+            Ok(self.argv)
+        }
     }
 }
 
@@ -341,10 +464,6 @@ fn workspace_url(workspace_id: &str) -> String {
 
 fn workspace_sessions_url(workspace_id: &str) -> String {
     format!("{}/sessions", workspace_url(workspace_id))
-}
-
-fn agent_profile_url(profile_id: &str) -> String {
-    format!("{AGENT_PROFILES_URL}/{}", encode_component(profile_id))
 }
 
 fn workspace_branches_url(workspace_id: &str) -> String {
@@ -396,10 +515,26 @@ mod tests {
         assert!(body.contains("refs/heads/release"));
         assert!(body.contains("opencode"));
 
-        let body = opencode_agent_profile_body("opencode\nacp\n--port=${ACP_PORT}".to_string())
-            .expect("profile body");
-        assert!(body.contains("OpenCode ACP"));
-        assert!(body.contains("${ACP_PORT}"));
+        let body = agent_profile_body(
+            " Claude ACP ".to_string(),
+            r#"claude acp --config "~/Library/Application Support/Claude/config.json" --port ${ACP_PORT}"#
+                .to_string(),
+        )
+        .expect("profile body");
+        let request: UpsertAgentProfileRequest =
+            serde_json::from_str(&body).expect("profile body should decode");
+        assert_eq!(request.name, "Claude ACP");
+        assert_eq!(
+            request.command_argv,
+            vec![
+                "claude",
+                "acp",
+                "--config",
+                "~/Library/Application Support/Claude/config.json",
+                "--port",
+                "${ACP_PORT}"
+            ]
+        );
     }
 
     #[test]
@@ -440,10 +575,13 @@ mod tests {
         let profiles_error = poll_ready(list_agent_profiles()).expect_err("host profiles fail");
         assert!(profiles_error.contains(AGENT_PROFILES_URL));
 
-        let save_profile_error =
-            poll_ready(save_opencode_agent_profile("opencode\nacp".to_string()))
-                .expect_err("host profile save should fail");
-        assert!(save_profile_error.contains("/api/v1/agent-profiles/opencode"));
+        let save_profile_error = poll_ready(create_agent_profile(
+            "OpenCode ACP".to_string(),
+            "opencode acp".to_string(),
+        ))
+        .expect_err("host profile save should fail");
+        assert!(save_profile_error.contains(AGENT_PROFILES_URL));
+        assert!(save_profile_error.contains("POST"));
 
         let create_session_error = poll_ready(create_workspace_session("w_1", None, None))
             .expect_err("host workspace session create should fail");
@@ -497,11 +635,73 @@ mod tests {
     }
 
     #[test]
-    fn command_lines_to_argv_trims_blank_lines() {
+    fn command_line_to_argv_parses_plain_and_quoted_commands() {
         assert_eq!(
-            command_lines_to_argv(" opencode \n\n acp \n --port=${ACP_PORT} ").expect("valid argv"),
-            vec!["opencode", "acp", "--port=${ACP_PORT}"]
+            command_line_to_argv(" opencode acp --port ${ACP_PORT} ").expect("valid argv"),
+            vec!["opencode", "acp", "--port", "${ACP_PORT}"]
         );
-        assert!(command_lines_to_argv(" \n ").is_err());
+        assert_eq!(
+            command_line_to_argv(
+                r#"claude acp --config "~/Library/Application Support/Claude/config.json" --port ${ACP_PORT}"#
+            )
+            .expect("quoted argv"),
+            vec![
+                "claude",
+                "acp",
+                "--config",
+                "~/Library/Application Support/Claude/config.json",
+                "--port",
+                "${ACP_PORT}"
+            ]
+        );
+    }
+
+    #[test]
+    fn command_line_to_argv_parses_escapes() {
+        assert_eq!(
+            command_line_to_argv(r#"copilot acp --name 'Copilot CLI' --flag escaped\ value"#)
+                .expect("escaped argv"),
+            vec![
+                "copilot",
+                "acp",
+                "--name",
+                "Copilot CLI",
+                "--flag",
+                "escaped value"
+            ]
+        );
+        assert_eq!(
+            command_line_to_argv(r#"agent --path 'dir\name' --quoted "escaped\"quote""#)
+                .expect("quoted backslash argv"),
+            vec![
+                "agent",
+                "--path",
+                r#"dir\name"#,
+                "--quoted",
+                "escaped\"quote"
+            ]
+        );
+        assert_eq!(
+            command_line_to_argv(r#"agent --regex "\d+\.json" --slash "dir\\name""#)
+                .expect("double-quoted backslash argv"),
+            vec!["agent", "--regex", r#"\d+\.json"#, "--slash", r#"dir\name"#]
+        );
+    }
+
+    #[test]
+    fn command_line_to_argv_rejects_incomplete_commands() {
+        assert!(command_line_to_argv(" \n ").is_err());
+        assert!(command_line_to_argv("claude acp \"unterminated").is_err());
+        assert!(command_line_to_argv("claude acp 'unterminated").is_err());
+        assert!(command_line_to_argv(r"agent trailing\").is_err());
+    }
+
+    #[test]
+    fn agent_profile_body_requires_a_profile_name() {
+        assert_eq!(
+            agent_profile_body("   ".to_string(), "claude acp".to_string())
+                .expect_err("blank profile names should fail"),
+            "Profile name is required"
+        );
     }
 }

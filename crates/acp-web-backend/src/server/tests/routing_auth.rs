@@ -94,6 +94,19 @@ async fn agent_profile_api_requires_admin_for_writes_but_allows_signed_in_reads(
         run_gid: 65_534,
     };
 
+    let create_forbidden = create_agent_profile(
+        State(state.clone()),
+        Extension(member_browser.principal.clone()),
+        Json(UpsertAgentProfileRequest {
+            name: "Copilot CLI ACP".to_string(),
+            command_argv: vec!["copilot".to_string(), "acp".to_string()],
+            ..request.clone()
+        }),
+    )
+    .await
+    .expect_err("members cannot create profiles");
+    assert!(matches!(create_forbidden, AppError::Forbidden(_)));
+
     let forbidden = upsert_agent_profile(
         State(state.clone()),
         Path("opencode".to_string()),
@@ -108,18 +121,51 @@ async fn agent_profile_api_requires_admin_for_writes_but_allows_signed_in_reads(
         State(state.clone()),
         Path("opencode".to_string()),
         Extension(admin_browser.principal.clone()),
-        Json(request),
+        Json(request.clone()),
     )
     .await
     .expect("admin can update profile");
+
+    let created = create_agent_profile(
+        State(state.clone()),
+        Extension(admin_browser.principal.clone()),
+        Json(UpsertAgentProfileRequest {
+            name: "Claude ACP".to_string(),
+            command_argv: vec!["claude".to_string(), "acp".to_string()],
+            ..request.clone()
+        }),
+    )
+    .await
+    .expect("admin can create profile");
+    assert_eq!(created.0, axum::http::StatusCode::CREATED);
+    let created = created.1.0.profile;
+    assert!(created.id.starts_with("profile-"));
+    assert_eq!(created.name, "Claude ACP");
+
+    let duplicate = create_agent_profile(
+        State(state.clone()),
+        Extension(admin_browser.principal.clone()),
+        Json(UpsertAgentProfileRequest {
+            name: "Claude ACP".to_string(),
+            command_argv: vec!["copilot".to_string(), "acp".to_string()],
+            ..request
+        }),
+    )
+    .await
+    .expect_err("duplicate profile names should fail");
+    assert!(matches!(
+        duplicate,
+        AppError::BadRequest(message) if message == "profile name already exists"
+    ));
 
     let profiles = list_agent_profiles(State(state), Extension(member_browser.principal))
         .await
         .expect("member can list profiles")
         .0
         .profiles;
-    assert_eq!(profiles.len(), 1);
-    assert_eq!(profiles[0].id, "opencode");
+    assert_eq!(profiles.len(), 2);
+    assert!(profiles.iter().any(|profile| profile.id == "opencode"));
+    assert!(profiles.iter().any(|profile| profile.id == created.id));
 }
 
 #[test]

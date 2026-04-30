@@ -76,9 +76,12 @@ impl ReplyProvider for BindFailingReplyProvider {
 
 #[derive(Debug)]
 struct TrackingAgentRuntimeManager {
-    launches: StdArc<Mutex<Vec<(String, String, String, std::path::PathBuf)>>>,
+    launches: RuntimeLaunches,
     forgotten_sessions: StdArc<Mutex<Vec<String>>>,
 }
+
+type RuntimeLaunchRecord = (String, String, String, std::path::PathBuf);
+type RuntimeLaunches = StdArc<Mutex<Vec<RuntimeLaunchRecord>>>;
 
 impl TrackingAgentRuntimeManager {
     fn new() -> Self {
@@ -88,7 +91,7 @@ impl TrackingAgentRuntimeManager {
         }
     }
 
-    fn launched_sessions(&self) -> Vec<(String, String, String, std::path::PathBuf)> {
+    fn launched_sessions(&self) -> Vec<RuntimeLaunchRecord> {
         self.launches
             .lock()
             .expect("runtime launch tracking should not poison")

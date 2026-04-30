@@ -1,6 +1,7 @@
 use axum::{
     Json,
     extract::{Extension, Path, State},
+    http::StatusCode,
 };
 
 use crate::{
@@ -26,6 +27,20 @@ pub(in crate::server) async fn list_agent_profiles(
         can_manage: owner.user.is_admin,
     };
     Ok(Json(response))
+}
+
+pub(in crate::server) async fn create_agent_profile(
+    State(state): State<AppState>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Json(request): Json<UpsertAgentProfileRequest>,
+) -> Result<(StatusCode, Json<AgentProfileResponse>), AppError> {
+    let owner = state.owner_context(principal).await?;
+    require_admin(&owner)?;
+    let profile = state
+        .agent_profile_store
+        .create_profile(request)
+        .map_err(map_profile_store_error)?;
+    Ok((StatusCode::CREATED, Json(AgentProfileResponse { profile })))
 }
 
 pub(in crate::server) async fn upsert_agent_profile(

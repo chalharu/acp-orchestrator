@@ -63,7 +63,7 @@ use self::account_api::{
     auth_status, bootstrap_register, create_account, delete_account, list_accounts, sign_in,
     sign_out, update_account,
 };
-use self::agent_profile_api::{list_agent_profiles, upsert_agent_profile};
+use self::agent_profile_api::{create_agent_profile, list_agent_profiles, upsert_agent_profile};
 use self::assets::{SlashCompletionsQuery, install_frontend_routes};
 pub use self::connection::serve_with_shutdown;
 #[cfg(test)]
@@ -424,9 +424,9 @@ mod route_handlers {
         ResolvePermissionRequest, SignInRequest, SlashCompletionsQuery, UpdateAccountRequest,
         UpdateWorkspaceRequest, UpsertAgentProfileRequest, WritePrincipal, auth_status,
         bootstrap_register, bootstrap_workspace, cancel_turn, close_session, create_account,
-        create_workspace, create_workspace_session, delete_account, delete_session,
-        delete_workspace, get_session, get_session_history, get_slash_completions, get_workspace,
-        list_accounts, list_agent_profiles, list_sessions, list_workspace_branches,
+        create_agent_profile, create_workspace, create_workspace_session, delete_account,
+        delete_session, delete_workspace, get_session, get_session_history, get_slash_completions,
+        get_workspace, list_accounts, list_agent_profiles, list_sessions, list_workspace_branches,
         list_workspace_sessions, list_workspaces, parse_json_body, post_message, rename_session,
         resolve_permission, sign_in, sign_out, stream_session_events, update_account,
         update_workspace, upsert_agent_profile,
@@ -667,6 +667,18 @@ mod route_handlers {
         )
         .await
         .map(IntoResponse::into_response)
+    }
+
+    pub(super) async fn create_agent_profile_handler(
+        State(state): State<AppState>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Result<Response, AppError> {
+        let request = parse_json_body::<UpsertAgentProfileRequest>(&headers, &body)?;
+        create_agent_profile(State(state), Extension(principal), Json(request))
+            .await
+            .map(IntoResponse::into_response)
     }
 
     pub(super) async fn delete_workspace_handler(
@@ -919,6 +931,10 @@ fn workspace_write_routes(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
             post_route(&state, route_handlers::create_workspace_session_handler),
+        )
+        .route(
+            "/api/v1/agent-profiles",
+            post_route(&state, route_handlers::create_agent_profile_handler),
         )
         .route(
             "/api/v1/agent-profiles/{profile_id}",

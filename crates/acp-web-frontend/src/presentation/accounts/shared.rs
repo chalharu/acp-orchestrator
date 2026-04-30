@@ -406,6 +406,10 @@ mod tests {
             spawn_account_reload(state);
             assert!(!state.loading_accounts.get());
             assert!(state.error.get().is_none());
+
+            state.agent_profiles_loading.set(true);
+            spawn_agent_profiles_reload(state);
+            assert!(!state.agent_profiles_loading.get());
         });
     }
 

@@ -7,9 +7,9 @@ use leptos::prelude::*;
 use crate::infrastructure::api;
 use crate::presentation::{AppIcon, app_icon_view};
 
+use super::shared::AccountsPageState;
 #[cfg(target_family = "wasm")]
 use super::shared::spawn_agent_profiles_reload;
-use super::shared::AccountsPageState;
 
 const PROFILE_COMMAND_PLACEHOLDER: &str = "opencode acp --host 127.0.0.1 --port ${ACP_PORT}";
 
@@ -68,7 +68,7 @@ fn agent_profile_create_form(state: AccountsPageState) -> AnyView {
                 class="account-form__submit"
                 prop:disabled=move || state.agent_profile_saving.get()
             >
-                {move || agent_profile_save_label(state.agent_profile_saving.get())}
+                "Add Profile"
             </button>
         </form>
         <p class="muted">
@@ -110,18 +110,15 @@ fn agent_profile_table_body(state: AccountsPageState) -> AnyView {
         .into_iter()
         .map(|profile| agent_profile_row(profile, state))
         .collect_view();
+    agent_profile_table_view(rows.into_any())
+}
+
+fn agent_profile_table_view(rows: AnyView) -> AnyView {
     view! {
         <div class="account-table-wrap">
             <table class="account-table agent-profile-table">
                 <caption class="sr-only">"ACP profile commands and launch modes"</caption>
-                <thead>
-                    <tr>
-                        <th scope="col">"Profile"</th>
-                        <th scope="col">"Command"</th>
-                        <th scope="col">"Mode"</th>
-                        <th scope="col">"Actions"</th>
-                    </tr>
-                </thead>
+                {agent_profile_table_header()}
                 <tbody>{rows}</tbody>
             </table>
         </div>
@@ -129,81 +126,184 @@ fn agent_profile_table_body(state: AccountsPageState) -> AnyView {
     .into_any()
 }
 
+fn agent_profile_table_header() -> impl IntoView {
+    let headers = ["Profile", "Command", "Mode", "Actions"]
+        .into_iter()
+        .map(|header| view! { <th scope="col">{header}</th> })
+        .collect_view();
+    view! { <thead><tr>{headers}</tr></thead> }
+}
+
 fn agent_profile_row(profile: AgentProfile, state: AccountsPageState) -> AnyView {
     let name = RwSignal::new(profile.name.clone());
     let command = RwSignal::new(agent_command_preview(&profile.command_argv));
     let mode = RwSignal::new(profile.mode.clone());
     let saving = RwSignal::new(false);
-    let deleting = Signal::derive({
-        let profile_id = profile.id.clone();
-        move || state.deleting_agent_profile_id.get().as_deref() == Some(profile_id.as_str())
-    });
-    let dirty = Signal::derive({
-        let original = profile.clone();
-        move || {
-            name.get().trim() != original.name
-                || command.get().trim() != agent_command_preview(&original.command_argv)
-                || mode.get() != original.mode
-        }
-    });
+    let deleting = agent_profile_deleting_signal(profile.id.clone(), state);
+    let dirty = agent_profile_dirty_signal(name, command, mode, profile.clone());
     let save_profile = save_agent_profile_handler(&profile.id, state, name, command, mode, saving);
     let delete_profile = delete_agent_profile_handler(&profile.id, state);
 
     view! {
         <tr class="account-table__row">
-            <td>
-                <label class="account-form__field account-form__field--compact">
-                    <span class="sr-only">"Profile name"</span>
-                    <input type="text" prop:value=move || name.get() on:input=move |event| name.set(event_target_value(&event)) />
-                </label>
-            </td>
-            <td>
-                <label class="account-form__field account-form__field--compact">
-                    <span class="sr-only">"ACP launch command"</span>
-                    <textarea rows="2" prop:value=move || command.get() on:input=move |event| command.set(event_target_value(&event)) />
-                </label>
-            </td>
-            <td>
-                <label class="account-form__field account-form__field--compact">
-                    <span class="sr-only">"Launch mode"</span>
-                    <select
-                        prop:value=move || profile_mode_value(mode.get())
-                        on:change=move |event| mode.set(profile_mode_from_value(&event_target_value(&event)))
-                    >
-                        <option value="host">"Host"</option>
-                        <option value="chroot">"Chroot"</option>
-                    </select>
-                </label>
-            </td>
-            <td>
-                <div class="account-row__actions-toolbar">
-                    <button
-                        type="button"
-                        class="account-row__action-btn icon-action"
-                        prop:disabled=move || saving.get() || !dirty.get()
-                        on:click=move |_| save_profile.run(())
-                        aria-label=move || agent_profile_save_label(saving.get())
-                        title=move || agent_profile_save_label(saving.get())
-                    >
-                        {move || app_icon_view(if saving.get() { AppIcon::Busy } else { AppIcon::Save })}
-                        <span class="sr-only">{move || agent_profile_save_label(saving.get())}</span>
-                    </button>
-                    <button
-                        type="button"
-                        class="account-row__action-btn account-row__delete icon-action icon-action--danger"
-                        prop:disabled=move || deleting.get()
-                        on:click=move |event| delete_profile.run(event)
-                        aria-label=move || if deleting.get() { "Deleting…" } else { "Delete profile" }
-                        title=move || if deleting.get() { "Deleting…" } else { "Delete profile" }
-                    >
-                        {move || app_icon_view(if deleting.get() { AppIcon::Busy } else { AppIcon::Delete })}
-                        <span class="sr-only">{move || if deleting.get() { "Deleting…" } else { "Delete profile" }}</span>
-                    </button>
-                </div>
-            </td>
+            {agent_profile_name_cell(name)}
+            {agent_profile_command_cell(command)}
+            {agent_profile_mode_cell(mode)}
+            {agent_profile_actions_cell(saving, dirty, deleting, save_profile, delete_profile)}
         </tr>
     }
     .into_any()
+}
+
+fn agent_profile_name_cell(name: RwSignal<String>) -> impl IntoView {
+    view! {
+        <td>
+            <label class="account-form__field account-form__field--compact">
+                <span class="sr-only">"Profile name"</span>
+                <input
+                    type="text"
+                    prop:value=move || name.get()
+                    on:input=move |event| name.set(event_target_value(&event))
+                />
+            </label>
+        </td>
+    }
+}
+
+fn agent_profile_command_cell(command: RwSignal<String>) -> impl IntoView {
+    view! {
+        <td>
+            <label class="account-form__field account-form__field--compact">
+                <span class="sr-only">"ACP launch command"</span>
+                <textarea
+                    rows="2"
+                    prop:value=move || command.get()
+                    on:input=move |event| command.set(event_target_value(&event))
+                />
+            </label>
+        </td>
+    }
+}
+
+fn agent_profile_mode_cell(mode: RwSignal<AgentProfileMode>) -> impl IntoView {
+    view! {
+        <td>
+            <label class="account-form__field account-form__field--compact">
+                <span class="sr-only">"Launch mode"</span>
+                <select
+                    prop:value=move || profile_mode_value(mode.get())
+                    on:change=move |event| mode.set(profile_mode_from_value(&event_target_value(&event)))
+                >
+                    <option value="host">"Host"</option>
+                    <option value="chroot">"Chroot"</option>
+                </select>
+            </label>
+        </td>
+    }
+}
+
+fn agent_profile_actions_cell(
+    saving: RwSignal<bool>,
+    dirty: Signal<bool>,
+    deleting: Signal<bool>,
+    save_profile: Callback<()>,
+    delete_profile: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <td>
+            <div class="account-row__actions-toolbar">
+                {agent_profile_save_button(saving, dirty, save_profile)}
+                {agent_profile_delete_button(deleting, delete_profile)}
+            </div>
+        </td>
+    }
+}
+
+fn agent_profile_save_button(
+    saving: RwSignal<bool>,
+    dirty: Signal<bool>,
+    save_profile: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="account-row__action-btn icon-action"
+            prop:disabled=move || saving.get() || !dirty.get()
+            on:click=move |_| save_profile.run(())
+            aria-label=move || agent_profile_save_label(saving.get())
+            title=move || agent_profile_save_label(saving.get())
+        >
+            {agent_profile_save_icon_view(saving)}
+            <span class="sr-only">{move || agent_profile_save_label(saving.get())}</span>
+        </button>
+    }
+}
+
+fn agent_profile_delete_button(
+    deleting: Signal<bool>,
+    delete_profile: Callback<web_sys::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class="account-row__action-btn account-row__delete icon-action icon-action--danger"
+            prop:disabled=move || deleting.get()
+            on:click=move |event| delete_profile.run(event)
+            aria-label=move || delete_profile_label(deleting.get())
+            title=move || delete_profile_label(deleting.get())
+        >
+            {agent_profile_delete_icon_view(deleting)}
+            <span class="sr-only">{move || delete_profile_label(deleting.get())}</span>
+        </button>
+    }
+}
+
+fn agent_profile_save_icon_view(saving: RwSignal<bool>) -> impl Fn() -> AnyView + Copy + 'static {
+    move || app_icon_view(agent_profile_save_icon(saving.get())).into_any()
+}
+
+fn agent_profile_delete_icon_view(deleting: Signal<bool>) -> impl Fn() -> AnyView + Copy + 'static {
+    move || app_icon_view(agent_profile_delete_icon(deleting.get())).into_any()
+}
+
+fn agent_profile_save_icon(saving: bool) -> AppIcon {
+    if saving { AppIcon::Busy } else { AppIcon::Save }
+}
+
+fn agent_profile_delete_icon(deleting: bool) -> AppIcon {
+    if deleting {
+        AppIcon::Busy
+    } else {
+        AppIcon::Delete
+    }
+}
+
+fn agent_profile_deleting_signal(profile_id: String, state: AccountsPageState) -> Signal<bool> {
+    Signal::derive(move || {
+        state.deleting_agent_profile_id.get().as_deref() == Some(profile_id.as_str())
+    })
+}
+
+fn agent_profile_dirty_signal(
+    name: RwSignal<String>,
+    command: RwSignal<String>,
+    mode: RwSignal<AgentProfileMode>,
+    original: AgentProfile,
+) -> Signal<bool> {
+    Signal::derive(move || {
+        agent_profile_values_changed(&name.get(), &command.get(), mode.get(), &original)
+    })
+}
+
+fn agent_profile_values_changed(
+    name: &str,
+    command: &str,
+    mode: AgentProfileMode,
+    original: &AgentProfile,
+) -> bool {
+    name.trim() != original.name
+        || command.trim() != agent_command_preview(&original.command_argv)
+        || mode != original.mode
 }
 
 #[cfg(target_family = "wasm")]
@@ -224,7 +324,9 @@ fn create_agent_profile_submit_handler(
         leptos::task::spawn_local(async move {
             match api::create_agent_profile(name, command, mode).await {
                 Ok(profile) => {
-                    state.agent_profiles.update(|profiles| profiles.push(profile));
+                    state
+                        .agent_profiles
+                        .update(|profiles| profiles.push(profile));
                     state.agent_profile_name.set(String::new());
                     state.agent_profile_command.set(String::new());
                     state.agent_profile_mode.set(AgentProfileMode::Host);
@@ -298,8 +400,9 @@ fn save_agent_profile(
         {
             Ok(profile) => {
                 state.agent_profiles.update(|profiles| {
-                    if let Some(existing) =
-                        profiles.iter_mut().find(|existing| existing.id == profile.id)
+                    if let Some(existing) = profiles
+                        .iter_mut()
+                        .find(|existing| existing.id == profile.id)
                     {
                         *existing = profile;
                     }
@@ -337,7 +440,9 @@ fn delete_agent_profile_handler(
         if state.deleting_agent_profile_id.get_untracked().is_some() {
             return;
         }
-        state.deleting_agent_profile_id.set(Some(profile_id.clone()));
+        state
+            .deleting_agent_profile_id
+            .set(Some(profile_id.clone()));
         state.error.set(None);
         state.notice.set(None);
         delete_agent_profile(profile_id.clone(), state);
@@ -390,6 +495,14 @@ fn agent_profile_save_label(saving: bool) -> &'static str {
     if saving { "Saving…" } else { "Save profile" }
 }
 
+fn delete_profile_label(deleting: bool) -> &'static str {
+    if deleting {
+        "Deleting…"
+    } else {
+        "Delete profile"
+    }
+}
+
 fn agent_command_preview(command_argv: &[String]) -> String {
     command_argv
         .iter()
@@ -416,6 +529,7 @@ fn preview_arg_can_stay_unquoted(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_bindgen::{JsCast, JsValue};
 
     fn sample_agent_profile(mode: AgentProfileMode) -> AgentProfile {
         AgentProfile {
@@ -449,6 +563,162 @@ mod tests {
     }
 
     #[test]
+    fn agent_profile_table_covers_loading_and_empty_states() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            state.agent_profiles_loading.set(true);
+            let _ = agent_profile_table(state);
+
+            state.agent_profiles_loading.set(false);
+            let _ = agent_profile_table(state);
+        });
+    }
+
+    #[test]
+    fn agent_profile_state_signals_detect_changes() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let profile = sample_agent_profile(AgentProfileMode::Host);
+            let command_preview = agent_command_preview(&profile.command_argv);
+            let deleting = agent_profile_deleting_signal(profile.id.clone(), state);
+            assert!(!deleting.get());
+            state
+                .deleting_agent_profile_id
+                .set(Some(profile.id.clone()));
+            assert!(deleting.get());
+
+            let dirty = agent_profile_dirty_signal(
+                RwSignal::new(profile.name.clone()),
+                RwSignal::new(command_preview.clone()),
+                RwSignal::new(profile.mode.clone()),
+                profile.clone(),
+            );
+            assert!(!dirty.get());
+            assert!(agent_profile_values_changed(
+                "Renamed",
+                &command_preview,
+                profile.mode.clone(),
+                &profile
+            ));
+            assert!(agent_profile_values_changed(
+                &profile.name,
+                "agent acp",
+                profile.mode.clone(),
+                &profile
+            ));
+            assert!(agent_profile_values_changed(
+                &profile.name,
+                &command_preview,
+                AgentProfileMode::Chroot,
+                &profile
+            ));
+        });
+    }
+
+    #[test]
+    fn agent_profile_action_icons_follow_busy_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            assert_eq!(agent_profile_save_icon(false), AppIcon::Save);
+            assert_eq!(agent_profile_save_icon(true), AppIcon::Busy);
+            assert_eq!(agent_profile_delete_icon(false), AppIcon::Delete);
+            assert_eq!(agent_profile_delete_icon(true), AppIcon::Busy);
+
+            let saving = RwSignal::new(false);
+            let render_save = agent_profile_save_icon_view(saving);
+            let _ = render_save();
+            saving.set(true);
+            let _ = render_save();
+
+            let deleting_state = RwSignal::new(false);
+            let deleting = Signal::derive(move || deleting_state.get());
+            let render_delete = agent_profile_delete_icon_view(deleting);
+            let _ = render_delete();
+            deleting_state.set(true);
+            let _ = render_delete();
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_create_profile_handler_updates_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            state.agent_profile_name.set("Copilot ACP".to_string());
+            state
+                .agent_profile_command
+                .set("copilot acp --port ${ACP_PORT}".to_string());
+            state.agent_profile_mode.set(AgentProfileMode::Chroot);
+            create_agent_profile_submit_handler(state)(null_submit_event());
+            assert!(state.agent_profile_name.get().is_empty());
+            assert!(state.agent_profile_command.get().is_empty());
+            assert_eq!(state.agent_profile_mode.get(), AgentProfileMode::Host);
+            assert_eq!(state.notice.get().as_deref(), Some("ACP profile saved."));
+
+            state.agent_profile_saving.set(true);
+            state.notice.set(None);
+            create_agent_profile_submit_handler(state)(null_submit_event());
+            assert!(state.agent_profile_saving.get());
+            assert!(state.notice.get().is_none());
+            state.agent_profile_saving.set(false);
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_save_profile_handler_updates_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let profile = sample_agent_profile(AgentProfileMode::Host);
+            state.agent_profiles.set(vec![profile.clone()]);
+            let name = RwSignal::new("OpenCode ACP updated".to_string());
+            let command = RwSignal::new(agent_command_preview(&profile.command_argv));
+            let mode = RwSignal::new(AgentProfileMode::Host);
+            let saving = RwSignal::new(false);
+            let save_profile =
+                save_agent_profile_handler(&profile.id, state, name, command, mode, saving);
+            save_profile.run(());
+            assert!(!saving.get());
+            assert_eq!(state.notice.get().as_deref(), Some("ACP profile updated."));
+
+            saving.set(true);
+            state.notice.set(None);
+            save_profile.run(());
+            assert!(saving.get());
+            assert!(state.notice.get().is_none());
+        });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn host_delete_profile_handler_updates_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = AccountsPageState::new();
+            let profile = sample_agent_profile(AgentProfileMode::Host);
+            state.agent_profiles.set(vec![profile.clone()]);
+            state.deleting_agent_profile_id.set(None);
+            let delete_profile = delete_agent_profile_handler(&profile.id, state);
+            delete_profile.run(null_mouse_event());
+            assert!(state.agent_profiles.get().is_empty());
+            assert_eq!(state.notice.get().as_deref(), Some("ACP profile deleted."));
+
+            state
+                .deleting_agent_profile_id
+                .set(Some("other-profile".to_string()));
+            delete_profile.run(null_mouse_event());
+            assert_eq!(
+                state.deleting_agent_profile_id.get().as_deref(),
+                Some("other-profile")
+            );
+        });
+    }
+
+    #[test]
     fn profile_mode_helpers_match_api_values() {
         assert_eq!(profile_mode_value(AgentProfileMode::Host), "host");
         assert_eq!(profile_mode_value(AgentProfileMode::Chroot), "chroot");
@@ -467,5 +737,15 @@ mod tests {
             ]),
             r#"agent 'can'\''t' 'dir\name' ''"#
         );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn null_submit_event() -> web_sys::SubmitEvent {
+        JsValue::NULL.unchecked_into()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn null_mouse_event() -> web_sys::MouseEvent {
+        JsValue::NULL.unchecked_into()
     }
 }

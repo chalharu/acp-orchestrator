@@ -1,6 +1,6 @@
+mod agent_profiles;
 mod auth_controls;
 mod create_account;
-mod agent_profiles;
 mod registry;
 mod route;
 mod shared;

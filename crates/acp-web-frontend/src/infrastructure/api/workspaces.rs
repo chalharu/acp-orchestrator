@@ -677,7 +677,10 @@ mod tests {
         let delete_error =
             poll_ready(delete_workspace("w_1")).expect_err("host delete should fail");
         assert!(delete_error.contains("/api/v1/workspaces/w_1"));
+    }
 
+    #[test]
+    fn host_agent_profile_api_functions_fail_with_descriptive_errors() {
         let profiles_error = poll_ready(list_agent_profiles()).expect_err("host profiles fail");
         assert!(profiles_error.contains(AGENT_PROFILES_URL));
 
@@ -704,7 +707,10 @@ mod tests {
             poll_ready(delete_agent_profile("profile_1")).expect_err("host profile delete");
         assert!(delete_profile_error.contains("/api/v1/agent-profiles/profile_1"));
         assert!(delete_profile_error.contains("DELETE"));
+    }
 
+    #[test]
+    fn host_workspace_session_api_functions_fail_with_descriptive_errors() {
         let create_session_error = poll_ready(create_workspace_session("w_1", None, None))
             .expect_err("host workspace session create should fail");
         assert!(
@@ -826,7 +832,7 @@ mod tests {
                 "claude acp".to_string(),
                 AgentProfileMode::Host
             )
-                .expect_err("blank profile names should fail"),
+            .expect_err("blank profile names should fail"),
             "Profile name is required"
         );
     }

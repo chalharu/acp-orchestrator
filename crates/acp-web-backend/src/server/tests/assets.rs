@@ -90,6 +90,19 @@ async fn app_shell_csp_permits_wasm_execution() {
 }
 
 #[tokio::test]
+async fn settings_entrypoint_serves_the_app_shell() {
+    let response = app_settings_entrypoint(HeaderMap::new()).await;
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("settings app shell should include a content type")
+        .to_str()
+        .expect("content type should be valid");
+
+    assert!(content_type.starts_with("text/html"), "got: {content_type}");
+}
+
+#[tokio::test]
 async fn workspace_session_deep_link_serves_the_app_shell() {
     let response = test_router()
         .oneshot(

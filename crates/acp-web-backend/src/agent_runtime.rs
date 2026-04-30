@@ -2077,9 +2077,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn process_is_zombie(pid: u32) -> bool {
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return false;
-        };
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => process_stat_is_zombie(&stat),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_stat_is_zombie(stat: &str) -> bool {
         stat.rsplit_once(") ")
             .and_then(|(_, rest)| rest.chars().next())
             == Some('Z')
@@ -3026,13 +3031,42 @@ mod tests {
             .expect("subprocess pid should parse");
 
         manager.forget_session(session_id);
-        let inactive = wait_for_process_inactive(child_pid);
-        if !inactive {
-            kill_process(child_pid);
-        }
+        let inactive = process_inactive_or_kill(child_pid);
         let _ = std::fs::remove_dir_all(state_dir);
 
         assert!(inactive, "host launch cleanup should kill subprocesses");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_host_cleans_up_when_endpoint_never_becomes_ready() {
+        let state_dir = temp_state_dir("acp-agent-launch-host-not-ready");
+        let session_id = "s_test";
+        let checkout = checkout_in_state(&state_dir, session_id);
+        let pid_file = checkout.working_dir.join("agent.pid");
+        let manager =
+            FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should build");
+        let config = host_never_ready_config();
+
+        let error = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id,
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect_err("host launch should fail when ACP endpoint never opens");
+
+        assert!(matches!(error, AgentRuntimeError::LaunchTimedOut(_)));
+        let child_pid = std::fs::read_to_string(&pid_file)
+            .expect("host agent should record its pid")
+            .trim()
+            .parse::<u32>()
+            .expect("agent pid should parse");
+        let inactive = process_inactive_or_kill(child_pid);
+        let _ = std::fs::remove_dir_all(state_dir);
+
+        assert!(inactive, "failed host launch should kill the agent process");
     }
 
     #[cfg(target_os = "linux")]
@@ -3169,6 +3203,23 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn host_never_ready_config() -> AgentLaunchConfig {
+        AgentLaunchConfig::host(
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo $$ > agent.pid; sleep 60".to_string(),
+                "${ACP_PORT}".to_string(),
+            ],
+            Vec::new(),
+            Duration::from_millis(250),
+            0,
+            0,
+        )
+        .expect("host non-ready config should validate")
+    }
+
+    #[cfg(target_os = "linux")]
     fn python_acp_server_script() -> String {
         "import os,socket,time;\
          s=socket.socket();\
@@ -3190,6 +3241,35 @@ mod tests {
          s.listen(1);\
          time.sleep(60)"
             .to_string()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_process_status_helpers_cover_running_and_stat_parsing() {
+        assert!(process_stat_is_zombie("123 (agent) Z 1 2 3"));
+        assert!(!process_stat_is_zombie("123 (agent) S 1 2 3"));
+        assert!(!process_stat_is_zombie("malformed stat"));
+        assert!(!process_is_zombie(u32::MAX));
+        assert!(!wait_for_process_inactive(std::process::id()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_cleanup_helper_kills_still_running_processes() {
+        let mut child = spawn_sleep_child();
+        let pid = child.child.id();
+
+        assert!(!process_inactive_or_kill(pid));
+        let _ = child.child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_inactive_or_kill(pid: u32) -> bool {
+        let inactive = wait_for_process_inactive(pid);
+        if !inactive {
+            kill_process(pid);
+        }
+        inactive
     }
 
     #[cfg(target_os = "linux")]

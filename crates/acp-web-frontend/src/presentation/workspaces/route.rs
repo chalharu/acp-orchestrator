@@ -222,7 +222,6 @@ mod tests {
         });
     }
 
-
     fn sample_account(is_admin: bool) -> LocalAccount {
         LocalAccount {
             user_id: "u_test".to_string(),

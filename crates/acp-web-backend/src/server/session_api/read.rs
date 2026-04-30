@@ -372,6 +372,23 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FailingMetadataReplyProvider;
+
+    impl ReplyProvider for FailingMetadataReplyProvider {
+        fn request_reply<'a>(&'a self, _turn: crate::sessions::TurnHandle) -> ReplyFuture<'a> {
+            Box::pin(async { Ok(ReplyResult::NoOutput) })
+        }
+
+        fn bind_session_launch_metadata<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _metadata: crate::agent_runtime::AgentLaunchMetadata,
+        ) -> crate::mock_client::BindLaunchMetadataFuture<'a> {
+            Box::pin(async { Err("metadata bind failed".to_string()) })
+        }
+    }
+
     fn sample_session_snapshot(session_id: &str) -> SessionSnapshot {
         SessionSnapshot {
             id: session_id.to_string(),
@@ -476,6 +493,100 @@ mod tests {
             .await
             .expect_err("runtime-unavailable restored sessions should reject writes");
         assert_eq!(error, SessionStoreError::RuntimeUnavailable);
+    }
+
+    #[tokio::test]
+    async fn restored_agent_config_errors_mark_runtime_unavailable() {
+        let store = Arc::new(SessionStore::new(4));
+        let state = AppState::with_dependencies(store.clone(), Arc::new(NoopReplyProvider));
+        let restored = sample_session_snapshot("s_restore");
+        let mut metadata = sample_session_metadata(
+            &restored.id,
+            Some("session-checkouts/s_restore".to_string()),
+        );
+        metadata.agent_profile_id = Some("missing-profile".to_string());
+        store
+            .restore_session("alice", restored.clone(), chrono::Utc::now())
+            .await
+            .expect("restored session should enter live store");
+
+        let config = restored_agent_config(&state, Some(&metadata), "alice", &restored)
+            .await
+            .expect("profile errors should not block transcript reads");
+
+        assert!(config.is_none());
+        assert_eq!(
+            store
+                .submit_prompt("alice", &restored.id, "hello".to_string())
+                .await
+                .expect_err("runtime-unavailable sessions reject writes"),
+            SessionStoreError::RuntimeUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_launch_metadata_bind_failures_roll_back_live_sessions() {
+        let store = Arc::new(SessionStore::new(4));
+        let provider = Arc::new(FailingMetadataReplyProvider);
+        let reply = provider
+            .request_reply(sample_turn_handle().await)
+            .await
+            .expect("failing metadata providers should still answer prompts");
+        assert_eq!(reply, ReplyResult::NoOutput);
+        let state = AppState::with_dependencies(store.clone(), provider);
+        let restored = sample_session_snapshot("s_restore");
+        store
+            .restore_session("alice", restored.clone(), chrono::Utc::now())
+            .await
+            .expect("restored session should enter live store");
+
+        let error = bind_restored_launch_metadata(
+            &state,
+            "alice",
+            &restored,
+            crate::agent_runtime::AgentLaunchMetadata::default(),
+        )
+        .await
+        .expect_err("metadata bind failure should surface");
+
+        assert!(matches!(error, AppError::Internal(message) if message == "metadata bind failed"));
+        assert!(store.session_snapshot("alice", &restored.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn restored_runtime_launch_returns_none_when_profile_config_is_unavailable() {
+        let store = Arc::new(SessionStore::new(4));
+        let state = AppState::with_dependencies(store.clone(), Arc::new(NoopReplyProvider));
+        let restored = sample_session_snapshot("s_restore");
+        let mut metadata = sample_session_metadata(
+            &restored.id,
+            Some("session-checkouts/s_restore".to_string()),
+        );
+        metadata.agent_profile_id = Some("missing-profile".to_string());
+        store
+            .restore_session("alice", restored.clone(), chrono::Utc::now())
+            .await
+            .expect("restored session should enter live store");
+        let checkout = PreparedWorkspaceCheckout {
+            checkout_relpath: "session-checkouts/s_restore".to_string(),
+            checkout_ref: None,
+            checkout_commit_sha: None,
+            working_dir: std::env::current_dir().expect("current dir should be readable"),
+        };
+
+        let metadata =
+            launch_restored_agent_runtime(&state, "alice", &restored, Some(&metadata), &checkout)
+                .await
+                .expect("profile lookup errors should keep transcript reads available");
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            store
+                .submit_prompt("alice", &restored.id, "hello".to_string())
+                .await
+                .expect_err("runtime-unavailable sessions reject writes"),
+            SessionStoreError::RuntimeUnavailable
+        );
     }
 
     #[test]

@@ -94,12 +94,22 @@ impl AgentProfileStore {
         &self,
         request: UpsertAgentProfileRequest,
     ) -> Result<AgentProfile, AgentProfileStoreError> {
+        self.create_profile_with_id_generator(request, || {
+            format!("profile-{}", uuid::Uuid::new_v4().simple())
+        })
+    }
+
+    fn create_profile_with_id_generator(
+        &self,
+        request: UpsertAgentProfileRequest,
+        mut next_profile_id: impl FnMut() -> String,
+    ) -> Result<AgentProfile, AgentProfileStoreError> {
         let mut profile = normalize_profile("profile-pending", request)?;
         profile_to_config(&profile)?;
         let mut profiles = self.lock_profiles()?;
         ensure_unique_profile_name(&profiles, None, &profile.name)?;
         loop {
-            let profile_id = format!("profile-{}", uuid::Uuid::new_v4().simple());
+            let profile_id = next_profile_id();
             if profiles.contains_key(&profile_id) {
                 continue;
             }
@@ -143,18 +153,28 @@ fn write_profiles(
     path: &Path,
     profiles: &BTreeMap<String, AgentProfile>,
 ) -> Result<(), AgentProfileStoreError> {
+    write_profiles_with_serializer(path, profiles, serde_json::to_vec_pretty)
+}
+
+fn write_profiles_with_serializer(
+    path: &Path,
+    profiles: &BTreeMap<String, AgentProfile>,
+    serialize: impl FnOnce(&AgentProfileFile) -> Result<Vec<u8>, serde_json::Error>,
+) -> Result<(), AgentProfileStoreError> {
     let file = AgentProfileFile {
         profiles: profiles.values().cloned().collect(),
     };
-    let bytes = serde_json::to_vec_pretty(&file).map_err(|error| {
-        AgentProfileStoreError::Json(format!("serializing agent profiles failed: {error}"))
-    })?;
+    let bytes = serialize(&file).map_err(agent_profile_file_serialization_error)?;
     let temp_path = path.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4().simple()));
     write_profile_bytes(&temp_path, &bytes)?;
     fs::rename(&temp_path, path).map_err(|error| {
         let _ = fs::remove_file(&temp_path);
         AgentProfileStoreError::Io(format!("replacing agent profiles failed: {error}"))
     })
+}
+
+fn agent_profile_file_serialization_error(error: serde_json::Error) -> AgentProfileStoreError {
+    AgentProfileStoreError::Json(format!("serializing agent profiles failed: {error}"))
 }
 
 fn write_profile_bytes(path: &Path, bytes: &[u8]) -> Result<(), AgentProfileStoreError> {
@@ -164,9 +184,11 @@ fn write_profile_bytes(path: &Path, bytes: &[u8]) -> Result<(), AgentProfileStor
     file.write_all(bytes).map_err(|error| {
         AgentProfileStoreError::Io(format!("writing temporary agent profiles failed: {error}"))
     })?;
-    file.sync_all().map_err(|error| {
-        AgentProfileStoreError::Io(format!("syncing temporary agent profiles failed: {error}"))
-    })
+    file.sync_all().map_err(sync_profile_error)
+}
+
+fn sync_profile_error(error: std::io::Error) -> AgentProfileStoreError {
+    AgentProfileStoreError::Io(format!("syncing temporary agent profiles failed: {error}"))
 }
 
 fn normalize_profile(
@@ -458,6 +480,43 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn profile_store_reports_profile_write_failures() {
+        let error = write_profile_bytes(Path::new("/dev/full"), b"profile")
+            .expect_err("/dev/full should reject writes");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message.contains("writing temporary agent profiles failed"))
+        );
+    }
+
+    #[test]
+    fn profile_store_formats_profile_sync_failures() {
+        let error = sync_profile_error(std::io::Error::other("sync failed"));
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message == "syncing temporary agent profiles failed: sync failed")
+        );
+    }
+
+    #[test]
+    fn profile_store_reports_profile_serialization_failures() {
+        let path = std::env::temp_dir().join(format!(
+            "acp-profile-serialize-error-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let profiles = BTreeMap::new();
+        let error = write_profiles_with_serializer(&path, &profiles, |_| {
+            Err(serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON"))
+        })
+        .expect_err("serialization failures should propagate");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Json(message) if message.contains("serializing agent profiles failed"))
+        );
+    }
+
     #[test]
     fn profile_store_reports_replace_failures() {
         let state_dir = std::env::temp_dir().join(format!(
@@ -565,6 +624,27 @@ mod tests {
         assert!(profile.id.starts_with("profile-"));
         assert_eq!(profile.name, "Claude ACP");
         assert_eq!(profile.command_argv, vec!["claude", "acp"]);
+    }
+
+    #[test]
+    fn profile_store_retries_generated_profile_id_collisions() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-create-collision-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        store
+            .upsert_profile("profile-collision", request(vec!["opencode".to_string()]))
+            .expect("collision fixture should save");
+        let mut ids = ["profile-collision", "profile-created"].into_iter();
+        let mut request = request(vec!["claude".to_string(), "acp".to_string()]);
+        request.name = "Claude ACP".to_string();
+
+        let profile = store
+            .create_profile_with_id_generator(request, || ids.next().expect("next id").to_string())
+            .expect("profile should save after collision");
+
+        assert_eq!(profile.id, "profile-created");
     }
 
     #[test]

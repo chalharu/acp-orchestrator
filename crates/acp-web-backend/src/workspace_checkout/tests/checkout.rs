@@ -1263,6 +1263,21 @@ async fn local_workspace_fallback_prepares_a_checkout_from_the_current_repo() {
     assert_eq!(checkout.checkout_relpath, "session-checkouts/s_test");
     assert!(checkout.checkout_commit_sha.is_some());
     assert!(checkout.working_dir.join("Cargo.toml").exists());
+
+    let chroot_checkout = manager
+        .prepare_checkout_with_layout(
+            &workspace,
+            "s_chroot",
+            None,
+            WorkspaceCheckoutLayout::ChrootRuntime,
+        )
+        .await
+        .expect("chroot-layout local checkout should prepare");
+    assert_eq!(
+        chroot_checkout.checkout_relpath,
+        "agent-runtimes/s_chroot/root/workspace"
+    );
+    assert!(chroot_checkout.working_dir.join("Cargo.toml").exists());
 }
 
 fn maybe_run_detached_head_checkout_child() -> bool {

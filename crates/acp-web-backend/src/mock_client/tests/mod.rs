@@ -64,4 +64,13 @@ async fn mock_client_uses_session_acp_address_override() {
 
     assert_eq!(client.session_acp_address("s_test").await, "127.0.0.1:2");
     assert_eq!(client.session_acp_address("s_other").await, "127.0.0.1:1");
+
+    client
+        .bind_session_launch_metadata(
+            "s_empty",
+            crate::agent_runtime::AgentLaunchMetadata::default(),
+        )
+        .await
+        .expect("empty metadata should bind without changing addresses");
+    assert_eq!(client.session_acp_address("s_empty").await, "127.0.0.1:1");
 }

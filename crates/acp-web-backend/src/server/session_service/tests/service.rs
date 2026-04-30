@@ -1,15 +1,15 @@
 use super::super::super::{AppError, AppState, OwnerContext};
 use super::super::{
-    cleanup_checkout_path_best_effort, load_checkout_cleanup_path_best_effort,
-    map_agent_profile_error, map_checkout_error, persist_failed_session_lifecycle,
-    persist_provisioning_session_lifecycle,
+    SessionStartupContext, bind_session_launch_metadata, cleanup_checkout_path_best_effort,
+    load_checkout_cleanup_path_best_effort, map_agent_profile_error, map_checkout_error,
+    persist_failed_session_lifecycle, persist_provisioning_session_lifecycle,
 };
 use crate::{
     agent_profiles::AgentProfileStoreError,
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_accounts::LocalAccount,
     contract_sessions::SessionStatus,
-    mock_client::{ReplyFuture, ReplyProvider, ReplyResult},
+    mock_client::{BindLaunchMetadataFuture, ReplyFuture, ReplyProvider, ReplyResult},
     sessions::{SessionStore, SessionStoreError},
     workspace_checkout::{PreparedWorkspaceCheckout, WorkspaceCheckoutManager},
     workspace_records::{
@@ -34,6 +34,23 @@ struct NoopReplyProvider;
 impl ReplyProvider for NoopReplyProvider {
     fn request_reply<'a>(&'a self, _turn: crate::sessions::TurnHandle) -> ReplyFuture<'a> {
         Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+}
+
+#[derive(Debug)]
+struct MetadataFailingReplyProvider;
+
+impl ReplyProvider for MetadataFailingReplyProvider {
+    fn request_reply<'a>(&'a self, _turn: crate::sessions::TurnHandle) -> ReplyFuture<'a> {
+        Box::pin(async { Ok(ReplyResult::NoOutput) })
+    }
+
+    fn bind_session_launch_metadata<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _metadata: crate::agent_runtime::AgentLaunchMetadata,
+    ) -> BindLaunchMetadataFuture<'a> {
+        Box::pin(async { Err("metadata bind failed".to_string()) })
     }
 }
 
@@ -467,6 +484,73 @@ async fn provisioning_persistence_failures_roll_back_live_sessions() {
             .expect_err("failed provisioning should discard the session"),
         SessionStoreError::NotFound
     );
+}
+
+#[tokio::test]
+async fn launch_metadata_binding_failures_clean_up_and_roll_back_live_sessions() {
+    let store = Arc::new(crate::sessions::SessionStore::new(4));
+    let live_owner_id = "bearer:alice";
+    let session = store
+        .create_session(live_owner_id, "w_test")
+        .await
+        .expect("session creation should succeed");
+    let checkout_root = std::env::current_dir()
+        .expect("tests should start in a readable directory")
+        .join(".tmp")
+        .join(format!(
+            "acp-session-checkout-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    let working_dir = checkout_root.join("checkout");
+    std::fs::create_dir_all(&working_dir).expect("checkout should be creatable");
+    let checkout = PreparedWorkspaceCheckout {
+        checkout_relpath: "session-checkouts/s_test".to_string(),
+        checkout_ref: None,
+        checkout_commit_sha: None,
+        working_dir: working_dir.clone(),
+    };
+    let state = AppState::with_workspace_repository(
+        store.clone(),
+        Arc::new(StubWorkspaceRepository {
+            metadata: None,
+            load_error: None,
+            save_error: None,
+        }),
+        Arc::new(MetadataFailingReplyProvider),
+    );
+    let user = sample_user();
+    let workspace = sample_workspace();
+    let context = SessionStartupContext {
+        state: &state,
+        live_owner_id,
+        user: &user,
+        workspace: &workspace,
+        session: &session,
+    };
+
+    let error = bind_session_launch_metadata(
+        &context,
+        &checkout,
+        crate::agent_runtime::AgentLaunchMetadata {
+            acp_address: Some("127.0.0.1:12345".to_string()),
+        },
+    )
+    .await
+    .expect_err("metadata bind failures should abort startup");
+
+    assert!(matches!(error, AppError::Internal(message) if message == "metadata bind failed"));
+    assert!(
+        !working_dir.exists(),
+        "checkout directory should be removed after bind failure"
+    );
+    assert_eq!(
+        store
+            .session_snapshot(live_owner_id, &session.id)
+            .await
+            .expect_err("failed metadata binding should discard the session"),
+        SessionStoreError::NotFound
+    );
+    let _ = std::fs::remove_dir(&checkout_root);
 }
 
 #[tokio::test]

@@ -27,13 +27,15 @@ mod backend_client;
 #[cfg(test)]
 mod tests;
 
-use crate::sessions::TurnHandle;
+use crate::{agent_runtime::AgentLaunchMetadata, sessions::TurnHandle};
 use backend_client::BackendAcpClient;
 
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
 pub type ReplyFuture<'a> = Pin<Box<dyn Future<Output = Result<ReplyResult>> + Send + 'a>>;
 pub type PrimeSessionFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
 pub type BindSessionFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>>;
+pub type BindLaunchMetadataFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>>;
 type DynRd = Box<dyn AsyncRead + Send + Unpin>;
 type DynWr = Box<dyn AsyncWrite + Send + Unpin>;
@@ -53,6 +55,7 @@ type ConnectedOperation<T> = Box<
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
+type SessionAcpAddresses = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionLock = Arc<tokio::sync::Mutex<()>>;
 type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
 
@@ -82,6 +85,14 @@ pub trait ReplyProvider: Send + Sync + std::fmt::Debug {
         Box::pin(async { Ok(()) })
     }
 
+    fn bind_session_launch_metadata<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _metadata: AgentLaunchMetadata,
+    ) -> BindLaunchMetadataFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn prime_session<'a>(&'a self, _session_id: &'a str) -> PrimeSessionFuture<'a> {
         Box::pin(async { Ok(None) })
     }
@@ -95,6 +106,7 @@ pub struct MockClient {
     request_timeout: Duration,
     default_working_dir: PathBuf,
     session_working_dirs: SessionWorkingDirs,
+    session_acp_addresses: SessionAcpAddresses,
     upstream_sessions: UpstreamSessions,
     session_locks: SessionLocks,
 }
@@ -156,6 +168,7 @@ impl MockClient {
             request_timeout,
             default_working_dir: working_dir,
             session_working_dirs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_acp_addresses: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             upstream_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -212,6 +225,10 @@ impl MockClient {
             .lock()
             .await
             .remove(backend_session_id);
+        self.session_acp_addresses
+            .lock()
+            .await
+            .remove(backend_session_id);
         self.session_locks.lock().await.remove(backend_session_id);
     }
 
@@ -232,7 +249,7 @@ impl MockClient {
         T: Send + 'static,
         F: FnOnce(String, PathBuf, Duration, UpstreamSessions) -> Result<T> + Send + 'static,
     {
-        let mock_address = self.mock_address.clone();
+        let mock_address = self.session_acp_address(&backend_session_id).await;
         let working_dir = self.session_working_dir(&backend_session_id).await;
         let request_timeout = self.request_timeout;
         let upstream_sessions = self.upstream_sessions.clone();
@@ -268,6 +285,15 @@ impl MockClient {
             .cloned()
             .unwrap_or_else(|| self.default_working_dir.clone())
     }
+
+    async fn session_acp_address(&self, backend_session_id: &str) -> String {
+        self.session_acp_addresses
+            .lock()
+            .await
+            .get(backend_session_id)
+            .cloned()
+            .unwrap_or_else(|| self.mock_address.clone())
+    }
 }
 
 impl ReplyProvider for MockClient {
@@ -291,6 +317,22 @@ impl ReplyProvider for MockClient {
 
     fn prime_session<'a>(&'a self, session_id: &'a str) -> PrimeSessionFuture<'a> {
         Box::pin(MockClient::prime_session_hint(self, session_id))
+    }
+
+    fn bind_session_launch_metadata<'a>(
+        &'a self,
+        session_id: &'a str,
+        metadata: AgentLaunchMetadata,
+    ) -> BindLaunchMetadataFuture<'a> {
+        Box::pin(async move {
+            if let Some(address) = metadata.acp_address {
+                self.session_acp_addresses
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), address);
+            }
+            Ok(())
+        })
     }
 
     fn forget_session(&self, session_id: &str) {

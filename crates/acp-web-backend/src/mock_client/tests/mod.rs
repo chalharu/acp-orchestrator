@@ -47,3 +47,21 @@ async fn test_pending_prompt(owner: &str, prompt: &str) -> PendingPrompt {
         .await
         .expect("prompt submission should succeed")
 }
+
+#[tokio::test]
+async fn mock_client_uses_session_acp_address_override() {
+    let client = MockClient::with_timeout("127.0.0.1:1".to_string(), Duration::from_secs(1))
+        .expect("client should build");
+    client
+        .bind_session_launch_metadata(
+            "s_test",
+            crate::agent_runtime::AgentLaunchMetadata {
+                acp_address: Some("127.0.0.1:2".to_string()),
+            },
+        )
+        .await
+        .expect("metadata bind should succeed");
+
+    assert_eq!(client.session_acp_address("s_test").await, "127.0.0.1:2");
+    assert_eq!(client.session_acp_address("s_other").await, "127.0.0.1:1");
+}

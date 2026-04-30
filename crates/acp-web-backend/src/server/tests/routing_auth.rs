@@ -1,5 +1,6 @@
 use super::*;
 use crate::contract_permissions::{PermissionDecision, ResolvePermissionRequest};
+use crate::contract_sessions::{AgentProfileMode, UpsertAgentProfileRequest};
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -72,6 +73,53 @@ async fn internal_errors_are_sanitized_in_http_responses() {
         serde_json::from_slice(&body).expect("error payload should decode");
 
     assert_eq!(payload.error, "internal server error");
+}
+
+#[tokio::test]
+async fn agent_profile_api_requires_admin_for_writes_but_allows_signed_in_reads() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    create_member_account(&state, &admin_browser, "member", "password123").await;
+
+    let member_browser = BrowserAuthContext::spawn().await;
+    sign_in_browser_account(&state, &member_browser, "member", "password123").await;
+    let request = UpsertAgentProfileRequest {
+        name: "OpenCode ACP".to_string(),
+        mode: AgentProfileMode::Chroot,
+        command_argv: vec!["opencode".to_string(), "acp".to_string()],
+        env_allowlist: Vec::new(),
+        timeout_seconds: 30,
+        run_uid: 65_534,
+        run_gid: 65_534,
+    };
+
+    let forbidden = upsert_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(member_browser.principal.clone()),
+        Json(request.clone()),
+    )
+    .await
+    .expect_err("members cannot update profiles");
+    assert!(matches!(forbidden, AppError::Forbidden(_)));
+
+    let _saved = upsert_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(admin_browser.principal.clone()),
+        Json(request),
+    )
+    .await
+    .expect("admin can update profile");
+
+    let profiles = list_agent_profiles(State(state), Extension(member_browser.principal))
+        .await
+        .expect("member can list profiles")
+        .0
+        .profiles;
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].id, "opencode");
 }
 
 #[test]

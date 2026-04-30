@@ -17,12 +17,13 @@ use acp_web::contract_workspaces::{
     UpdateWorkspaceResponse, WorkspaceBranch, WorkspaceListResponse, WorkspaceResponse,
 };
 use acp_web::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
-use acp_web::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
 use acp_web::{
-    DynWorkspaceCheckoutManager, MockClient, NoopAgentRuntimeManager, PreparedWorkspaceCheckout,
-    WorkspaceCheckoutError, WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
+    AgentProfileStore, DynWorkspaceCheckoutManager, MockClient, NoopAgentRuntimeManager,
+    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutLayout,
+    WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
     workspace_store::SqliteWorkspaceRepository,
 };
+use acp_web::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
 pub(super) use anyhow::{Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -834,6 +835,12 @@ fn build_backend_state(backend_config: ServerConfig) -> Result<AppState> {
         reply_provider,
         checkout_manager,
         Arc::new(NoopAgentRuntimeManager),
+        Arc::new(
+            AgentProfileStore::new(&backend_config.state_dir).map_err(|error| {
+                anyhow::anyhow!("building agent profile store: {}", error.message())
+            })?,
+        ),
+        WorkspaceCheckoutLayout::Standard,
         backend_config.startup_hints,
         backend_config.frontend_dist,
     ))

@@ -561,7 +561,7 @@ fn session_sidebar_new_chat_submit_handler(
         state.creating.set(true);
         sidebar_error.set(None);
         leptos::task::spawn_local(async move {
-            match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
+            match api::create_workspace_session(&workspace_id, Some(selected_branch), None).await {
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
                     if let Err(message) = navigate_to(&app_session_path_for_workspace(

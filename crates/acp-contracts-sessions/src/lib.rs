@@ -57,6 +57,69 @@ pub type CreateSessionResponse = SessionResponse;
 pub struct CreateSessionRequest {
     #[serde(default)]
     pub checkout_ref: Option<String>,
+    #[serde(default)]
+    pub agent_profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProfileMode {
+    Chroot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    pub mode: AgentProfileMode,
+    pub command_argv: Vec<String>,
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    #[serde(default = "default_agent_profile_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_agent_profile_run_uid")]
+    pub run_uid: u32,
+    #[serde(default = "default_agent_profile_run_gid")]
+    pub run_gid: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfileListResponse {
+    pub profiles: Vec<AgentProfile>,
+    #[serde(default)]
+    pub can_manage: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfileResponse {
+    pub profile: AgentProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpsertAgentProfileRequest {
+    pub name: String,
+    pub mode: AgentProfileMode,
+    pub command_argv: Vec<String>,
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    #[serde(default = "default_agent_profile_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_agent_profile_run_uid")]
+    pub run_uid: u32,
+    #[serde(default = "default_agent_profile_run_gid")]
+    pub run_gid: u32,
+}
+
+pub const fn default_agent_profile_timeout_seconds() -> u64 {
+    30
+}
+
+pub const fn default_agent_profile_run_uid() -> u32 {
+    65_534
+}
+
+pub const fn default_agent_profile_run_gid() -> u32 {
+    65_534
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,7 +155,7 @@ pub struct CloseSessionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateSessionRequest, SessionListItem, SessionSnapshot};
+    use super::{AgentProfileMode, CreateSessionRequest, SessionListItem, SessionSnapshot};
 
     #[test]
     fn session_snapshots_deserialize_default_titles_empty_permissions_and_workspace() {
@@ -129,5 +192,27 @@ mod tests {
             .expect("create requests should deserialize");
 
         assert_eq!(request.checkout_ref, None);
+        assert_eq!(request.agent_profile_id, None);
+    }
+
+    #[test]
+    fn agent_profile_mode_uses_snake_case() {
+        let value = serde_json::to_value(AgentProfileMode::Chroot).expect("serialize mode");
+        assert_eq!(value, serde_json::json!("chroot"));
+    }
+
+    #[test]
+    fn upsert_agent_profile_request_defaults_runtime_fields() {
+        let request: super::UpsertAgentProfileRequest = serde_json::from_value(serde_json::json!({
+            "name": "OpenCode ACP",
+            "mode": "chroot",
+            "command_argv": ["opencode", "acp"]
+        }))
+        .expect("profile request should deserialize");
+
+        assert!(request.env_allowlist.is_empty());
+        assert_eq!(request.timeout_seconds, 30);
+        assert_eq!(request.run_uid, 65_534);
+        assert_eq!(request.run_gid, 65_534);
     }
 }

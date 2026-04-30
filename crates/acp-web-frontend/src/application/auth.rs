@@ -19,7 +19,7 @@ pub enum AccountsRouteAccess {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkspacesRouteAccess {
-    SignedIn,
+    SignedIn(LocalAccount),
     RegisterRequired,
     SignInRequired,
 }
@@ -62,7 +62,7 @@ pub fn accounts_route_access(status: &AuthStatusResponse) -> AccountsRouteAccess
 
 pub fn workspaces_route_access(status: &AuthStatusResponse) -> WorkspacesRouteAccess {
     match &status.account {
-        Some(_) => WorkspacesRouteAccess::SignedIn,
+        Some(account) => WorkspacesRouteAccess::SignedIn(account.clone()),
         None if status.bootstrap_required => WorkspacesRouteAccess::RegisterRequired,
         None => WorkspacesRouteAccess::SignInRequired,
     }
@@ -221,9 +221,9 @@ mod tests {
         assert_eq!(
             workspaces_route_access(&AuthStatusResponse {
                 bootstrap_required: false,
-                account: Some(member),
+                account: Some(member.clone()),
             }),
-            WorkspacesRouteAccess::SignedIn
+            WorkspacesRouteAccess::SignedIn(member)
         );
         assert_eq!(
             workspaces_route_access(&AuthStatusResponse {

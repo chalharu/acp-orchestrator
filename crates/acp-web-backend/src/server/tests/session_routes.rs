@@ -107,7 +107,8 @@ impl crate::agent_runtime::AgentRuntimeManager for TrackingAgentRuntimeManager {
     fn launch_session(
         &self,
         launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
-    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+    ) -> Result<crate::agent_runtime::AgentLaunchMetadata, crate::agent_runtime::AgentRuntimeError>
+    {
         self.launches
             .lock()
             .expect("runtime launch tracking should not poison")
@@ -117,7 +118,7 @@ impl crate::agent_runtime::AgentRuntimeManager for TrackingAgentRuntimeManager {
                 launch.checkout.checkout_relpath.clone(),
                 launch.checkout.working_dir.clone(),
             ));
-        Ok(())
+        Ok(crate::agent_runtime::AgentLaunchMetadata::default())
     }
 
     fn forget_session(&self, session_id: &str) {
@@ -135,7 +136,8 @@ impl crate::agent_runtime::AgentRuntimeManager for RestoreFailingAgentRuntimeMan
     fn launch_session(
         &self,
         _launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
-    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+    ) -> Result<crate::agent_runtime::AgentLaunchMetadata, crate::agent_runtime::AgentRuntimeError>
+    {
         Err(crate::agent_runtime::AgentRuntimeError::Io(
             "runtime relaunch failed".to_string(),
         ))
@@ -151,7 +153,8 @@ impl crate::agent_runtime::AgentRuntimeManager for RestoreAlreadyRunningAgentRun
     fn launch_session(
         &self,
         launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
-    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+    ) -> Result<crate::agent_runtime::AgentLaunchMetadata, crate::agent_runtime::AgentRuntimeError>
+    {
         Err(crate::agent_runtime::AgentRuntimeError::AlreadyRunning(
             launch.session_id.to_string(),
         ))
@@ -467,6 +470,8 @@ async fn create_session_seeds_startup_hints_when_enabled() {
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: true,
         frontend_dist: None,
     };
@@ -500,6 +505,8 @@ async fn create_session_skips_startup_hints_when_disabled() {
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -536,6 +543,8 @@ async fn create_session_keeps_sessions_without_primeable_startup_hints() {
         reply_provider: Arc::new(NoStartupHintProvider),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: true,
         frontend_dist: None,
     };
@@ -566,6 +575,8 @@ async fn create_session_rolls_back_when_startup_hints_fail() {
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: true,
         frontend_dist: None,
     };
@@ -614,6 +625,8 @@ async fn create_session_reports_rollback_failures() {
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: true,
         frontend_dist: None,
     };
@@ -692,6 +705,7 @@ async fn create_session_persists_checkout_metadata_and_binds_before_priming() {
         axum::body::Bytes::from(
             serde_json::to_vec(&crate::contract_sessions::CreateSessionRequest {
                 checkout_ref: Some("refs/heads/feature".to_string()),
+                agent_profile_id: None,
             })
             .expect("request should serialize"),
         ),
@@ -717,6 +731,65 @@ async fn create_session_persists_checkout_metadata_and_binds_before_priming() {
 }
 
 #[tokio::test]
+async fn create_session_with_agent_profile_uses_chroot_checkout_layout() {
+    let store = Arc::new(SessionStore::new(4));
+    let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
+    let state = AppState::with_workspace_repository(
+        store,
+        metadata_test_workspace_store(),
+        reply_provider.clone(),
+    );
+    state
+        .agent_profile_store
+        .upsert_profile(
+            "opencode",
+            crate::contract_sessions::UpsertAgentProfileRequest {
+                name: "OpenCode ACP".to_string(),
+                mode: crate::contract_sessions::AgentProfileMode::Chroot,
+                command_argv: vec!["opencode".to_string(), "acp".to_string()],
+                env_allowlist: Vec::new(),
+                timeout_seconds: 30,
+                run_uid: 65_534,
+                run_gid: 65_534,
+            },
+        )
+        .expect("profile should save");
+    let workspace =
+        create_owned_workspace_for_principal(&state, bearer_principal("alice"), "Workspace A")
+            .await;
+
+    let response = create_workspace_session(
+        State(state.clone()),
+        Path(workspace.workspace_id.clone()),
+        bearer_principal("alice"),
+        axum::body::Bytes::from(
+            serde_json::to_vec(&crate::contract_sessions::CreateSessionRequest {
+                checkout_ref: None,
+                agent_profile_id: Some("opencode".to_string()),
+            })
+            .expect("request should serialize"),
+        ),
+    )
+    .await
+    .expect("session creation should succeed");
+    let session_id = response.1.0.session.id;
+    let principal = bearer_principal("alice");
+    let user = durable_user_for_principal(&state, &principal).await;
+    let metadata = session_metadata_for_user(&state, &user.user_id, &session_id).await;
+
+    assert_eq!(
+        metadata.checkout_relpath,
+        Some(format!("agent-runtimes/{session_id}/root/workspace"))
+    );
+    assert_eq!(metadata.agent_profile_id.as_deref(), Some("opencode"));
+    assert_binding_calls(
+        &reply_provider,
+        &["bind", "prime"],
+        &[(session_id, checkout_path_from_metadata(&state, &metadata))],
+    );
+}
+
+#[tokio::test]
 async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
     let store = Arc::new(SessionStore::new(4));
     let reply_provider = Arc::new(BindingTrackingReplyProvider::new());
@@ -727,6 +800,8 @@ async fn get_session_rebinds_restored_sessions_to_the_persisted_checkout() {
         reply_provider: reply_provider.clone(),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: agent_runtime_manager.clone(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -795,6 +870,8 @@ async fn get_session_rolls_back_restored_sessions_with_invalid_checkout_paths() 
         }),
         checkout_manager: Arc::new(InvalidRestoredCheckoutManager),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -833,6 +910,8 @@ async fn get_session_keeps_transcript_readable_when_runtime_relaunch_fails() {
         reply_provider: reply_provider.clone(),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: Arc::new(RestoreFailingAgentRuntimeManager),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -865,6 +944,8 @@ async fn get_session_rebinds_when_restored_runtime_is_already_running() {
         reply_provider: reply_provider.clone(),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: Arc::new(RestoreAlreadyRunningAgentRuntimeManager),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -910,6 +991,8 @@ async fn get_session_restores_closed_sessions_without_runtime_relaunch() {
         reply_provider,
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: runtime_manager.clone(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1038,6 +1121,8 @@ async fn get_session_marks_runtime_unavailable_without_expected_checkout_path() 
         reply_provider: Arc::new(BindingTrackingReplyProvider::new()),
         checkout_manager: Arc::new(MissingExpectedCheckoutManager),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1080,6 +1165,8 @@ async fn get_session_rolls_back_restored_sessions_when_rebinding_fails() {
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1308,6 +1395,8 @@ async fn close_session_skips_cleanup_when_expected_checkout_path_is_unavailable(
         reply_provider: Arc::new(BindingTrackingReplyProvider::new()),
         checkout_manager: Arc::new(MissingExpectedCheckoutManager),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -1339,6 +1428,8 @@ async fn close_session_skips_cleanup_when_checkout_path_no_longer_resolves() {
         reply_provider: Arc::new(BindingTrackingReplyProvider::new()),
         checkout_manager: Arc::new(InvalidRestoredCheckoutManager),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };

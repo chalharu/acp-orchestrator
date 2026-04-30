@@ -59,7 +59,8 @@ impl crate::agent_runtime::AgentRuntimeManager for FailingAgentRuntimeManager {
     fn launch_session(
         &self,
         _launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
-    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
+    ) -> Result<crate::agent_runtime::AgentLaunchMetadata, crate::agent_runtime::AgentRuntimeError>
+    {
         Err(crate::agent_runtime::AgentRuntimeError::Io(
             "runtime launch exploded".to_string(),
         ))
@@ -82,8 +83,9 @@ impl crate::agent_runtime::AgentRuntimeManager for CheckoutObservingAgentRuntime
     fn launch_session(
         &self,
         _launch: &crate::agent_runtime::AgentSessionLaunch<'_>,
-    ) -> Result<(), crate::agent_runtime::AgentRuntimeError> {
-        Ok(())
+    ) -> Result<crate::agent_runtime::AgentLaunchMetadata, crate::agent_runtime::AgentRuntimeError>
+    {
+        Ok(crate::agent_runtime::AgentLaunchMetadata::default())
     }
 
     fn forget_session(&self, session_id: &str) {
@@ -518,6 +520,8 @@ async fn create_session_reports_metadata_rollback_failures() {
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -557,6 +561,8 @@ async fn create_session_rolls_back_when_metadata_persistence_fails() {
         agent_runtime_manager: Arc::new(CheckoutObservingAgentRuntimeManager {
             checkout_exists_on_forget: checkout_exists_on_forget.clone(),
         }),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -597,6 +603,8 @@ async fn create_session_marks_provisioning_rows_failed_when_cloning_persistence_
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -645,6 +653,8 @@ async fn create_session_marks_starting_rows_failed_when_starting_persistence_fai
         }),
         checkout_manager: test_checkout_manager(),
         agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -694,6 +704,8 @@ async fn create_session_marks_sessions_failed_when_agent_runtime_launch_fails() 
         agent_runtime_manager: Arc::new(FailingAgentRuntimeManager {
             forgotten_sessions: forgotten_runtime_sessions.clone(),
         }),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };
@@ -763,6 +775,8 @@ async fn create_session_marks_sessions_failed_when_checkout_binding_fails() {
         agent_runtime_manager: Arc::new(CheckoutObservingAgentRuntimeManager {
             checkout_exists_on_forget: checkout_exists_on_forget.clone(),
         }),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: None,
     };

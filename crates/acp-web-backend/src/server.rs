@@ -9,12 +9,13 @@ use axum::{
     handler::Handler,
     http::{HeaderMap, Request, StatusCode, request::Parts},
     response::{IntoResponse, Response},
-    routing::{MethodRouter, get_service, patch_service, post_service},
+    routing::{MethodRouter, get_service, patch_service, post_service, put_service},
 };
 use tower::util::BoxCloneSyncService;
 #[cfg(test)]
 use uuid::Uuid;
 
+use crate::agent_profiles::{AgentProfileStore, AgentProfileStoreError};
 #[cfg(test)]
 use crate::agent_runtime::NoopAgentRuntimeManager;
 use crate::agent_runtime::{AgentLaunchMode, DynAgentRuntimeManager, FsAgentRuntimeManager};
@@ -39,6 +40,7 @@ use crate::{
     contract_health::ErrorResponse,
     contract_messages::PromptRequest,
     contract_permissions::ResolvePermissionRequest,
+    contract_sessions::UpsertAgentProfileRequest,
     contract_workspaces::{CreateWorkspaceRequest, UpdateWorkspaceRequest},
     mock_client::{MockClient, MockClientError, ReplyProvider},
     sessions::{SessionStore, SessionStoreError},
@@ -49,6 +51,7 @@ use crate::{
 
 mod account_api;
 mod account_service;
+mod agent_profile_api;
 mod assets;
 mod connection;
 mod session_api;
@@ -60,6 +63,7 @@ use self::account_api::{
     auth_status, bootstrap_register, create_account, delete_account, list_accounts, sign_in,
     sign_out, update_account,
 };
+use self::agent_profile_api::{list_agent_profiles, upsert_agent_profile};
 use self::assets::{SlashCompletionsQuery, install_frontend_routes};
 pub use self::connection::serve_with_shutdown;
 #[cfg(test)]
@@ -115,6 +119,7 @@ pub enum AppStateBuildError {
     ReplyProvider(MockClientError),
     WorkspaceStore(WorkspaceStoreError),
     AgentRuntime(crate::agent_runtime::AgentRuntimeError),
+    AgentProfiles(AgentProfileStoreError),
 }
 
 impl AppStateBuildError {
@@ -123,6 +128,7 @@ impl AppStateBuildError {
             Self::ReplyProvider(source) => source.to_string(),
             Self::WorkspaceStore(source) => source.to_string(),
             Self::AgentRuntime(source) => source.to_string(),
+            Self::AgentProfiles(source) => source.message().to_string(),
         }
     }
 }
@@ -139,6 +145,7 @@ impl std::error::Error for AppStateBuildError {
             Self::ReplyProvider(source) => Some(source),
             Self::WorkspaceStore(source) => Some(source),
             Self::AgentRuntime(source) => Some(source),
+            Self::AgentProfiles(_) => None,
         }
     }
 }
@@ -161,6 +168,12 @@ impl From<crate::agent_runtime::AgentRuntimeError> for AppStateBuildError {
     }
 }
 
+impl From<AgentProfileStoreError> for AppStateBuildError {
+    fn from(source: AgentProfileStoreError) -> Self {
+        Self::AgentProfiles(source)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<SessionStore>,
@@ -168,6 +181,8 @@ pub struct AppState {
     reply_provider: Arc<dyn ReplyProvider>,
     checkout_manager: DynWorkspaceCheckoutManager,
     agent_runtime_manager: DynAgentRuntimeManager,
+    agent_profile_store: Arc<AgentProfileStore>,
+    default_agent_layout: WorkspaceCheckoutLayout,
     startup_hints: bool,
     /// Path to the Trunk dist directory.  `None` → WASM routes return 503.
     frontend_dist: Option<Arc<PathBuf>>,
@@ -203,9 +218,10 @@ impl AppState {
             ),
         };
         let agent_runtime_manager: DynAgentRuntimeManager = Arc::new(FsAgentRuntimeManager::new(
-            config.state_dir,
+            config.state_dir.clone(),
             config.agent_launch,
         )?);
+        let agent_profile_store = Arc::new(AgentProfileStore::new(&config.state_dir)?);
 
         Ok(Self::with_services(
             store,
@@ -213,6 +229,8 @@ impl AppState {
             reply_provider,
             checkout_manager,
             agent_runtime_manager,
+            agent_profile_store,
+            checkout_layout,
             config.startup_hints,
             config.frontend_dist,
         ))
@@ -224,6 +242,8 @@ impl AppState {
         reply_provider: Arc<dyn ReplyProvider>,
         checkout_manager: DynWorkspaceCheckoutManager,
         agent_runtime_manager: DynAgentRuntimeManager,
+        agent_profile_store: Arc<AgentProfileStore>,
+        default_agent_layout: WorkspaceCheckoutLayout,
         startup_hints: bool,
         frontend_dist: Option<PathBuf>,
     ) -> Self {
@@ -233,6 +253,8 @@ impl AppState {
             reply_provider,
             checkout_manager,
             agent_runtime_manager,
+            agent_profile_store,
+            default_agent_layout,
             startup_hints,
             frontend_dist: frontend_dist.map(Arc::new),
         }
@@ -278,6 +300,8 @@ impl AppState {
             reply_provider,
             checkout_manager,
             test_agent_runtime_manager(),
+            test_agent_profile_store(),
+            WorkspaceCheckoutLayout::Standard,
             false,
             None,
         )
@@ -396,13 +420,14 @@ mod route_handlers {
         AppError, AppState, BootstrapRegistrationRequest, CreateAccountRequest,
         CreateWorkspaceRequest, PromptRequest, ReadPrincipal, RenameSessionBody,
         ResolvePermissionRequest, SignInRequest, SlashCompletionsQuery, UpdateAccountRequest,
-        UpdateWorkspaceRequest, WritePrincipal, auth_status, bootstrap_register,
-        bootstrap_workspace, cancel_turn, close_session, create_account, create_workspace,
-        create_workspace_session, delete_account, delete_session, delete_workspace, get_session,
-        get_session_history, get_slash_completions, get_workspace, list_accounts, list_sessions,
-        list_workspace_branches, list_workspace_sessions, list_workspaces, parse_json_body,
-        post_message, rename_session, resolve_permission, sign_in, sign_out, stream_session_events,
-        update_account, update_workspace,
+        UpdateWorkspaceRequest, UpsertAgentProfileRequest, WritePrincipal, auth_status,
+        bootstrap_register, bootstrap_workspace, cancel_turn, close_session, create_account,
+        create_workspace, create_workspace_session, delete_account, delete_session,
+        delete_workspace, get_session, get_session_history, get_slash_completions, get_workspace,
+        list_accounts, list_agent_profiles, list_sessions, list_workspace_branches,
+        list_workspace_sessions, list_workspaces, parse_json_body, post_message, rename_session,
+        resolve_permission, sign_in, sign_out, stream_session_events, update_account,
+        update_workspace, upsert_agent_profile,
     };
 
     pub(super) async fn auth_status_handler(
@@ -467,6 +492,15 @@ mod route_handlers {
         ReadPrincipal(principal): ReadPrincipal,
     ) -> Result<Response, AppError> {
         list_workspace_sessions(State(state), Path(workspace_id), Extension(principal))
+            .await
+            .map(IntoResponse::into_response)
+    }
+
+    pub(super) async fn list_agent_profiles_handler(
+        State(state): State<AppState>,
+        ReadPrincipal(principal): ReadPrincipal,
+    ) -> Result<Response, AppError> {
+        list_agent_profiles(State(state), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
@@ -615,6 +649,24 @@ mod route_handlers {
         .map(IntoResponse::into_response)
     }
 
+    pub(super) async fn upsert_agent_profile_handler(
+        State(state): State<AppState>,
+        Path(profile_id): Path<String>,
+        WritePrincipal(principal): WritePrincipal,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Result<Response, AppError> {
+        let request = parse_json_body::<UpsertAgentProfileRequest>(&headers, &body)?;
+        upsert_agent_profile(
+            State(state),
+            Path(profile_id),
+            Extension(principal),
+            Json(request),
+        )
+        .await
+        .map(IntoResponse::into_response)
+    }
+
     pub(super) async fn delete_workspace_handler(
         State(state): State<AppState>,
         Path(workspace_id): Path<String>,
@@ -745,6 +797,14 @@ where
     patch_service(boxed_handler_service(state.clone(), handler))
 }
 
+fn put_route<H, T>(state: &AppState, handler: H) -> MethodRouter
+where
+    H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+    T: 'static,
+{
+    put_service(boxed_handler_service(state.clone(), handler))
+}
+
 fn boxed_handler_service<H, T>(state: AppState, handler: H) -> BoxedRouteService
 where
     H: Handler<T, AppState> + Clone + Send + Sync + 'static,
@@ -778,6 +838,10 @@ fn read_api_routes(state: AppState) -> Router {
         .route(
             "/api/v1/workspaces/{workspace_id}/sessions",
             get_route(&state, route_handlers::list_workspace_sessions_handler),
+        )
+        .route(
+            "/api/v1/agent-profiles",
+            get_route(&state, route_handlers::list_agent_profiles_handler),
         )
         .route(
             "/api/v1/sessions/{session_id}",
@@ -854,6 +918,12 @@ fn workspace_write_routes(state: AppState) -> Router {
             "/api/v1/workspaces/{workspace_id}/sessions",
             post_route(&state, route_handlers::create_workspace_session_handler),
         )
+        .route(
+            "/api/v1/agent-profiles/{profile_id}",
+            put_route(&state, route_handlers::upsert_agent_profile_handler).patch_service(
+                boxed_handler_service(state.clone(), route_handlers::upsert_agent_profile_handler),
+            ),
+        )
 }
 
 fn session_write_routes(state: AppState) -> Router {
@@ -905,6 +975,15 @@ fn test_agent_runtime_manager() -> DynAgentRuntimeManager {
 }
 
 #[cfg(test)]
+fn test_agent_profile_store() -> Arc<AgentProfileStore> {
+    let state_dir = std::env::temp_dir().join(format!(
+        "acp-profile-test-state-{}",
+        Uuid::new_v4().simple()
+    ));
+    Arc::new(AgentProfileStore::new(&state_dir).expect("profile store should initialize"))
+}
+
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct TestWorkspaceCheckoutManager;
 
@@ -931,11 +1010,32 @@ fn reset_test_checkout_dir(working_dir: &std::path::Path) -> Result<(), Workspac
 impl WorkspaceCheckoutManager for TestWorkspaceCheckoutManager {
     async fn prepare_checkout(
         &self,
-        _workspace: &crate::workspace_records::WorkspaceRecord,
+        workspace: &crate::workspace_records::WorkspaceRecord,
         session_id: &str,
         checkout_ref_override: Option<&str>,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
-        let checkout_relpath = format!("session-checkouts/{session_id}");
+        self.prepare_checkout_with_layout(
+            workspace,
+            session_id,
+            checkout_ref_override,
+            WorkspaceCheckoutLayout::Standard,
+        )
+        .await
+    }
+
+    async fn prepare_checkout_with_layout(
+        &self,
+        _workspace: &crate::workspace_records::WorkspaceRecord,
+        session_id: &str,
+        checkout_ref_override: Option<&str>,
+        layout: WorkspaceCheckoutLayout,
+    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+        let checkout_relpath = match layout {
+            WorkspaceCheckoutLayout::Standard => format!("session-checkouts/{session_id}"),
+            WorkspaceCheckoutLayout::ChrootRuntime => {
+                format!("agent-runtimes/{session_id}/root/workspace")
+            }
+        };
         let working_dir = test_checkout_path(&checkout_relpath);
         reset_test_checkout_dir(&working_dir)?;
         Ok(PreparedWorkspaceCheckout {

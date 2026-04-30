@@ -118,6 +118,7 @@ pub(in crate::server) async fn create_workspace_session(
         principal,
         &workspace_id,
         request.checkout_ref,
+        request.agent_profile_id,
     )
     .await?;
 

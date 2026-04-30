@@ -432,6 +432,7 @@ async fn failed_sessions_are_hidden_from_user_facing_durable_queries() {
             checkout_relpath: Some("session-checkouts/s_failed".to_string()),
             checkout_ref: Some("refs/heads/main".to_string()),
             checkout_commit_sha: Some("deadbeef".to_string()),
+            agent_profile_id: None,
             failure_reason: Some("startup failed".to_string()),
             detach_deadline_at: None,
             restartable_deadline_at: None,

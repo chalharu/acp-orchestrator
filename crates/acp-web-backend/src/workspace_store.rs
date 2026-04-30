@@ -2526,6 +2526,7 @@ mod tests {
             checkout_relpath: None,
             checkout_ref: None,
             checkout_commit_sha: None,
+            agent_profile_id: None,
             failure_reason: None,
             detach_deadline_at: None,
             restartable_deadline_at: None,

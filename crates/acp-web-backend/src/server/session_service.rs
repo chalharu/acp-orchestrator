@@ -9,10 +9,12 @@ use chrono::Utc;
 use crate::workspace_repository::NewWorkspace;
 use crate::{
     agent_runtime::launch_session_blocking,
+    agent_runtime::{AgentLaunchConfig, AgentLaunchMetadata},
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_sessions::SessionSnapshot,
     mock_client::{ReplyProvider, ReplyResult},
     sessions::{PendingPrompt, SessionStoreError},
+    workspace_checkout::{FsWorkspaceCheckoutManager, WorkspaceCheckoutLayout},
     workspace_records::UserRecord,
     workspace_records::{SessionMetadataRecord, WorkspaceRecord},
 };
@@ -25,11 +27,53 @@ pub(super) struct LiveSessionWriteContext {
     pub(super) live_owner_id: String,
 }
 
+#[derive(Debug, Clone)]
+struct SessionStartupOptions {
+    layout: WorkspaceCheckoutLayout,
+    agent_config: Option<AgentLaunchConfig>,
+}
+
+fn session_startup_options(
+    state: &AppState,
+    agent_profile_id: Option<&str>,
+) -> Result<SessionStartupOptions, AppError> {
+    let agent_config = state
+        .agent_profile_store
+        .profile_config(agent_profile_id)
+        .map_err(map_agent_profile_error)?;
+    let layout = match agent_config.as_ref().map(|config| config.mode) {
+        Some(crate::agent_runtime::AgentLaunchMode::Chroot) => {
+            WorkspaceCheckoutLayout::ChrootRuntime
+        }
+        None => state.default_agent_layout,
+    };
+    Ok(SessionStartupOptions {
+        layout,
+        agent_config,
+    })
+}
+
+fn map_agent_profile_error(error: crate::agent_profiles::AgentProfileStoreError) -> AppError {
+    match error {
+        crate::agent_profiles::AgentProfileStoreError::NotFound => {
+            AppError::BadRequest(error.message().to_string())
+        }
+        crate::agent_profiles::AgentProfileStoreError::Validation(message) => {
+            AppError::BadRequest(message)
+        }
+        crate::agent_profiles::AgentProfileStoreError::Io(message)
+        | crate::agent_profiles::AgentProfileStoreError::Json(message) => {
+            AppError::Internal(message)
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) async fn create_session_snapshot(
     state: &AppState,
     principal: AuthenticatedPrincipal,
     checkout_ref_override: Option<String>,
+    agent_profile_id: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
     let workspaces = state
@@ -52,7 +96,14 @@ pub(super) async fn create_session_snapshot(
         }
     };
 
-    create_session_snapshot_in_workspace(state, owner, &workspace_id, checkout_ref_override).await
+    create_session_snapshot_in_workspace(
+        state,
+        owner,
+        &workspace_id,
+        checkout_ref_override,
+        agent_profile_id,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -70,9 +121,17 @@ pub(super) async fn create_session_snapshot_for_workspace(
     principal: AuthenticatedPrincipal,
     workspace_id: &str,
     checkout_ref_override: Option<String>,
+    agent_profile_id: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
     let owner = state.owner_context(principal).await?;
-    create_session_snapshot_in_workspace(state, owner, workspace_id, checkout_ref_override).await
+    create_session_snapshot_in_workspace(
+        state,
+        owner,
+        workspace_id,
+        checkout_ref_override,
+        agent_profile_id,
+    )
+    .await
 }
 
 async fn create_session_snapshot_in_workspace(
@@ -80,13 +139,22 @@ async fn create_session_snapshot_in_workspace(
     owner: super::OwnerContext,
     workspace_id: &str,
     checkout_ref_override: Option<String>,
+    agent_profile_id: Option<String>,
 ) -> Result<SessionSnapshot, AppError> {
     let workspace = load_workspace_for_session(state, &owner.user.user_id, workspace_id).await?;
+    let startup = session_startup_options(state, agent_profile_id.as_deref())?;
     let session = state
         .store
         .create_session(&owner.live_owner_id, workspace_id)
         .await?;
-    persist_provisioning_session_lifecycle(state, &owner, &workspace, &session).await?;
+    persist_provisioning_session_lifecycle(
+        state,
+        &owner,
+        &workspace,
+        &session,
+        agent_profile_id.as_deref(),
+    )
+    .await?;
     let (session, checkout) = prepare_session_startup(
         state,
         &owner.live_owner_id,
@@ -94,6 +162,7 @@ async fn create_session_snapshot_in_workspace(
         &workspace,
         session,
         checkout_ref_override.as_deref(),
+        &startup,
     )
     .await?;
     persist_started_session_metadata(state, &owner, &workspace, &session, &checkout).await?;
@@ -117,6 +186,7 @@ async fn persist_provisioning_session_lifecycle(
     owner: &super::OwnerContext,
     workspace: &WorkspaceRecord,
     session: &SessionSnapshot,
+    agent_profile_id: Option<&str>,
 ) -> Result<(), AppError> {
     if let Err(error) = persist_session_lifecycle(
         state,
@@ -126,6 +196,7 @@ async fn persist_provisioning_session_lifecycle(
         "provisioning",
         None,
         None,
+        agent_profile_id,
     )
     .await
     {
@@ -433,6 +504,7 @@ async fn prepare_session_startup(
     workspace: &WorkspaceRecord,
     session: SessionSnapshot,
     checkout_ref_override: Option<&str>,
+    startup: &SessionStartupOptions,
 ) -> Result<
     (
         SessionSnapshot,
@@ -448,12 +520,32 @@ async fn prepare_session_startup(
         workspace,
         &session,
         checkout_ref_override,
+        startup.layout,
     )
     .await?;
     persist_starting_session_lifecycle(state, live_owner_id, user, workspace, &session, &checkout)
         .await?;
-    launch_agent_runtime(state, live_owner_id, user, workspace, &session, &checkout).await?;
+    let launch_metadata = launch_agent_runtime(
+        state,
+        live_owner_id,
+        user,
+        workspace,
+        &session,
+        &checkout,
+        startup,
+    )
+    .await?;
     bind_session_checkout(state, live_owner_id, user, workspace, &session, &checkout).await?;
+    bind_session_launch_metadata(
+        state,
+        live_owner_id,
+        user,
+        workspace,
+        &session,
+        &checkout,
+        launch_metadata,
+    )
+    .await?;
     let session = prime_session_startup_or_rollback(
         state,
         live_owner_id,
@@ -474,7 +566,8 @@ async fn persist_cloning_session_lifecycle(
     session: &SessionSnapshot,
 ) -> Result<(), AppError> {
     if let Err(error) =
-        persist_session_lifecycle(state, user, workspace, session, "cloning", None, None).await
+        persist_session_lifecycle(state, user, workspace, session, "cloning", None, None, None)
+            .await
     {
         persist_failed_session_lifecycle(state, user, workspace, session, None, error.message())
             .await;
@@ -491,10 +584,11 @@ async fn prepare_workspace_checkout(
     workspace: &WorkspaceRecord,
     session: &SessionSnapshot,
     checkout_ref_override: Option<&str>,
+    layout: WorkspaceCheckoutLayout,
 ) -> Result<crate::workspace_checkout::PreparedWorkspaceCheckout, AppError> {
     match state
         .checkout_manager
-        .prepare_checkout(workspace, &session.id, checkout_ref_override)
+        .prepare_checkout_with_layout(workspace, &session.id, checkout_ref_override, layout)
         .await
     {
         Ok(checkout) => Ok(checkout),
@@ -530,6 +624,7 @@ async fn persist_starting_session_lifecycle(
         "starting",
         Some(checkout),
         None,
+        None,
     )
     .await
     {
@@ -556,25 +651,36 @@ async fn launch_agent_runtime(
     workspace: &WorkspaceRecord,
     session: &SessionSnapshot,
     checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
-) -> Result<(), AppError> {
+    startup: &SessionStartupOptions,
+) -> Result<AgentLaunchMetadata, AppError> {
     let launch_result = launch_session_blocking(
         state.agent_runtime_manager.clone(),
         session.id.clone(),
         workspace.workspace_id.clone(),
         checkout.clone(),
+        startup.agent_config.clone(),
     )
     .await;
-    if let Err(error) = launch_result {
-        let message = error.to_string();
-        cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
-        persist_failed_session_lifecycle(state, user, workspace, session, Some(checkout), &message)
+    match launch_result {
+        Ok(metadata) => Ok(metadata),
+        Err(error) => {
+            let message = error.to_string();
+            cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
+            persist_failed_session_lifecycle(
+                state,
+                user,
+                workspace,
+                session,
+                Some(checkout),
+                &message,
+            )
             .await;
-        rollback_session_creation(state, live_owner_id, &session.id, &message).await?;
-        return Err(AppError::Internal(format!(
-            "agent runtime launch failed: {message}"
-        )));
+            rollback_session_creation(state, live_owner_id, &session.id, &message).await?;
+            Err(AppError::Internal(format!(
+                "agent runtime launch failed: {message}"
+            )))
+        }
     }
-    Ok(())
 }
 
 async fn bind_session_checkout(
@@ -588,6 +694,29 @@ async fn bind_session_checkout(
     if let Err(error) = state
         .reply_provider
         .bind_session(&session.id, checkout.working_dir.clone())
+        .await
+    {
+        cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
+        persist_failed_session_lifecycle(state, user, workspace, session, Some(checkout), &error)
+            .await;
+        rollback_session_creation(state, live_owner_id, &session.id, &error).await?;
+        return Err(AppError::Internal(error));
+    }
+    Ok(())
+}
+
+async fn bind_session_launch_metadata(
+    state: &AppState,
+    live_owner_id: &str,
+    user: &UserRecord,
+    workspace: &WorkspaceRecord,
+    session: &SessionSnapshot,
+    checkout: &crate::workspace_checkout::PreparedWorkspaceCheckout,
+    metadata: AgentLaunchMetadata,
+) -> Result<(), AppError> {
+    if let Err(error) = state
+        .reply_provider
+        .bind_session_launch_metadata(&session.id, metadata)
         .await
     {
         cleanup_runtime_and_checkout_best_effort(state, &session.id, checkout);
@@ -634,6 +763,7 @@ async fn persist_session_lifecycle(
     status: &str,
     checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
     failure_reason: Option<&str>,
+    agent_profile_id: Option<&str>,
 ) -> Result<(), AppError> {
     let existing = state
         .workspace_repository
@@ -647,6 +777,7 @@ async fn persist_session_lifecycle(
         status,
         checkout,
         failure_reason,
+        agent_profile_id,
     );
     state
         .workspace_repository
@@ -663,6 +794,7 @@ fn build_session_lifecycle_record(
     status: &str,
     checkout: Option<&crate::workspace_checkout::PreparedWorkspaceCheckout>,
     failure_reason: Option<&str>,
+    agent_profile_id: Option<&str>,
 ) -> SessionMetadataRecord {
     let now = Utc::now();
     let created_at = existing.map(|record| record.created_at).unwrap_or(now);
@@ -675,6 +807,7 @@ fn build_session_lifecycle_record(
         checkout_relpath: merged_checkout_relpath(existing, checkout),
         checkout_ref: merged_checkout_ref(existing, checkout),
         checkout_commit_sha: merged_checkout_commit_sha(existing, checkout),
+        agent_profile_id: merged_agent_profile_id(existing, agent_profile_id),
         failure_reason: merged_failure_reason(existing, failure_reason),
         detach_deadline_at: existing.and_then(|record| record.detach_deadline_at),
         restartable_deadline_at: existing.and_then(|record| record.restartable_deadline_at),
@@ -723,6 +856,15 @@ fn merged_failure_reason(
         .or_else(|| existing.and_then(|record| record.failure_reason.clone()))
 }
 
+fn merged_agent_profile_id(
+    existing: Option<&SessionMetadataRecord>,
+    agent_profile_id: Option<&str>,
+) -> Option<String> {
+    agent_profile_id
+        .map(str::to_string)
+        .or_else(|| existing.and_then(|record| record.agent_profile_id.clone()))
+}
+
 async fn persist_failed_session_lifecycle(
     state: &AppState,
     user: &UserRecord,
@@ -739,6 +881,7 @@ async fn persist_failed_session_lifecycle(
         "failed",
         checkout,
         Some(failure_reason),
+        None,
     )
     .await
     {
@@ -790,8 +933,8 @@ fn resolve_checkout_cleanup_path(
     action: &'static str,
 ) -> Option<PathBuf> {
     let checkout_relpath = checkout_relpath?;
-    let expected_relpath = expected_cleanup_relpath(state, session_id, action)?;
-    if !cleanup_relpath_matches(session_id, checkout_relpath, &expected_relpath, action) {
+    let expected_relpaths = expected_cleanup_relpaths(session_id);
+    if !cleanup_relpath_matches(session_id, checkout_relpath, &expected_relpaths, action) {
         return None;
     }
     state
@@ -800,37 +943,35 @@ fn resolve_checkout_cleanup_path(
         .or_else(|| warn_invalid_cleanup_relpath(session_id, checkout_relpath, action))
 }
 
-fn expected_cleanup_relpath(
-    state: &AppState,
-    session_id: &str,
-    action: &'static str,
-) -> Option<String> {
-    state
-        .checkout_manager
-        .checkout_relpath_for_session(session_id)
-        .or_else(|| {
-            tracing::warn!(
-                session_id = %session_id,
-                action,
-                "checkout manager could not provide an expected cleanup path"
-            );
-            None
-        })
+fn expected_cleanup_relpaths(session_id: &str) -> [String; 2] {
+    [
+        FsWorkspaceCheckoutManager::checkout_relpath_for(
+            WorkspaceCheckoutLayout::Standard,
+            session_id,
+        ),
+        FsWorkspaceCheckoutManager::checkout_relpath_for(
+            WorkspaceCheckoutLayout::ChrootRuntime,
+            session_id,
+        ),
+    ]
 }
 
 fn cleanup_relpath_matches(
     session_id: &str,
     checkout_relpath: &str,
-    expected_relpath: &str,
+    expected_relpaths: &[String],
     action: &'static str,
 ) -> bool {
-    if checkout_relpath == expected_relpath {
+    if expected_relpaths
+        .iter()
+        .any(|expected| checkout_relpath == expected)
+    {
         return true;
     }
     tracing::warn!(
         session_id = %session_id,
         checkout_relpath,
-        expected_relpath,
+        expected_relpaths = ?expected_relpaths,
         action,
         "persisted checkout path did not match the session cleanup path"
     );

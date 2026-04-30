@@ -282,6 +282,7 @@ fn sample_metadata(checkout_relpath: Option<&str>) -> SessionMetadataRecord {
         checkout_relpath: checkout_relpath.map(str::to_string),
         checkout_ref: None,
         checkout_commit_sha: None,
+        agent_profile_id: None,
         failure_reason: None,
         detach_deadline_at: None,
         restartable_deadline_at: None,
@@ -452,7 +453,7 @@ async fn provisioning_persistence_failures_roll_back_live_sessions() {
     };
 
     let error =
-        persist_provisioning_session_lifecycle(&state, &owner, &sample_workspace(), &session)
+        persist_provisioning_session_lifecycle(&state, &owner, &sample_workspace(), &session, None)
             .await
             .expect_err("metadata failures should abort provisioning");
 

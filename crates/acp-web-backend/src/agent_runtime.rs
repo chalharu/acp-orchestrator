@@ -3,13 +3,14 @@ use std::{
     env,
     fmt::Display,
     fs,
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::CString;
 
 use crate::workspace_checkout::PreparedWorkspaceCheckout;
@@ -21,6 +22,11 @@ pub const DEFAULT_AGENT_RUN_GID: u32 = 65_534;
 pub const DEFAULT_AGENT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]
 const DEFAULT_AGENT_CGROUP_ROOT: &str = "/sys/fs/cgroup/acp-orchestrator";
+const ACP_HOST: &str = "127.0.0.1";
+const ACP_PORT_PLACEHOLDER: &str = "${ACP_PORT}";
+const ACP_ENDPOINT_PLACEHOLDER: &str = "${ACP_ENDPOINT}";
+const ACP_BASE_URL_PLACEHOLDER: &str = "${ACP_BASE_URL}";
+const ACP_HOST_PLACEHOLDER: &str = "${ACP_HOST}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentLaunchMode {
@@ -175,10 +181,19 @@ pub struct AgentSessionLaunch<'a> {
     pub session_id: &'a str,
     pub workspace_id: &'a str,
     pub checkout: &'a PreparedWorkspaceCheckout,
+    pub config: Option<AgentLaunchConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentLaunchMetadata {
+    pub acp_address: Option<String>,
 }
 
 pub trait AgentRuntimeManager: Send + Sync + std::fmt::Debug {
-    fn launch_session(&self, launch: &AgentSessionLaunch<'_>) -> Result<(), AgentRuntimeError>;
+    fn launch_session(
+        &self,
+        launch: &AgentSessionLaunch<'_>,
+    ) -> Result<AgentLaunchMetadata, AgentRuntimeError>;
     fn forget_session(&self, session_id: &str);
 }
 
@@ -189,12 +204,14 @@ pub async fn launch_session_blocking(
     session_id: String,
     workspace_id: String,
     checkout: PreparedWorkspaceCheckout,
-) -> Result<(), AgentRuntimeError> {
+    config: Option<AgentLaunchConfig>,
+) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
     match tokio::task::spawn_blocking(move || {
         runtime_manager.launch_session(&AgentSessionLaunch {
             session_id: &session_id,
             workspace_id: &workspace_id,
             checkout: &checkout,
+            config,
         })
     })
     .await
@@ -210,8 +227,11 @@ pub async fn launch_session_blocking(
 pub struct NoopAgentRuntimeManager;
 
 impl AgentRuntimeManager for NoopAgentRuntimeManager {
-    fn launch_session(&self, _launch: &AgentSessionLaunch<'_>) -> Result<(), AgentRuntimeError> {
-        Ok(())
+    fn launch_session(
+        &self,
+        _launch: &AgentSessionLaunch<'_>,
+    ) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
+        Ok(AgentLaunchMetadata::default())
     }
 
     fn forget_session(&self, _session_id: &str) {}
@@ -242,6 +262,7 @@ enum AgentChildSlot {
 struct AgentChild {
     child: Child,
     cgroup: Option<AgentCgroup>,
+    metadata: AgentLaunchMetadata,
 }
 
 #[cfg(target_os = "linux")]
@@ -299,27 +320,28 @@ impl FsAgentRuntimeManager {
         &self,
         config: &AgentLaunchConfig,
         launch: &AgentSessionLaunch<'_>,
-    ) -> Result<AgentChild, AgentRuntimeError> {
+    ) -> Result<(AgentChild, AgentLaunchMetadata), AgentRuntimeError> {
         let root_dir = self.root_dir(launch.session_id);
         fs::create_dir_all(&root_dir).map_err(|error| {
             AgentRuntimeError::Io(format!("creating agent chroot root failed: {error}"))
         })?;
         chown_workspace_for_agent(&launch.checkout.working_dir, config.run_uid, config.run_gid)?;
         let cgroup = self.prepare_session_cgroup(launch.session_id)?;
+        let reserved_endpoint = AcpEndpoint::reserve_for_command(&config.command)?;
+        let acp_endpoint = reserved_endpoint
+            .as_ref()
+            .map(|reserved| reserved.endpoint.clone());
+        let argv = expand_agent_argv(&config.command, acp_endpoint.as_ref());
 
-        let mut command = Command::new(&config.command[0]);
-        command.args(&config.command[1..]);
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
         command.env_clear();
         for name in &config.env_allowlist {
             if let Some(value) = env::var_os(name) {
                 command.env(name, value);
             }
         }
-        command.env("ACP_SESSION_ID", launch.session_id);
-        command.env("ACP_WORKSPACE_ID", launch.workspace_id);
-        command.env("ACP_CHECKOUT_ROOT", CHROOT_CHECKOUT_ROOT);
-        command.env("ACP_CHECKOUT_RELPATH", "workspace");
-        command.env("ACP_AGENT_LAUNCH_MODE", AgentLaunchMode::Chroot.as_str());
+        apply_structured_agent_env(&mut command, launch, acp_endpoint.as_ref());
         command.stdin(Stdio::null());
         command.stdout(Stdio::null());
         command.stderr(Stdio::null());
@@ -331,16 +353,40 @@ impl FsAgentRuntimeManager {
             config.run_uid,
             config.run_gid,
         )?;
-        spawn_with_timeout(command, config.timeout, Some(cgroup))
+        let port_reservation = reserved_endpoint.map(ReservedAcpEndpoint::into_listener);
+        let mut child =
+            spawn_with_timeout(command, config.timeout, Some(cgroup), port_reservation)?;
+        if let Err(error) =
+            wait_for_acp_readiness(acp_endpoint.as_ref(), config.timeout, &mut child)
+        {
+            terminate_agent_child(&mut child);
+            return Err(error);
+        }
+        let metadata = AgentLaunchMetadata {
+            acp_address: acp_endpoint.map(|endpoint| endpoint.address),
+        };
+        child.metadata = metadata.clone();
+        Ok((child, metadata))
     }
 
     fn prepare_session_cgroup(&self, session_id: &str) -> Result<AgentCgroup, AgentRuntimeError> {
-        let Some(root) = self.cgroup_root.as_ref() else {
-            return Err(AgentRuntimeError::Unsupported(
-                "chroot agent launch requires a Linux cgroup v2 root".to_string(),
-            ));
-        };
-        AgentCgroup::prepare(root, session_id)
+        #[cfg(target_os = "macos")]
+        {
+            AgentCgroup::prepare(Path::new(""), session_id)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let Some(root) = self.cgroup_root.as_ref() else {
+                return Err(AgentRuntimeError::Unsupported(
+                    "chroot agent launch requires a Linux cgroup v2 root".to_string(),
+                ));
+            };
+            AgentCgroup::prepare(root, session_id)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            AgentCgroup::prepare(Path::new(""), session_id)
+        }
     }
 
     fn reserve_launch(&self, session_id: &str) -> Result<u64, AgentRuntimeError> {
@@ -418,26 +464,50 @@ impl FsAgentRuntimeManager {
             }
         }
     }
+
+    fn running_launch_metadata(
+        &self,
+        session_id: &str,
+    ) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
+        let registry = self.children.lock().map_err(|_| {
+            AgentRuntimeError::Poisoned("agent runtime child registry is poisoned".to_string())
+        })?;
+        match registry.slots.get(session_id) {
+            Some(AgentChildSlot::Running(child)) => Ok(child.metadata.clone()),
+            _ => Err(AgentRuntimeError::AlreadyRunning(session_id.to_string())),
+        }
+    }
 }
 
 impl AgentRuntimeManager for FsAgentRuntimeManager {
-    fn launch_session(&self, launch: &AgentSessionLaunch<'_>) -> Result<(), AgentRuntimeError> {
-        let Some(config) = self.config.as_ref() else {
-            return Ok(());
+    fn launch_session(
+        &self,
+        launch: &AgentSessionLaunch<'_>,
+    ) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
+        let config = match launch.config.as_ref().or(self.config.as_ref()) {
+            Some(config) => config,
+            None => return Ok(AgentLaunchMetadata::default()),
         };
         config.validate()?;
-        let launch_id = self.reserve_launch(launch.session_id)?;
-        let child = match config.mode {
+        let launch_id = match self.reserve_launch(launch.session_id) {
+            Ok(launch_id) => launch_id,
+            Err(AgentRuntimeError::AlreadyRunning(_)) => {
+                return self.running_launch_metadata(launch.session_id);
+            }
+            Err(error) => return Err(error),
+        };
+        let launched = match config.mode {
             AgentLaunchMode::Chroot => self.launch_chroot(config, launch),
         };
-        let child = match child {
-            Ok(child) => child,
+        let (child, metadata) = match launched {
+            Ok(launched) => launched,
             Err(error) => {
                 self.clear_launch_reservation(launch.session_id, launch_id);
                 return Err(error);
             }
         };
-        self.store_launched_child(launch.session_id, launch_id, child)
+        self.store_launched_child(launch.session_id, launch_id, child)?;
+        Ok(metadata)
     }
 
     fn forget_session(&self, session_id: &str) {
@@ -486,6 +556,128 @@ fn default_agent_cgroup_root() -> Option<PathBuf> {
 #[cfg(not(target_os = "linux"))]
 fn default_agent_cgroup_root() -> Option<PathBuf> {
     None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcpEndpoint {
+    address: String,
+    port: u16,
+}
+
+impl AcpEndpoint {
+    fn reserve_for_command(
+        command: &[String],
+    ) -> Result<Option<ReservedAcpEndpoint>, AgentRuntimeError> {
+        if !command.iter().any(|arg| contains_acp_placeholder(arg)) {
+            return Ok(None);
+        }
+        let listener = TcpListener::bind((ACP_HOST, 0)).map_err(|error| {
+            AgentRuntimeError::Io(format!("allocating ACP listen port failed: {error}"))
+        })?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| {
+                AgentRuntimeError::Io(format!("reading ACP listen port failed: {error}"))
+            })?
+            .port();
+        Ok(Some(ReservedAcpEndpoint {
+            endpoint: Self {
+                address: format!("{ACP_HOST}:{port}"),
+                port,
+            },
+            listener,
+        }))
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+}
+
+#[derive(Debug)]
+struct ReservedAcpEndpoint {
+    endpoint: AcpEndpoint,
+    listener: TcpListener,
+}
+
+impl ReservedAcpEndpoint {
+    fn into_listener(self) -> TcpListener {
+        self.listener
+    }
+}
+
+fn contains_acp_placeholder(arg: &str) -> bool {
+    [
+        ACP_PORT_PLACEHOLDER,
+        ACP_ENDPOINT_PLACEHOLDER,
+        ACP_BASE_URL_PLACEHOLDER,
+        ACP_HOST_PLACEHOLDER,
+    ]
+    .iter()
+    .any(|placeholder| arg.contains(placeholder))
+}
+
+fn expand_agent_argv(command: &[String], endpoint: Option<&AcpEndpoint>) -> Vec<String> {
+    command
+        .iter()
+        .map(|arg| expand_agent_arg(arg, endpoint))
+        .collect()
+}
+
+fn expand_agent_arg(arg: &str, endpoint: Option<&AcpEndpoint>) -> String {
+    let Some(endpoint) = endpoint else {
+        return arg.to_string();
+    };
+    arg.replace(ACP_PORT_PLACEHOLDER, &endpoint.port.to_string())
+        .replace(ACP_ENDPOINT_PLACEHOLDER, &endpoint.address)
+        .replace(ACP_BASE_URL_PLACEHOLDER, &endpoint.base_url())
+        .replace(ACP_HOST_PLACEHOLDER, ACP_HOST)
+}
+
+fn apply_structured_agent_env(
+    command: &mut Command,
+    launch: &AgentSessionLaunch<'_>,
+    endpoint: Option<&AcpEndpoint>,
+) {
+    command.env("ACP_SESSION_ID", launch.session_id);
+    command.env("ACP_WORKSPACE_ID", launch.workspace_id);
+    command.env("ACP_CHECKOUT_ROOT", CHROOT_CHECKOUT_ROOT);
+    command.env("ACP_CHECKOUT_RELPATH", "workspace");
+    command.env("ACP_AGENT_LAUNCH_MODE", AgentLaunchMode::Chroot.as_str());
+    if let Some(endpoint) = endpoint {
+        command.env("ACP_HOST", ACP_HOST);
+        command.env("ACP_PORT", endpoint.port.to_string());
+        command.env("ACP_ENDPOINT", &endpoint.address);
+        command.env("ACP_BASE_URL", endpoint.base_url());
+    }
+}
+
+fn wait_for_acp_readiness(
+    endpoint: Option<&AcpEndpoint>,
+    timeout: Duration,
+    child: &mut AgentChild,
+) -> Result<(), AgentRuntimeError> {
+    let Some(endpoint) = endpoint else {
+        return Ok(());
+    };
+    let address: SocketAddr = endpoint.address.parse().map_err(|error| {
+        AgentRuntimeError::Io(format!("parsing ACP endpoint address failed: {error}"))
+    })?;
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child.child.try_wait().map_err(|error| {
+            AgentRuntimeError::Io(format!("checking agent process status failed: {error}"))
+        })? {
+            return Err(AgentRuntimeError::Io(format!(
+                "agent process exited before ACP endpoint became ready: {status}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(AgentRuntimeError::LaunchTimedOut(timeout))
 }
 
 #[cfg(target_os = "linux")]
@@ -557,11 +749,22 @@ impl AgentCgroup {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+impl AgentCgroup {
+    fn prepare(_root: &Path, _session_id: &str) -> Result<Self, AgentRuntimeError> {
+        Ok(Self)
+    }
+
+    fn kill(&self) {}
+
+    fn remove(&self) {}
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl AgentCgroup {
     fn prepare(_root: &Path, _session_id: &str) -> Result<Self, AgentRuntimeError> {
         Err(AgentRuntimeError::Unsupported(
-            "chroot agent launch requires Linux cgroup v2".to_string(),
+            "chroot agent launch is only supported on Linux and macOS".to_string(),
         ))
     }
 
@@ -606,10 +809,46 @@ fn chown_path_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRunt
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn chown_workspace_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRuntimeError> {
+    chown_path_for_agent(path, uid, gid)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        AgentRuntimeError::Io(format!("reading agent workspace metadata failed: {error}"))
+    })?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).map_err(|error| {
+        AgentRuntimeError::Io(format!("reading agent workspace failed: {error}"))
+    })? {
+        let entry = entry.map_err(|error| {
+            AgentRuntimeError::Io(format!("reading agent workspace entry failed: {error}"))
+        })?;
+        chown_workspace_for_agent(&entry.path(), uid, gid)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn chown_path_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRuntimeError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        AgentRuntimeError::Io("agent workspace path contains a NUL byte".to_string())
+    })?;
+    if unsafe { libc::lchown(path.as_ptr(), uid, gid) } != 0 {
+        return Err(AgentRuntimeError::Io(format!(
+            "assigning agent workspace ownership failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn chown_workspace_for_agent(_path: &Path, _uid: u32, _gid: u32) -> Result<(), AgentRuntimeError> {
     Err(AgentRuntimeError::Unsupported(
-        "chroot agent launch is only supported on Linux".to_string(),
+        "chroot agent launch is only supported on Linux and macOS".to_string(),
     ))
 }
 
@@ -659,7 +898,7 @@ fn prepare_chroot_child(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_nonnegative_syscall(result: libc::c_int) -> std::io::Result<()> {
     if result >= 0 {
         Ok(())
@@ -668,7 +907,7 @@ fn check_nonnegative_syscall(result: libc::c_int) -> std::io::Result<()> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_zero_syscall(result: libc::c_int) -> std::io::Result<()> {
     if result == 0 {
         Ok(())
@@ -677,7 +916,47 @@ fn check_zero_syscall(result: libc::c_int) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn configure_chroot_command(
+    command: &mut Command,
+    root_dir: &Path,
+    _cgroup: &AgentCgroup,
+    run_uid: u32,
+    run_gid: u32,
+) -> Result<(), AgentRuntimeError> {
+    use std::os::unix::{ffi::OsStrExt, process::CommandExt};
+
+    let root = CString::new(root_dir.as_os_str().as_bytes()).map_err(|_| {
+        AgentRuntimeError::Io("agent chroot root path contains a NUL byte".to_string())
+    })?;
+    let workspace =
+        CString::new(CHROOT_CHECKOUT_ROOT).expect("static chroot workspace path has no NUL");
+
+    unsafe {
+        command.pre_exec(move || prepare_macos_chroot_child(&root, &workspace, run_uid, run_gid));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_macos_chroot_child(
+    root: &CString,
+    workspace: &CString,
+    run_uid: u32,
+    run_gid: u32,
+) -> std::io::Result<()> {
+    unsafe {
+        check_nonnegative_syscall(libc::setsid())?;
+        check_zero_syscall(libc::chroot(root.as_ptr()))?;
+        check_zero_syscall(libc::chdir(workspace.as_ptr()))?;
+        check_zero_syscall(libc::setgroups(0, std::ptr::null()))?;
+        check_zero_syscall(libc::setgid(run_gid))?;
+        check_zero_syscall(libc::setuid(run_uid))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn configure_chroot_command(
     _command: &mut Command,
     _root_dir: &Path,
@@ -686,7 +965,7 @@ fn configure_chroot_command(
     _run_gid: u32,
 ) -> Result<(), AgentRuntimeError> {
     Err(AgentRuntimeError::Unsupported(
-        "chroot agent launch is only supported on Linux".to_string(),
+        "chroot agent launch is only supported on Linux and macOS".to_string(),
     ))
 }
 
@@ -730,11 +1009,12 @@ fn spawn_with_timeout(
     mut command: Command,
     timeout: Duration,
     cgroup: Option<AgentCgroup>,
+    port_reservation: Option<TcpListener>,
 ) -> Result<AgentChild, AgentRuntimeError> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(0);
     let cgroup_for_timeout = cgroup.clone();
     std::thread::spawn(move || {
-        let spawn_result = spawn_agent_child(&mut command, cgroup.clone());
+        let spawn_result = spawn_agent_child(&mut command, cgroup.clone(), port_reservation);
         if let Err(std::sync::mpsc::SendError(result)) = sender.send(spawn_result) {
             cleanup_unsent_spawn_result(result, cgroup.as_ref());
         }
@@ -750,9 +1030,16 @@ fn spawn_with_timeout(
 fn spawn_agent_child(
     command: &mut Command,
     cgroup: Option<AgentCgroup>,
+    port_reservation: Option<TcpListener>,
 ) -> std::io::Result<AgentChild> {
-    match command.spawn() {
-        Ok(child) => Ok(AgentChild { child, cgroup }),
+    let spawn_result = command.spawn();
+    drop(port_reservation);
+    match spawn_result {
+        Ok(child) => Ok(AgentChild {
+            child,
+            cgroup,
+            metadata: AgentLaunchMetadata::default(),
+        }),
         Err(error) => {
             if let Some(cgroup) = cgroup.as_ref() {
                 cgroup.remove();
@@ -930,9 +1217,48 @@ mod tests {
                 session_id: "s_test",
                 workspace_id: "w_test",
                 checkout: &sample_checkout(),
+                config: None,
             })
             .expect("noop launch should succeed");
         manager.forget_session("s_test");
+    }
+
+    #[test]
+    fn argv_placeholders_expand_only_when_endpoint_allocated() {
+        let endpoint = AcpEndpoint {
+            address: "127.0.0.1:4567".to_string(),
+            port: 4567,
+        };
+        let argv = expand_agent_argv(
+            &[
+                "agent".to_string(),
+                "--port=${ACP_PORT}".to_string(),
+                "--url=${ACP_BASE_URL}".to_string(),
+                "--host=${ACP_HOST}".to_string(),
+                "--endpoint=${ACP_ENDPOINT}".to_string(),
+            ],
+            Some(&endpoint),
+        );
+
+        assert_eq!(
+            argv,
+            vec![
+                "agent",
+                "--port=4567",
+                "--url=http://127.0.0.1:4567",
+                "--host=127.0.0.1",
+                "--endpoint=127.0.0.1:4567"
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_acp_placeholders_in_argv() {
+        assert!(contains_acp_placeholder("--port=${ACP_PORT}"));
+        assert!(contains_acp_placeholder("${ACP_ENDPOINT}"));
+        assert!(contains_acp_placeholder("${ACP_BASE_URL}"));
+        assert!(contains_acp_placeholder("${ACP_HOST}"));
+        assert!(!contains_acp_placeholder("--stdio"));
     }
 
     #[test]
@@ -983,12 +1309,66 @@ mod tests {
                 AgentChildSlot::Running(AgentChild {
                     child,
                     cgroup: None,
+                    metadata: AgentLaunchMetadata::default(),
                 }),
             );
 
         manager.forget_session("s_test");
 
         assert!(!process_is_running(pid), "forget should terminate children");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_launch_returns_existing_metadata() {
+        let manager = FsAgentRuntimeManager::new(
+            std::env::temp_dir().join(format!(
+                "acp-agent-runtime-existing-{}",
+                uuid::Uuid::new_v4().simple()
+            )),
+            None,
+        )
+        .expect("manager should build");
+        let child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("sleep child should spawn");
+        let metadata = AgentLaunchMetadata {
+            acp_address: Some("127.0.0.1:49152".to_string()),
+        };
+        manager
+            .children
+            .lock()
+            .expect("child registry should not poison")
+            .slots
+            .insert(
+                "s_test".to_string(),
+                AgentChildSlot::Running(AgentChild {
+                    child,
+                    cgroup: None,
+                    metadata: metadata.clone(),
+                }),
+            );
+        let config = AgentLaunchConfig::chroot(
+            vec!["/bin/true".to_string()],
+            Vec::new(),
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            DEFAULT_AGENT_RUN_UID,
+            DEFAULT_AGENT_RUN_GID,
+        )
+        .expect("config should validate");
+
+        let restored = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id: "s_test",
+                workspace_id: "w_test",
+                checkout: &sample_checkout(),
+                config: Some(config),
+            })
+            .expect("existing launch should return metadata");
+        manager.forget_session("s_test");
+
+        assert_eq!(restored, metadata);
     }
 
     #[cfg(unix)]
@@ -1017,6 +1397,7 @@ mod tests {
                 AgentChildSlot::Running(AgentChild {
                     child,
                     cgroup: None,
+                    metadata: AgentLaunchMetadata::default(),
                 }),
             );
 

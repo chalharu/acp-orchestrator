@@ -1,7 +1,9 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
 use acp_contracts_sessions::{
+    AgentProfile, AgentProfileListResponse, AgentProfileMode, AgentProfileResponse,
     CreateSessionRequest, CreateSessionResponse, SessionListItem, SessionListResponse,
+    UpsertAgentProfileRequest,
 };
 use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
@@ -19,6 +21,8 @@ use super::response_error_message;
 use super::{csrf_token, encode_component, patch_json_with_csrf, post_json_with_csrf};
 
 const WORKSPACES_URL: &str = "/api/v1/workspaces";
+const AGENT_PROFILES_URL: &str = "/api/v1/agent-profiles";
+const OPENCODE_AGENT_PROFILE_ID: &str = "opencode";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceSessionCreateError {
@@ -137,10 +141,12 @@ pub(crate) async fn delete_workspace(
 pub(crate) async fn create_workspace_session(
     workspace_id: &str,
     checkout_ref: Option<String>,
+    agent_profile_id: Option<String>,
 ) -> Result<String, WorkspaceSessionCreateError> {
     let response = post_json_with_csrf(
         &workspace_sessions_url(workspace_id),
-        create_workspace_session_body(checkout_ref).map_err(WorkspaceSessionCreateError::Other)?,
+        create_workspace_session_body(checkout_ref, agent_profile_id)
+            .map_err(WorkspaceSessionCreateError::Other)?,
     )
     .await
     .map_err(WorkspaceSessionCreateError::Other)?;
@@ -165,13 +171,61 @@ pub(crate) async fn create_workspace_session(
 pub(crate) async fn create_workspace_session(
     workspace_id: &str,
     checkout_ref: Option<String>,
+    agent_profile_id: Option<String>,
 ) -> Result<String, WorkspaceSessionCreateError> {
-    let _ =
-        create_workspace_session_body(checkout_ref).map_err(WorkspaceSessionCreateError::Other)?;
+    let _ = create_workspace_session_body(checkout_ref, agent_profile_id)
+        .map_err(WorkspaceSessionCreateError::Other)?;
     Err(WorkspaceSessionCreateError::Other(non_wasm_api_error(
         "POST",
         &workspace_sessions_url(workspace_id),
     )))
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn list_agent_profiles() -> Result<Vec<AgentProfile>, String> {
+    let response = Request::get(AGENT_PROFILES_URL)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.ok() {
+        return Err(response_error_message(response, "List ACP profiles failed").await);
+    }
+    let listed: AgentProfileListResponse =
+        response.json().await.map_err(|error| error.to_string())?;
+    Ok(listed.profiles)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn list_agent_profiles() -> Result<Vec<AgentProfile>, String> {
+    Err(non_wasm_api_error("GET", AGENT_PROFILES_URL))
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn save_opencode_agent_profile(command: String) -> Result<AgentProfile, String> {
+    let body = opencode_agent_profile_body(command)?;
+    let csrf = csrf_token();
+    let response = Request::put(&agent_profile_url(OPENCODE_AGENT_PROFILE_ID))
+        .header("x-csrf-token", &csrf)
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.ok() {
+        return Err(response_error_message(response, "Save ACP profile failed").await);
+    }
+    let payload: AgentProfileResponse = response.json().await.map_err(|error| error.to_string())?;
+    Ok(payload.profile)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn save_opencode_agent_profile(command: String) -> Result<AgentProfile, String> {
+    let _ = opencode_agent_profile_body(command)?;
+    Err(non_wasm_api_error(
+        "PUT",
+        &agent_profile_url(OPENCODE_AGENT_PROFILE_ID),
+    ))
 }
 
 #[cfg(target_family = "wasm")]
@@ -238,11 +292,43 @@ fn create_workspace_body(name: &str, upstream_url: String) -> Result<String, Str
     .map_err(|error| error.to_string())
 }
 
-fn create_workspace_session_body(checkout_ref: Option<String>) -> Result<String, String> {
+fn create_workspace_session_body(
+    checkout_ref: Option<String>,
+    agent_profile_id: Option<String>,
+) -> Result<String, String> {
     serde_json::to_string(&CreateSessionRequest {
         checkout_ref: normalize_optional_text(checkout_ref),
+        agent_profile_id: normalize_optional_text(agent_profile_id),
     })
     .map_err(|error| error.to_string())
+}
+
+fn opencode_agent_profile_body(command: String) -> Result<String, String> {
+    let command_argv = command_lines_to_argv(&command)?;
+    serde_json::to_string(&UpsertAgentProfileRequest {
+        name: "OpenCode ACP".to_string(),
+        mode: AgentProfileMode::Chroot,
+        command_argv,
+        env_allowlist: Vec::new(),
+        timeout_seconds: 30,
+        run_uid: 65_534,
+        run_gid: 65_534,
+    })
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn command_lines_to_argv(command: &str) -> Result<Vec<String>, String> {
+    let argv: Vec<String> = command
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if argv.is_empty() {
+        Err("OpenCode ACP command is required".to_string())
+    } else {
+        Ok(argv)
+    }
 }
 
 fn update_workspace_body(name: Option<String>) -> Result<String, String> {
@@ -255,6 +341,10 @@ fn workspace_url(workspace_id: &str) -> String {
 
 fn workspace_sessions_url(workspace_id: &str) -> String {
     format!("{}/sessions", workspace_url(workspace_id))
+}
+
+fn agent_profile_url(profile_id: &str) -> String {
+    format!("{AGENT_PROFILES_URL}/{}", encode_component(profile_id))
 }
 
 fn workspace_branches_url(workspace_id: &str) -> String {
@@ -298,9 +388,18 @@ mod tests {
         let body = update_workspace_body(Some("Renamed".to_string())).expect("update body");
         assert!(body.contains("Renamed"));
 
-        let body =
-            create_workspace_session_body(Some(" refs/heads/release ".to_string())).expect("body");
+        let body = create_workspace_session_body(
+            Some(" refs/heads/release ".to_string()),
+            Some(" opencode ".to_string()),
+        )
+        .expect("body");
         assert!(body.contains("refs/heads/release"));
+        assert!(body.contains("opencode"));
+
+        let body = opencode_agent_profile_body("opencode\nacp\n--port=${ACP_PORT}".to_string())
+            .expect("profile body");
+        assert!(body.contains("OpenCode ACP"));
+        assert!(body.contains("${ACP_PORT}"));
     }
 
     #[test]
@@ -338,7 +437,15 @@ mod tests {
             poll_ready(delete_workspace("w_1")).expect_err("host delete should fail");
         assert!(delete_error.contains("/api/v1/workspaces/w_1"));
 
-        let create_session_error = poll_ready(create_workspace_session("w_1", None))
+        let profiles_error = poll_ready(list_agent_profiles()).expect_err("host profiles fail");
+        assert!(profiles_error.contains(AGENT_PROFILES_URL));
+
+        let save_profile_error =
+            poll_ready(save_opencode_agent_profile("opencode\nacp".to_string()))
+                .expect_err("host profile save should fail");
+        assert!(save_profile_error.contains("/api/v1/agent-profiles/opencode"));
+
+        let create_session_error = poll_ready(create_workspace_session("w_1", None, None))
             .expect_err("host workspace session create should fail");
         assert!(
             create_session_error
@@ -387,5 +494,14 @@ mod tests {
             normalize_required_text("   ".to_string()).expect_err("blank values should fail"),
             "repository_url is required"
         );
+    }
+
+    #[test]
+    fn command_lines_to_argv_trims_blank_lines() {
+        assert_eq!(
+            command_lines_to_argv(" opencode \n\n acp \n --port=${ACP_PORT} ").expect("valid argv"),
+            vec!["opencode", "acp", "--port=${ACP_PORT}"]
+        );
+        assert!(command_lines_to_argv(" \n ").is_err());
     }
 }

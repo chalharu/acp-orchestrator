@@ -599,7 +599,12 @@ fn prepare_checkout_sync_reports_checkout_root_creation_failures() {
     let manager = FsWorkspaceCheckoutManager::new(state_dir);
 
     let error = manager
-        .prepare_checkout_sync(&sample_workspace_record(None, None), "s_test", None)
+        .prepare_checkout_sync(
+            &sample_workspace_record(None, None),
+            "s_test",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("blocking files should make the checkout root fail");
 
     assert_io_error_contains(error, "creating checkout root failed");
@@ -632,7 +637,12 @@ fn prepare_checkout_sync_reports_stale_checkout_cleanup_failures() {
     let manager = FsWorkspaceCheckoutManager::new(state_dir);
 
     let error = manager
-        .prepare_checkout_sync(&sample_workspace_record(None, None), "s_test", None)
+        .prepare_checkout_sync(
+            &sample_workspace_record(None, None),
+            "s_test",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("file-based stale paths should fail cleanup");
 
     assert_io_error_contains(error, "clearing stale checkout directory failed");
@@ -645,7 +655,12 @@ fn https_checkout_failures_clean_up_partially_initialized_directories() {
     let workspace = sample_workspace_record(Some("https://127.0.0.1:9/repo.git"), None);
 
     let error = manager
-        .prepare_checkout_sync(&workspace, "s_test", None)
+        .prepare_checkout_sync(
+            &workspace,
+            "s_test",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("unreachable https remotes should fail");
 
     assert_git_error(error);
@@ -665,7 +680,12 @@ fn https_checkout_failures_after_fetch_cleanup_checkout_directories() {
     );
 
     let error = manager
-        .prepare_checkout_sync(&workspace, "s_fetch", None)
+        .prepare_checkout_sync(
+            &workspace,
+            "s_fetch",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("fetch failures should surface through the git2 checkout path");
 
     assert_git_error(error);
@@ -1269,7 +1289,12 @@ fn local_workspace_fallback_prepares_a_checkout_from_detached_head_sources() {
             ));
         let manager = FsWorkspaceCheckoutManager::new(state_dir);
         let checkout = manager
-            .prepare_checkout_sync(&sample_workspace_record(None, None), "s_detached", None)
+            .prepare_checkout_sync(
+                &sample_workspace_record(None, None),
+                "s_detached",
+                None,
+                WorkspaceCheckoutLayout::Standard,
+            )
             .expect("detached source local checkout should prepare");
 
         assert_eq!(checkout.checkout_ref, None);

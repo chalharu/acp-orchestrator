@@ -652,7 +652,10 @@ async fn spawn_backend_server(mock_address: String) -> Result<(String, oneshot::
         reply_provider,
         checkout_manager,
         agent_runtime_manager: Arc::new(NoopAgentRuntimeManager),
-        agent_profile_store: Arc::new(AgentProfileStore::new(&config.state_dir)?),
+        agent_profile_store: Arc::new(
+            AgentProfileStore::new(&config.state_dir)
+                .map_err(|error| format!("building agent profile store: {}", error.message()))?,
+        ),
         default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: config.startup_hints,
         frontend_dist: config.frontend_dist,

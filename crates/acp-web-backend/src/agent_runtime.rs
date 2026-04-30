@@ -1442,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_error_display_messages_are_specific() {
+    fn launch_config_error_display_messages_are_specific() {
         assert_eq!(
             AgentLaunchConfigError::EmptyArgvElement.to_string(),
             "agent command argv elements must not be empty"
@@ -1463,6 +1463,10 @@ mod tests {
             AgentLaunchConfigError::InvalidEnvName("bad-name".to_string()).to_string(),
             "agent env allowlist name is invalid: bad-name"
         );
+    }
+
+    #[test]
+    fn runtime_error_display_messages_are_specific() {
         assert_eq!(
             AgentRuntimeError::from(AgentLaunchConfigError::MissingCommand).to_string(),
             "agent command is required in chroot mode"
@@ -1483,6 +1487,10 @@ mod tests {
             AgentRuntimeError::LaunchTimedOut(Duration::from_secs(2)).to_string(),
             "agent launch timed out after 2s"
         );
+    }
+
+    #[test]
+    fn runtime_helper_error_display_messages_are_specific() {
         assert_eq!(
             poisoned_child_registry_error().to_string(),
             "agent runtime child registry is poisoned"

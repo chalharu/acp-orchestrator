@@ -325,6 +325,40 @@ fn sample_snapshot(session_id: &str) -> crate::contract_sessions::SessionSnapsho
     }
 }
 
+fn unique_checkout_fixture() -> (PathBuf, PathBuf) {
+    let checkout_root = std::env::current_dir()
+        .expect("tests should start in a readable directory")
+        .join(".tmp")
+        .join(format!(
+            "acp-session-checkout-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    let working_dir = checkout_root.join("checkout");
+    std::fs::create_dir_all(&working_dir).expect("checkout should be creatable");
+    (checkout_root, working_dir)
+}
+
+fn prepared_checkout_for(working_dir: PathBuf) -> PreparedWorkspaceCheckout {
+    PreparedWorkspaceCheckout {
+        checkout_relpath: "session-checkouts/s_test".to_string(),
+        checkout_ref: None,
+        checkout_commit_sha: None,
+        working_dir,
+    }
+}
+
+fn metadata_bind_failure_state(store: Arc<SessionStore>) -> AppState {
+    AppState::with_workspace_repository(
+        store,
+        Arc::new(StubWorkspaceRepository {
+            metadata: None,
+            load_error: None,
+            save_error: None,
+        }),
+        Arc::new(MetadataFailingReplyProvider),
+    )
+}
+
 fn sample_principal() -> AuthenticatedPrincipal {
     AuthenticatedPrincipal {
         id: "alice".to_string(),
@@ -494,30 +528,9 @@ async fn launch_metadata_binding_failures_clean_up_and_roll_back_live_sessions()
         .create_session(live_owner_id, "w_test")
         .await
         .expect("session creation should succeed");
-    let checkout_root = std::env::current_dir()
-        .expect("tests should start in a readable directory")
-        .join(".tmp")
-        .join(format!(
-            "acp-session-checkout-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-    let working_dir = checkout_root.join("checkout");
-    std::fs::create_dir_all(&working_dir).expect("checkout should be creatable");
-    let checkout = PreparedWorkspaceCheckout {
-        checkout_relpath: "session-checkouts/s_test".to_string(),
-        checkout_ref: None,
-        checkout_commit_sha: None,
-        working_dir: working_dir.clone(),
-    };
-    let state = AppState::with_workspace_repository(
-        store.clone(),
-        Arc::new(StubWorkspaceRepository {
-            metadata: None,
-            load_error: None,
-            save_error: None,
-        }),
-        Arc::new(MetadataFailingReplyProvider),
-    );
+    let (checkout_root, working_dir) = unique_checkout_fixture();
+    let checkout = prepared_checkout_for(working_dir.clone());
+    let state = metadata_bind_failure_state(store.clone());
     let user = sample_user();
     let workspace = sample_workspace();
     let context = SessionStartupContext {

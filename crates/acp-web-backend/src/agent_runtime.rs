@@ -805,7 +805,7 @@ impl AgentCgroup {
     fn remove(&self) {}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn chown_workspace_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRuntimeError> {
     chown_path_for_agent(path, uid, gid)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -825,43 +825,7 @@ fn chown_workspace_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), Agen
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn chown_path_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRuntimeError> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        AgentRuntimeError::Io("agent workspace path contains a NUL byte".to_string())
-    })?;
-    if unsafe { libc::lchown(path.as_ptr(), uid, gid) } != 0 {
-        return Err(AgentRuntimeError::Io(format!(
-            "assigning agent workspace ownership failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn chown_workspace_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRuntimeError> {
-    chown_path_for_agent(path, uid, gid)?;
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        AgentRuntimeError::Io(format!("reading agent workspace metadata failed: {error}"))
-    })?;
-    if !metadata.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(path).map_err(|error| {
-        AgentRuntimeError::Io(format!("reading agent workspace failed: {error}"))
-    })? {
-        let entry = entry.map_err(|error| {
-            AgentRuntimeError::Io(format!("reading agent workspace entry failed: {error}"))
-        })?;
-        chown_workspace_for_agent(&entry.path(), uid, gid)?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn chown_path_for_agent(path: &Path, uid: u32, gid: u32) -> Result<(), AgentRuntimeError> {
     use std::os::unix::ffi::OsStrExt;
 

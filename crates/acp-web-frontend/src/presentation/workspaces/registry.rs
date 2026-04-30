@@ -485,7 +485,7 @@ fn workspace_start_chat_profile_field(state: WorkspacesPageState) -> impl IntoVi
     let profiles = Signal::derive(move || state.agent_profiles.get());
     let selected = Signal::derive(move || state.start_chat_agent_profile_id.get());
     view! {
-        <label class="account-field">
+        <label class="account-form__field">
             <span>"ACP profile"</span>
             <select
                 prop:value=move || selected.get().unwrap_or_default()

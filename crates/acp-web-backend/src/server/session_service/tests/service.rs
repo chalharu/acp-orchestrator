@@ -21,12 +21,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt;
-use std::{
-    future::Future,
-    panic::AssertUnwindSafe,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{future::Future, panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
 
 #[derive(Debug)]
 struct NoopReplyProvider;
@@ -326,13 +321,10 @@ fn sample_snapshot(session_id: &str) -> crate::contract_sessions::SessionSnapsho
 }
 
 fn unique_checkout_fixture() -> (PathBuf, PathBuf) {
-    let checkout_root = std::env::current_dir()
-        .expect("tests should start in a readable directory")
-        .join(".tmp")
-        .join(format!(
-            "acp-session-checkout-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+    let checkout_root = std::env::temp_dir().join(format!(
+        "acp-session-checkout-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let working_dir = checkout_root.join("checkout");
     std::fs::create_dir_all(&working_dir).expect("checkout should be creatable");
     (checkout_root, working_dir)
@@ -649,15 +641,16 @@ async fn checkout_cleanup_path_loading_handles_metadata_without_checkout_paths()
 
 #[test]
 fn cleanup_checkout_path_best_effort_ignores_missing_paths_and_files() {
-    cleanup_checkout_path_best_effort(Path::new("/workspace/.tmp/nonexistent-session-checkout"));
+    let missing_path = std::env::temp_dir().join(format!(
+        "nonexistent-session-checkout-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    cleanup_checkout_path_best_effort(&missing_path);
 
-    let file_path = std::env::current_dir()
-        .expect("tests should start in a readable directory")
-        .join(".tmp")
-        .join(format!(
-            "acp-session-cleanup-file-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+    let file_path = std::env::temp_dir().join(format!(
+        "acp-session-cleanup-file-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     std::fs::create_dir_all(file_path.parent().expect("file path should have a parent"))
         .expect("parent dir should be creatable");
     std::fs::write(&file_path, "not a directory").expect("file path should be writable");
@@ -667,6 +660,7 @@ fn cleanup_checkout_path_best_effort_ignores_missing_paths_and_files() {
         file_path.exists(),
         "file cleanups should fail without panicking"
     );
+    let _ = std::fs::remove_file(file_path);
 }
 
 #[test]

@@ -11,6 +11,10 @@ use super::{
     shared::{WorkspacesPageState, initialize_workspaces_page},
 };
 
+const AGENT_SETTINGS_FIELD_CLASS: &str = "account-form__field";
+const AGENT_SETTINGS_PROFILE_NAME_PLACEHOLDER: &str = "Claude ACP";
+const AGENT_SETTINGS_COMMAND_PLACEHOLDER: &str = "claude acp --port ${ACP_PORT}";
+
 #[component]
 pub fn WorkspacesPage() -> impl IntoView {
     let state = WorkspacesPageState::new();
@@ -140,12 +144,14 @@ fn agent_settings_modal_view(state: WorkspacesPageState) -> impl IntoView {
     let is_admin = agent_settings_is_admin(state);
     let on_cancel = move |_event: web_sys::MouseEvent| state.show_agent_settings.set(false);
     let on_submit = agent_settings_submit_handler(state, is_admin);
+    let error = Signal::derive(move || state.error.get());
     view! {
         <div class="workspace-modal-overlay" role="dialog" aria-modal="true" aria-label="ACP settings">
             <div class="workspace-modal">
                 {agent_settings_header_view(on_cancel)}
                 <p class="muted">"Configured profiles are selectable when starting a new chat."</p>
                 {agent_profile_list_view(state)}
+                <ErrorBanner message=error />
                 {agent_settings_form_view(state, is_admin, on_submit, on_cancel)}
             </div>
         </div>
@@ -184,11 +190,11 @@ fn agent_settings_form_view(
 
 fn agent_settings_profile_name_field(state: WorkspacesPageState, is_admin: bool) -> impl IntoView {
     view! {
-        <label class="account-field">
+        <label class=AGENT_SETTINGS_FIELD_CLASS>
             <span>"Profile name"</span>
             <input
                 type="text"
-                placeholder="Claude ACP"
+                placeholder=AGENT_SETTINGS_PROFILE_NAME_PLACEHOLDER
                 prop:value=move || state.agent_settings_profile_name.get()
                 prop:disabled=move || !is_admin || state.agent_settings_saving.get()
                 on:input=move |event| state.agent_settings_profile_name.set(event_target_value(&event))
@@ -199,11 +205,11 @@ fn agent_settings_profile_name_field(state: WorkspacesPageState, is_admin: bool)
 
 fn agent_settings_command_field(state: WorkspacesPageState, is_admin: bool) -> impl IntoView {
     view! {
-        <label class="account-field">
+        <label class=AGENT_SETTINGS_FIELD_CLASS>
             <span>"ACP launch command"</span>
             <textarea
                 rows="3"
-                placeholder="opencode acp --hostname 0.0.0.0 --port ${ACP_PORT}"
+                placeholder=AGENT_SETTINGS_COMMAND_PLACEHOLDER
                 prop:value=move || state.agent_settings_command.get()
                 prop:disabled=move || !is_admin || state.agent_settings_saving.get()
                 on:input=move |event| state.agent_settings_command.set(event_target_value(&event))
@@ -516,6 +522,29 @@ mod tests {
             assert!(state.show_agent_settings.get());
             assert!(state.error.get().is_none());
             assert!(state.agent_settings_command.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn agent_settings_modal_uses_form_fields_inline_errors_and_consistent_examples() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state
+                .access
+                .set(Some(WorkspacesRouteAccess::SignedIn(sample_account(true))));
+            state
+                .error
+                .set(Some("Profile name is required".to_string()));
+
+            let _ = agent_settings_modal_view(state);
+            assert_eq!(AGENT_SETTINGS_FIELD_CLASS, "account-form__field");
+            assert_eq!(AGENT_SETTINGS_PROFILE_NAME_PLACEHOLDER, "Claude ACP");
+            assert_eq!(
+                AGENT_SETTINGS_COMMAND_PLACEHOLDER,
+                "claude acp --port ${ACP_PORT}"
+            );
+            assert!(!AGENT_SETTINGS_COMMAND_PLACEHOLDER.contains("opencode"));
         });
     }
 

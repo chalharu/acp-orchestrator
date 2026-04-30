@@ -1104,8 +1104,15 @@ textarea:focus-visible {
   min-width: 0;
 }
 
-.account-form__field input {
+.account-form__field input,
+.account-form__field select,
+.account-form__field textarea {
   width: 100%;
+}
+
+.account-form__field textarea {
+  min-height: 5rem;
+  resize: vertical;
 }
 
 .account-form__field--compact {
@@ -1487,7 +1494,8 @@ textarea:focus-visible {
 
 input[type="text"],
 input[type="url"],
-input[type="password"] {
+input[type="password"],
+textarea {
   min-height: 2.5rem;
   padding: 0.65rem 0.75rem;
   border: 1px solid var(--line);

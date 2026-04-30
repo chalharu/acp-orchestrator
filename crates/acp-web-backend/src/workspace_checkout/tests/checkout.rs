@@ -28,9 +28,9 @@ use std::{
 };
 
 fn test_root_dir() -> PathBuf {
-    let root = std::env::current_dir()
-        .expect("workspace checkout tests should start in a readable directory")
-        .join(".tmp");
+    let root = std::env::temp_dir()
+        .join("acp-orchestrator-tests")
+        .join("workspace-checkout");
     std::fs::create_dir_all(&root).expect("workspace checkout test root should be creatable");
     root
 }
@@ -163,9 +163,33 @@ fn corrupt_head_file(repo_path: &Path, contents: &[u8]) {
     std::fs::write(git_dir.join("HEAD"), contents).expect("HEAD should be writable");
 }
 
-fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
+struct ProbePathOverflowFixture {
+    state_dir: PathBuf,
+    created_dirs: Vec<PathBuf>,
+}
+
+impl ProbePathOverflowFixture {
+    fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+}
+
+impl Drop for ProbePathOverflowFixture {
+    fn drop(&mut self) {
+        if let Some(deepest) = self.created_dirs.last() {
+            let _ = std::fs::remove_dir_all(deepest);
+        }
+        for path in self.created_dirs.iter().rev().skip(1) {
+            let _ = std::fs::remove_dir(path);
+        }
+    }
+}
+
+fn state_dir_with_probe_path_overflow(prefix: &str) -> ProbePathOverflowFixture {
     let mut state_dir = unique_test_dir(prefix);
+    let mut created_dirs = Vec::new();
     std::fs::create_dir_all(&state_dir).expect("long state dir root should be creatable");
+    created_dirs.push(state_dir.clone());
     let segment = "aaaaaaaaaaaaaaaa";
     let probe_suffix = format!("remote-head-{}", "a".repeat(32));
     while state_dir
@@ -177,6 +201,7 @@ fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
     {
         state_dir = state_dir.join(segment);
         std::fs::create_dir_all(&state_dir).expect("long state dirs should be creatable");
+        created_dirs.push(state_dir.clone());
     }
     assert!(
         state_dir.join("git-home").to_string_lossy().len() < 4096,
@@ -191,7 +216,10 @@ fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
             > 4095,
         "probe path should overflow the platform path limit"
     );
-    state_dir
+    ProbePathOverflowFixture {
+        state_dir,
+        created_dirs,
+    }
 }
 
 fn fetch_checkout_origin_head(checkout_path: &Path) {
@@ -799,9 +827,9 @@ fn parse_remote_default_branch_name_rejects_invalid_utf8() {
 
 #[test]
 fn resolve_remote_head_ref_reports_probe_directory_creation_failures() {
-    let state_dir = state_dir_with_probe_path_overflow("acp-workspace-checkout-probe-overflow");
+    let fixture = state_dir_with_probe_path_overflow("acp-workspace-checkout-probe-overflow");
 
-    let error = resolve_remote_head_ref("file:///unused.git", &state_dir)
+    let error = resolve_remote_head_ref("file:///unused.git", fixture.state_dir())
         .expect_err("overflowed probe paths should fail before remote access");
 
     assert_io_error_contains(error, "creating git home failed");

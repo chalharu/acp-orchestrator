@@ -137,8 +137,8 @@ OpenCode と local llama.cpp を使う典型 flow は次のとおり。
 
 1. <https://github.com/PrismML-Eng/llama.cpp> を取得して llama-server を build する。
 2. Ternary-Bonsai-8B-Q2_0.gguf を Hugging Face から取得する。
-3. llama-server --model Ternary-Bonsai-8B-Q2_0.gguf -c 4096 --port <LLAMA_PORT> --host 0.0.0.0
-4. ~/.config/opencode/opencode.json の baseURL を http://<host>:<LLAMA_PORT>/v1 にする。
+3. llama-server --model Ternary-Bonsai-8B-Q2_0.gguf -c 4096 --port `LLAMA_PORT` --host 0.0.0.0
+4. ~/.config/opencode/opencode.json の baseURL を `http://HOST:LLAMA_PORT/v1` にする。
 5. cargo run -- --web で ACP orchestrator を起動する。
 6. ACP settings で profile name に `OpenCode ACP`、ACP launch command に次を保存する。
 

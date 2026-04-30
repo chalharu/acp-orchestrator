@@ -72,3 +72,29 @@ fn map_profile_store_error(error: crate::agent_profiles::AgentProfileStoreError)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_profiles::AgentProfileStoreError;
+
+    #[test]
+    fn profile_store_errors_map_to_http_errors() {
+        assert!(matches!(
+            map_profile_store_error(AgentProfileStoreError::NotFound),
+            AppError::NotFound(message) if message == "agent profile not found"
+        ));
+        assert!(matches!(
+            map_profile_store_error(AgentProfileStoreError::Validation("bad".to_string())),
+            AppError::BadRequest(message) if message == "bad"
+        ));
+        assert!(matches!(
+            map_profile_store_error(AgentProfileStoreError::Io("io".to_string())),
+            AppError::Internal(message) if message == "io"
+        ));
+        assert!(matches!(
+            map_profile_store_error(AgentProfileStoreError::Json("json".to_string())),
+            AppError::Internal(message) if message == "json"
+        ));
+    }
+}

@@ -27,6 +27,10 @@ const ACP_PORT_PLACEHOLDER: &str = "${ACP_PORT}";
 const ACP_ENDPOINT_PLACEHOLDER: &str = "${ACP_ENDPOINT}";
 const ACP_BASE_URL_PLACEHOLDER: &str = "${ACP_BASE_URL}";
 const ACP_HOST_PLACEHOLDER: &str = "${ACP_HOST}";
+#[cfg(test)]
+const TEST_FAKE_CGROUP_MARKER: &str = ".acp-test-fake-cgroup-v2";
+#[cfg(test)]
+const TEST_SKIP_CHROOT_PREEXEC_MARKER: &str = ".acp-test-skip-chroot-preexec";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentLaunchMode {
@@ -727,6 +731,8 @@ impl AgentCgroup {
         fs::create_dir_all(&path).map_err(|error| {
             AgentRuntimeError::Io(format!("creating agent session cgroup failed: {error}"))
         })?;
+        #[cfg(test)]
+        create_fake_cgroup_files(root, &path)?;
         if !path.join("cgroup.procs").exists() || !path.join("cgroup.kill").exists() {
             let _ = fs::remove_dir(&path);
             return Err(AgentRuntimeError::Unsupported(
@@ -779,6 +785,20 @@ impl AgentCgroup {
             );
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn create_fake_cgroup_files(root: &Path, path: &Path) -> Result<(), AgentRuntimeError> {
+    if !root.join(TEST_FAKE_CGROUP_MARKER).exists() {
+        return Ok(());
+    }
+    fs::write(path.join("cgroup.procs"), b"").map_err(|error| {
+        AgentRuntimeError::Io(format!("creating fake cgroup.procs failed: {error}"))
+    })?;
+    fs::write(path.join("cgroup.kill"), b"").map_err(|error| {
+        AgentRuntimeError::Io(format!("creating fake cgroup.kill failed: {error}"))
+    })?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -857,6 +877,11 @@ fn configure_chroot_command(
     run_gid: u32,
 ) -> Result<(), AgentRuntimeError> {
     use std::os::unix::{ffi::OsStrExt, process::CommandExt};
+
+    #[cfg(test)]
+    if root_dir.join(TEST_SKIP_CHROOT_PREEXEC_MARKER).exists() {
+        return Ok(());
+    }
 
     let root = CString::new(root_dir.as_os_str().as_bytes()).map_err(|_| {
         AgentRuntimeError::Io("agent chroot root path contains a NUL byte".to_string())
@@ -1115,6 +1140,66 @@ mod tests {
         }
     }
 
+    fn temp_state_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4().simple()))
+    }
+
+    fn checkout_in_state(state_dir: &Path, session_id: &str) -> PreparedWorkspaceCheckout {
+        let root_dir = FsAgentRuntimeManager::root_dir_for_state(state_dir, session_id);
+        let working_dir = root_dir.join("workspace");
+        std::fs::create_dir_all(&working_dir).expect("checkout fixture should be creatable");
+        PreparedWorkspaceCheckout {
+            checkout_relpath: format!("agent-runtimes/{session_id}/root/workspace"),
+            checkout_ref: None,
+            checkout_commit_sha: None,
+            working_dir,
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_agent_identity() -> (u32, u32) {
+        unsafe {
+            let uid = libc::geteuid() as u32;
+            let gid = libc::getegid() as u32;
+            if uid == 0 {
+                (DEFAULT_AGENT_RUN_UID, DEFAULT_AGENT_RUN_GID)
+            } else {
+                (uid, gid)
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_cgroup_root() -> PathBuf {
+        let root = temp_state_dir("acp-agent-fake-cgroup");
+        std::fs::create_dir_all(&root).expect("fake cgroup root should be creatable");
+        std::fs::write(root.join(TEST_FAKE_CGROUP_MARKER), b"")
+            .expect("fake cgroup marker should be writable");
+        root
+    }
+
+    #[cfg(target_os = "linux")]
+    fn python3_path() -> String {
+        for candidate in [
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/opt/yamllint/bin/python3",
+        ] {
+            if Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("python3"))
+                    .find(|candidate| candidate.exists())
+            })
+            .expect("python3 should be available")
+            .display()
+            .to_string()
+    }
+
     #[test]
     fn launch_config_validation_requires_command() {
         assert_eq!(
@@ -1157,6 +1242,35 @@ mod tests {
             )
             .expect_err("unsafe env names should fail"),
             AgentLaunchConfigError::InvalidEnvName("bad-name".to_string())
+        );
+    }
+
+    #[test]
+    fn launch_config_validation_accepts_safe_env_names() {
+        let config = AgentLaunchConfig::chroot(
+            vec!["agent".to_string()],
+            vec!["_ACP_OK".to_string(), "ACP1".to_string()],
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            DEFAULT_AGENT_RUN_UID,
+            DEFAULT_AGENT_RUN_GID,
+        )
+        .expect("safe env names should validate");
+
+        assert_eq!(config.mode.as_str(), "chroot");
+    }
+
+    #[test]
+    fn launch_config_validation_rejects_empty_env_name() {
+        assert_eq!(
+            AgentLaunchConfig::chroot(
+                vec!["agent".to_string()],
+                vec![String::new()],
+                DEFAULT_AGENT_LAUNCH_TIMEOUT,
+                DEFAULT_AGENT_RUN_UID,
+                DEFAULT_AGENT_RUN_GID,
+            )
+            .expect_err("empty env names should fail"),
+            AgentLaunchConfigError::InvalidEnvName(String::new())
         );
     }
 
@@ -1220,6 +1334,114 @@ mod tests {
     }
 
     #[test]
+    fn runtime_error_display_messages_are_specific() {
+        assert_eq!(
+            AgentLaunchConfigError::EmptyArgvElement.to_string(),
+            "agent command argv elements must not be empty"
+        );
+        assert_eq!(
+            AgentLaunchConfigError::InvalidTimeout.to_string(),
+            "agent launch timeout must be greater than zero"
+        );
+        assert_eq!(
+            AgentLaunchConfigError::RootRunUid.to_string(),
+            "agent run uid must be non-root"
+        );
+        assert_eq!(
+            AgentLaunchConfigError::RootRunGid.to_string(),
+            "agent run gid must be non-root"
+        );
+        assert_eq!(
+            AgentLaunchConfigError::InvalidEnvName("bad-name".to_string()).to_string(),
+            "agent env allowlist name is invalid: bad-name"
+        );
+        assert_eq!(
+            AgentRuntimeError::from(AgentLaunchConfigError::MissingCommand).to_string(),
+            "agent command is required in chroot mode"
+        );
+        assert_eq!(
+            AgentRuntimeError::Io("io failed".to_string()).to_string(),
+            "io failed"
+        );
+        assert_eq!(
+            AgentRuntimeError::Unsupported("unsupported".to_string()).to_string(),
+            "unsupported"
+        );
+        assert_eq!(
+            AgentRuntimeError::AlreadyRunning("s_test".to_string()).to_string(),
+            "agent runtime already exists for session s_test"
+        );
+        assert_eq!(
+            AgentRuntimeError::LaunchTimedOut(Duration::from_secs(2)).to_string(),
+            "agent launch timed out after 2s"
+        );
+    }
+
+    #[derive(Debug)]
+    struct PanicAgentRuntimeManager;
+
+    impl AgentRuntimeManager for PanicAgentRuntimeManager {
+        fn launch_session(
+            &self,
+            _launch: &AgentSessionLaunch<'_>,
+        ) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
+            panic!("join failure fixture");
+        }
+
+        fn forget_session(&self, _session_id: &str) {}
+    }
+
+    #[tokio::test]
+    async fn launch_session_blocking_reports_join_failures() {
+        let error = launch_session_blocking(
+            Arc::new(PanicAgentRuntimeManager),
+            "s_test".to_string(),
+            "w_test".to_string(),
+            sample_checkout(),
+            None,
+        )
+        .await
+        .expect_err("panic should become join failure");
+
+        assert!(matches!(
+            error,
+            AgentRuntimeError::Io(message)
+                if message.starts_with("joining agent runtime launch failed:")
+        ));
+    }
+
+    #[derive(Debug)]
+    struct MetadataAgentRuntimeManager;
+
+    impl AgentRuntimeManager for MetadataAgentRuntimeManager {
+        fn launch_session(
+            &self,
+            _launch: &AgentSessionLaunch<'_>,
+        ) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
+            Ok(AgentLaunchMetadata {
+                acp_address: Some("127.0.0.1:4567".to_string()),
+            })
+        }
+
+        fn forget_session(&self, _session_id: &str) {}
+    }
+
+    #[tokio::test]
+    async fn launch_session_blocking_returns_runtime_metadata() {
+        let metadata = launch_session_blocking(
+            Arc::new(MetadataAgentRuntimeManager),
+            "s_test".to_string(),
+            "w_test".to_string(),
+            sample_checkout(),
+            None,
+        )
+        .await
+        .expect("metadata launch should succeed");
+
+        assert_eq!(metadata.acp_address.as_deref(), Some("127.0.0.1:4567"));
+    }
+
+    #[test]
     fn argv_placeholders_expand_only_when_endpoint_allocated() {
         let endpoint = AcpEndpoint {
             address: "127.0.0.1:4567".to_string(),
@@ -1249,6 +1471,13 @@ mod tests {
     }
 
     #[test]
+    fn argv_placeholders_remain_literal_without_endpoint() {
+        let command = vec!["agent".to_string(), "--port=${ACP_PORT}".to_string()];
+
+        assert_eq!(expand_agent_argv(&command, None), command);
+    }
+
+    #[test]
     fn detects_acp_placeholders_in_argv() {
         assert!(contains_acp_placeholder("--port=${ACP_PORT}"));
         assert!(contains_acp_placeholder("${ACP_ENDPOINT}"));
@@ -1258,11 +1487,94 @@ mod tests {
     }
 
     #[test]
+    fn acp_endpoint_is_reserved_only_when_command_uses_placeholders() {
+        assert!(
+            AcpEndpoint::reserve_for_command(&["agent".to_string()])
+                .expect("reservation check should succeed")
+                .is_none()
+        );
+        let reserved = AcpEndpoint::reserve_for_command(&["${ACP_PORT}".to_string()])
+            .expect("placeholder command should reserve a port")
+            .expect("reservation should be present");
+
+        assert_eq!(
+            reserved.endpoint.address,
+            format!("127.0.0.1:{}", reserved.endpoint.port)
+        );
+        drop(reserved);
+    }
+
+    #[test]
+    fn build_agent_command_injects_structured_env_and_allowed_values() {
+        let (env_name, command) = built_agent_command_fixture();
+
+        assert_eq!(command.get_program(), "/bin/echo");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["4567"]);
+        let envs = command_envs(&command);
+        assert_eq!(
+            envs.get(&env_name).and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("allowed"))
+        );
+        assert_eq!(
+            envs.get("ACP_SESSION_ID")
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("s_test"))
+        );
+        assert_eq!(
+            envs.get("ACP_PORT").and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("4567"))
+        );
+    }
+
+    fn built_agent_command_fixture() -> (String, Command) {
+        let env_name = format!("ACP_TEST_ALLOWED_{}", uuid::Uuid::new_v4().simple());
+        unsafe {
+            std::env::set_var(&env_name, "allowed");
+        }
+        let config = AgentLaunchConfig::chroot(
+            vec!["/bin/echo".to_string(), "${ACP_PORT}".to_string()],
+            vec![env_name.clone()],
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            DEFAULT_AGENT_RUN_UID,
+            DEFAULT_AGENT_RUN_GID,
+        )
+        .expect("config should validate");
+        let checkout = sample_checkout();
+        let launch = AgentSessionLaunch {
+            session_id: "s_test",
+            workspace_id: "w_test",
+            checkout: &checkout,
+            config: Some(config.clone()),
+        };
+        let command = build_agent_command(&config, &launch, Some(&endpoint_fixture()));
+        unsafe {
+            std::env::remove_var(&env_name);
+        }
+        (env_name, command)
+    }
+
+    fn endpoint_fixture() -> AcpEndpoint {
+        AcpEndpoint {
+            address: "127.0.0.1:4567".to_string(),
+            port: 4567,
+        }
+    }
+
+    fn command_envs(command: &Command) -> HashMap<String, Option<std::ffi::OsString>> {
+        command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_os_string()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
     fn runtime_forget_removes_runtime_directory_without_launching() {
-        let state_dir = std::env::temp_dir().join(format!(
-            "acp-agent-runtime-cleanup-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let state_dir = temp_state_dir("acp-agent-runtime-cleanup");
         let runtime_dir = FsAgentRuntimeManager::runtime_dir_for_state(&state_dir, "s_test");
         std::fs::create_dir_all(runtime_dir.join("root/workspace"))
             .expect("runtime fixture should be creatable");
@@ -1272,6 +1584,69 @@ mod tests {
         manager.forget_session("s_test");
 
         assert!(!runtime_dir.exists(), "forget should remove runtime roots");
+    }
+
+    #[test]
+    fn runtime_paths_are_scoped_by_state_and_session() {
+        let state_dir = PathBuf::from("/state");
+        let manager =
+            FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should build");
+
+        assert_eq!(
+            FsAgentRuntimeManager::runtime_dir_for_state(&state_dir, "s_test"),
+            PathBuf::from("/state/agent-runtimes/s_test")
+        );
+        assert_eq!(
+            FsAgentRuntimeManager::root_dir_for_state(&state_dir, "s_test"),
+            PathBuf::from("/state/agent-runtimes/s_test/root")
+        );
+        assert_eq!(
+            manager.runtime_dir("s_test"),
+            PathBuf::from("/state/agent-runtimes/s_test")
+        );
+        assert_eq!(
+            manager.root_dir("s_test"),
+            PathBuf::from("/state/agent-runtimes/s_test/root")
+        );
+    }
+
+    #[test]
+    fn manager_new_validates_config() {
+        let error = FsAgentRuntimeManager::new_with_cgroup_root(
+            temp_state_dir("acp-agent-invalid-manager-config"),
+            Some(AgentLaunchConfig {
+                mode: AgentLaunchMode::Chroot,
+                command: Vec::new(),
+                env_allowlist: Vec::new(),
+                timeout: DEFAULT_AGENT_LAUNCH_TIMEOUT,
+                run_uid: DEFAULT_AGENT_RUN_UID,
+                run_gid: DEFAULT_AGENT_RUN_GID,
+            }),
+            None,
+        )
+        .expect_err("invalid manager config should fail");
+
+        assert!(matches!(
+            error,
+            AgentRuntimeError::Config(AgentLaunchConfigError::MissingCommand)
+        ));
+    }
+
+    #[test]
+    fn fs_runtime_without_config_returns_default_metadata() {
+        let manager = FsAgentRuntimeManager::new(temp_state_dir("acp-agent-no-config"), None)
+            .expect("manager should build");
+        let checkout = sample_checkout();
+        let metadata = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id: "s_test",
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: None,
+            })
+            .expect("missing config should be a noop");
+
+        assert_eq!(metadata, AgentLaunchMetadata::default());
     }
 
     #[cfg(unix)]
@@ -1432,6 +1807,471 @@ mod tests {
             .expect("second launch should reserve");
         manager.clear_launch_reservation("s_test", second_launch_id);
         waiter.join().expect("waiter should finish");
+    }
+
+    #[test]
+    fn running_launch_metadata_errors_when_session_is_not_running() {
+        let manager = FsAgentRuntimeManager::new(temp_state_dir("acp-agent-no-running"), None)
+            .expect("manager should build");
+        let error = manager
+            .running_launch_metadata("s_test")
+            .expect_err("missing running child should fail");
+
+        assert!(matches!(error, AgentRuntimeError::AlreadyRunning(session) if session == "s_test"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_launched_child_cleans_up_when_reservation_disappears() {
+        let manager = FsAgentRuntimeManager::new(temp_state_dir("acp-agent-cancelled-store"), None)
+            .expect("manager should build");
+        let child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = child.id();
+        let error = manager
+            .store_launched_child(
+                "s_test",
+                7,
+                AgentChild {
+                    child,
+                    cgroup: None,
+                    metadata: AgentLaunchMetadata::default(),
+                },
+            )
+            .expect_err("missing reservation should fail");
+
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message == "agent runtime launch was cancelled")
+        );
+        assert!(
+            !process_is_running(pid),
+            "cancelled store should kill child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_launched_child_handles_mismatched_and_running_slots() {
+        let manager =
+            FsAgentRuntimeManager::new(temp_state_dir("acp-agent-mismatched-store"), None)
+                .expect("manager should build");
+        manager
+            .children
+            .lock()
+            .expect("registry should lock")
+            .slots
+            .insert("s_test".to_string(), AgentChildSlot::Launching(1));
+        let mismatched = manager.store_launched_child("s_test", 2, spawn_sleep_child());
+        assert!(
+            matches!(mismatched, Err(AgentRuntimeError::Io(message)) if message == "agent runtime launch was cancelled")
+        );
+
+        let running_child = spawn_sleep_child();
+        manager
+            .children
+            .lock()
+            .expect("registry should lock")
+            .slots
+            .insert("s_test".to_string(), AgentChildSlot::Running(running_child));
+        let running = manager.store_launched_child("s_test", 3, spawn_sleep_child());
+        assert!(
+            matches!(running, Err(AgentRuntimeError::AlreadyRunning(session)) if session == "s_test")
+        );
+        manager.forget_session("s_test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_acp_readiness_handles_ready_exit_and_timeout_paths() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
+        let endpoint = AcpEndpoint {
+            address: listener.local_addr().expect("listener address").to_string(),
+            port: listener.local_addr().expect("listener address").port(),
+        };
+        let mut child = spawn_sleep_child();
+        wait_for_acp_readiness(Some(&endpoint), Duration::from_secs(1), &mut child)
+            .expect("listening endpoint should be ready");
+        terminate_agent_child(&mut child);
+
+        let mut exited = spawn_true_child();
+        let error = wait_for_acp_readiness(
+            Some(&closed_endpoint()),
+            Duration::from_secs(1),
+            &mut exited,
+        )
+        .expect_err("exited child should fail readiness");
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message.contains("exited before ACP endpoint"))
+        );
+
+        let mut sleeping = spawn_sleep_child();
+        let error = wait_for_acp_readiness(
+            Some(&closed_endpoint()),
+            Duration::from_millis(1),
+            &mut sleeping,
+        )
+        .expect_err("sleeping child should time out");
+        terminate_agent_child(&mut sleeping);
+        assert!(matches!(error, AgentRuntimeError::LaunchTimedOut(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_acp_readiness_accepts_missing_endpoint_and_bad_addresses_fail() {
+        let mut child = spawn_sleep_child();
+        wait_for_acp_readiness(None, Duration::from_millis(1), &mut child)
+            .expect("missing endpoint should not wait");
+        let error = wait_for_acp_readiness(
+            Some(&AcpEndpoint {
+                address: "not-an-address".to_string(),
+                port: 0,
+            }),
+            Duration::from_millis(1),
+            &mut child,
+        )
+        .expect_err("bad endpoint address should fail");
+        terminate_agent_child(&mut child);
+
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message.contains("parsing ACP endpoint"))
+        );
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleep_child() -> AgentChild {
+        AgentChild {
+            child: Command::new("/bin/sleep")
+                .arg("60")
+                .spawn()
+                .expect("sleep child should spawn"),
+            cgroup: None,
+            metadata: AgentLaunchMetadata::default(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_true_child() -> AgentChild {
+        AgentChild {
+            child: Command::new("/bin/true")
+                .spawn()
+                .expect("true child should spawn"),
+            cgroup: None,
+            metadata: AgentLaunchMetadata::default(),
+        }
+    }
+
+    fn closed_endpoint() -> AcpEndpoint {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
+        let address = listener.local_addr().expect("listener address");
+        drop(listener);
+        AcpEndpoint {
+            address: address.to_string(),
+            port: address.port(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepare_cgroup_supports_fake_cgroup_fixture() {
+        let root = fake_cgroup_root();
+        let cgroup = AgentCgroup::prepare(&root, "s_test").expect("fake cgroup should prepare");
+
+        assert!(cgroup.path.join("cgroup.procs").exists());
+        assert!(cgroup.path.join("cgroup.kill").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepare_cgroup_cleans_stale_fake_cgroups() {
+        let root = fake_cgroup_root();
+        let stale = root.join("s_test");
+        std::fs::create_dir_all(&stale).expect("stale cgroup should be creatable");
+        std::fs::write(stale.join("cgroup.procs"), b"").expect("stale procs should write");
+        std::fs::write(stale.join("cgroup.kill"), b"").expect("stale kill should write");
+
+        let cgroup = AgentCgroup::prepare(&root, "s_test").expect("fake cgroup should prepare");
+
+        assert!(cgroup.path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepare_cgroup_rejects_plain_directories() {
+        let root = temp_state_dir("acp-agent-plain-cgroup");
+        let error =
+            AgentCgroup::prepare(&root, "s_test").expect_err("plain directories are not cgroup v2");
+
+        assert!(
+            matches!(error, AgentRuntimeError::Unsupported(message) if message.contains("cgroup v2"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepare_session_cgroup_requires_linux_root() {
+        let manager = FsAgentRuntimeManager::new_with_cgroup_root(
+            temp_state_dir("acp-agent-no-cgroup-root"),
+            None,
+            None,
+        )
+        .expect("manager should build");
+        let error = manager
+            .prepare_session_cgroup("s_test")
+            .expect_err("missing cgroup root should fail");
+
+        assert!(
+            matches!(error, AgentRuntimeError::Unsupported(message) if message.contains("requires a Linux cgroup"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configure_chroot_command_accepts_fake_cgroup_without_spawning() {
+        let root_dir = temp_state_dir("acp-agent-configure-chroot");
+        std::fs::create_dir_all(&root_dir).expect("root fixture should be creatable");
+        let cgroup_root = fake_cgroup_root();
+        let cgroup = AgentCgroup::prepare(&cgroup_root, "s_test").expect("cgroup should prepare");
+        let (uid, gid) = test_agent_identity();
+        let mut command = Command::new("/bin/true");
+
+        configure_chroot_command(&mut command, &root_dir, &cgroup, uid, gid)
+            .expect("valid chroot command should configure");
+
+        let _ = std::fs::remove_dir_all(root_dir);
+        let _ = std::fs::remove_dir_all(cgroup_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn syscall_helpers_cover_success_and_error_results() {
+        assert!(check_nonnegative_syscall(0).is_ok());
+        assert!(check_nonnegative_syscall(-1).is_err());
+        assert!(check_zero_syscall(0).is_ok());
+        assert!(check_zero_syscall(-1).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_current_process_to_cgroup_writes_pid_to_path() {
+        let path = temp_state_dir("acp-agent-cgroup-procs").join("cgroup.procs");
+        std::fs::create_dir_all(path.parent().expect("procs parent"))
+            .expect("procs parent should be creatable");
+        std::fs::write(&path, b"").expect("procs file should be writable");
+        let cgroup_procs = CString::new(path.as_os_str().as_encoded_bytes())
+            .expect("test path should not contain NUL");
+
+        move_current_process_to_cgroup(&cgroup_procs).expect("pid should write");
+
+        assert!(
+            !std::fs::read_to_string(&path)
+                .expect("procs should read")
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(path.parent().expect("procs parent"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn move_current_process_to_cgroup_reports_open_failures() {
+        let path = temp_state_dir("acp-agent-missing-cgroup-procs").join("missing");
+        let cgroup_procs = CString::new(path.as_os_str().as_encoded_bytes())
+            .expect("test path should not contain NUL");
+
+        assert!(move_current_process_to_cgroup(&cgroup_procs).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_kill_falls_back_to_listed_processes() {
+        let cgroup_path = temp_state_dir("acp-agent-cgroup-kill-fallback");
+        std::fs::create_dir_all(&cgroup_path).expect("fake cgroup should be creatable");
+        std::fs::create_dir(cgroup_path.join("cgroup.kill"))
+            .expect("fake cgroup.kill directory should be creatable");
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = child.id();
+        std::fs::write(
+            cgroup_path.join("cgroup.procs"),
+            format!("invalid\n{pid}\n"),
+        )
+        .expect("fake cgroup.procs should be writable");
+        let cgroup = AgentCgroup { path: cgroup_path };
+
+        cgroup.kill();
+        let _ = child.wait();
+
+        assert!(
+            !process_is_running(pid),
+            "fallback kill should terminate child"
+        );
+        let _ = std::fs::remove_dir_all(cgroup.path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn chown_workspace_handles_files_and_nested_directories_for_current_identity() {
+        let (uid, gid) = test_agent_identity();
+        let workspace = temp_state_dir("acp-agent-chown-current");
+        let nested = workspace.join("nested");
+        std::fs::create_dir_all(&nested).expect("workspace fixture should be creatable");
+        std::fs::write(nested.join("file.txt"), b"data")
+            .expect("workspace file should be writable");
+
+        chown_workspace_for_agent(&workspace, uid, gid).expect("current owner chown should work");
+        chown_workspace_for_agent(&nested.join("file.txt"), uid, gid)
+            .expect("file chown should work");
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn chown_workspace_reports_missing_paths() {
+        let (uid, gid) = test_agent_identity();
+        let error = chown_workspace_for_agent(&temp_state_dir("acp-agent-missing-chown"), uid, gid)
+            .expect_err("missing chown path should fail");
+
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message.contains("assigning agent workspace ownership failed"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_chroot_binds_reserved_endpoint_with_fake_cgroup() {
+        let state_dir = temp_state_dir("acp-agent-launch-chroot");
+        let session_id = "s_test";
+        let checkout = checkout_in_state(&state_dir, session_id);
+        let root_dir = FsAgentRuntimeManager::root_dir_for_state(&state_dir, session_id);
+        std::fs::write(root_dir.join(TEST_SKIP_CHROOT_PREEXEC_MARKER), b"")
+            .expect("skip marker should be writable");
+        let cgroup_root = fake_cgroup_root();
+        let manager = FsAgentRuntimeManager::new_with_cgroup_root(
+            state_dir.clone(),
+            None,
+            Some(cgroup_root.clone()),
+        )
+        .expect("manager should build");
+        let config = python_acp_server_config();
+
+        let metadata = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id,
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect("fake chroot launch should succeed");
+
+        assert!(metadata.acp_address.as_deref().is_some_and(|address| {
+            address.starts_with("127.0.0.1:") && address.len() > "127.0.0.1:".len()
+        }));
+        manager.forget_session(session_id);
+        let _ = std::fs::remove_dir_all(state_dir);
+        let _ = std::fs::remove_dir_all(cgroup_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_chroot_cleans_up_when_endpoint_never_becomes_ready() {
+        let state_dir = temp_state_dir("acp-agent-launch-not-ready");
+        let session_id = "s_test";
+        let checkout = checkout_in_state(&state_dir, session_id);
+        let root_dir = FsAgentRuntimeManager::root_dir_for_state(&state_dir, session_id);
+        std::fs::write(root_dir.join(TEST_SKIP_CHROOT_PREEXEC_MARKER), b"")
+            .expect("skip marker should be writable");
+        let cgroup_root = fake_cgroup_root();
+        let manager = FsAgentRuntimeManager::new_with_cgroup_root(
+            state_dir.clone(),
+            None,
+            Some(cgroup_root.clone()),
+        )
+        .expect("manager should build");
+        let (uid, gid) = test_agent_identity();
+        let config = AgentLaunchConfig::chroot(
+            vec!["/bin/true".to_string(), "${ACP_PORT}".to_string()],
+            Vec::new(),
+            Duration::from_secs(1),
+            uid,
+            gid,
+        )
+        .expect("config should validate");
+
+        let error = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id,
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect_err("launch without listening endpoint should fail");
+
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message.contains("exited before ACP endpoint"))
+        );
+        let _ = std::fs::remove_dir_all(state_dir);
+        let _ = std::fs::remove_dir_all(cgroup_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn python_acp_server_config() -> AgentLaunchConfig {
+        let (uid, gid) = test_agent_identity();
+        AgentLaunchConfig::chroot(
+            vec![
+                python3_path(),
+                "-c".to_string(),
+                python_acp_server_script(),
+                "${ACP_PORT}".to_string(),
+            ],
+            Vec::new(),
+            Duration::from_secs(5),
+            uid,
+            gid,
+        )
+        .expect("python ACP server config should validate")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn python_acp_server_script() -> String {
+        "import os,socket,time;\
+         s=socket.socket();\
+         s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);\
+         s.bind(('127.0.0.1',int(os.environ['ACP_PORT'])));\
+         s.listen(1);\
+         time.sleep(60)"
+            .to_string()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_helpers_cover_error_timeout_and_cleanup_paths() {
+        let missing = Command::new("/definitely/missing/acp-agent");
+        let cgroup = fake_agent_cgroup("spawn-error");
+        let error = spawn_with_timeout(missing, Duration::from_secs(1), Some(cgroup.clone()), None)
+            .expect_err("missing binary should fail");
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message.contains("spawning agent process failed"))
+        );
+
+        cleanup_unsent_spawn_result(Ok(spawn_sleep_child()), None);
+        assert!(launch_timed_out(Duration::from_millis(1), Some(&cgroup)).is_err());
+        let _ = std::fs::remove_dir_all(cgroup.path);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_agent_cgroup(name: &str) -> AgentCgroup {
+        let path = temp_state_dir(&format!("acp-agent-cgroup-{name}"));
+        std::fs::create_dir_all(&path).expect("fake cgroup should be creatable");
+        std::fs::write(path.join("cgroup.kill"), b"").expect("fake cgroup.kill should write");
+        std::fs::write(path.join("cgroup.procs"), b"").expect("fake cgroup.procs should write");
+        AgentCgroup { path }
     }
 
     #[cfg(target_os = "linux")]

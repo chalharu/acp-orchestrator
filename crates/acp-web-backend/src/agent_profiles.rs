@@ -306,6 +306,220 @@ mod tests {
     }
 
     #[test]
+    fn profile_store_loads_existing_profiles_and_builds_runtime_config() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-load-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let profile = store
+            .upsert_profile(
+                "opencode",
+                request(vec!["opencode".to_string(), "acp".to_string()]),
+            )
+            .expect("profile should save");
+        drop(store);
+
+        let reloaded = AgentProfileStore::new(&state_dir).expect("store should reload");
+        let config = reloaded
+            .profile_config(Some("opencode"))
+            .expect("profile config should load")
+            .expect("profile config should exist");
+
+        assert_eq!(reloaded.list_profiles().expect("list"), vec![profile]);
+        assert_eq!(config.command, vec!["opencode", "acp"]);
+    }
+
+    #[test]
+    fn profile_store_returns_none_without_profile_selection() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-none-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+
+        assert!(store.profile_config(None).expect("none config").is_none());
+    }
+
+    #[test]
+    fn profile_store_reports_missing_profiles() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-missing-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let error = store
+            .profile_config(Some("missing"))
+            .expect_err("missing profile should fail");
+
+        assert_eq!(error.message(), "agent profile not found");
+    }
+
+    #[test]
+    fn profile_store_rejects_blank_profile_names() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-blank-name-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let mut invalid = request(vec!["opencode".to_string()]);
+        invalid.name = "   ".to_string();
+        let error = store
+            .create_profile(invalid)
+            .expect_err("blank profile name should fail");
+
+        assert!(matches!(
+            error,
+            AgentProfileStoreError::Validation(message)
+                if message == "profile name must not be empty"
+        ));
+    }
+
+    #[test]
+    fn profile_store_rejects_invalid_profile_ids() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-bad-id-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let error = store
+            .upsert_profile("bad/id", request(vec!["opencode".to_string()]))
+            .expect_err("invalid ids should fail");
+
+        assert!(matches!(
+            error,
+            AgentProfileStoreError::Validation(message) if message == "profile id is invalid"
+        ));
+    }
+
+    #[test]
+    fn profile_store_rejects_corrupt_profile_files() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-corrupt-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&state_dir).expect("state dir should be creatable");
+        std::fs::write(state_dir.join(PROFILES_FILE), b"not-json")
+            .expect("corrupt profile fixture should be writable");
+        let error =
+            AgentProfileStore::new(&state_dir).expect_err("corrupt profile file should fail");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Json(message) if message.contains("parsing agent profiles failed"))
+        );
+    }
+
+    #[test]
+    fn profile_store_reports_state_directory_creation_failures() {
+        let file_path = std::env::temp_dir().join(format!(
+            "acp-profile-store-file-parent-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&file_path, b"not a directory").expect("file fixture should be writable");
+        let error = AgentProfileStore::new(&file_path.join("child"))
+            .expect_err("file parent should fail directory creation");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message.contains("creating profile state directory failed"))
+        );
+        let _ = std::fs::remove_file(file_path);
+    }
+
+    #[test]
+    fn profile_store_reports_profile_read_failures() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-read-error-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(state_dir.join(PROFILES_FILE))
+            .expect("directory fixture should be creatable");
+        let error = AgentProfileStore::new(&state_dir).expect_err("directory read should fail");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message.contains("reading agent profiles failed"))
+        );
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn profile_store_reports_temporary_file_creation_failures() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "acp-profile-missing-dir-{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .join(PROFILES_FILE);
+        let profiles = BTreeMap::new();
+        let error =
+            write_profiles(&path, &profiles).expect_err("missing parent should fail temp create");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message.contains("creating temporary agent profiles failed"))
+        );
+    }
+
+    #[test]
+    fn profile_store_reports_replace_failures() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-replace-error-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = state_dir.join(PROFILES_FILE);
+        std::fs::create_dir_all(&path).expect("directory target should be creatable");
+        let profiles = BTreeMap::new();
+        let error = write_profiles(&path, &profiles).expect_err("directory replace should fail");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message.contains("replacing agent profiles failed"))
+        );
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn profile_store_reports_poisoned_locks() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-poison-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = std::sync::Arc::new(AgentProfileStore::new(&state_dir).expect("store"));
+        let poisoned = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.profiles.lock().expect("lock should succeed");
+            panic!("poison profile store");
+        })
+        .join();
+
+        let error = store
+            .list_profiles()
+            .expect_err("poisoned lock should fail");
+
+        assert!(
+            matches!(error, AgentProfileStoreError::Io(message) if message == "agent profile store lock is poisoned")
+        );
+    }
+
+    #[test]
+    fn profile_store_rejects_invalid_stored_profiles() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-invalid-file-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&state_dir).expect("state dir should be creatable");
+        std::fs::write(
+            state_dir.join(PROFILES_FILE),
+            r#"{"profiles":[{"id":"bad/id","name":"Bad","mode":"chroot","command_argv":["agent"],"env_allowlist":[],"timeout_seconds":30,"run_uid":65534,"run_gid":65534}]}"#,
+        )
+        .expect("invalid profile fixture should be writable");
+        let error =
+            AgentProfileStore::new(&state_dir).expect_err("invalid stored profile should fail");
+
+        assert!(matches!(
+            error,
+            AgentProfileStoreError::Validation(message) if message == "profile id is invalid"
+        ));
+    }
+
+    #[test]
     fn profile_store_rejects_invalid_command() {
         let state_dir = std::env::temp_dir().join(format!(
             "acp-profile-store-invalid-{}",

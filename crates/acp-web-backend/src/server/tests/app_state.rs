@@ -224,6 +224,9 @@ fn app_state_build_errors_format_and_expose_sources() {
     let runtime_error = AppStateBuildError::from(crate::agent_runtime::AgentRuntimeError::Io(
         "runtime failed".to_string(),
     ));
+    let profiles_error = AppStateBuildError::from(
+        crate::agent_profiles::AgentProfileStoreError::Validation("profiles failed".to_string()),
+    );
 
     assert_eq!(
         reply_error.to_string(),
@@ -249,6 +252,8 @@ fn app_state_build_errors_format_and_expose_sources() {
             .to_string(),
         "runtime failed"
     );
+    assert_eq!(profiles_error.to_string(), "profiles failed");
+    assert!(std::error::Error::source(&profiles_error).is_none());
 }
 
 #[test]

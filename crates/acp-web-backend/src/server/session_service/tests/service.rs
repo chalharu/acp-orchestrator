@@ -1,9 +1,11 @@
 use super::super::super::{AppError, AppState, OwnerContext};
 use super::super::{
-    cleanup_checkout_path_best_effort, load_checkout_cleanup_path_best_effort, map_checkout_error,
-    persist_failed_session_lifecycle, persist_provisioning_session_lifecycle,
+    cleanup_checkout_path_best_effort, load_checkout_cleanup_path_best_effort,
+    map_agent_profile_error, map_checkout_error, persist_failed_session_lifecycle,
+    persist_provisioning_session_lifecycle,
 };
 use crate::{
+    agent_profiles::AgentProfileStoreError,
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_accounts::LocalAccount,
     contract_sessions::SessionStatus,
@@ -589,5 +591,25 @@ fn checkout_errors_map_to_public_http_errors() {
             "git failed".to_string()
         )),
         AppError::Internal(message) if message == "checkout preparation failed"
+    ));
+}
+
+#[test]
+fn agent_profile_errors_map_to_public_http_errors() {
+    assert!(matches!(
+        map_agent_profile_error(AgentProfileStoreError::NotFound),
+        AppError::BadRequest(message) if message == "agent profile not found"
+    ));
+    assert!(matches!(
+        map_agent_profile_error(AgentProfileStoreError::Validation("bad profile".to_string())),
+        AppError::BadRequest(message) if message == "bad profile"
+    ));
+    assert!(matches!(
+        map_agent_profile_error(AgentProfileStoreError::Io("io failed".to_string())),
+        AppError::Internal(message) if message == "io failed"
+    ));
+    assert!(matches!(
+        map_agent_profile_error(AgentProfileStoreError::Json("json failed".to_string())),
+        AppError::Internal(message) if message == "json failed"
     ));
 }

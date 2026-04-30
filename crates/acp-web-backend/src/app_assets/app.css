@@ -1098,6 +1098,10 @@ textarea:focus-visible {
   align-items: end;
 }
 
+.agent-profile-form {
+  grid-template-columns: minmax(12rem, 0.9fr) minmax(18rem, 1.6fr) minmax(10rem, 0.7fr) auto;
+}
+
 .account-form__field {
   display: grid;
   gap: 0.35rem;

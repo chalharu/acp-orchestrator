@@ -61,16 +61,19 @@ pub struct CreateSessionRequest {
     pub agent_profile_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentProfileMode {
+    #[default]
     Chroot,
+    Host,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProfile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub mode: AgentProfileMode,
     pub command_argv: Vec<String>,
     #[serde(default)]
@@ -96,8 +99,14 @@ pub struct AgentProfileResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteAgentProfileResponse {
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpsertAgentProfileRequest {
     pub name: String,
+    #[serde(default)]
     pub mode: AgentProfileMode,
     pub command_argv: Vec<String>,
     #[serde(default)]
@@ -199,17 +208,22 @@ mod tests {
     fn agent_profile_mode_uses_snake_case() {
         let value = serde_json::to_value(AgentProfileMode::Chroot).expect("serialize mode");
         assert_eq!(value, serde_json::json!("chroot"));
+        let value = serde_json::to_value(AgentProfileMode::Host).expect("serialize host mode");
+        assert_eq!(value, serde_json::json!("host"));
+        let mode: AgentProfileMode =
+            serde_json::from_value(serde_json::json!("host")).expect("deserialize host mode");
+        assert_eq!(mode, AgentProfileMode::Host);
     }
 
     #[test]
     fn upsert_agent_profile_request_defaults_runtime_fields() {
         let request: super::UpsertAgentProfileRequest = serde_json::from_value(serde_json::json!({
             "name": "OpenCode ACP",
-            "mode": "chroot",
             "command_argv": ["opencode", "acp"]
         }))
         .expect("profile request should deserialize");
 
+        assert_eq!(request.mode, AgentProfileMode::Chroot);
         assert!(request.env_allowlist.is_empty());
         assert_eq!(request.timeout_seconds, 30);
         assert_eq!(request.run_uid, 65_534);

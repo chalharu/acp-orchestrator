@@ -4,6 +4,7 @@ use crate::presentation::{AppIcon, app_icon_view};
 use crate::{application::auth::AccountsRouteAccess, components::ErrorBanner};
 
 use super::{
+    agent_profiles::AgentProfilesSection,
     create_account::CreateAccountSection,
     registry::current_accounts_section,
     shared::{
@@ -67,7 +68,7 @@ fn accounts_page_shell(
             <ErrorBanner message=state.error />
             <section class="panel account-panel">
                 <div class="account-panel__header">
-                    <h1>"Accounts"</h1>
+                    <h1>"Settings"</h1>
                     <div class="account-panel__header-actions">
                         {accounts_back_link_view(&back_to_chat_href)}
                         <Show when=move || accounts_page_shows_sign_out(state.access.get())>
@@ -154,7 +155,7 @@ fn accounts_page_shell(
             <ErrorBanner message=state.error />
             <section class="panel account-panel">
                 <div class="account-panel__header">
-                    <h1>"Accounts"</h1>
+                    <h1>"Settings"</h1>
                     <div class="account-panel__header-actions">
                         {accounts_back_link_view(&back_to_chat_href)}
                         {sign_out_button}
@@ -190,6 +191,7 @@ fn accounts_page_content_body(
         Some(AccountsRouteAccess::Admin(_)) => view! {
             <CreateAccountSection state />
             {current_accounts_section(state)}
+            <AgentProfilesSection state />
         }
         .into_any(),
         Some(AccountsRouteAccess::RegisterRequired) => view! {

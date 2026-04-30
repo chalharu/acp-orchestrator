@@ -84,7 +84,7 @@ fn dispatch_route(route: AppRoute) -> AnyView {
         AppRoute::Home => home_route_view(),
         AppRoute::Register => register_route_view(),
         AppRoute::SignIn => sign_in_route_view(),
-        AppRoute::Accounts => accounts_route_view(),
+        AppRoute::Accounts | AppRoute::Settings => accounts_route_view(),
         AppRoute::Workspaces => workspaces_route_view(),
         AppRoute::Session(session_id) => session_route_view(session_id),
         AppRoute::WorkspaceSession { session_id, .. } => session_route_view(session_id),
@@ -148,6 +148,7 @@ mod tests {
             let _ = dispatch_route(AppRoute::Register);
             let _ = dispatch_route(AppRoute::SignIn);
             let _ = dispatch_route(AppRoute::Accounts);
+            let _ = dispatch_route(AppRoute::Settings);
             let _ = dispatch_route(AppRoute::Workspaces);
             let _ = dispatch_route(AppRoute::Session("s1".to_string()));
             let _ = dispatch_route(AppRoute::WorkspaceSession {

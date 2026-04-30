@@ -126,6 +126,15 @@ async fn assert_member_cannot_write_agent_profiles(
     .await
     .expect_err("members cannot update profiles");
     assert!(matches!(update_error, AppError::Forbidden(_)));
+
+    let delete_error = delete_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(member_browser.principal.clone()),
+    )
+    .await
+    .expect_err("members cannot delete profiles");
+    assert!(matches!(delete_error, AppError::Forbidden(_)));
 }
 
 async fn save_agent_profile(
@@ -186,6 +195,39 @@ async fn agent_profile_create_generates_ids_and_rejects_duplicate_names() {
     ));
 }
 
+#[tokio::test]
+async fn agent_profile_delete_removes_profiles_and_reports_missing() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    save_agent_profile(&state, &admin_browser, "opencode", agent_profile_request()).await;
+
+    let deleted = delete_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(admin_browser.principal.clone()),
+    )
+    .await
+    .expect("admin can delete profiles");
+    assert!(deleted.0.deleted);
+    assert!(
+        state
+            .agent_profile_store
+            .list_profiles()
+            .expect("profiles should list")
+            .is_empty()
+    );
+
+    let missing = delete_agent_profile(
+        State(state),
+        Path("opencode".to_string()),
+        Extension(admin_browser.principal),
+    )
+    .await
+    .expect_err("missing profile should fail");
+    assert!(matches!(missing, AppError::NotFound(_)));
+}
+
 fn agent_profile_request() -> UpsertAgentProfileRequest {
     UpsertAgentProfileRequest {
         name: "OpenCode ACP".to_string(),
@@ -225,6 +267,15 @@ async fn route_handler_adapters_cover_agent_profile_routes() {
     .await
     .expect("upsert-agent-profile route adapter should succeed");
     assert_eq!(upserted.status(), StatusCode::OK);
+
+    let deleted = route_handlers::delete_agent_profile_handler(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        WritePrincipal(admin_browser.principal.clone()),
+    )
+    .await
+    .expect("delete-agent-profile route adapter should succeed");
+    assert_eq!(deleted.status(), StatusCode::OK);
 
     let listed = route_handlers::list_agent_profiles_handler(
         State(state),

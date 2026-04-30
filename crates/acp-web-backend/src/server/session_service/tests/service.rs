@@ -3,15 +3,18 @@ use super::super::{
     SessionStartupContext, bind_session_launch_metadata, cleanup_checkout_path_best_effort,
     load_checkout_cleanup_path_best_effort, map_agent_profile_error, map_checkout_error,
     persist_failed_session_lifecycle, persist_provisioning_session_lifecycle,
+    session_startup_options,
 };
 use crate::{
     agent_profiles::AgentProfileStoreError,
     auth::{AuthenticatedPrincipal, AuthenticatedPrincipalKind},
     contract_accounts::LocalAccount,
-    contract_sessions::SessionStatus,
+    contract_sessions::{AgentProfileMode, SessionStatus, UpsertAgentProfileRequest},
     mock_client::{BindLaunchMetadataFuture, ReplyFuture, ReplyProvider, ReplyResult},
     sessions::{SessionStore, SessionStoreError},
-    workspace_checkout::{PreparedWorkspaceCheckout, WorkspaceCheckoutManager},
+    workspace_checkout::{
+        PreparedWorkspaceCheckout, WorkspaceCheckoutLayout, WorkspaceCheckoutManager,
+    },
     workspace_records::{
         DurableSessionSnapshotRecord, SessionMetadataRecord, UserRecord, WorkspaceRecord,
         WorkspaceStoreError,
@@ -375,6 +378,18 @@ fn sample_workspace_update() -> WorkspaceUpdatePatch {
     }
 }
 
+fn agent_profile_request(mode: AgentProfileMode) -> UpsertAgentProfileRequest {
+    UpsertAgentProfileRequest {
+        name: format!("{mode:?} ACP"),
+        mode,
+        command_argv: vec!["agent".to_string(), "acp".to_string()],
+        env_allowlist: Vec::new(),
+        timeout_seconds: 30,
+        run_uid: 65_534,
+        run_gid: 65_534,
+    }
+}
+
 async fn sample_turn_handle() -> crate::sessions::TurnHandle {
     let store = SessionStore::new(4);
     let session = store
@@ -386,6 +401,33 @@ async fn sample_turn_handle() -> crate::sessions::TurnHandle {
         .await
         .expect("prompt submission should succeed")
         .turn_handle()
+}
+
+#[test]
+fn session_startup_options_use_profile_specific_checkout_layouts() {
+    let state = metadata_bind_failure_state(Arc::new(SessionStore::new(4)));
+    state
+        .agent_profile_store
+        .upsert_profile("host", agent_profile_request(AgentProfileMode::Host))
+        .expect("host profile should save");
+    state
+        .agent_profile_store
+        .upsert_profile("chroot", agent_profile_request(AgentProfileMode::Chroot))
+        .expect("chroot profile should save");
+
+    let host = session_startup_options(&state, Some("host")).expect("host startup options");
+    let chroot = session_startup_options(&state, Some("chroot")).expect("chroot startup options");
+
+    assert_eq!(host.layout, WorkspaceCheckoutLayout::Standard);
+    assert_eq!(
+        host.agent_config.expect("host config").mode,
+        crate::agent_runtime::AgentLaunchMode::Host
+    );
+    assert_eq!(chroot.layout, WorkspaceCheckoutLayout::ChrootRuntime);
+    assert_eq!(
+        chroot.agent_config.expect("chroot config").mode,
+        crate::agent_runtime::AgentLaunchMode::Chroot
+    );
 }
 
 async fn assert_future_panics<F, T>(future: F)

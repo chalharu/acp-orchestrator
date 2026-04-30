@@ -63,7 +63,9 @@ use self::account_api::{
     auth_status, bootstrap_register, create_account, delete_account, list_accounts, sign_in,
     sign_out, update_account,
 };
-use self::agent_profile_api::{create_agent_profile, list_agent_profiles, upsert_agent_profile};
+use self::agent_profile_api::{
+    create_agent_profile, delete_agent_profile, list_agent_profiles, upsert_agent_profile,
+};
 use self::assets::{SlashCompletionsQuery, install_frontend_routes};
 pub use self::connection::serve_with_shutdown;
 #[cfg(test)]
@@ -219,7 +221,7 @@ impl AppState {
         let reply_provider = Arc::new(MockClient::new(config.acp_server)?);
         let checkout_layout = match config.agent_launch.as_ref().map(|launch| launch.mode) {
             Some(AgentLaunchMode::Chroot) => WorkspaceCheckoutLayout::ChrootRuntime,
-            None => WorkspaceCheckoutLayout::Standard,
+            Some(AgentLaunchMode::Host) | None => WorkspaceCheckoutLayout::Standard,
         };
         let checkout_manager: DynWorkspaceCheckoutManager = match checkout_layout {
             WorkspaceCheckoutLayout::Standard => {
@@ -425,11 +427,11 @@ mod route_handlers {
         UpdateWorkspaceRequest, UpsertAgentProfileRequest, WritePrincipal, auth_status,
         bootstrap_register, bootstrap_workspace, cancel_turn, close_session, create_account,
         create_agent_profile, create_workspace, create_workspace_session, delete_account,
-        delete_session, delete_workspace, get_session, get_session_history, get_slash_completions,
-        get_workspace, list_accounts, list_agent_profiles, list_sessions, list_workspace_branches,
-        list_workspace_sessions, list_workspaces, parse_json_body, post_message, rename_session,
-        resolve_permission, sign_in, sign_out, stream_session_events, update_account,
-        update_workspace, upsert_agent_profile,
+        delete_agent_profile, delete_session, delete_workspace, get_session, get_session_history,
+        get_slash_completions, get_workspace, list_accounts, list_agent_profiles, list_sessions,
+        list_workspace_branches, list_workspace_sessions, list_workspaces, parse_json_body,
+        post_message, rename_session, resolve_permission, sign_in, sign_out, stream_session_events,
+        update_account, update_workspace, upsert_agent_profile,
     };
 
     pub(super) async fn auth_status_handler(
@@ -677,6 +679,16 @@ mod route_handlers {
     ) -> Result<Response, AppError> {
         let request = parse_json_body::<UpsertAgentProfileRequest>(&headers, &body)?;
         create_agent_profile(State(state), Extension(principal), Json(request))
+            .await
+            .map(IntoResponse::into_response)
+    }
+
+    pub(super) async fn delete_agent_profile_handler(
+        State(state): State<AppState>,
+        Path(profile_id): Path<String>,
+        WritePrincipal(principal): WritePrincipal,
+    ) -> Result<Response, AppError> {
+        delete_agent_profile(State(state), Path(profile_id), Extension(principal))
             .await
             .map(IntoResponse::into_response)
     }
@@ -938,9 +950,15 @@ fn workspace_write_routes(state: AppState) -> Router {
         )
         .route(
             "/api/v1/agent-profiles/{profile_id}",
-            put_route(&state, route_handlers::upsert_agent_profile_handler).patch_service(
-                boxed_handler_service(state.clone(), route_handlers::upsert_agent_profile_handler),
-            ),
+            put_route(&state, route_handlers::upsert_agent_profile_handler)
+                .patch_service(boxed_handler_service(
+                    state.clone(),
+                    route_handlers::upsert_agent_profile_handler,
+                ))
+                .delete_service(boxed_handler_service(
+                    state.clone(),
+                    route_handlers::delete_agent_profile_handler,
+                )),
         )
 }
 

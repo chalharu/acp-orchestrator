@@ -2,8 +2,8 @@
 
 use acp_contracts_sessions::{
     AgentProfile, AgentProfileListResponse, AgentProfileMode, AgentProfileResponse,
-    CreateSessionRequest, CreateSessionResponse, SessionListItem, SessionListResponse,
-    UpsertAgentProfileRequest,
+    CreateSessionRequest, CreateSessionResponse, DeleteAgentProfileResponse, SessionListItem,
+    SessionListResponse, UpsertAgentProfileRequest,
 };
 use acp_contracts_workspaces::{
     CreateWorkspaceRequest, CreateWorkspaceResponse, DeleteWorkspaceResponse,
@@ -203,8 +203,9 @@ pub(crate) async fn list_agent_profiles() -> Result<Vec<AgentProfile>, String> {
 pub(crate) async fn create_agent_profile(
     name: String,
     command: String,
+    mode: AgentProfileMode,
 ) -> Result<AgentProfile, String> {
-    let body = agent_profile_body(name, command)?;
+    let body = agent_profile_body(name, command, mode)?;
     let csrf = csrf_token();
     let response = Request::post(AGENT_PROFILES_URL)
         .header("x-csrf-token", &csrf)
@@ -225,9 +226,60 @@ pub(crate) async fn create_agent_profile(
 pub(crate) async fn create_agent_profile(
     name: String,
     command: String,
+    mode: AgentProfileMode,
 ) -> Result<AgentProfile, String> {
-    let _ = agent_profile_body(name, command)?;
+    let _ = agent_profile_body(name, command, mode)?;
     Err(non_wasm_api_error("POST", AGENT_PROFILES_URL))
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn update_agent_profile(
+    profile_id: &str,
+    name: String,
+    command: String,
+    mode: AgentProfileMode,
+) -> Result<AgentProfile, String> {
+    let body = agent_profile_body(name, command, mode)?;
+    let response = patch_json_with_csrf(&agent_profile_url(profile_id), body).await?;
+    if !response.ok() {
+        return Err(response_error_message(response, "Save ACP profile failed").await);
+    }
+    let payload: AgentProfileResponse = response.json().await.map_err(|error| error.to_string())?;
+    Ok(payload.profile)
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn update_agent_profile(
+    profile_id: &str,
+    name: String,
+    command: String,
+    mode: AgentProfileMode,
+) -> Result<AgentProfile, String> {
+    let _ = agent_profile_body(name, command, mode)?;
+    Err(non_wasm_api_error("PATCH", &agent_profile_url(profile_id)))
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn delete_agent_profile(
+    profile_id: &str,
+) -> Result<DeleteAgentProfileResponse, String> {
+    let csrf = csrf_token();
+    let response = Request::delete(&agent_profile_url(profile_id))
+        .header("x-csrf-token", &csrf)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.ok() {
+        return Err(response_error_message(response, "Delete ACP profile failed").await);
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn delete_agent_profile(
+    profile_id: &str,
+) -> Result<DeleteAgentProfileResponse, String> {
+    Err(non_wasm_api_error("DELETE", &agent_profile_url(profile_id)))
 }
 
 #[cfg(target_family = "wasm")]
@@ -305,19 +357,46 @@ fn create_workspace_session_body(
     .map_err(|error| error.to_string())
 }
 
-fn agent_profile_body(name: String, command: String) -> Result<String, String> {
+fn agent_profile_body(
+    name: String,
+    command: String,
+    mode: AgentProfileMode,
+) -> Result<String, String> {
     let name = normalize_profile_name(name)?;
     let command_argv = command_line_to_argv(&command)?;
+    let env_allowlist = agent_profile_env_allowlist(&mode);
     serde_json::to_string(&UpsertAgentProfileRequest {
         name,
-        mode: AgentProfileMode::Chroot,
+        mode,
         command_argv,
-        env_allowlist: Vec::new(),
+        env_allowlist,
         timeout_seconds: 30,
         run_uid: 65_534,
         run_gid: 65_534,
     })
     .map_err(|error| error.to_string())
+}
+
+fn agent_profile_env_allowlist(mode: &AgentProfileMode) -> Vec<String> {
+    match mode {
+        AgentProfileMode::Host => [
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+        ]
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect(),
+        AgentProfileMode::Chroot => Vec::new(),
+    }
 }
 
 fn normalize_profile_name(name: String) -> Result<String, String> {
@@ -462,6 +541,10 @@ fn workspace_url(workspace_id: &str) -> String {
     format!("{WORKSPACES_URL}/{}", encode_component(workspace_id))
 }
 
+fn agent_profile_url(profile_id: &str) -> String {
+    format!("{AGENT_PROFILES_URL}/{}", encode_component(profile_id))
+}
+
 fn workspace_sessions_url(workspace_id: &str) -> String {
     format!("{}/sessions", workspace_url(workspace_id))
 }
@@ -519,11 +602,15 @@ mod tests {
             " Claude ACP ".to_string(),
             r#"claude acp --config "~/Library/Application Support/Claude/config.json" --port ${ACP_PORT}"#
                 .to_string(),
+            AgentProfileMode::Host,
         )
         .expect("profile body");
         let request: UpsertAgentProfileRequest =
             serde_json::from_str(&body).expect("profile body should decode");
         assert_eq!(request.name, "Claude ACP");
+        assert_eq!(request.mode, AgentProfileMode::Host);
+        assert!(request.env_allowlist.contains(&"PATH".to_string()));
+        assert!(request.env_allowlist.contains(&"HOME".to_string()));
         assert_eq!(
             request.command_argv,
             vec![
@@ -535,6 +622,21 @@ mod tests {
                 "${ACP_PORT}"
             ]
         );
+    }
+
+    #[test]
+    fn agent_profile_body_keeps_chroot_profiles_env_explicit() {
+        let body = agent_profile_body(
+            "Isolated ACP".to_string(),
+            "agent acp --port ${ACP_PORT}".to_string(),
+            AgentProfileMode::Chroot,
+        )
+        .expect("profile body");
+        let request: UpsertAgentProfileRequest =
+            serde_json::from_str(&body).expect("profile body should decode");
+
+        assert_eq!(request.mode, AgentProfileMode::Chroot);
+        assert!(request.env_allowlist.is_empty());
     }
 
     #[test]
@@ -550,6 +652,10 @@ mod tests {
             "/api/v1/workspaces/w%2F1/branches"
         );
         assert_eq!(WORKSPACES_URL, "/api/v1/workspaces");
+        assert_eq!(
+            agent_profile_url("profile/1"),
+            "/api/v1/agent-profiles/profile%2F1"
+        );
     }
 
     #[test]
@@ -578,10 +684,26 @@ mod tests {
         let save_profile_error = poll_ready(create_agent_profile(
             "OpenCode ACP".to_string(),
             "opencode acp".to_string(),
+            AgentProfileMode::Host,
         ))
         .expect_err("host profile save should fail");
         assert!(save_profile_error.contains(AGENT_PROFILES_URL));
         assert!(save_profile_error.contains("POST"));
+
+        let update_profile_error = poll_ready(update_agent_profile(
+            "profile_1",
+            "OpenCode ACP".to_string(),
+            "opencode acp".to_string(),
+            AgentProfileMode::Chroot,
+        ))
+        .expect_err("host profile update should fail");
+        assert!(update_profile_error.contains("/api/v1/agent-profiles/profile_1"));
+        assert!(update_profile_error.contains("PATCH"));
+
+        let delete_profile_error =
+            poll_ready(delete_agent_profile("profile_1")).expect_err("host profile delete");
+        assert!(delete_profile_error.contains("/api/v1/agent-profiles/profile_1"));
+        assert!(delete_profile_error.contains("DELETE"));
 
         let create_session_error = poll_ready(create_workspace_session("w_1", None, None))
             .expect_err("host workspace session create should fail");
@@ -699,7 +821,11 @@ mod tests {
     #[test]
     fn agent_profile_body_requires_a_profile_name() {
         assert_eq!(
-            agent_profile_body("   ".to_string(), "claude acp".to_string())
+            agent_profile_body(
+                "   ".to_string(),
+                "claude acp".to_string(),
+                AgentProfileMode::Host
+            )
                 .expect_err("blank profile names should fail"),
             "Profile name is required"
         );

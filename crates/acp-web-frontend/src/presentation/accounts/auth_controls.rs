@@ -132,7 +132,7 @@ fn session_sidebar_workspaces_link_view(workspaces_href: &str, signed_in: bool) 
 
 fn session_sidebar_accounts_link_view(accounts_href: &str, is_admin: bool) -> AnyView {
     if is_admin {
-        session_sidebar_icon_link_view(accounts_href, "Accounts", AppIcon::Accounts)
+        session_sidebar_icon_link_view(accounts_href, "Settings", AppIcon::Accounts)
     } else {
         ().into_any()
     }

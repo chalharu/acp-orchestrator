@@ -35,12 +35,14 @@ const TEST_SKIP_CHROOT_PREEXEC_MARKER: &str = ".acp-test-skip-chroot-preexec";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentLaunchMode {
     Chroot,
+    Host,
 }
 
 impl AgentLaunchMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Chroot => "chroot",
+            Self::Host => "host",
         }
     }
 }
@@ -56,6 +58,25 @@ pub struct AgentLaunchConfig {
 }
 
 impl AgentLaunchConfig {
+    pub fn host(
+        command: Vec<String>,
+        env_allowlist: Vec<String>,
+        timeout: Duration,
+        run_uid: u32,
+        run_gid: u32,
+    ) -> Result<Self, AgentLaunchConfigError> {
+        let config = Self {
+            mode: AgentLaunchMode::Host,
+            command,
+            env_allowlist,
+            timeout,
+            run_uid,
+            run_gid,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn chroot(
         command: Vec<String>,
         env_allowlist: Vec<String>,
@@ -85,11 +106,13 @@ impl AgentLaunchConfig {
         if self.timeout.is_zero() {
             return Err(AgentLaunchConfigError::InvalidTimeout);
         }
-        if self.run_uid == 0 {
-            return Err(AgentLaunchConfigError::RootRunUid);
-        }
-        if self.run_gid == 0 {
-            return Err(AgentLaunchConfigError::RootRunGid);
+        if self.mode == AgentLaunchMode::Chroot {
+            if self.run_uid == 0 {
+                return Err(AgentLaunchConfigError::RootRunUid);
+            }
+            if self.run_gid == 0 {
+                return Err(AgentLaunchConfigError::RootRunGid);
+            }
         }
         if let Some(name) = self
             .env_allowlist
@@ -124,7 +147,7 @@ pub enum AgentLaunchConfigError {
 impl Display for AgentLaunchConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingCommand => formatter.write_str("agent command is required in chroot mode"),
+            Self::MissingCommand => formatter.write_str("agent command is required"),
             Self::EmptyArgvElement => {
                 formatter.write_str("agent command argv elements must not be empty")
             }
@@ -247,6 +270,7 @@ pub struct FsAgentRuntimeManager {
     config: Option<AgentLaunchConfig>,
     children: Mutex<AgentChildRegistry>,
     launch_notifications: Condvar,
+    #[cfg(target_os = "linux")]
     cgroup_root: Option<PathBuf>,
 }
 
@@ -276,6 +300,12 @@ struct PreparedChrootLaunch {
     port_reservation: Option<TcpListener>,
 }
 
+struct PreparedHostLaunch {
+    command: Command,
+    acp_endpoint: Option<AcpEndpoint>,
+    port_reservation: Option<TcpListener>,
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 struct AgentCgroup {
@@ -297,16 +327,19 @@ impl FsAgentRuntimeManager {
     fn new_with_cgroup_root(
         state_dir: PathBuf,
         config: Option<AgentLaunchConfig>,
-        cgroup_root: Option<PathBuf>,
+        _cgroup_root: Option<PathBuf>,
     ) -> Result<Self, AgentRuntimeError> {
         if let Some(config) = config.as_ref() {
             config.validate()?;
         }
+        #[cfg(target_os = "linux")]
+        let cgroup_root = _cgroup_root;
         Ok(Self {
             state_dir,
             config,
             children: Mutex::new(AgentChildRegistry::default()),
             launch_notifications: Condvar::new(),
+            #[cfg(target_os = "linux")]
             cgroup_root,
         })
     }
@@ -340,6 +373,30 @@ impl FsAgentRuntimeManager {
         } = self.prepare_chroot_launch(config, launch)?;
         let mut child =
             spawn_with_timeout(command, config.timeout, Some(cgroup), port_reservation)?;
+        if let Err(error) =
+            wait_for_acp_readiness(acp_endpoint.as_ref(), config.timeout, &mut child)
+        {
+            terminate_agent_child(&mut child);
+            return Err(error);
+        }
+        let metadata = AgentLaunchMetadata {
+            acp_address: acp_endpoint.map(|endpoint| endpoint.address),
+        };
+        child.metadata = metadata.clone();
+        Ok((child, metadata))
+    }
+
+    fn launch_host(
+        &self,
+        config: &AgentLaunchConfig,
+        launch: &AgentSessionLaunch<'_>,
+    ) -> Result<(AgentChild, AgentLaunchMetadata), AgentRuntimeError> {
+        let PreparedHostLaunch {
+            command,
+            acp_endpoint,
+            port_reservation,
+        } = prepare_host_launch(config, launch)?;
+        let mut child = spawn_with_timeout(command, config.timeout, None, port_reservation)?;
         if let Err(error) =
             wait_for_acp_readiness(acp_endpoint.as_ref(), config.timeout, &mut child)
         {
@@ -512,6 +569,7 @@ impl AgentRuntimeManager for FsAgentRuntimeManager {
         };
         let launched = match config.mode {
             AgentLaunchMode::Chroot => self.launch_chroot(config, launch),
+            AgentLaunchMode::Host => self.launch_host(config, launch),
         };
         let (child, metadata) = match launched {
             Ok(launched) => launched,
@@ -661,6 +719,34 @@ fn expand_agent_argv(command: &[String], endpoint: Option<&AcpEndpoint>) -> Vec<
         .collect()
 }
 
+fn prepare_host_launch(
+    config: &AgentLaunchConfig,
+    launch: &AgentSessionLaunch<'_>,
+) -> Result<PreparedHostLaunch, AgentRuntimeError> {
+    let reserved_endpoint = AcpEndpoint::reserve_for_command(&config.command)?;
+    let acp_endpoint = reserved_endpoint
+        .as_ref()
+        .map(|reserved| reserved.endpoint.clone());
+    let mut command = build_agent_command(config, launch, acp_endpoint.as_ref());
+    command.current_dir(&launch.checkout.working_dir);
+    configure_host_command(&mut command);
+    Ok(PreparedHostLaunch {
+        command,
+        acp_endpoint,
+        port_reservation: reserved_endpoint.map(ReservedAcpEndpoint::into_listener),
+    })
+}
+
+#[cfg(unix)]
+fn configure_host_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_host_command(_command: &mut Command) {}
+
 fn build_agent_command(
     config: &AgentLaunchConfig,
     launch: &AgentSessionLaunch<'_>,
@@ -675,7 +761,7 @@ fn build_agent_command(
             command.env(name, value);
         }
     }
-    apply_structured_agent_env(&mut command, launch, endpoint);
+    apply_structured_agent_env(&mut command, launch, config.mode, endpoint);
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
@@ -695,18 +781,33 @@ fn expand_agent_arg(arg: &str, endpoint: Option<&AcpEndpoint>) -> String {
 fn apply_structured_agent_env(
     command: &mut Command,
     launch: &AgentSessionLaunch<'_>,
+    mode: AgentLaunchMode,
     endpoint: Option<&AcpEndpoint>,
 ) {
     command.env("ACP_SESSION_ID", launch.session_id);
     command.env("ACP_WORKSPACE_ID", launch.workspace_id);
-    command.env("ACP_CHECKOUT_ROOT", CHROOT_CHECKOUT_ROOT);
-    command.env("ACP_CHECKOUT_RELPATH", "workspace");
-    command.env("ACP_AGENT_LAUNCH_MODE", AgentLaunchMode::Chroot.as_str());
+    command.env("ACP_CHECKOUT_ROOT", checkout_root_for_mode(launch, mode));
+    command.env("ACP_CHECKOUT_RELPATH", checkout_relpath_for_mode(mode));
+    command.env("ACP_AGENT_LAUNCH_MODE", mode.as_str());
     if let Some(endpoint) = endpoint {
         command.env("ACP_HOST", ACP_HOST);
         command.env("ACP_PORT", endpoint.port.to_string());
         command.env("ACP_ENDPOINT", &endpoint.address);
         command.env("ACP_BASE_URL", endpoint.base_url());
+    }
+}
+
+fn checkout_root_for_mode(launch: &AgentSessionLaunch<'_>, mode: AgentLaunchMode) -> String {
+    match mode {
+        AgentLaunchMode::Host => launch.checkout.working_dir.display().to_string(),
+        AgentLaunchMode::Chroot => CHROOT_CHECKOUT_ROOT.to_string(),
+    }
+}
+
+fn checkout_relpath_for_mode(mode: AgentLaunchMode) -> String {
+    match mode {
+        AgentLaunchMode::Host => ".".to_string(),
+        AgentLaunchMode::Chroot => "workspace".to_string(),
     }
 }
 
@@ -1415,6 +1516,22 @@ mod tests {
     }
 
     #[test]
+    fn host_launch_config_accepts_root_identity_fields() {
+        let config = AgentLaunchConfig::host(
+            vec!["agent".to_string()],
+            vec!["_ACP_OK".to_string()],
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            0,
+            0,
+        )
+        .expect("host mode ignores chroot identity fields");
+
+        assert_eq!(config.mode.as_str(), "host");
+        assert_eq!(config.run_uid, 0);
+        assert_eq!(config.run_gid, 0);
+    }
+
+    #[test]
     fn launch_config_validation_rejects_empty_env_name() {
         assert_eq!(
             AgentLaunchConfig::chroot(
@@ -1516,7 +1633,7 @@ mod tests {
     fn runtime_error_display_messages_are_specific() {
         assert_eq!(
             AgentRuntimeError::from(AgentLaunchConfigError::MissingCommand).to_string(),
-            "agent command is required in chroot mode"
+            "agent command is required"
         );
         assert_eq!(
             AgentRuntimeError::Io("io failed".to_string()).to_string(),
@@ -1740,6 +1857,67 @@ mod tests {
             envs.get("ACP_PORT").and_then(|value| value.as_deref()),
             Some(std::ffi::OsStr::new("4567"))
         );
+        assert_eq!(
+            envs.get("ACP_CHECKOUT_ROOT")
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new(CHROOT_CHECKOUT_ROOT))
+        );
+        assert_eq!(
+            envs.get("ACP_CHECKOUT_RELPATH")
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("workspace"))
+        );
+        assert_eq!(
+            envs.get("ACP_AGENT_LAUNCH_MODE")
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("chroot"))
+        );
+    }
+
+    #[test]
+    fn host_launch_command_uses_checkout_cwd_and_host_structured_env() {
+        let state_dir = temp_state_dir("acp-agent-host-command");
+        let checkout = checkout_in_state(&state_dir, "s_host");
+        let config = AgentLaunchConfig::host(
+            vec!["/bin/echo".to_string()],
+            Vec::new(),
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            0,
+            0,
+        )
+        .expect("host config should validate");
+        let launch = AgentSessionLaunch {
+            session_id: "s_host",
+            workspace_id: "w_test",
+            checkout: &checkout,
+            config: Some(config.clone()),
+        };
+
+        let prepared = prepare_host_launch(&config, &launch).expect("host launch should prepare");
+        let envs = command_envs(&prepared.command);
+
+        assert!(prepared.acp_endpoint.is_none());
+        assert!(prepared.port_reservation.is_none());
+        assert_eq!(
+            prepared.command.get_current_dir(),
+            Some(checkout.working_dir.as_path())
+        );
+        assert_eq!(
+            envs.get("ACP_CHECKOUT_ROOT")
+                .and_then(|value| value.as_deref()),
+            Some(checkout.working_dir.as_os_str())
+        );
+        assert_eq!(
+            envs.get("ACP_CHECKOUT_RELPATH")
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("."))
+        );
+        assert_eq!(
+            envs.get("ACP_AGENT_LAUNCH_MODE")
+                .and_then(|value| value.as_deref()),
+            Some(std::ffi::OsStr::new("host"))
+        );
+        let _ = std::fs::remove_dir_all(state_dir);
     }
 
     fn built_agent_command_fixture() -> (String, Command) {
@@ -1884,6 +2062,34 @@ mod tests {
     #[cfg(unix)]
     fn process_is_running(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_process_inactive(pid: u32) -> bool {
+        for _ in 0..20 {
+            if !process_is_running(pid) || process_is_zombie(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_is_zombie(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        stat.rsplit_once(") ")
+            .and_then(|(_, rest)| rest.chars().next())
+            == Some('Z')
+    }
+
+    #[cfg(unix)]
+    fn kill_process(pid: u32) {
+        unsafe {
+            let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 
     #[cfg(unix)]
@@ -2770,6 +2976,67 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn launch_host_binds_reserved_endpoint_without_chroot_ownership_changes() {
+        let state_dir = temp_state_dir("acp-agent-launch-host");
+        let session_id = "s_test";
+        let checkout = checkout_in_state(&state_dir, session_id);
+        let manager =
+            FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should build");
+        let config = python_host_acp_server_config();
+
+        let metadata = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id,
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect("host launch should succeed without cgroups or chown");
+
+        assert!(metadata.acp_address.as_deref().is_some_and(|address| {
+            address.starts_with("127.0.0.1:") && address.len() > "127.0.0.1:".len()
+        }));
+        manager.forget_session(session_id);
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_host_cleanup_kills_spawned_subprocesses() {
+        let state_dir = temp_state_dir("acp-agent-launch-host-tree");
+        let session_id = "s_test";
+        let checkout = checkout_in_state(&state_dir, session_id);
+        let pid_file = checkout.working_dir.join("agent-child.pid");
+        let manager =
+            FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should build");
+        let config = python_host_acp_server_with_child_config();
+
+        manager
+            .launch_session(&AgentSessionLaunch {
+                session_id,
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect("host launch should succeed");
+        let child_pid = std::fs::read_to_string(&pid_file)
+            .expect("host agent should record subprocess pid")
+            .trim()
+            .parse::<u32>()
+            .expect("subprocess pid should parse");
+
+        manager.forget_session(session_id);
+        let inactive = wait_for_process_inactive(child_pid);
+        if !inactive {
+            kill_process(child_pid);
+        }
+        let _ = std::fs::remove_dir_all(state_dir);
+
+        assert!(inactive, "host launch cleanup should kill subprocesses");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn launch_chroot_cleans_up_when_endpoint_never_becomes_ready() {
         let state_dir = temp_state_dir("acp-agent-launch-not-ready");
         let session_id = "s_test";
@@ -2868,8 +3135,55 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn python_host_acp_server_config() -> AgentLaunchConfig {
+        AgentLaunchConfig::host(
+            vec![
+                python3_path(),
+                "-c".to_string(),
+                python_acp_server_script(),
+                "${ACP_PORT}".to_string(),
+            ],
+            Vec::new(),
+            Duration::from_secs(5),
+            0,
+            0,
+        )
+        .expect("python host ACP server config should validate")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn python_host_acp_server_with_child_config() -> AgentLaunchConfig {
+        AgentLaunchConfig::host(
+            vec![
+                python3_path(),
+                "-c".to_string(),
+                python_acp_server_with_child_script(),
+                "${ACP_PORT}".to_string(),
+            ],
+            Vec::new(),
+            Duration::from_secs(5),
+            0,
+            0,
+        )
+        .expect("python host ACP server config should validate")
+    }
+
+    #[cfg(target_os = "linux")]
     fn python_acp_server_script() -> String {
         "import os,socket,time;\
+         s=socket.socket();\
+         s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);\
+         s.bind(('127.0.0.1',int(os.environ['ACP_PORT'])));\
+         s.listen(1);\
+         time.sleep(60)"
+            .to_string()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn python_acp_server_with_child_script() -> String {
+        "import os,socket,subprocess,time;\
+         p=subprocess.Popen(['/bin/sleep','60']);\
+         open('agent-child.pid','w').write(str(p.pid));\
          s=socket.socket();\
          s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);\
          s.bind(('127.0.0.1',int(os.environ['ACP_PORT'])));\

@@ -49,6 +49,18 @@ async fn redirect_to_accounts_uses_the_canonical_trailing_slash_route() {
 }
 
 #[tokio::test]
+async fn redirect_to_settings_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_settings().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/settings/"));
+}
+
+#[tokio::test]
 async fn redirect_to_workspaces_uses_the_canonical_trailing_slash_route() {
     let response = redirect_to_workspaces().await.into_response();
     let location = response

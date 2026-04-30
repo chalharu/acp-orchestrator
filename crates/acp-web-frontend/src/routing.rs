@@ -4,6 +4,7 @@ pub(crate) enum AppRoute {
     Register,
     SignIn,
     Accounts,
+    Settings,
     Workspaces,
     Session(String),
     WorkspaceSession {
@@ -40,6 +41,7 @@ fn static_app_route(pathname: &str) -> Option<AppRoute> {
         "/app/register" => Some(AppRoute::Register),
         "/app/sign-in" => Some(AppRoute::SignIn),
         "/app/accounts" => Some(AppRoute::Accounts),
+        "/app/settings" => Some(AppRoute::Settings),
         "/app/workspaces" => Some(AppRoute::Workspaces),
         _ => None,
     }
@@ -164,6 +166,8 @@ mod tests {
         assert_eq!(route_from_pathname("/app/sign-in/"), AppRoute::SignIn);
         assert_eq!(route_from_pathname("/app/accounts"), AppRoute::Accounts);
         assert_eq!(route_from_pathname("/app/accounts/"), AppRoute::Accounts);
+        assert_eq!(route_from_pathname("/app/settings"), AppRoute::Settings);
+        assert_eq!(route_from_pathname("/app/settings/"), AppRoute::Settings);
         assert_eq!(route_from_pathname("/app/workspaces"), AppRoute::Workspaces);
         assert_eq!(
             route_from_pathname("/app/workspaces/"),

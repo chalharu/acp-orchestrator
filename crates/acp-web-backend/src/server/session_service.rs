@@ -100,6 +100,7 @@ fn session_startup_options(
         Some(crate::agent_runtime::AgentLaunchMode::Chroot) => {
             WorkspaceCheckoutLayout::ChrootRuntime
         }
+        Some(crate::agent_runtime::AgentLaunchMode::Host) => WorkspaceCheckoutLayout::Standard,
         None => state.default_agent_layout,
     };
     Ok(SessionStartupOptions {

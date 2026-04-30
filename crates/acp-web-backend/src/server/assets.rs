@@ -37,6 +37,8 @@ pub(super) fn install_frontend_routes(router: Router, state: AppState) -> Router
         .route("/app/sign-in/", get_route(&state, app_sign_in_entrypoint))
         .route("/app/accounts", get_route(&state, redirect_to_accounts))
         .route("/app/accounts/", get_route(&state, app_accounts_entrypoint))
+        .route("/app/settings", get_route(&state, redirect_to_settings))
+        .route("/app/settings/", get_route(&state, app_settings_entrypoint))
         .route("/app/workspaces", get_route(&state, redirect_to_workspaces))
         .route(
             "/app/workspaces/",
@@ -96,6 +98,10 @@ pub(super) async fn redirect_to_accounts() -> Redirect {
     Redirect::permanent("/app/accounts/")
 }
 
+pub(super) async fn redirect_to_settings() -> Redirect {
+    Redirect::permanent("/app/settings/")
+}
+
 pub(super) async fn redirect_to_workspaces() -> Redirect {
     Redirect::permanent("/app/workspaces/")
 }
@@ -113,6 +119,10 @@ pub(super) async fn app_sign_in_entrypoint(headers: HeaderMap) -> Response {
 }
 
 pub(super) async fn app_accounts_entrypoint(headers: HeaderMap) -> Response {
+    app_shell_response(&headers)
+}
+
+pub(super) async fn app_settings_entrypoint(headers: HeaderMap) -> Response {
     app_shell_response(&headers)
 }
 

@@ -7,7 +7,8 @@ use axum::{
 use crate::{
     auth::AuthenticatedPrincipal,
     contract_sessions::{
-        AgentProfileListResponse, AgentProfileResponse, UpsertAgentProfileRequest,
+        AgentProfileListResponse, AgentProfileResponse, DeleteAgentProfileResponse,
+        UpsertAgentProfileRequest,
     },
 };
 
@@ -56,6 +57,20 @@ pub(in crate::server) async fn upsert_agent_profile(
         .upsert_profile(&profile_id, request)
         .map_err(map_profile_store_error)?;
     Ok(Json(AgentProfileResponse { profile }))
+}
+
+pub(in crate::server) async fn delete_agent_profile(
+    State(state): State<AppState>,
+    Path(profile_id): Path<String>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+) -> Result<Json<DeleteAgentProfileResponse>, AppError> {
+    let owner = state.owner_context(principal).await?;
+    require_admin(&owner)?;
+    state
+        .agent_profile_store
+        .delete_profile(&profile_id)
+        .map_err(map_profile_store_error)?;
+    Ok(Json(DeleteAgentProfileResponse { deleted: true }))
 }
 
 fn map_profile_store_error(error: crate::agent_profiles::AgentProfileStoreError) -> AppError {

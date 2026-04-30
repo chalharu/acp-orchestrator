@@ -99,6 +99,15 @@ impl AgentProfileStore {
         })
     }
 
+    pub fn delete_profile(&self, profile_id: &str) -> Result<(), AgentProfileStoreError> {
+        validate_profile_id(profile_id)?;
+        let mut profiles = self.lock_profiles()?;
+        if profiles.remove(profile_id).is_none() {
+            return Err(AgentProfileStoreError::NotFound);
+        }
+        write_profiles(&self.path, &profiles)
+    }
+
     fn create_profile_with_id_generator(
         &self,
         request: UpsertAgentProfileRequest,
@@ -249,6 +258,14 @@ fn normalize_command_argv(
 
 fn profile_to_config(profile: &AgentProfile) -> Result<AgentLaunchConfig, AgentProfileStoreError> {
     match profile.mode {
+        AgentProfileMode::Host => AgentLaunchConfig::host(
+            profile.command_argv.clone(),
+            profile.env_allowlist.clone(),
+            Duration::from_secs(profile.timeout_seconds),
+            profile.run_uid,
+            profile.run_gid,
+        )
+        .map_err(|error| AgentProfileStoreError::Validation(error.to_string())),
         AgentProfileMode::Chroot => AgentLaunchConfig::chroot(
             profile.command_argv.clone(),
             profile.env_allowlist.clone(),
@@ -328,6 +345,32 @@ mod tests {
     }
 
     #[test]
+    fn profile_store_deletes_existing_profiles_and_reports_missing() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-delete-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        store
+            .upsert_profile(
+                "opencode",
+                request(vec!["opencode".to_string(), "acp".to_string()]),
+            )
+            .expect("profile should save");
+
+        store
+            .delete_profile("opencode")
+            .expect("profile should delete");
+        assert!(store.list_profiles().expect("list").is_empty());
+        assert!(matches!(
+            store
+                .delete_profile("opencode")
+                .expect_err("missing profile should fail"),
+            AgentProfileStoreError::NotFound
+        ));
+    }
+
+    #[test]
     fn profile_store_loads_existing_profiles_and_builds_runtime_config() {
         let state_dir = std::env::temp_dir().join(format!(
             "acp-profile-store-load-{}",
@@ -350,6 +393,31 @@ mod tests {
 
         assert_eq!(reloaded.list_profiles().expect("list"), vec![profile]);
         assert_eq!(config.command, vec!["opencode", "acp"]);
+    }
+
+    #[test]
+    fn profile_store_builds_host_runtime_configs() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "acp-profile-store-host-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = AgentProfileStore::new(&state_dir).expect("store should initialize");
+        let mut host = request(vec!["opencode".to_string(), "acp".to_string()]);
+        host.mode = AgentProfileMode::Host;
+        host.run_uid = 0;
+        host.run_gid = 0;
+        store
+            .upsert_profile("opencode", host)
+            .expect("host profile should save");
+
+        let config = store
+            .profile_config(Some("opencode"))
+            .expect("profile config should load")
+            .expect("profile config should exist");
+
+        assert_eq!(config.mode, crate::agent_runtime::AgentLaunchMode::Host);
+        assert_eq!(config.run_uid, 0);
+        assert_eq!(config.run_gid, 0);
     }
 
     #[test]

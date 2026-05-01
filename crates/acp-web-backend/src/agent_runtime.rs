@@ -2085,22 +2085,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn process_stat_is_zombie(stat: &str) -> bool {
-        process_stat_state(stat) == 'Z'
+        process_stat_state_byte(stat.as_bytes()) == 90
     }
 
     #[cfg(target_os = "linux")]
-    fn process_stat_state(stat: &str) -> char {
+    fn process_stat_state_byte(stat: &[u8]) -> u8 {
         let mut after_process_name = false;
-        for ch in stat.chars() {
+        for byte in stat {
             if after_process_name {
-                if !ch.is_whitespace() {
-                    return ch;
+                if *byte > 32 {
+                    return *byte;
                 }
-            } else if u32::from(ch) == 41 {
+            } else if *byte == 41 {
                 after_process_name = true;
             }
         }
-        '\0'
+        0
     }
 
     #[cfg(unix)]

@@ -641,6 +641,14 @@ mod tests {
         });
     }
 
+    #[test]
+    fn agent_profile_action_labels_follow_busy_state() {
+        assert_eq!(agent_profile_save_label(false), "Save profile");
+        assert_eq!(agent_profile_save_label(true), "Saving…");
+        assert_eq!(delete_profile_label(false), "Delete profile");
+        assert_eq!(delete_profile_label(true), "Deleting…");
+    }
+
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn host_create_profile_handler_updates_state() {

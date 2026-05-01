@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::presentation::{AppIcon, app_icon_view};
+use crate::routing::SettingsSection;
 use crate::{application::auth::AccountsRouteAccess, components::ErrorBanner};
 
 use super::{
@@ -42,7 +43,7 @@ fn accounts_sign_out_icon(signing_out: bool) -> AppIcon {
 }
 
 #[component]
-pub fn AccountsPage() -> impl IntoView {
+pub fn AccountsPage(section: SettingsSection) -> impl IntoView {
     let state = AccountsPageState::new();
     let back_to_chat_href = accounts_back_to_chat_path_from_location();
     let signing_out = RwSignal::new(false);
@@ -53,7 +54,7 @@ pub fn AccountsPage() -> impl IntoView {
     );
     initialize_accounts_page(state);
 
-    accounts_page_shell(state, back_to_chat_href, signing_out, sign_out)
+    accounts_page_shell(state, back_to_chat_href, signing_out, sign_out, section)
 }
 
 #[cfg(target_family = "wasm")]
@@ -62,6 +63,7 @@ fn accounts_page_shell(
     back_to_chat_href: String,
     signing_out: RwSignal<bool>,
     sign_out: Callback<web_sys::MouseEvent>,
+    section: SettingsSection,
 ) -> impl IntoView {
     view! {
         <main class="app-shell account-shell">
@@ -91,7 +93,7 @@ fn accounts_page_shell(
                         {move || state.notice.get().unwrap_or_default()}
                     </p>
                 </Show>
-                <AccountsPageContent state />
+                <AccountsPageContent state section />
             </section>
         </main>
     }
@@ -144,6 +146,7 @@ fn accounts_page_shell(
     back_to_chat_href: String,
     signing_out: RwSignal<bool>,
     sign_out: Callback<web_sys::MouseEvent>,
+    section: SettingsSection,
 ) -> impl IntoView {
     let show_sign_out = accounts_page_shows_sign_out(state.access.get_untracked());
     let sign_out_button =
@@ -162,36 +165,40 @@ fn accounts_page_shell(
                     </div>
                 </div>
                 {notice_view}
-                <AccountsPageContent state />
+                <AccountsPageContent state section />
             </section>
         </main>
     }
 }
 
 #[component]
-fn AccountsPageContent(state: AccountsPageState) -> impl IntoView {
-    accounts_page_content(state)
+fn AccountsPageContent(state: AccountsPageState, section: SettingsSection) -> impl IntoView {
+    accounts_page_content(state, section)
 }
 
 #[cfg(target_family = "wasm")]
-fn accounts_page_content(state: AccountsPageState) -> impl IntoView {
-    move || accounts_page_content_body(state.access.get(), state)
+fn accounts_page_content(state: AccountsPageState, section: SettingsSection) -> impl IntoView {
+    move || accounts_page_content_body(state.access.get(), state, section)
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn accounts_page_content(state: AccountsPageState) -> impl IntoView {
-    accounts_page_content_body(state.access.get_untracked(), state)
+fn accounts_page_content(state: AccountsPageState, section: SettingsSection) -> impl IntoView {
+    accounts_page_content_body(state.access.get_untracked(), state, section)
 }
 
 fn accounts_page_content_body(
     access: Option<AccountsRouteAccess>,
     state: AccountsPageState,
+    section: SettingsSection,
 ) -> AnyView {
     match access {
         Some(AccountsRouteAccess::Admin(_)) => view! {
-            <CreateAccountSection state />
-            {current_accounts_section(state)}
-            <AgentProfilesSection state />
+            <div class="settings-layout">
+                {settings_sidebar(section)}
+                <div class="settings-content">
+                    {settings_section_content(section, state)}
+                </div>
+            </div>
         }
         .into_any(),
         Some(AccountsRouteAccess::RegisterRequired) => view! {
@@ -213,6 +220,78 @@ fn accounts_page_content_body(
         }
         .into_any(),
         None => view! { <p class="muted">"Checking account access…"</p> }.into_any(),
+    }
+}
+
+fn settings_sidebar(active: SettingsSection) -> AnyView {
+    view! {
+        <aside class="settings-sidebar" aria-label="Settings sections">
+            <p class="settings-sidebar__eyebrow">"Settings"</p>
+            <nav class="settings-sidebar__nav">
+                {settings_nav_link(active, SettingsSection::Accounts)}
+                {settings_nav_link(active, SettingsSection::Agents)}
+            </nav>
+        </aside>
+    }
+    .into_any()
+}
+
+fn settings_nav_link(active: SettingsSection, section: SettingsSection) -> AnyView {
+    let is_active = active == section;
+    view! {
+        <a
+            class=settings_nav_link_class(is_active)
+            href=settings_section_href(section)
+            aria-current=settings_nav_aria_current(is_active)
+        >
+            <span class="settings-nav__title">{settings_section_label(section)}</span>
+            <span class="settings-nav__description">{settings_section_description(section)}</span>
+        </a>
+    }
+    .into_any()
+}
+
+fn settings_section_content(section: SettingsSection, state: AccountsPageState) -> AnyView {
+    match section {
+        SettingsSection::Accounts => view! {
+            <CreateAccountSection state />
+            {current_accounts_section(state)}
+        }
+        .into_any(),
+        SettingsSection::Agents => view! { <AgentProfilesSection state /> }.into_any(),
+    }
+}
+
+fn settings_nav_link_class(active: bool) -> &'static str {
+    if active {
+        "settings-nav__link settings-nav__link--active"
+    } else {
+        "settings-nav__link"
+    }
+}
+
+fn settings_nav_aria_current(active: bool) -> Option<&'static str> {
+    active.then_some("page")
+}
+
+fn settings_section_href(section: SettingsSection) -> &'static str {
+    match section {
+        SettingsSection::Accounts => "/app/settings/accounts/",
+        SettingsSection::Agents => "/app/settings/agents/",
+    }
+}
+
+fn settings_section_label(section: SettingsSection) -> &'static str {
+    match section {
+        SettingsSection::Accounts => "Accounts",
+        SettingsSection::Agents => "Agents",
+    }
+}
+
+fn settings_section_description(section: SettingsSection) -> &'static str {
+    match section {
+        SettingsSection::Accounts => "Users and access",
+        SettingsSection::Agents => "ACP launch profiles",
     }
 }
 
@@ -241,18 +320,19 @@ mod tests {
             let admin = sample_account("admin", true);
 
             state.access.set(Some(AccountsRouteAccess::Admin(admin)));
-            let _ = view! { <AccountsPageContent state=state /> };
+            let _ = view! { <AccountsPageContent state=state section=SettingsSection::Accounts /> };
+            let _ = view! { <AccountsPageContent state=state section=SettingsSection::Agents /> };
 
             state
                 .access
                 .set(Some(AccountsRouteAccess::RegisterRequired));
-            let _ = view! { <AccountsPageContent state=state /> };
+            let _ = view! { <AccountsPageContent state=state section=SettingsSection::Accounts /> };
 
             state.access.set(Some(AccountsRouteAccess::SignInRequired));
-            let _ = view! { <AccountsPageContent state=state /> };
+            let _ = view! { <AccountsPageContent state=state section=SettingsSection::Accounts /> };
 
             state.access.set(Some(AccountsRouteAccess::Forbidden));
-            let _ = view! { <AccountsPageContent state=state /> };
+            let _ = view! { <AccountsPageContent state=state section=SettingsSection::Accounts /> };
         });
     }
 
@@ -272,8 +352,9 @@ mod tests {
                 "/app/sessions/abc".to_string(),
                 RwSignal::new(false),
                 Callback::new(|_: web_sys::MouseEvent| {}),
+                SettingsSection::Agents,
             );
-            let _ = view! { <AccountsPage /> };
+            let _ = view! { <AccountsPage section=SettingsSection::Accounts /> };
         });
     }
 
@@ -294,5 +375,45 @@ mod tests {
             let _ = accounts_sign_out_button(true, true, sign_out);
             let _ = accounts_sign_out_button(false, false, sign_out);
         });
+    }
+
+    #[test]
+    fn settings_sidebar_helpers_match_sections() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let _ = settings_sidebar(SettingsSection::Accounts);
+            let _ = settings_sidebar(SettingsSection::Agents);
+            let _ = settings_nav_link(SettingsSection::Accounts, SettingsSection::Accounts);
+            let _ = settings_section_content(SettingsSection::Accounts, AccountsPageState::new());
+            let _ = settings_section_content(SettingsSection::Agents, AccountsPageState::new());
+        });
+        assert_eq!(
+            settings_nav_link_class(true),
+            "settings-nav__link settings-nav__link--active"
+        );
+        assert_eq!(settings_nav_link_class(false), "settings-nav__link");
+        assert_eq!(settings_nav_aria_current(true), Some("page"));
+        assert_eq!(settings_nav_aria_current(false), None);
+        assert_eq!(
+            settings_section_href(SettingsSection::Accounts),
+            "/app/settings/accounts/"
+        );
+        assert_eq!(
+            settings_section_href(SettingsSection::Agents),
+            "/app/settings/agents/"
+        );
+        assert_eq!(
+            settings_section_label(SettingsSection::Accounts),
+            "Accounts"
+        );
+        assert_eq!(settings_section_label(SettingsSection::Agents), "Agents");
+        assert_eq!(
+            settings_section_description(SettingsSection::Accounts),
+            "Users and access"
+        );
+        assert_eq!(
+            settings_section_description(SettingsSection::Agents),
+            "ACP launch profiles"
+        );
     }
 }

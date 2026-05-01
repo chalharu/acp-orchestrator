@@ -4,7 +4,7 @@ pub(crate) enum AppRoute {
     Register,
     SignIn,
     Accounts,
-    Settings,
+    Settings(SettingsSection),
     Workspaces,
     Session(String),
     WorkspaceSession {
@@ -12,6 +12,12 @@ pub(crate) enum AppRoute {
         session_id: String,
     },
     NotFound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    Accounts,
+    Agents,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -41,7 +47,10 @@ fn static_app_route(pathname: &str) -> Option<AppRoute> {
         "/app/register" => Some(AppRoute::Register),
         "/app/sign-in" => Some(AppRoute::SignIn),
         "/app/accounts" => Some(AppRoute::Accounts),
-        "/app/settings" => Some(AppRoute::Settings),
+        "/app/settings" | "/app/settings/accounts" => {
+            Some(AppRoute::Settings(SettingsSection::Accounts))
+        }
+        "/app/settings/agents" => Some(AppRoute::Settings(SettingsSection::Agents)),
         "/app/workspaces" => Some(AppRoute::Workspaces),
         _ => None,
     }
@@ -137,8 +146,9 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppRoute, app_session_path, app_session_path_for_workspace, app_workspace_session_path,
-        current_route, decode_component, encode_component, route_from_pathname,
+        AppRoute, SettingsSection, app_session_path, app_session_path_for_workspace,
+        app_workspace_session_path, current_route, decode_component, encode_component,
+        route_from_pathname,
     };
 
     #[test]
@@ -166,8 +176,30 @@ mod tests {
         assert_eq!(route_from_pathname("/app/sign-in/"), AppRoute::SignIn);
         assert_eq!(route_from_pathname("/app/accounts"), AppRoute::Accounts);
         assert_eq!(route_from_pathname("/app/accounts/"), AppRoute::Accounts);
-        assert_eq!(route_from_pathname("/app/settings"), AppRoute::Settings);
-        assert_eq!(route_from_pathname("/app/settings/"), AppRoute::Settings);
+        assert_eq!(
+            route_from_pathname("/app/settings"),
+            AppRoute::Settings(SettingsSection::Accounts)
+        );
+        assert_eq!(
+            route_from_pathname("/app/settings/"),
+            AppRoute::Settings(SettingsSection::Accounts)
+        );
+        assert_eq!(
+            route_from_pathname("/app/settings/accounts"),
+            AppRoute::Settings(SettingsSection::Accounts)
+        );
+        assert_eq!(
+            route_from_pathname("/app/settings/accounts/"),
+            AppRoute::Settings(SettingsSection::Accounts)
+        );
+        assert_eq!(
+            route_from_pathname("/app/settings/agents"),
+            AppRoute::Settings(SettingsSection::Agents)
+        );
+        assert_eq!(
+            route_from_pathname("/app/settings/agents/"),
+            AppRoute::Settings(SettingsSection::Agents)
+        );
         assert_eq!(route_from_pathname("/app/workspaces"), AppRoute::Workspaces);
         assert_eq!(
             route_from_pathname("/app/workspaces/"),

@@ -108,7 +108,7 @@ pub(super) fn initialize_accounts_page_host(state: AccountsPageState) {
 }
 
 pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
-    path_with_return_to("/app/settings/", return_to_path)
+    path_with_return_to("/app/settings/accounts/", return_to_path)
 }
 
 pub(super) fn sign_in_path_with_return_to(return_to_path: &str) -> String {
@@ -298,7 +298,7 @@ mod tests {
     fn accounts_paths_preserve_only_session_routes() {
         assert_eq!(
             accounts_path_with_return_to("/app/sessions/s%2F1"),
-            "/app/settings/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+            "/app/settings/accounts/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
         );
         assert_eq!(
             sign_in_path_with_return_to("/app/sessions/s%2F1"),

@@ -39,6 +39,22 @@ pub(super) fn install_frontend_routes(router: Router, state: AppState) -> Router
         .route("/app/accounts/", get_route(&state, app_accounts_entrypoint))
         .route("/app/settings", get_route(&state, redirect_to_settings))
         .route("/app/settings/", get_route(&state, app_settings_entrypoint))
+        .route(
+            "/app/settings/accounts",
+            get_route(&state, redirect_to_settings_accounts),
+        )
+        .route(
+            "/app/settings/accounts/",
+            get_route(&state, app_settings_entrypoint),
+        )
+        .route(
+            "/app/settings/agents",
+            get_route(&state, redirect_to_settings_agents),
+        )
+        .route(
+            "/app/settings/agents/",
+            get_route(&state, app_settings_entrypoint),
+        )
         .route("/app/workspaces", get_route(&state, redirect_to_workspaces))
         .route(
             "/app/workspaces/",
@@ -100,6 +116,14 @@ pub(super) async fn redirect_to_accounts() -> Redirect {
 
 pub(super) async fn redirect_to_settings() -> Redirect {
     Redirect::permanent("/app/settings/")
+}
+
+pub(super) async fn redirect_to_settings_accounts() -> Redirect {
+    Redirect::permanent("/app/settings/accounts/")
+}
+
+pub(super) async fn redirect_to_settings_agents() -> Redirect {
+    Redirect::permanent("/app/settings/agents/")
 }
 
 pub(super) async fn redirect_to_workspaces() -> Redirect {

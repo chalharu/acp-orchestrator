@@ -200,6 +200,18 @@ async fn mock_agent_advertises_and_enforces_authentication_when_required() {
 }
 
 #[tokio::test]
+async fn mock_agent_rejects_unknown_auth_method_when_authentication_is_required() {
+    let agent = MockAgent::new(auth_required_state());
+
+    let error = agent
+        .authenticate(schema::AuthenticateRequest::new("unknown-auth-method"))
+        .await
+        .expect_err("unknown auth methods should be rejected");
+
+    assert_eq!(error.message, acp::Error::invalid_params().message);
+}
+
+#[tokio::test]
 async fn mock_agent_authentication_is_connection_scoped() {
     let state = auth_required_state();
     let authenticated = MockAgent::new(state.clone());

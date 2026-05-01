@@ -27,68 +27,87 @@ use crate::{
 use super::{AppState, CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, cookie_value, get_route};
 
 pub(super) fn install_frontend_routes(router: Router, state: AppState) -> Router {
+    let router = install_app_entrypoint_routes(router, &state);
+    let router = install_settings_routes(router, &state);
+    let router = install_static_asset_routes(router, &state);
+    install_session_deep_link_routes(router, &state)
+}
+
+fn install_app_entrypoint_routes(router: Router, state: &AppState) -> Router {
     router
-        .route("/healthz", get_route(&state, healthz))
-        .route("/app", get_route(&state, redirect_to_app))
-        .route("/app/", get_route(&state, app_entrypoint))
-        .route("/app/register", get_route(&state, redirect_to_register))
-        .route("/app/register/", get_route(&state, app_register_entrypoint))
-        .route("/app/sign-in", get_route(&state, redirect_to_sign_in))
-        .route("/app/sign-in/", get_route(&state, app_sign_in_entrypoint))
-        .route("/app/accounts", get_route(&state, redirect_to_accounts))
-        .route("/app/accounts/", get_route(&state, app_accounts_entrypoint))
-        .route("/app/settings", get_route(&state, redirect_to_settings))
-        .route("/app/settings/", get_route(&state, app_settings_entrypoint))
+        .route("/healthz", get_route(state, healthz))
+        .route("/app", get_route(state, redirect_to_app))
+        .route("/app/", get_route(state, app_entrypoint))
+        .route("/app/register", get_route(state, redirect_to_register))
+        .route("/app/register/", get_route(state, app_register_entrypoint))
+        .route("/app/sign-in", get_route(state, redirect_to_sign_in))
+        .route("/app/sign-in/", get_route(state, app_sign_in_entrypoint))
+        .route("/app/accounts", get_route(state, redirect_to_accounts))
+        .route("/app/accounts/", get_route(state, app_accounts_entrypoint))
+        .route("/app/settings", get_route(state, redirect_to_settings))
+        .route("/app/settings/", get_route(state, app_settings_entrypoint))
+        .route("/app/workspaces", get_route(state, redirect_to_workspaces))
+        .route(
+            "/app/workspaces/",
+            get_route(state, app_workspaces_entrypoint),
+        )
+}
+
+fn install_settings_routes(router: Router, state: &AppState) -> Router {
+    router
         .route(
             "/app/settings/accounts",
-            get_route(&state, redirect_to_settings_accounts),
+            get_route(state, redirect_to_settings_accounts),
         )
         .route(
             "/app/settings/accounts/",
-            get_route(&state, app_settings_entrypoint),
+            get_route(state, app_settings_entrypoint),
         )
         .route(
             "/app/settings/agents",
-            get_route(&state, redirect_to_settings_agents),
+            get_route(state, redirect_to_settings_agents),
         )
         .route(
             "/app/settings/agents/",
-            get_route(&state, app_settings_entrypoint),
+            get_route(state, app_settings_entrypoint),
         )
-        .route("/app/workspaces", get_route(&state, redirect_to_workspaces))
-        .route(
-            "/app/workspaces/",
-            get_route(&state, app_workspaces_entrypoint),
-        )
-        .route("/app/assets/app.css", get_route(&state, app_stylesheet))
+}
+
+fn install_static_asset_routes(router: Router, state: &AppState) -> Router {
+    router
+        .route("/app/assets/app.css", get_route(state, app_stylesheet))
         .route(
             "/app/assets/fonts/{font_name}",
-            get_route(&state, app_font_asset),
+            get_route(state, app_font_asset),
         )
         .route(
             "/app/assets/wasm-init.js",
-            get_route(&state, wasm_init_script),
+            get_route(state, wasm_init_script),
         )
         .route(
             FRONTEND_JAVASCRIPT_ASSET_PATH,
-            get_route(&state, wasm_glue_javascript),
+            get_route(state, wasm_glue_javascript),
         )
-        .route(FRONTEND_WASM_ASSET_PATH, get_route(&state, wasm_binary))
+        .route(FRONTEND_WASM_ASSET_PATH, get_route(state, wasm_binary))
         .route(
             LEGACY_FRONTEND_JAVASCRIPT_ASSET_PATH,
-            get_route(&state, wasm_glue_javascript),
+            get_route(state, wasm_glue_javascript),
         )
         .route(
             LEGACY_FRONTEND_WASM_ASSET_PATH,
-            get_route(&state, wasm_binary),
+            get_route(state, wasm_binary),
         )
+}
+
+fn install_session_deep_link_routes(router: Router, state: &AppState) -> Router {
+    router
         .route(
             "/app/sessions/{session_id}",
-            get_route(&state, app_session_entrypoint),
+            get_route(state, app_session_entrypoint),
         )
         .route(
             "/app/workspaces/{workspace_id}/sessions/{session_id}",
-            get_route(&state, app_workspace_session_entrypoint),
+            get_route(state, app_workspace_session_entrypoint),
         )
 }
 

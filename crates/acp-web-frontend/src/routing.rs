@@ -169,13 +169,22 @@ mod tests {
     }
 
     #[test]
-    fn route_from_pathname_decodes_session_id_segments() {
+    fn route_from_pathname_maps_static_routes() {
         assert_eq!(route_from_pathname("/app/register"), AppRoute::Register);
         assert_eq!(route_from_pathname("/app/register/"), AppRoute::Register);
         assert_eq!(route_from_pathname("/app/sign-in"), AppRoute::SignIn);
         assert_eq!(route_from_pathname("/app/sign-in/"), AppRoute::SignIn);
         assert_eq!(route_from_pathname("/app/accounts"), AppRoute::Accounts);
         assert_eq!(route_from_pathname("/app/accounts/"), AppRoute::Accounts);
+        assert_eq!(route_from_pathname("/app/workspaces"), AppRoute::Workspaces);
+        assert_eq!(
+            route_from_pathname("/app/workspaces/"),
+            AppRoute::Workspaces
+        );
+    }
+
+    #[test]
+    fn route_from_pathname_maps_settings_sections() {
         assert_eq!(
             route_from_pathname("/app/settings"),
             AppRoute::Settings(SettingsSection::Accounts)
@@ -200,11 +209,10 @@ mod tests {
             route_from_pathname("/app/settings/agents/"),
             AppRoute::Settings(SettingsSection::Agents)
         );
-        assert_eq!(route_from_pathname("/app/workspaces"), AppRoute::Workspaces);
-        assert_eq!(
-            route_from_pathname("/app/workspaces/"),
-            AppRoute::Workspaces
-        );
+    }
+
+    #[test]
+    fn route_from_pathname_decodes_session_id_segments() {
         assert_eq!(
             route_from_pathname("/app/sessions/s%2F1"),
             AppRoute::Session("s/1".to_string())
@@ -216,6 +224,10 @@ mod tests {
                 session_id: "s/1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn route_from_pathname_rejects_invalid_session_segments() {
         assert_eq!(route_from_pathname("/app/sessions/%ZZ"), AppRoute::NotFound);
         assert_eq!(
             route_from_pathname("/app/workspaces/%ZZ/sessions/s1"),

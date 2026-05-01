@@ -2085,23 +2085,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn process_stat_is_zombie(stat: &str) -> bool {
-        let mut close_paren = None;
-        for (index, byte) in stat.bytes().enumerate() {
-            if byte == 41 {
-                close_paren = Some(index);
-            }
-        }
-        if let Some(index) = close_paren {
-            let (_, rest) = stat.split_at(index + 1);
-            process_stat_state(rest) == Some('Z')
-        } else {
-            false
-        }
+        process_stat_state(stat) == 'Z'
     }
 
     #[cfg(target_os = "linux")]
-    fn process_stat_state(rest: &str) -> Option<char> {
-        rest.chars().find(|ch| !ch.is_whitespace())
+    fn process_stat_state(stat: &str) -> char {
+        let mut after_process_name = false;
+        for ch in stat.chars() {
+            if after_process_name {
+                if !ch.is_whitespace() {
+                    return ch;
+                }
+            } else if u32::from(ch) == 41 {
+                after_process_name = true;
+            }
+        }
+        '\0'
     }
 
     #[cfg(unix)]

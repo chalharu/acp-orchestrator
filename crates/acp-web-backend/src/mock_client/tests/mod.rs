@@ -74,3 +74,15 @@ async fn mock_client_uses_session_acp_address_override() {
         .expect("empty metadata should bind without changing addresses");
     assert_eq!(client.session_acp_address("s_empty").await, "127.0.0.1:1");
 }
+
+#[test]
+fn create_session_error_includes_acp_source_details() {
+    let error = MockClientError::CreateSession {
+        source: acp::Error::invalid_params().data("cwd must be absolute"),
+    };
+    let message = error.to_string();
+
+    assert!(message.contains("creating an ACP session failed"));
+    assert!(message.contains("Invalid params"));
+    assert!(message.contains("cwd must be absolute"));
+}

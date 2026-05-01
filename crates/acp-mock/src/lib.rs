@@ -11,7 +11,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -44,6 +44,7 @@ pub use runtime::{MockAppError, run_with_args};
 pub struct MockConfig {
     pub response_delay: Duration,
     pub startup_hints: bool,
+    pub auth_required: bool,
 }
 
 impl Default for MockConfig {
@@ -51,9 +52,12 @@ impl Default for MockConfig {
         Self {
             response_delay: Duration::from_millis(120),
             startup_hints: false,
+            auth_required: false,
         }
     }
 }
+
+const MOCK_AUTH_METHOD_ID: &str = "mock-agent-auth";
 
 #[derive(Debug)]
 struct MockServerState {
@@ -176,29 +180,55 @@ impl PermissionRequester for ConnectionClientAdapter {
 #[derive(Clone)]
 struct MockAgent {
     state: Arc<MockServerState>,
+    authenticated: Arc<AtomicBool>,
 }
 
 impl MockAgent {
     fn new(state: Arc<MockServerState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            authenticated: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn is_authenticated(&self) -> bool {
+        !self.state.config.auth_required || self.authenticated.load(Ordering::Relaxed)
+    }
+
+    fn mark_authenticated(&self) {
+        self.authenticated.store(true, Ordering::Relaxed);
+    }
+
+    fn ensure_authenticated(&self) -> Result<(), acp::Error> {
+        if self.is_authenticated() {
+            Ok(())
+        } else {
+            Err(acp::Error::auth_required())
+        }
     }
 
     async fn initialize(
         &self,
         _arguments: schema::InitializeRequest,
     ) -> Result<schema::InitializeResponse, acp::Error> {
-        Ok(
-            schema::InitializeResponse::new(schema::ProtocolVersion::V1).agent_info(
+        let response = schema::InitializeResponse::new(schema::ProtocolVersion::V1)
+            .agent_capabilities(schema::AgentCapabilities::new().load_session(true))
+            .agent_info(
                 schema::Implementation::new("acp-mock", env!("CARGO_PKG_VERSION"))
                     .title("ACP Mock"),
-            ),
-        )
+            );
+        Ok(add_auth_methods(response, self.state.config.auth_required))
     }
 
     async fn authenticate(
         &self,
-        _arguments: schema::AuthenticateRequest,
+        arguments: schema::AuthenticateRequest,
     ) -> Result<schema::AuthenticateResponse, acp::Error> {
+        if self.state.config.auth_required && arguments.method_id.to_string() != MOCK_AUTH_METHOD_ID
+        {
+            return Err(acp::Error::invalid_params());
+        }
+        self.mark_authenticated();
         Ok(schema::AuthenticateResponse::default())
     }
 
@@ -207,6 +237,7 @@ impl MockAgent {
         _arguments: schema::NewSessionRequest,
         notifier: &N,
     ) -> Result<schema::NewSessionResponse, acp::Error> {
+        self.ensure_authenticated()?;
         let session_id = self.state.next_session_id();
         if self.state.config.startup_hints {
             notifier
@@ -225,6 +256,7 @@ impl MockAgent {
         &self,
         arguments: schema::LoadSessionRequest,
     ) -> Result<schema::LoadSessionResponse, acp::Error> {
+        self.ensure_authenticated()?;
         let _ = self.state.session_state(&arguments.session_id.to_string());
         Ok(schema::LoadSessionResponse::new())
     }
@@ -276,6 +308,7 @@ impl MockAgent {
         N: SessionUpdateNotifier + Sync,
         P: PermissionRequester + Sync,
     {
+        self.ensure_authenticated()?;
         let prompt = prompt_text(&arguments.prompt);
         let session_id = arguments.session_id.to_string();
         let session_state = self.state.session_state(&session_id);
@@ -306,6 +339,7 @@ impl MockAgent {
     }
 
     async fn cancel(&self, args: schema::CancelNotification) -> Result<(), acp::Error> {
+        self.ensure_authenticated()?;
         self.state
             .session_state(&args.session_id.to_string())
             .cancel();
@@ -316,6 +350,7 @@ impl MockAgent {
         &self,
         _args: schema::SetSessionModeRequest,
     ) -> Result<schema::SetSessionModeResponse, acp::Error> {
+        self.ensure_authenticated()?;
         Ok(schema::SetSessionModeResponse::default())
     }
 }
@@ -349,6 +384,19 @@ fn startup_hint_message() -> String {
     format!(
         "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
     )
+}
+
+fn add_auth_methods(
+    response: schema::InitializeResponse,
+    auth_required: bool,
+) -> schema::InitializeResponse {
+    if auth_required {
+        response.auth_methods(vec![schema::AuthMethod::Agent(
+            schema::AuthMethodAgent::new(MOCK_AUTH_METHOD_ID, "Mock agent auth"),
+        )])
+    } else {
+        response
+    }
 }
 
 fn cancelled_prompt_response() -> schema::PromptResponse {
@@ -768,6 +816,7 @@ mod coverage_tests {
             MockConfig {
                 response_delay: Duration::from_millis(1),
                 startup_hints: false,
+                auth_required: false,
             },
             async move {
                 let _ = shutdown_rx.await;
@@ -953,6 +1002,7 @@ mod coverage_tests {
         let state = Arc::new(MockServerState::new(MockConfig {
             response_delay: Duration::from_millis(1),
             startup_hints: false,
+            auth_required: false,
         }));
         let server = tokio::spawn(accept_mock_agent_connection(listener, state));
 
@@ -1084,6 +1134,7 @@ mod coverage_tests {
             MockConfig {
                 response_delay: Duration::from_millis(1),
                 startup_hints: false,
+                auth_required: false,
             },
             async move {
                 let _ = shutdown_rx.await;

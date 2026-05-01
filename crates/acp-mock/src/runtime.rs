@@ -69,6 +69,7 @@ async fn run(cli: Cli) -> Result<()> {
             cli.response_delay_ms.unwrap_or(DEFAULT_RESPONSE_DELAY_MS),
         ),
         startup_hints: cli.startup_hints,
+        ..MockConfig::default()
     };
     let ready = wait_for_tcp_connect(&endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY);
     let serve = serve_with_shutdown(listener, config, shutdown_signal(cli.listen.exit_after_ms));

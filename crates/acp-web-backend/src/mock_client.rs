@@ -49,6 +49,7 @@ type ConnectedOperation<T> = Box<
             String,
             BackendAcpClient,
             UpstreamSessions,
+            AgentConnectionCapabilities,
         ) -> OperationFuture<T>
         + Send,
 >;
@@ -65,6 +66,11 @@ struct ConnectedMainState<T> {
     client: BackendAcpClient,
     upstream_sessions: UpstreamSessions,
     operation: ConnectedOperation<T>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentConnectionCapabilities {
+    load_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,19 +128,22 @@ pub enum MockClientError {
         address: String,
     },
 
-    #[snafu(display("initializing the ACP client failed"))]
+    #[snafu(display("initializing the ACP client failed: {source}"))]
     Initialize { source: acp::Error },
 
-    #[snafu(display("creating an ACP session failed"))]
+    #[snafu(display("authenticating with the ACP agent failed: {source}"))]
+    Authenticate { source: acp::Error },
+
+    #[snafu(display("creating an ACP session failed: {source}"))]
     CreateSession { source: acp::Error },
 
-    #[snafu(display("sending the ACP prompt failed"))]
+    #[snafu(display("sending the ACP prompt failed: {source}"))]
     SendPrompt { source: acp::Error },
 
-    #[snafu(display("sending the ACP cancel notification failed"))]
+    #[snafu(display("sending the ACP cancel notification failed: {source}"))]
     SendCancel { source: acp::Error },
 
-    #[snafu(display("driving the ACP connection failed"))]
+    #[snafu(display("driving the ACP connection failed: {source}"))]
     ConnectionClosed { source: acp::Error },
 
     #[snafu(display("building the ACP runtime failed"))]
@@ -360,7 +369,12 @@ async fn drive_acp_roundtrip(
         upstream_sessions,
         client,
         Box::new(
-            move |conn, working_dir, backend_session_id, client, upstream_sessions| {
+            move |conn,
+                  working_dir,
+                  backend_session_id,
+                  client,
+                  upstream_sessions,
+                  capabilities| {
                 Box::pin(async move {
                     let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
                     let session_id = load_or_create_session(
@@ -368,6 +382,7 @@ async fn drive_acp_roundtrip(
                         &working_dir,
                         &backend_session_id,
                         &upstream_sessions,
+                        capabilities.load_session,
                     )
                     .await?;
                     if *cancel_rx.borrow() {
@@ -402,13 +417,19 @@ async fn drive_acp_session_prime(
         upstream_sessions,
         BackendAcpClient::without_turn(),
         Box::new(
-            move |conn, working_dir, backend_session_id, client, upstream_sessions| {
+            move |conn,
+                  working_dir,
+                  backend_session_id,
+                  client,
+                  upstream_sessions,
+                  capabilities| {
                 Box::pin(async move {
                     let session_id = load_or_create_session(
                         &conn,
                         &working_dir,
                         &backend_session_id,
                         &upstream_sessions,
+                        capabilities.load_session,
                     )
                     .await?;
                     let _ = session_id;
@@ -666,13 +687,14 @@ async fn run_connected_operation<T: 'static>(
     upstream_sessions: UpstreamSessions,
     operation: ConnectedOperation<T>,
 ) -> Result<T> {
-    initialize_connection(&conn).await?;
+    let capabilities = initialize_connection(&conn).await?;
     operation(
         conn,
         working_dir,
         backend_session_id,
         client,
         upstream_sessions,
+        capabilities,
     )
     .await
 }
@@ -796,16 +818,36 @@ async fn run_connected_main<T: 'static>(
     .await)
 }
 
-async fn initialize_connection(conn: &acp::ConnectionTo<acp::Agent>) -> Result<()> {
-    conn.send_request(
-        schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_info(
-            schema::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
-                .title("ACP Web Backend"),
-        ),
-    )
-    .block_task()
-    .await
-    .context(InitializeSnafu)?;
+async fn initialize_connection(
+    conn: &acp::ConnectionTo<acp::Agent>,
+) -> Result<AgentConnectionCapabilities> {
+    let response = conn
+        .send_request(
+            schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_info(
+                schema::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
+                    .title("ACP Web Backend"),
+            ),
+        )
+        .block_task()
+        .await
+        .context(InitializeSnafu)?;
+    authenticate_with_agent(conn, &response.auth_methods).await?;
+    Ok(AgentConnectionCapabilities {
+        load_session: response.agent_capabilities.load_session,
+    })
+}
+
+async fn authenticate_with_agent(
+    conn: &acp::ConnectionTo<acp::Agent>,
+    auth_methods: &[schema::AuthMethod],
+) -> Result<()> {
+    let Some(method) = auth_methods.first() else {
+        return Ok(());
+    };
+    conn.send_request(schema::AuthenticateRequest::new(method.id().clone()))
+        .block_task()
+        .await
+        .context(AuthenticateSnafu)?;
     Ok(())
 }
 
@@ -820,20 +862,15 @@ async fn load_or_create_session(
     working_dir: &Path,
     backend_session_id: &str,
     upstream_sessions: &UpstreamSessions,
+    can_load_session: bool,
 ) -> Result<String> {
     let cached_session_id = upstream_sessions
         .lock()
         .await
         .get(backend_session_id)
         .cloned();
-    let load_succeeded = if let Some(session_id) = cached_session_id.as_ref() {
-        conn.send_request(schema::LoadSessionRequest::new(
-            session_id.clone(),
-            working_dir.to_path_buf(),
-        ))
-        .block_task()
-        .await
-        .is_ok()
+    let load_succeeded = if can_load_session {
+        load_cached_session(conn, working_dir, cached_session_id.as_ref()).await
     } else {
         false
     };
@@ -859,6 +896,24 @@ async fn load_or_create_session(
         .await
         .insert(backend_session_id.to_string(), session_id.clone());
     Ok(session_id)
+}
+
+async fn load_cached_session(
+    conn: &acp::ConnectionTo<acp::Agent>,
+    working_dir: &Path,
+    cached_session_id: Option<&String>,
+) -> bool {
+    if let Some(session_id) = cached_session_id {
+        conn.send_request(schema::LoadSessionRequest::new(
+            session_id.clone(),
+            working_dir.to_path_buf(),
+        ))
+        .block_task()
+        .await
+        .is_ok()
+    } else {
+        false
+    }
 }
 
 fn reply_from_stop_reason(stop_reason: schema::StopReason, reply_text: String) -> ReplyResult {

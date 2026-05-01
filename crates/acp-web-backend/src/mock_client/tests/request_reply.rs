@@ -88,6 +88,7 @@ async fn prime_session_hint_collects_startup_hints_without_polluting_prompt_repl
     let (mock_address, shutdown_tx) = spawn_mock_server_with_config(MockConfig {
         response_delay: Duration::from_millis(1),
         startup_hints: true,
+        ..MockConfig::default()
     })
     .await;
     let client = MockClient::new(mock_address).expect("client construction should succeed");
@@ -121,6 +122,31 @@ async fn prime_session_hint_collects_startup_hints_without_polluting_prompt_repl
         ReplyResult::Reply(text) if text.starts_with("mock assistant:")
     ));
 
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn prime_session_hint_authenticates_before_creating_sessions() {
+    let (mock_address, shutdown_tx) = spawn_mock_server_with_config(MockConfig {
+        response_delay: Duration::from_millis(1),
+        auth_required: true,
+        ..MockConfig::default()
+    })
+    .await;
+    let client = MockClient::new(mock_address).expect("client construction should succeed");
+    let pending = test_pending_prompt("alice", "hello").await;
+    let session_id = pending.turn_handle().session_id().to_string();
+
+    let hint = client
+        .prime_session_hint(&session_id)
+        .await
+        .expect("authenticated session priming should succeed");
+
+    assert!(hint.is_none());
+    assert_eq!(
+        client.mapped_session_id(&session_id).await.as_deref(),
+        Some("mock_0")
+    );
     let _ = shutdown_tx.send(());
 }
 

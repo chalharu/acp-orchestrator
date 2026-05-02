@@ -367,6 +367,19 @@ async fn backend_acp_client_terminal_lifecycle_is_checkout_bounded() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn backend_acp_client_terminal_lifecycle_works_for_standard_checkout() {
+    let checkout = test_checkout_dir();
+    let client = muted_client_for_checkout(checkout.clone()).await;
+
+    assert_terminal_output_is_bounded(&client).await;
+    assert_terminal_cwd_escape_rejected(&client).await;
+    assert_terminal_is_killable(&client).await;
+
+    let _ = fs::remove_dir_all(checkout);
+}
+
+#[cfg(unix)]
 async fn assert_terminal_output_is_bounded(client: &BackendAcpClient) {
     let created = client
         .create_terminal(
@@ -517,29 +530,6 @@ async fn wait_for_concurrent_terminal_exit(
         .unwrap_or_else(|_| panic!("wait should finish after {action}"))
         .expect("wait task should not panic")
         .expect("terminal wait should succeed")
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn backend_acp_client_rejects_terminals_without_chroot_checkout() {
-    let checkout = test_checkout_dir();
-    let client = BackendAcpClient::new_muted_with_checkout(
-        test_pending_prompt("alice", "runtime tools")
-            .await
-            .turn_handle(),
-        checkout.clone(),
-    );
-
-    assert!(
-        client
-            .create_terminal(
-                schema::CreateTerminalRequest::new("mock_0", "/bin/printf")
-                    .cwd(PathBuf::from("/workspace"))
-            )
-            .await
-            .is_err()
-    );
-
-    let _ = fs::remove_dir_all(checkout);
 }
 
 #[tokio::test(flavor = "current_thread")]

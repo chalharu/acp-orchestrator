@@ -113,8 +113,12 @@ impl BackendAcpClient {
         }
     }
 
-    pub(super) fn supports_chroot_terminal_for_checkout(checkout_root: &Path) -> bool {
-        RuntimeToolContext::supports_chroot_terminal(checkout_root)
+    pub(super) fn supports_filesystem_tools_for_checkout(checkout_root: &Path) -> bool {
+        RuntimeToolContext::supports_filesystem_tools(checkout_root)
+    }
+
+    pub(super) fn supports_terminal_for_checkout(checkout_root: &Path) -> bool {
+        RuntimeToolContext::supports_terminal(checkout_root)
     }
 
     pub(super) fn reply_text(&self) -> String {
@@ -390,10 +394,13 @@ struct RuntimeToolContext {
 }
 
 #[derive(Debug, Clone)]
-struct TerminalBoundary {
-    root_dir: PathBuf,
-    run_uid: u32,
-    run_gid: u32,
+enum TerminalBoundary {
+    Chroot {
+        root_dir: PathBuf,
+        run_uid: u32,
+        run_gid: u32,
+    },
+    Host,
 }
 
 #[derive(Debug, Default)]
@@ -430,8 +437,14 @@ impl RuntimeToolContext {
         }
     }
 
-    pub(super) fn supports_chroot_terminal(checkout_root: &Path) -> bool {
-        terminal_boundary_for_checkout(checkout_root).is_some()
+    pub(super) fn supports_filesystem_tools(checkout_root: &Path) -> bool {
+        cfg!(unix) && checkout_root.is_dir()
+    }
+
+    pub(super) fn supports_terminal(checkout_root: &Path) -> bool {
+        cfg!(unix)
+            && checkout_root.is_dir()
+            && terminal_boundary_for_checkout(checkout_root).is_some()
     }
 
     fn checkout_root(&self) -> acp::Result<PathBuf> {
@@ -493,9 +506,9 @@ impl RuntimeToolContext {
             .ok_or_else(|| tool_error("terminal runtime is unavailable"))?;
         validate_terminal_request(&args)?;
         let cwd = self.resolve_cwd(args.cwd.as_deref())?;
-        let chroot_cwd = self.chroot_path_for_checkout_path(&cwd)?;
+        let process_cwd = self.process_cwd_for_checkout_path(boundary, &cwd)?;
         let output_limit = terminal_output_limit(args.output_byte_limit);
-        let process = spawn_terminal_process(args, boundary, &chroot_cwd)?;
+        let process = spawn_terminal_process(args, boundary, &process_cwd)?;
         let entry = terminal_entry_from_process(process, output_limit).await;
         let terminal_id = self.register_terminal_entry(entry).await;
         Ok(schema::CreateTerminalResponse::new(terminal_id))
@@ -656,6 +669,17 @@ impl RuntimeToolContext {
             .unwrap_or_else(|_| self.checkout_root.clone())
             .display()
             .to_string()
+    }
+
+    fn process_cwd_for_checkout_path(
+        &self,
+        boundary: &TerminalBoundary,
+        checkout_path: &Path,
+    ) -> acp::Result<PathBuf> {
+        match boundary {
+            TerminalBoundary::Chroot { .. } => self.chroot_path_for_checkout_path(checkout_path),
+            TerminalBoundary::Host => Ok(checkout_path.to_path_buf()),
+        }
     }
 
     fn chroot_path_for_checkout_path(&self, checkout_path: &Path) -> acp::Result<PathBuf> {
@@ -892,14 +916,14 @@ fn owned_fd_from_raw(fd: libc::c_int, error: &'static str) -> acp::Result<OwnedF
 }
 
 fn terminal_boundary_for_checkout(checkout_root: &Path) -> Option<TerminalBoundary> {
-    if !is_chroot_checkout_root(checkout_root) {
-        return None;
+    if is_chroot_checkout_root(checkout_root) {
+        return Some(TerminalBoundary::Chroot {
+            root_dir: checkout_root.parent()?.to_path_buf(),
+            run_uid: DEFAULT_AGENT_RUN_UID,
+            run_gid: DEFAULT_AGENT_RUN_GID,
+        });
     }
-    Some(TerminalBoundary {
-        root_dir: checkout_root.parent()?.to_path_buf(),
-        run_uid: DEFAULT_AGENT_RUN_UID,
-        run_gid: DEFAULT_AGENT_RUN_GID,
-    })
+    Some(TerminalBoundary::Host)
 }
 
 fn is_chroot_checkout_root(checkout_root: &Path) -> bool {
@@ -945,7 +969,7 @@ fn terminal_output_limit(limit: Option<u64>) -> usize {
 fn spawn_terminal_process(
     args: schema::CreateTerminalRequest,
     boundary: &TerminalBoundary,
-    chroot_cwd: &Path,
+    process_cwd: &Path,
 ) -> acp::Result<SpawnedTerminal> {
     let mut command = Command::new(&args.command);
     command.args(&args.args);
@@ -957,7 +981,7 @@ fn spawn_terminal_process(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    configure_chroot_terminal_command(&mut command, boundary, chroot_cwd)?;
+    configure_terminal_command(&mut command, boundary, process_cwd)?;
     let mut child = command
         .spawn()
         .map_err(|_| tool_error("spawning terminal command failed"))?;
@@ -996,32 +1020,43 @@ async fn terminal_entry_from_process(
     entry
 }
 
+fn configure_terminal_command(
+    command: &mut Command,
+    boundary: &TerminalBoundary,
+    cwd: &Path,
+) -> acp::Result<()> {
+    match boundary {
+        TerminalBoundary::Chroot {
+            root_dir,
+            run_uid,
+            run_gid,
+        } => configure_chroot_terminal_command(command, root_dir, *run_uid, *run_gid, cwd),
+        TerminalBoundary::Host => configure_host_terminal_command(command, cwd),
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn configure_chroot_terminal_command(
     command: &mut Command,
-    boundary: &TerminalBoundary,
+    root_dir: &Path,
+    run_uid: u32,
+    run_gid: u32,
     cwd: &Path,
 ) -> acp::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     #[cfg(test)]
-    if boundary
-        .root_dir
-        .join(TEST_SKIP_CHROOT_PREEXEC_MARKER)
-        .exists()
-    {
+    if root_dir.join(TEST_SKIP_CHROOT_PREEXEC_MARKER).exists() {
         if let Ok(relative_cwd) = cwd.strip_prefix(Path::new("/")) {
-            command.current_dir(boundary.root_dir.join(relative_cwd));
+            command.current_dir(root_dir.join(relative_cwd));
         }
         return Ok(());
     }
 
-    let root = std::ffi::CString::new(boundary.root_dir.as_os_str().as_bytes())
+    let root = std::ffi::CString::new(root_dir.as_os_str().as_bytes())
         .map_err(|_| tool_error("terminal chroot root is invalid"))?;
     let cwd = std::ffi::CString::new(cwd.as_os_str().as_bytes())
         .map_err(|_| tool_error("terminal cwd is invalid"))?;
-    let run_uid = boundary.run_uid;
-    let run_gid = boundary.run_gid;
     unsafe {
         command.pre_exec(move || prepare_chroot_terminal_child(&root, &cwd, run_uid, run_gid));
     }
@@ -1031,13 +1066,37 @@ fn configure_chroot_terminal_command(
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn configure_chroot_terminal_command(
     _command: &mut Command,
-    _boundary: &TerminalBoundary,
+    _root_dir: &Path,
+    _run_uid: u32,
+    _run_gid: u32,
     _cwd: &Path,
 ) -> acp::Result<()> {
     Err(tool_error(
         "chroot terminal is not supported on this platform",
     ))
 }
+
+fn configure_host_terminal_command(command: &mut Command, cwd: &Path) -> acp::Result<()> {
+    command.current_dir(cwd);
+    configure_host_terminal_process_group(command);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn configure_host_terminal_process_group(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() >= 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_host_terminal_process_group(_command: &mut Command) {}
 
 #[cfg(target_os = "linux")]
 fn prepare_chroot_terminal_child(

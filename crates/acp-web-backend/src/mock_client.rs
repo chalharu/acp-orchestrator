@@ -1149,13 +1149,14 @@ async fn initialize_connection(
     conn: &acp::ConnectionTo<acp::Agent>,
     working_dir: &Path,
 ) -> Result<AgentConnectionCapabilities> {
-    let supports_runtime_tools =
-        BackendAcpClient::supports_chroot_terminal_for_checkout(working_dir);
+    let supports_filesystem_tools =
+        BackendAcpClient::supports_filesystem_tools_for_checkout(working_dir);
+    let supports_terminal_tools = BackendAcpClient::supports_terminal_for_checkout(working_dir);
     let client_capabilities = schema::ClientCapabilities::new()
         .fs(schema::FileSystemCapabilities::new()
-            .read_text_file(supports_runtime_tools)
-            .write_text_file(supports_runtime_tools))
-        .terminal(supports_runtime_tools);
+            .read_text_file(supports_filesystem_tools)
+            .write_text_file(supports_filesystem_tools))
+        .terminal(supports_terminal_tools);
     let response = conn
         .send_request(
             schema::InitializeRequest::new(schema::ProtocolVersion::V1)

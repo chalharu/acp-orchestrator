@@ -510,8 +510,9 @@ async fn request_reply_services_acp_mock_runtime_tool_requests() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn request_reply_reports_acp_mock_runtime_tools_unavailable_for_standard_checkout() {
+async fn request_reply_services_acp_mock_runtime_tool_requests_for_standard_checkout() {
     let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
     let client = MockClient::with_timeout(mock_address, Duration::from_secs(5))
         .expect("client construction should succeed");
@@ -520,6 +521,18 @@ async fn request_reply_reports_acp_mock_runtime_tools_unavailable_for_standard_c
         .create_session("alice", "w_test")
         .await
         .expect("session creation should succeed");
+    let (_snapshot, mut receiver) = store
+        .session_events("alice", &session.id)
+        .await
+        .expect("session subscriptions should succeed");
+    let checkout = temp_stdio_working_dir();
+    std::fs::create_dir_all(&checkout).expect("standard checkout should be created");
+    std::fs::write(checkout.join("README.md"), "standard-runtime-read\nsecond")
+        .expect("runtime tool read target should be seeded");
+    client
+        .bind_session(&session.id, checkout.clone())
+        .await
+        .expect("working dir bind should succeed");
     let pending = store
         .submit_prompt(
             "alice",
@@ -528,19 +541,32 @@ async fn request_reply_reports_acp_mock_runtime_tools_unavailable_for_standard_c
         )
         .await
         .expect("runtime tool prompt should submit");
+    let request_task = {
+        let client = client.clone();
+        tokio::spawn(async move { client.request_reply(pending.turn_handle()).await })
+    };
 
-    let reply = client
-        .request_reply(pending.turn_handle())
+    let tool_call_id = approve_runtime_tool_permission(&store, &session.id, &mut receiver).await;
+    let reply = request_task
         .await
-        .expect("unsupported runtime tool prompt should succeed");
+        .expect("request task should join")
+        .expect("acp-mock runtime tool prompt should succeed");
 
     assert!(matches!(
         reply,
         ReplyResult::Reply(text)
-            if text.contains("Runtime tools are unavailable")
-                && !text.contains("Runtime tools verified")
+            if text.contains("Runtime tools verified")
+                && text.contains("standard-runtime-read")
+                && text.contains("terminal-ok")
     ));
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("acp-mock-runtime-tools.txt"))
+            .expect("runtime write should persist"),
+        "created by acp-mock runtime tools\n"
+    );
+    assert_runtime_tool_completed(&mut receiver, &tool_call_id).await;
     let _ = shutdown_tx.send(());
+    let _ = std::fs::remove_dir_all(checkout);
 }
 
 #[cfg(unix)]

@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent_runtime::{AgentLaunchMetadata, AgentStdioMetadata};
 use crate::contract_permissions::PermissionDecision;
-use crate::contract_stream::StreamEventPayload;
+use crate::contract_stream::{StreamEvent, StreamEventPayload};
 use crate::sessions::TurnHandle;
 use std::path::{Path, PathBuf};
 
@@ -450,6 +450,126 @@ async fn request_reply_services_stdio_runtime_tool_requests() {
         "created by runtime tool"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn request_reply_services_acp_mock_runtime_tool_requests() {
+    let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+    let client = MockClient::with_timeout(mock_address, Duration::from_secs(5))
+        .expect("client construction should succeed");
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let (_snapshot, mut receiver) = store
+        .session_events("alice", &session.id)
+        .await
+        .expect("session subscriptions should succeed");
+    let (root, checkout) = temp_stdio_chroot_checkout();
+    std::fs::write(checkout.join("README.md"), "mock-runtime-read\nsecond")
+        .expect("runtime tool read target should be seeded");
+    client
+        .bind_session(&session.id, checkout.clone())
+        .await
+        .expect("working dir bind should succeed");
+    let pending = store
+        .submit_prompt(
+            "alice",
+            &session.id,
+            acp_mock::MANUAL_RUNTIME_TOOLS_TRIGGER.to_string(),
+        )
+        .await
+        .expect("runtime tool prompt should submit");
+    let request_task = {
+        let client = client.clone();
+        tokio::spawn(async move { client.request_reply(pending.turn_handle()).await })
+    };
+
+    let tool_call_id = approve_runtime_tool_permission(&store, &session.id, &mut receiver).await;
+    let reply = request_task
+        .await
+        .expect("request task should join")
+        .expect("acp-mock runtime tool prompt should succeed");
+
+    assert!(matches!(
+        reply,
+        ReplyResult::Reply(text)
+            if text.contains("Runtime tools verified")
+                && text.contains("mock-runtime-read")
+                && text.contains("terminal-ok")
+    ));
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("acp-mock-runtime-tools.txt"))
+            .expect("runtime write should persist"),
+        "created by acp-mock runtime tools\n"
+    );
+    assert_runtime_tool_completed(&mut receiver, &tool_call_id).await;
+    let _ = shutdown_tx.send(());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+async fn approve_runtime_tool_permission(
+    store: &SessionStore,
+    session_id: &str,
+    receiver: &mut tokio::sync::broadcast::Receiver<StreamEvent>,
+) -> String {
+    let mut tool_call_id = None;
+    loop {
+        let event = receiver
+            .recv()
+            .await
+            .expect("runtime tool events should arrive");
+        match event.payload {
+            StreamEventPayload::ToolCall { call }
+                if call.title.as_deref() == Some("Verify ACP runtime tools")
+                    && call.status.as_deref() == Some("in_progress") =>
+            {
+                tool_call_id = Some(call.tool_call_id);
+            }
+            StreamEventPayload::PermissionRequested { request } => {
+                assert_eq!(request.summary, "verify runtime tools");
+                store
+                    .resolve_permission(
+                        "alice",
+                        session_id,
+                        &request.request_id,
+                        PermissionDecision::Approve,
+                    )
+                    .await
+                    .expect("runtime tool permission should approve");
+                return tool_call_id.expect("the mock should stream a tool call event");
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn assert_runtime_tool_completed(
+    receiver: &mut tokio::sync::broadcast::Receiver<StreamEvent>,
+    tool_call_id: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let event = receiver
+                .recv()
+                .await
+                .expect("runtime tool completion should arrive");
+            if matches!(
+                event.payload,
+                StreamEventPayload::ToolCallUpdate { update }
+                    if update.tool_call_id == tool_call_id
+                        && update.status.as_deref() == Some("completed")
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("runtime tool completion should arrive");
 }
 
 #[tokio::test]

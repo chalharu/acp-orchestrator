@@ -1,7 +1,8 @@
 use super::*;
 use crate::prompt::{
     MANUAL_CANCEL_TRIGGER, MANUAL_FAILURE_TRIGGER, MANUAL_PERMISSION_TRIGGER,
-    prompt_requires_permission, prompt_should_fail, reply_for, response_delay_for, wait_for_cancel,
+    MANUAL_RUNTIME_TOOLS_TRIGGER, prompt_requires_permission, prompt_should_fail,
+    prompt_uses_runtime_tools, reply_for, response_delay_for, wait_for_cancel,
 };
 use agent_client_protocol::schema;
 use std::{
@@ -28,6 +29,184 @@ impl PermissionRequester for StubPermissionRequester {
     }
 }
 
+#[async_trait::async_trait]
+impl RuntimeToolRequester for StubPermissionRequester {
+    async fn read_text_file(
+        &self,
+        _request: schema::ReadTextFileRequest,
+    ) -> Result<schema::ReadTextFileResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+
+    async fn write_text_file(
+        &self,
+        _request: schema::WriteTextFileRequest,
+    ) -> Result<schema::WriteTextFileResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+
+    async fn create_terminal(
+        &self,
+        _request: schema::CreateTerminalRequest,
+    ) -> Result<schema::CreateTerminalResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+
+    async fn terminal_output(
+        &self,
+        _request: schema::TerminalOutputRequest,
+    ) -> Result<schema::TerminalOutputResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+
+    async fn wait_for_terminal_exit(
+        &self,
+        _request: schema::WaitForTerminalExitRequest,
+    ) -> Result<schema::WaitForTerminalExitResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+
+    async fn kill_terminal(
+        &self,
+        _request: schema::KillTerminalRequest,
+    ) -> Result<schema::KillTerminalResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+
+    async fn release_terminal(
+        &self,
+        _request: schema::ReleaseTerminalRequest,
+    ) -> Result<schema::ReleaseTerminalResponse, acp::Error> {
+        Err(acp::Error::internal_error())
+    }
+}
+
+struct StubRuntimeRequester {
+    permission_count: Arc<AtomicUsize>,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl StubRuntimeRequester {
+    fn new() -> Self {
+        Self {
+            permission_count: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls
+            .lock()
+            .expect("runtime call list should not be poisoned")
+            .clone()
+    }
+
+    fn push_call(&self, name: &'static str) {
+        self.calls
+            .lock()
+            .expect("runtime call list should not be poisoned")
+            .push(name);
+    }
+}
+
+#[async_trait::async_trait]
+impl PermissionRequester for StubRuntimeRequester {
+    async fn request_permission(
+        &self,
+        request: schema::RequestPermissionRequest,
+    ) -> Result<schema::RequestPermissionResponse, acp::Error> {
+        self.permission_count.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(
+            request.tool_call.fields.title.as_deref(),
+            Some("verify runtime tools")
+        );
+        Ok(schema::RequestPermissionResponse::new(
+            schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
+                "allow_once",
+            )),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeToolRequester for StubRuntimeRequester {
+    async fn read_text_file(
+        &self,
+        request: schema::ReadTextFileRequest,
+    ) -> Result<schema::ReadTextFileResponse, acp::Error> {
+        self.push_call("read");
+        assert_eq!(request.path, std::path::Path::new("/workspace/README.md"));
+        Ok(schema::ReadTextFileResponse::new("runtime-readme"))
+    }
+
+    async fn write_text_file(
+        &self,
+        request: schema::WriteTextFileRequest,
+    ) -> Result<schema::WriteTextFileResponse, acp::Error> {
+        self.push_call("write");
+        assert_eq!(
+            request.path,
+            std::path::Path::new("/workspace/acp-mock-runtime-tools.txt")
+        );
+        assert_eq!(request.content, "created by acp-mock runtime tools\n");
+        Ok(schema::WriteTextFileResponse::new())
+    }
+
+    async fn create_terminal(
+        &self,
+        request: schema::CreateTerminalRequest,
+    ) -> Result<schema::CreateTerminalResponse, acp::Error> {
+        self.push_call("create_terminal");
+        match request.command.as_str() {
+            "/bin/printf" => Ok(schema::CreateTerminalResponse::new("printf")),
+            "/bin/sleep" => Ok(schema::CreateTerminalResponse::new("sleep")),
+            _ => Err(acp::Error::invalid_params()),
+        }
+    }
+
+    async fn terminal_output(
+        &self,
+        request: schema::TerminalOutputRequest,
+    ) -> Result<schema::TerminalOutputResponse, acp::Error> {
+        self.push_call("terminal_output");
+        assert_eq!(request.terminal_id.to_string(), "printf");
+        Ok(schema::TerminalOutputResponse::new("terminal-ok", false))
+    }
+
+    async fn wait_for_terminal_exit(
+        &self,
+        request: schema::WaitForTerminalExitRequest,
+    ) -> Result<schema::WaitForTerminalExitResponse, acp::Error> {
+        self.push_call("wait_for_terminal_exit");
+        assert_eq!(request.terminal_id.to_string(), "printf");
+        Ok(schema::WaitForTerminalExitResponse::new(
+            schema::TerminalExitStatus::new().exit_code(0),
+        ))
+    }
+
+    async fn kill_terminal(
+        &self,
+        request: schema::KillTerminalRequest,
+    ) -> Result<schema::KillTerminalResponse, acp::Error> {
+        self.push_call("kill_terminal");
+        assert_eq!(request.terminal_id.to_string(), "sleep");
+        Ok(schema::KillTerminalResponse::new())
+    }
+
+    async fn release_terminal(
+        &self,
+        request: schema::ReleaseTerminalRequest,
+    ) -> Result<schema::ReleaseTerminalResponse, acp::Error> {
+        self.push_call("release_terminal");
+        assert!(
+            matches!(request.terminal_id.to_string().as_str(), "printf" | "sleep"),
+            "unexpected terminal id {}",
+            request.terminal_id
+        );
+        Ok(schema::ReleaseTerminalResponse::new())
+    }
+}
+
 struct StubSessionUpdateNotifier {
     should_fail: bool,
     call_count: Arc<AtomicUsize>,
@@ -50,6 +229,39 @@ impl SessionUpdateNotifier for StubSessionUpdateNotifier {
         } else {
             Ok(())
         }
+    }
+}
+
+struct RecordingSessionUpdateNotifier {
+    notifications: Arc<Mutex<Vec<schema::SessionNotification>>>,
+}
+
+impl RecordingSessionUpdateNotifier {
+    fn new() -> Self {
+        Self {
+            notifications: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn notifications(&self) -> Vec<schema::SessionNotification> {
+        self.notifications
+            .lock()
+            .expect("notification list should not be poisoned")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionUpdateNotifier for RecordingSessionUpdateNotifier {
+    async fn send_session_update(
+        &self,
+        notification: schema::SessionNotification,
+    ) -> Result<(), acp::Error> {
+        self.notifications
+            .lock()
+            .expect("notification list should not be poisoned")
+            .push(notification);
+        Ok(())
     }
 }
 
@@ -271,12 +483,71 @@ async fn mock_agent_emits_startup_hints_when_enabled() {
         schema::SessionUpdate::AgentMessageChunk(chunk) => match chunk.content {
             schema::ContentBlock::Text(text) => {
                 assert!(text.text.contains(MANUAL_PERMISSION_TRIGGER));
+                assert!(text.text.contains(MANUAL_RUNTIME_TOOLS_TRIGGER));
                 assert!(text.text.contains(MANUAL_CANCEL_TRIGGER));
             }
             other => panic!("unexpected startup hint content: {other:?}"),
         },
         other => panic!("unexpected startup hint update: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn mock_agent_runtime_tool_trigger_exercises_client_tools() {
+    let requester = StubRuntimeRequester::new();
+    let notifier = RecordingSessionUpdateNotifier::new();
+    let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
+
+    let response = agent
+        .prompt(
+            schema::PromptRequest::new(
+                "mock_0",
+                vec![schema::ContentBlock::Text(schema::TextContent::new(
+                    MANUAL_RUNTIME_TOOLS_TRIGGER,
+                ))],
+            ),
+            &notifier,
+            &requester,
+        )
+        .await
+        .expect("runtime tool prompt should resolve");
+
+    assert_eq!(
+        response,
+        schema::PromptResponse::new(schema::StopReason::EndTurn)
+    );
+    assert_eq!(requester.permission_count.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        requester.calls(),
+        vec![
+            "read",
+            "write",
+            "create_terminal",
+            "wait_for_terminal_exit",
+            "terminal_output",
+            "release_terminal",
+            "create_terminal",
+            "kill_terminal",
+            "release_terminal",
+        ]
+    );
+    let notifications = notifier.notifications();
+    assert!(matches!(
+        notifications[0].update,
+        schema::SessionUpdate::ToolCall(ref call)
+            if call.title == "Verify ACP runtime tools"
+                && call.status == schema::ToolCallStatus::InProgress
+    ));
+    assert!(matches!(
+        notifications[1].update,
+        schema::SessionUpdate::ToolCallUpdate(ref update)
+            if update.fields.status == Some(schema::ToolCallStatus::Completed)
+    ));
+    assert!(matches!(
+        notifications[2].update,
+        schema::SessionUpdate::AgentMessageChunk(ref chunk)
+            if format!("{:?}", chunk.content).contains("Runtime tools verified")
+    ));
 }
 
 #[tokio::test]
@@ -527,6 +798,11 @@ fn long_prompts_are_truncated_in_mock_replies() {
 #[test]
 fn manual_permission_trigger_still_uses_the_permission_flow() {
     assert!(prompt_requires_permission(MANUAL_PERMISSION_TRIGGER));
+}
+
+#[test]
+fn manual_runtime_tools_trigger_uses_the_runtime_tool_flow() {
+    assert!(prompt_uses_runtime_tools(MANUAL_RUNTIME_TOOLS_TRIGGER));
 }
 
 #[test]

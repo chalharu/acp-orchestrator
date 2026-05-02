@@ -206,6 +206,7 @@ dependencies = [
  "async-trait",
  "clap",
  "futures-util",
+ "serde_json",
  "snafu",
  "tokio",
  "tokio-util",

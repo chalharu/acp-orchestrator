@@ -1,5 +1,5 @@
 use super::*;
-use agent_client_protocol::{ConnectTo, HandleDispatchFrom, schema};
+use agent_client_protocol::{ConnectTo, schema};
 use std::collections::HashMap;
 
 #[test]
@@ -89,6 +89,63 @@ async fn handle_cancelled_prompt_sends_cancels_and_reports_cancelled_status() {
     assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_responses_wait_for_late_agent_chunks() {
+    let client = BackendAcpClient::without_turn();
+    let notifier = client.clone();
+    let notify_task = tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        notifier
+            .session_notification(schema::SessionNotification::new(
+                "mock_0",
+                schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                    "late chunk".into(),
+                )),
+            ))
+            .await
+            .expect("late chunks should be accepted");
+    });
+
+    let reply = reply_from_prompt_response(
+        Ok(schema::PromptResponse::new(schema::StopReason::EndTurn)),
+        &client,
+    )
+    .await
+    .expect("prompt response should resolve");
+
+    assert_eq!(reply, ReplyResult::Reply("late chunk".to_string()));
+    notify_task.await.expect("notification task should finish");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_prompt_responses_wait_for_late_agent_chunks() {
+    let client = BackendAcpClient::without_turn();
+    let notifier = client.clone();
+    let notify_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        notifier
+            .session_notification(schema::SessionNotification::new(
+                "mock_0",
+                schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                    "late chunk".into(),
+                )),
+            ))
+            .await
+            .expect("late chunks should be accepted");
+    });
+
+    let reply = reply_from_prompt_response(
+        Ok(schema::PromptResponse::new(schema::StopReason::Cancelled)),
+        &client,
+    )
+    .await
+    .expect("cancelled prompt response should resolve");
+
+    assert_eq!(reply, ReplyResult::Status("turn cancelled".to_string()));
+    assert_eq!(client.reply_text(), "late chunk");
+    notify_task.await.expect("notification task should finish");
+}
+
 #[tokio::test]
 async fn backend_io_connect_to_completes_when_peer_closes() {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -113,17 +170,4 @@ async fn backend_io_connect_to_completes_when_peer_closes() {
     )
     .await
     .expect("BackendIo should stop promptly when the peer closes");
-}
-
-#[test]
-fn backend_dispatch_handler_describes_itself() {
-    let handler = BackendDispatchHandler::new(
-        BackendAcpClient::without_turn(),
-        BackendAcpClient::without_turn(),
-    );
-
-    assert_eq!(
-        format!("{:?}", handler.describe_chain()),
-        "\"BackendDispatchHandler\""
-    );
 }

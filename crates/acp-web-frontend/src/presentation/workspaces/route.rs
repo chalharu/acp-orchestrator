@@ -30,6 +30,7 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
                     <h1>"Workspaces"</h1>
                     <div class="account-panel__header-actions">
                         {workspaces_back_link_view(back_to_chat_path)}
+                        {agent_settings_button()}
                         <CreateWorkspaceButton state />
                     </div>
                 </div>
@@ -71,6 +72,7 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
                     <h1>"Workspaces"</h1>
                     <div class="account-panel__header-actions">
                         {workspaces_back_link_view(None)}
+                        {agent_settings_button()}
                         <CreateWorkspaceButton state />
                     </div>
                 </div>
@@ -80,6 +82,21 @@ fn workspaces_page_shell(state: WorkspacesPageState) -> impl IntoView {
             </section>
         </main>
     }
+}
+
+fn agent_settings_button() -> AnyView {
+    view! {
+        <a
+            href="/app/settings/"
+            class="account-panel__header-action icon-action icon-action--ghost"
+            aria-label="Settings"
+            title="Settings"
+        >
+            {app_icon_view(AppIcon::Accounts)}
+            <span class="sr-only">"Settings"</span>
+        </a>
+    }
+    .into_any()
 }
 
 fn workspaces_back_link_view(back_to_chat_path: Option<String>) -> AnyView {
@@ -121,7 +138,7 @@ fn workspaces_page_content_body(
     state: WorkspacesPageState,
 ) -> AnyView {
     match access {
-        Some(WorkspacesRouteAccess::SignedIn) => view! {
+        Some(WorkspacesRouteAccess::SignedIn(_)) => view! {
             {workspace_registry_section(state)}
         }
         .into_any(),
@@ -145,6 +162,8 @@ fn workspaces_page_content_body(
 
 #[cfg(test)]
 mod tests {
+    use acp_contracts_accounts::LocalAccount;
+    use chrono::{TimeZone, Utc};
     use leptos::prelude::*;
 
     use super::*;
@@ -155,7 +174,9 @@ mod tests {
         owner.with(|| {
             let state = WorkspacesPageState::new();
 
-            state.access.set(Some(WorkspacesRouteAccess::SignedIn));
+            state
+                .access
+                .set(Some(WorkspacesRouteAccess::SignedIn(sample_account(false))));
             let _ = view! { <WorkspacesPageContent state=state /> };
 
             state
@@ -176,7 +197,9 @@ mod tests {
         owner.with(|| {
             let state = WorkspacesPageState::new();
             state.notice.set(Some("Workspace updated.".to_string()));
-            state.access.set(Some(WorkspacesRouteAccess::SignedIn));
+            state
+                .access
+                .set(Some(WorkspacesRouteAccess::SignedIn(sample_account(false))));
             let _ = workspaces_page_shell(state);
             let _ = workspaces_back_link_view(Some("/app/sessions/abc".to_string()));
             let _ = view! { <WorkspacesPage /> };
@@ -190,10 +213,21 @@ mod tests {
         let owner = Owner::new();
         owner.with(|| {
             let state = WorkspacesPageState::new();
-            state.access.set(Some(WorkspacesRouteAccess::SignedIn));
+            state
+                .access
+                .set(Some(WorkspacesRouteAccess::SignedIn(sample_account(false))));
             // Modal is not shown by default.
             assert!(!state.show_create_modal.get());
             let _ = workspaces_page_shell(state);
         });
+    }
+
+    fn sample_account(is_admin: bool) -> LocalAccount {
+        LocalAccount {
+            user_id: "u_test".to_string(),
+            username: "tester".to_string(),
+            is_admin,
+            created_at: Utc.with_ymd_and_hms(2026, 4, 17, 1, 0, 0).unwrap(),
+        }
     }
 }

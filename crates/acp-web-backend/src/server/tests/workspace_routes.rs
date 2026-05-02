@@ -69,6 +69,7 @@ async fn workspace_session_routes_accept_empty_and_override_request_bodies() {
         axum::body::Bytes::from(
             serde_json::to_vec(&CreateSessionRequest {
                 checkout_ref: Some("refs/heads/release".to_string()),
+                agent_profile_id: None,
             })
             .expect("request should serialize"),
         ),

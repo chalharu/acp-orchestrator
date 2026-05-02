@@ -1,8 +1,17 @@
-use std::{env, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::Parser;
+use clap::ValueEnum;
 use snafu::prelude::*;
 
+use crate::agent_runtime::{
+    AgentLaunchConfig, DEFAULT_AGENT_LAUNCH_TIMEOUT, DEFAULT_AGENT_RUN_GID, DEFAULT_AGENT_RUN_UID,
+};
 use crate::support::errors::{BoxError, ListenerSetupError, ServiceReadinessError};
 use crate::support::http::{build_http_client_for_url, wait_for_health, wait_for_http_success};
 use crate::support::runtime::{
@@ -13,11 +22,19 @@ use crate::{
     AppState, AppStateBuildError, ServerConfig, serve_with_shutdown,
     workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
 };
+use tokio::net::TcpListener;
 
 type Result<T, E = BackendAppError> = std::result::Result<T, E>;
 const READY_CHECK_ATTEMPTS: usize = 50;
 const READY_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const READY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+struct RunningBackend {
+    listener: TcpListener,
+    endpoint: String,
+    state: AppState,
+    exit_after_ms: Option<u64>,
+}
 
 async fn wait_for_app_entrypoint(client: &reqwest::Client, base_url: &str) -> Result<(), BoxError> {
     let app_url = format!("{base_url}/app/");
@@ -42,6 +59,9 @@ fn map_service_readiness_error(error: ServiceReadinessError<BoxError>) -> Backen
 pub enum BackendAppError {
     #[snafu(display("parsing backend CLI arguments failed: {source}"))]
     ParseArgs { source: clap::Error },
+
+    #[snafu(display("resolving backend state directory failed"))]
+    ResolveStateDir { source: std::io::Error },
 
     #[snafu(transparent)]
     Setup { source: ListenerSetupError },
@@ -80,6 +100,70 @@ struct Cli {
     /// When absent the WASM asset routes return 503 until the frontend is built.
     #[arg(long)]
     frontend_dist: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    agent_launch_mode: Option<AgentLaunchModeArg>,
+    #[arg(long)]
+    agent_command: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    agent_command_arg: Vec<String>,
+    #[arg(long)]
+    agent_env_allowlist: Vec<String>,
+    #[arg(long)]
+    agent_launch_timeout_seconds: Option<u64>,
+    #[arg(long)]
+    agent_run_uid: Option<u32>,
+    #[arg(long)]
+    agent_run_gid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AgentLaunchModeArg {
+    Chroot,
+}
+
+fn agent_launch_config(cli: &Cli) -> std::result::Result<Option<AgentLaunchConfig>, clap::Error> {
+    match cli.agent_launch_mode {
+        None => {
+            if cli.agent_command.is_some()
+                || !cli.agent_command_arg.is_empty()
+                || !cli.agent_env_allowlist.is_empty()
+                || cli.agent_launch_timeout_seconds.is_some()
+                || cli.agent_run_uid.is_some()
+                || cli.agent_run_gid.is_some()
+            {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "agent launch options require --agent-launch-mode",
+                ));
+            }
+            Ok(None)
+        }
+        Some(AgentLaunchModeArg::Chroot) => {
+            let Some(program) = cli.agent_command.clone() else {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "--agent-command is required when --agent-launch-mode chroot is set",
+                ));
+            };
+            let mut command = vec![program];
+            command.extend(cli.agent_command_arg.clone());
+            let timeout = std::time::Duration::from_secs(
+                cli.agent_launch_timeout_seconds
+                    .unwrap_or(DEFAULT_AGENT_LAUNCH_TIMEOUT.as_secs()),
+            );
+            AgentLaunchConfig::chroot(
+                command,
+                cli.agent_env_allowlist.clone(),
+                timeout,
+                cli.agent_run_uid.unwrap_or(DEFAULT_AGENT_RUN_UID),
+                cli.agent_run_gid.unwrap_or(DEFAULT_AGENT_RUN_GID),
+            )
+            .map(Some)
+            .map_err(|error| {
+                clap::Error::raw(clap::error::ErrorKind::InvalidValue, error.to_string())
+            })
+        }
+    }
 }
 
 fn resolve_acp_server(
@@ -96,41 +180,85 @@ fn resolve_acp_server(
         })
 }
 
+fn absolute_state_dir(state_dir: PathBuf) -> std::io::Result<PathBuf> {
+    if state_dir.is_absolute() {
+        Ok(state_dir)
+    } else {
+        Ok(env::current_dir()?.join(state_dir))
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
+    let backend = build_running_backend(&cli).await?;
+    let client = build_http_client_for_url(&backend.endpoint, Some(READY_CHECK_TIMEOUT))
+        .context(BuildHttpClientSnafu)?;
+    run_backend(backend, client).await
+}
+
+async fn build_running_backend(cli: &Cli) -> Result<RunningBackend> {
     let acp_server = resolve_acp_server(cli.acp_server.clone(), env::var("ACP_MOCK_ADDRESS").ok())
         .context(ParseArgsSnafu)?;
+    let agent_launch = agent_launch_config(cli).context(ParseArgsSnafu)?;
+    let state_dir = absolute_state_dir(cli.state_dir.clone()).context(ResolveStateDirSnafu)?;
     let listener = bind_listener(cli.listen.resolved_host(), cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
     let endpoint = listener_endpoint(&listener, "web backend", "https://")
         .map_err(|source| BackendAppError::Setup { source })?;
 
-    let config = ServerConfig {
-        session_cap: cli.session_cap,
-        acp_server,
-        startup_hints: cli.startup_hints,
-        state_dir: cli.state_dir,
-        frontend_dist: cli.frontend_dist,
-    };
-    let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
-        SqliteWorkspaceRepository::new(config.state_dir.join("db.sqlite"))
-            .map_err(AppStateBuildError::from)
-            .context(BuildStateSnafu)?,
-    );
+    let config = server_config(cli, acp_server, state_dir.clone(), agent_launch);
+    let workspace_repository = workspace_repository_for_state(&state_dir)?;
     let state = AppState::new(config, workspace_repository).context(BuildStateSnafu)?;
-    let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
-        .context(BuildHttpClientSnafu)?;
+
+    Ok(RunningBackend {
+        listener,
+        endpoint,
+        state,
+        exit_after_ms: cli.listen.exit_after_ms,
+    })
+}
+
+async fn run_backend(backend: RunningBackend, client: reqwest::Client) -> Result<()> {
+    let RunningBackend {
+        listener,
+        endpoint,
+        state,
+        exit_after_ms,
+    } = backend;
     let ready = async {
         wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY).await?;
         wait_for_app_entrypoint(&client, &endpoint).await
     };
-    let serve = serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms));
+    let serve = serve_with_shutdown(listener, state, shutdown_signal(exit_after_ms));
 
     run_service_with_readiness(ready, serve, || {
         print_startup_line("web backend", &endpoint)
     })
     .await
     .map_err(map_service_readiness_error)
+}
+
+fn server_config(
+    cli: &Cli,
+    acp_server: String,
+    state_dir: PathBuf,
+    agent_launch: Option<AgentLaunchConfig>,
+) -> ServerConfig {
+    ServerConfig {
+        session_cap: cli.session_cap,
+        acp_server,
+        startup_hints: cli.startup_hints,
+        state_dir,
+        agent_launch,
+        frontend_dist: cli.frontend_dist.clone(),
+    }
+}
+
+fn workspace_repository_for_state(state_dir: &Path) -> Result<Arc<dyn WorkspaceRepository>> {
+    SqliteWorkspaceRepository::new(state_dir.join("db.sqlite"))
+        .map(|repository| Arc::new(repository) as Arc<dyn WorkspaceRepository>)
+        .map_err(AppStateBuildError::from)
+        .context(BuildStateSnafu)
 }
 
 pub async fn run_with_args<I, T>(args: I) -> Result<()>
@@ -159,6 +287,13 @@ mod tests {
             startup_hints: false,
             state_dir: PathBuf::from(".acp-state"),
             frontend_dist: None,
+            agent_launch_mode: None,
+            agent_command: None,
+            agent_command_arg: Vec::new(),
+            agent_env_allowlist: Vec::new(),
+            agent_launch_timeout_seconds: None,
+            agent_run_uid: None,
+            agent_run_gid: None,
         }
     }
 
@@ -199,6 +334,146 @@ mod tests {
                 .expect("the legacy ACP server should resolve"),
             "127.0.0.1:8090"
         );
+    }
+
+    #[test]
+    fn state_dir_resolution_makes_relative_paths_absolute() {
+        let cwd = env::current_dir().expect("current directory should be readable");
+
+        assert_eq!(
+            absolute_state_dir(PathBuf::from(".acp-state"))
+                .expect("relative state directories should resolve"),
+            cwd.join(".acp-state")
+        );
+        assert_eq!(
+            absolute_state_dir(PathBuf::from("/tmp/acp-state"))
+                .expect("absolute state directories should pass through"),
+            PathBuf::from("/tmp/acp-state")
+        );
+    }
+
+    #[test]
+    fn agent_launch_config_parses_chroot_argv_and_runtime_options() {
+        let cli = Cli::try_parse_from([
+            "acp-web-backend",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--agent-launch-mode",
+            "chroot",
+            "--agent-command",
+            "/bin/agent",
+            "--agent-command-arg",
+            "--stdio",
+            "--agent-env-allowlist",
+            "PATH",
+            "--agent-launch-timeout-seconds",
+            "7",
+            "--agent-run-uid",
+            "1000",
+            "--agent-run-gid",
+            "1000",
+        ])
+        .expect("agent launch CLI should parse");
+
+        let config = agent_launch_config(&cli)
+            .expect("agent launch config should validate")
+            .expect("agent launch config should be present");
+
+        assert_eq!(config.command, vec!["/bin/agent", "--stdio"]);
+        assert_eq!(config.env_allowlist, vec!["PATH"]);
+        assert_eq!(config.timeout, std::time::Duration::from_secs(7));
+        assert_eq!(config.run_uid, 1000);
+        assert_eq!(config.run_gid, 1000);
+    }
+
+    #[test]
+    fn agent_launch_config_rejects_missing_chroot_command() {
+        let missing_command = Cli::try_parse_from([
+            "acp-web-backend",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--agent-launch-mode",
+            "chroot",
+        ])
+        .expect("CLI shape should parse");
+        assert!(
+            agent_launch_config(&missing_command).is_err(),
+            "chroot mode should require a command"
+        );
+    }
+
+    #[test]
+    fn agent_launch_config_rejects_invalid_env_allowlist_name() {
+        let invalid_env = Cli::try_parse_from([
+            "acp-web-backend",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--agent-launch-mode",
+            "chroot",
+            "--agent-command",
+            "/bin/agent",
+            "--agent-env-allowlist",
+            "bad-name",
+        ])
+        .expect("CLI shape should parse");
+        assert!(
+            agent_launch_config(&invalid_env).is_err(),
+            "unsafe environment variable names should be rejected"
+        );
+    }
+
+    #[test]
+    fn agent_launch_config_rejects_root_uid() {
+        let root_uid = Cli::try_parse_from([
+            "acp-web-backend",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--agent-launch-mode",
+            "chroot",
+            "--agent-command",
+            "/bin/agent",
+            "--agent-run-uid",
+            "0",
+        ])
+        .expect("CLI shape should parse");
+        assert!(
+            agent_launch_config(&root_uid).is_err(),
+            "chroot agents should not run as root"
+        );
+    }
+
+    #[test]
+    fn agent_launch_config_rejects_root_gid() {
+        let root_gid = Cli::try_parse_from([
+            "acp-web-backend",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--agent-launch-mode",
+            "chroot",
+            "--agent-command",
+            "/bin/agent",
+            "--agent-run-gid",
+            "0",
+        ])
+        .expect("CLI shape should parse");
+        assert!(
+            agent_launch_config(&root_gid).is_err(),
+            "chroot agents should not run with a root group"
+        );
+    }
+
+    #[test]
+    fn agent_launch_options_require_an_explicit_mode() {
+        let cli = Cli::try_parse_from([
+            "acp-web-backend",
+            "--acp-server",
+            "127.0.0.1:9",
+            "--agent-command",
+            "/bin/agent",
+        ])
+        .expect("CLI shape should parse");
+
+        assert!(agent_launch_config(&cli).is_err());
     }
 
     #[tokio::test]

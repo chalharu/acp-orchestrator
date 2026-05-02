@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     checkout_relpath TEXT,
     checkout_ref TEXT,
     checkout_commit_sha TEXT,
+    agent_profile_id TEXT,
     failure_reason TEXT,
     detach_deadline_at TEXT,
     restartable_deadline_at TEXT,
@@ -122,6 +123,7 @@ CREATE TABLE {table_name} (
     checkout_relpath TEXT,
     checkout_ref TEXT,
     checkout_commit_sha TEXT,
+    agent_profile_id TEXT,
     failure_reason TEXT,
     detach_deadline_at TEXT,
     restartable_deadline_at TEXT,
@@ -212,6 +214,7 @@ status
 checkout_relpath=NULL
 checkout_ref=NULL
 checkout_commit_sha=NULL
+agent_profile_id=NULL
 failure_reason=NULL
 detach_deadline_at=NULL
 restartable_deadline_at=NULL
@@ -482,6 +485,7 @@ fn ensure_user_auth_columns(connection: &Connection) -> Result<(), WorkspaceStor
 }
 
 fn ensure_session_snapshot_columns(connection: &Connection) -> Result<(), WorkspaceStoreError> {
+    ensure_sessions_column(connection, "agent_profile_id", "TEXT")?;
     ensure_sessions_column(connection, "latest_sequence", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_sessions_column(connection, "messages_json", "TEXT NOT NULL DEFAULT '[]'")?;
     Ok(())

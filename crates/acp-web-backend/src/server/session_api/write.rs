@@ -31,7 +31,13 @@ pub(in crate::server) async fn create_session(
     body: axum::body::Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateSessionResponse>), AppError> {
     let request = parse_optional_json_body::<CreateSessionRequest>(&body)?.unwrap_or_default();
-    let session = create_session_snapshot(&state, principal, request.checkout_ref).await?;
+    let session = create_session_snapshot(
+        &state,
+        principal,
+        request.checkout_ref,
+        request.agent_profile_id,
+    )
+    .await?;
 
     Ok((
         axum::http::StatusCode::CREATED,

@@ -75,8 +75,19 @@ fn quiet_notifier() -> StubSessionUpdateNotifier {
 fn mock_agent_with_delay(delay: Duration) -> MockAgent {
     MockAgent::new(Arc::new(MockServerState::new(MockConfig {
         response_delay: delay,
-        startup_hints: false,
+        ..MockConfig::default()
     })))
+}
+
+fn auth_required_state() -> Arc<MockServerState> {
+    Arc::new(MockServerState::new(MockConfig {
+        auth_required: true,
+        ..MockConfig::default()
+    }))
+}
+
+fn assert_auth_required(error: acp::Error) {
+    assert_eq!(error.code, acp::ErrorCode::AuthRequired);
 }
 
 fn spawn_cancel_task(agent: MockAgent) -> tokio::task::JoinHandle<()> {
@@ -159,6 +170,77 @@ async fn mock_agent_initializes_with_mock_identity() {
 
     assert!(debug.contains("acp-mock"));
     assert!(debug.contains("ACP Mock"));
+    assert!(response.agent_capabilities.load_session);
+}
+
+#[tokio::test]
+async fn mock_agent_advertises_and_enforces_authentication_when_required() {
+    let agent = MockAgent::new(auth_required_state());
+    let response = agent
+        .initialize(schema::InitializeRequest::new(schema::ProtocolVersion::V1))
+        .await
+        .expect("initialize requests should succeed");
+    let unauthenticated = agent
+        .new_session(schema::NewSessionRequest::new("/tmp"), &quiet_notifier())
+        .await
+        .expect_err("new sessions should require authentication");
+
+    assert_eq!(response.auth_methods.len(), 1);
+    assert_auth_required(unauthenticated);
+    agent
+        .authenticate(schema::AuthenticateRequest::new(
+            response.auth_methods[0].id().clone(),
+        ))
+        .await
+        .expect("advertised auth methods should authenticate");
+    agent
+        .new_session(schema::NewSessionRequest::new("/tmp"), &quiet_notifier())
+        .await
+        .expect("authenticated new sessions should succeed");
+}
+
+#[tokio::test]
+async fn mock_agent_rejects_unknown_auth_method_when_authentication_is_required() {
+    let agent = MockAgent::new(auth_required_state());
+
+    let error = agent
+        .authenticate(schema::AuthenticateRequest::new("unknown-auth-method"))
+        .await
+        .expect_err("unknown auth methods should be rejected");
+
+    assert_eq!(error.message, acp::Error::invalid_params().message);
+}
+
+#[tokio::test]
+async fn mock_agent_authentication_is_connection_scoped() {
+    let state = auth_required_state();
+    let authenticated = MockAgent::new(state.clone());
+    authenticated
+        .authenticate(schema::AuthenticateRequest::new(MOCK_AUTH_METHOD_ID))
+        .await
+        .expect("first connection should authenticate");
+    let fresh_connection = MockAgent::new(state);
+
+    let new_session = fresh_connection
+        .new_session(schema::NewSessionRequest::new("/tmp"), &quiet_notifier())
+        .await
+        .expect_err("fresh connections should not inherit auth state");
+    let load_session = fresh_connection
+        .load_session(schema::LoadSessionRequest::new("mock_0", "/tmp"))
+        .await
+        .expect_err("load session should require authentication");
+    let prompt = fresh_connection
+        .prompt(
+            schema::PromptRequest::new("mock_0", vec!["hello".to_string().into()]),
+            &quiet_notifier(),
+            &allow_once_requester(),
+        )
+        .await
+        .expect_err("prompts should require authentication");
+
+    assert_auth_required(new_session);
+    assert_auth_required(load_session);
+    assert_auth_required(prompt);
 }
 
 #[tokio::test]
@@ -171,6 +253,7 @@ async fn mock_agent_emits_startup_hints_when_enabled() {
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig {
         response_delay: Duration::from_millis(120),
         startup_hints: true,
+        ..MockConfig::default()
     })));
 
     agent
@@ -409,6 +492,7 @@ fn default_config_uses_the_expected_delay() {
         Duration::from_millis(120)
     );
     assert!(!MockConfig::default().startup_hints);
+    assert!(!MockConfig::default().auth_required);
 }
 
 #[test]

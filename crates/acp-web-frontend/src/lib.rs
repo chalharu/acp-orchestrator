@@ -39,7 +39,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::presentation::{AccountsPage, RegisterPage, SignInPage, WorkspacesPage};
-use crate::routing::{AppRoute, current_route};
+use crate::routing::{AppRoute, SettingsSection, current_route};
 use crate::session_page::{HomePage, SessionView};
 
 fn not_found_view() -> impl IntoView {
@@ -67,8 +67,8 @@ fn sign_in_route_view() -> AnyView {
     view! { <SignInPage /> }.into_any()
 }
 
-fn accounts_route_view() -> AnyView {
-    view! { <AccountsPage /> }.into_any()
+fn accounts_route_view(section: SettingsSection) -> AnyView {
+    view! { <AccountsPage section=section /> }.into_any()
 }
 
 fn workspaces_route_view() -> AnyView {
@@ -84,7 +84,8 @@ fn dispatch_route(route: AppRoute) -> AnyView {
         AppRoute::Home => home_route_view(),
         AppRoute::Register => register_route_view(),
         AppRoute::SignIn => sign_in_route_view(),
-        AppRoute::Accounts => accounts_route_view(),
+        AppRoute::Accounts => accounts_route_view(SettingsSection::Accounts),
+        AppRoute::Settings(section) => accounts_route_view(section),
         AppRoute::Workspaces => workspaces_route_view(),
         AppRoute::Session(session_id) => session_route_view(session_id),
         AppRoute::WorkspaceSession { session_id, .. } => session_route_view(session_id),
@@ -148,6 +149,8 @@ mod tests {
             let _ = dispatch_route(AppRoute::Register);
             let _ = dispatch_route(AppRoute::SignIn);
             let _ = dispatch_route(AppRoute::Accounts);
+            let _ = dispatch_route(AppRoute::Settings(SettingsSection::Accounts));
+            let _ = dispatch_route(AppRoute::Settings(SettingsSection::Agents));
             let _ = dispatch_route(AppRoute::Workspaces);
             let _ = dispatch_route(AppRoute::Session("s1".to_string()));
             let _ = dispatch_route(AppRoute::WorkspaceSession {

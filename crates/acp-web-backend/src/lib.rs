@@ -1,3 +1,5 @@
+pub mod agent_profiles;
+pub mod agent_runtime;
 pub mod auth;
 mod completions;
 pub mod contract_accounts;
@@ -18,11 +20,20 @@ pub mod workspace_records;
 pub mod workspace_repository;
 pub mod workspace_store;
 
+pub use agent_profiles::{AgentProfileStore, AgentProfileStoreError};
+pub use agent_runtime::{
+    AgentLaunchConfig, AgentLaunchConfigError, AgentLaunchMetadata, AgentLaunchMode,
+    AgentRuntimeError, AgentRuntimeManager, DynAgentRuntimeManager, FsAgentRuntimeManager,
+    NoopAgentRuntimeManager,
+};
 pub use mock_client::{MockClient, MockClientError, ReplyFuture, ReplyProvider, ReplyResult};
 pub use runtime::{BackendAppError, run_with_args};
-pub use server::{AppError, AppState, AppStateBuildError, ServerConfig, app, serve_with_shutdown};
+pub use server::{
+    AppError, AppState, AppStateBuildError, AppStateServices, ServerConfig, app,
+    serve_with_shutdown,
+};
 pub use sessions::TurnHandle;
 pub use workspace_checkout::{
     DynWorkspaceCheckoutManager, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
-    WorkspaceCheckoutManager,
+    WorkspaceCheckoutLayout, WorkspaceCheckoutManager,
 };

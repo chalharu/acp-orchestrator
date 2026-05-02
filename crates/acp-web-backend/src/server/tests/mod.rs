@@ -96,6 +96,9 @@ fn test_state_with_frontend_dist(dist: std::path::PathBuf) -> AppState {
             reply: String::new(),
         }),
         checkout_manager: test_checkout_manager(),
+        agent_runtime_manager: test_agent_runtime_manager(),
+        agent_profile_store: test_agent_profile_store(),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
         startup_hints: false,
         frontend_dist: Some(Arc::new(dist)),
     }

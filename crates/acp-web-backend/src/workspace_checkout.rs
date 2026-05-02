@@ -18,6 +18,7 @@ use reqwest::Url;
 use crate::{contract_workspaces::WorkspaceBranch, workspace_records::WorkspaceRecord};
 
 const CHECKOUTS_DIR_NAME: &str = "session-checkouts";
+pub(crate) const AGENT_RUNTIMES_DIR_NAME: &str = "agent-runtimes";
 const GIT_FETCH_HEAD: &str = "FETCH_HEAD";
 const GIT_HOME_DIR_NAME: &str = "git-home";
 const GIT_REMOTE_NAME: &str = "origin";
@@ -65,6 +66,17 @@ pub trait WorkspaceCheckoutManager: Send + Sync {
         checkout_ref_override: Option<&str>,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError>;
 
+    async fn prepare_checkout_with_layout(
+        &self,
+        workspace: &WorkspaceRecord,
+        session_id: &str,
+        checkout_ref_override: Option<&str>,
+        _layout: WorkspaceCheckoutLayout,
+    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+        self.prepare_checkout(workspace, session_id, checkout_ref_override)
+            .await
+    }
+
     async fn list_branches(
         &self,
         _workspace: &WorkspaceRecord,
@@ -75,39 +87,87 @@ pub trait WorkspaceCheckoutManager: Send + Sync {
     fn resolve_checkout_path(&self, _checkout_relpath: &str) -> Option<PathBuf> {
         None
     }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String>;
 }
 
 pub type DynWorkspaceCheckoutManager = Arc<dyn WorkspaceCheckoutManager>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceCheckoutLayout {
+    Standard,
+    ChrootRuntime,
+}
+
 #[derive(Debug, Clone)]
 pub struct FsWorkspaceCheckoutManager {
     state_dir: PathBuf,
+    layout: WorkspaceCheckoutLayout,
 }
 
 impl FsWorkspaceCheckoutManager {
     pub fn new(state_dir: PathBuf) -> Self {
-        Self { state_dir }
+        Self::with_layout(state_dir, WorkspaceCheckoutLayout::Standard)
     }
 
-    fn checkout_relpath(session_id: &str) -> String {
-        format!("{CHECKOUTS_DIR_NAME}/{session_id}")
+    pub fn with_layout(state_dir: PathBuf, layout: WorkspaceCheckoutLayout) -> Self {
+        Self { state_dir, layout }
     }
 
-    fn checkout_path(&self, session_id: &str) -> PathBuf {
-        self.state_dir.join(Self::checkout_relpath(session_id))
+    fn checkout_relpath_for_layout(layout: WorkspaceCheckoutLayout, session_id: &str) -> String {
+        match layout {
+            WorkspaceCheckoutLayout::Standard => format!("{CHECKOUTS_DIR_NAME}/{session_id}"),
+            WorkspaceCheckoutLayout::ChrootRuntime => {
+                format!("{AGENT_RUNTIMES_DIR_NAME}/{session_id}/root/workspace")
+            }
+        }
+    }
+
+    pub fn checkout_relpath_for(layout: WorkspaceCheckoutLayout, session_id: &str) -> String {
+        Self::checkout_relpath_for_layout(layout, session_id)
+    }
+
+    fn checkout_relpath(&self, layout: WorkspaceCheckoutLayout, session_id: &str) -> String {
+        Self::checkout_relpath_for_layout(layout, session_id)
+    }
+
+    fn checkout_path(&self, layout: WorkspaceCheckoutLayout, session_id: &str) -> PathBuf {
+        self.state_dir
+            .join(self.checkout_relpath(layout, session_id))
     }
 
     fn resolved_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
+        Self::resolve_checkout_relpath(&self.state_dir, checkout_relpath)
+    }
+
+    pub fn resolve_checkout_relpath(state_dir: &Path, checkout_relpath: &str) -> Option<PathBuf> {
         let relpath = Path::new(checkout_relpath);
         let mut components = relpath.components();
         match components.next() {
-            Some(Component::Normal(component)) if component == OsStr::new(CHECKOUTS_DIR_NAME) => {}
-            _ => return None,
+            Some(Component::Normal(component)) if component == OsStr::new(CHECKOUTS_DIR_NAME) => {
+                if components.any(|component| !matches!(component, Component::Normal(_))) {
+                    return None;
+                }
+                Some(state_dir.join(relpath))
+            }
+            Some(Component::Normal(root)) if root == OsStr::new(AGENT_RUNTIMES_DIR_NAME) => match (
+                components.next(),
+                components.next(),
+                components.next(),
+                components.next(),
+            ) {
+                (
+                    Some(Component::Normal(_session_id)),
+                    Some(Component::Normal(chroot_root)),
+                    Some(Component::Normal(workspace)),
+                    None,
+                ) if chroot_root == OsStr::new("root") && workspace == OsStr::new("workspace") => {
+                    Some(state_dir.join(relpath))
+                }
+                _ => None,
+            },
+            _ => None,
         }
-        if components.any(|component| !matches!(component, Component::Normal(_))) {
-            return None;
-        }
-        Some(self.state_dir.join(relpath))
     }
 
     fn prepare_checkout_sync(
@@ -115,10 +175,11 @@ impl FsWorkspaceCheckoutManager {
         workspace: &WorkspaceRecord,
         session_id: &str,
         checkout_ref_override: Option<&str>,
+        layout: WorkspaceCheckoutLayout,
     ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
         let validated_override = validate_checkout_ref(checkout_ref_override)?;
-        let checkout_relpath = Self::checkout_relpath(session_id);
-        let checkout_path = self.checkout_path(session_id);
+        let checkout_relpath = self.checkout_relpath(layout, session_id);
+        let checkout_path = self.checkout_path(layout, session_id);
         let checkout_parent = checkout_parent_dir(&checkout_path)?;
         fs::create_dir_all(checkout_parent).map_err(|error| {
             WorkspaceCheckoutError::Io(format!("creating checkout root failed: {error}"))
@@ -223,15 +284,48 @@ impl WorkspaceCheckoutManager for FsWorkspaceCheckoutManager {
         let workspace = workspace.clone();
         let session_id = session_id.to_string();
         let checkout_ref_override = checkout_ref_override.map(str::to_string);
+        let layout = self.layout;
 
         await_checkout_task(tokio::task::spawn_blocking(move || {
-            manager.prepare_checkout_sync(&workspace, &session_id, checkout_ref_override.as_deref())
+            manager.prepare_checkout_sync(
+                &workspace,
+                &session_id,
+                checkout_ref_override.as_deref(),
+                layout,
+            )
+        }))
+        .await
+    }
+
+    async fn prepare_checkout_with_layout(
+        &self,
+        workspace: &WorkspaceRecord,
+        session_id: &str,
+        checkout_ref_override: Option<&str>,
+        layout: WorkspaceCheckoutLayout,
+    ) -> Result<PreparedWorkspaceCheckout, WorkspaceCheckoutError> {
+        let manager = self.clone();
+        let workspace = workspace.clone();
+        let session_id = session_id.to_string();
+        let checkout_ref_override = checkout_ref_override.map(str::to_string);
+
+        await_checkout_task(tokio::task::spawn_blocking(move || {
+            manager.prepare_checkout_sync(
+                &workspace,
+                &session_id,
+                checkout_ref_override.as_deref(),
+                layout,
+            )
         }))
         .await
     }
 
     fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
         self.resolved_checkout_path(checkout_relpath)
+    }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(self.checkout_relpath(self.layout, session_id))
     }
 
     async fn list_branches(

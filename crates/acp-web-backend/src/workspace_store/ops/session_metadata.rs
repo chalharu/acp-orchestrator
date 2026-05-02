@@ -38,6 +38,7 @@ INSERT INTO sessions (
     checkout_relpath,
     checkout_ref,
     checkout_commit_sha,
+    agent_profile_id,
     failure_reason,
     detach_deadline_at,
     restartable_deadline_at,
@@ -45,7 +46,7 @@ INSERT INTO sessions (
     last_activity_at,
     closed_at,
     deleted_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
 ON CONFLICT(session_id) DO UPDATE SET
     workspace_id = excluded.workspace_id,
     owner_user_id = excluded.owner_user_id,
@@ -54,6 +55,7 @@ ON CONFLICT(session_id) DO UPDATE SET
     checkout_relpath = excluded.checkout_relpath,
     checkout_ref = excluded.checkout_ref,
     checkout_commit_sha = excluded.checkout_commit_sha,
+    agent_profile_id = excluded.agent_profile_id,
     failure_reason = excluded.failure_reason,
     detach_deadline_at = excluded.detach_deadline_at,
     restartable_deadline_at = excluded.restartable_deadline_at,
@@ -164,6 +166,7 @@ pub(in crate::workspace_store) fn upsert_session_metadata(
                 record.checkout_relpath,
                 record.checkout_ref,
                 record.checkout_commit_sha,
+                record.agent_profile_id,
                 record.failure_reason,
                 record.detach_deadline_at.as_ref().map(timestamp),
                 record.restartable_deadline_at.as_ref().map(timestamp),
@@ -296,6 +299,7 @@ pub(in crate::workspace_store) fn build_session_metadata_record(
         checkout_relpath: existing.and_then(|record| record.checkout_relpath.clone()),
         checkout_ref: existing.and_then(|record| record.checkout_ref.clone()),
         checkout_commit_sha: existing.and_then(|record| record.checkout_commit_sha.clone()),
+        agent_profile_id: existing.and_then(|record| record.agent_profile_id.clone()),
         failure_reason: existing.and_then(|record| record.failure_reason.clone()),
         detach_deadline_at: existing.and_then(|record| record.detach_deadline_at),
         restartable_deadline_at: existing.and_then(|record| record.restartable_deadline_at),

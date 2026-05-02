@@ -3,19 +3,47 @@ use super::{
 };
 use crate::sessions::{PermissionResolutionOutcome, TurnHandle};
 use agent_client_protocol::{self as acp, schema};
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+const PROMPT_RESPONSE_NOTIFICATION_GRACE: Duration = Duration::from_millis(100);
+const PROMPT_RESPONSE_NOTIFICATION_IDLE: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub(super) struct BackendAcpClient {
     turn: Option<TurnHandle>,
     collected: Arc<Mutex<String>>,
+    reply_notify: Arc<tokio::sync::Notify>,
+    streaming_enabled: Arc<AtomicBool>,
+    collect_while_muted: bool,
 }
 
 impl BackendAcpClient {
+    #[cfg(test)]
     pub(super) fn new(turn: TurnHandle) -> Self {
+        Self::with_streaming(turn, true, false)
+    }
+
+    pub(super) fn new_muted(turn: TurnHandle) -> Self {
+        Self::with_streaming(turn, false, false)
+    }
+
+    fn with_streaming(
+        turn: TurnHandle,
+        streaming_enabled: bool,
+        collect_while_muted: bool,
+    ) -> Self {
         Self {
             turn: Some(turn),
             collected: Arc::new(Mutex::new(String::new())),
+            reply_notify: Arc::new(tokio::sync::Notify::new()),
+            streaming_enabled: Arc::new(AtomicBool::new(streaming_enabled)),
+            collect_while_muted,
         }
     }
 
@@ -23,6 +51,9 @@ impl BackendAcpClient {
         Self {
             turn: None,
             collected: Arc::new(Mutex::new(String::new())),
+            reply_notify: Arc::new(tokio::sync::Notify::new()),
+            streaming_enabled: Arc::new(AtomicBool::new(false)),
+            collect_while_muted: true,
         }
     }
 
@@ -40,6 +71,53 @@ impl BackendAcpClient {
                 .lock()
                 .expect("mock reply buffer mutex should not be poisoned"),
         )
+    }
+
+    pub(super) async fn reply_text_after_notifications(&self) -> String {
+        self.wait_for_response_notifications(prompt_response_notification_deadline())
+            .await;
+        self.reply_text()
+    }
+
+    pub(super) async fn take_reply_text_after_notifications(&self) -> String {
+        self.wait_for_response_notifications(prompt_response_notification_deadline())
+            .await;
+        self.take_reply_text()
+    }
+
+    pub(super) fn enable_streaming(&self) {
+        self.streaming_enabled.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_response_notifications_until_for_test(
+        &self,
+        deadline: tokio::time::Instant,
+    ) {
+        self.wait_for_response_notifications(deadline).await;
+    }
+
+    async fn wait_for_response_notifications(&self, deadline: tokio::time::Instant) {
+        loop {
+            let Some(wait_for) = self.next_notification_wait(deadline) else {
+                return;
+            };
+            if tokio::time::timeout(wait_for, self.reply_notify.notified())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    fn next_notification_wait(&self, deadline: tokio::time::Instant) -> Option<Duration> {
+        let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
+        Some(if self.reply_text().is_empty() {
+            remaining
+        } else {
+            remaining.min(PROMPT_RESPONSE_NOTIFICATION_IDLE)
+        })
     }
 
     pub(super) async fn request_permission(
@@ -77,13 +155,27 @@ impl BackendAcpClient {
         args: schema::SessionNotification,
     ) -> acp::Result<()> {
         if let schema::SessionUpdate::AgentMessageChunk(chunk) = args.update {
-            self.collected
-                .lock()
-                .expect("mock reply buffer mutex should not be poisoned")
-                .push_str(&content_text(chunk.content));
+            let text = content_text(chunk.content);
+            let streaming_enabled = self.streaming_enabled.load(Ordering::Acquire);
+            if streaming_enabled || self.collect_while_muted {
+                self.collected
+                    .lock()
+                    .expect("mock reply buffer mutex should not be poisoned")
+                    .push_str(&text);
+                self.reply_notify.notify_one();
+            }
+            if streaming_enabled && let Some(turn) = self.turn.as_ref() {
+                turn.stream_assistant_chunk(text)
+                    .await
+                    .map_err(to_acp_error)?;
+            }
         }
         Ok(())
     }
+}
+
+fn prompt_response_notification_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + PROMPT_RESPONSE_NOTIFICATION_GRACE
 }
 
 pub(super) fn content_text(content: schema::ContentBlock) -> String {

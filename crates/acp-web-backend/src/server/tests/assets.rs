@@ -49,6 +49,42 @@ async fn redirect_to_accounts_uses_the_canonical_trailing_slash_route() {
 }
 
 #[tokio::test]
+async fn redirect_to_settings_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_settings().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/settings/"));
+}
+
+#[tokio::test]
+async fn redirect_to_settings_accounts_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_settings_accounts().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/settings/accounts/"));
+}
+
+#[tokio::test]
+async fn redirect_to_settings_agents_uses_the_canonical_trailing_slash_route() {
+    let response = redirect_to_settings_agents().await.into_response();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect responses should include a location header");
+
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location.to_str().ok(), Some("/app/settings/agents/"));
+}
+
+#[tokio::test]
 async fn redirect_to_workspaces_uses_the_canonical_trailing_slash_route() {
     let response = redirect_to_workspaces().await.into_response();
     let location = response
@@ -75,6 +111,46 @@ async fn app_shell_csp_permits_wasm_execution() {
         csp.contains("'wasm-unsafe-eval'"),
         "CSP script-src must include 'wasm-unsafe-eval' for WASM; got: {csp}",
     );
+}
+
+#[tokio::test]
+async fn settings_entrypoint_serves_the_app_shell() {
+    let response = app_settings_entrypoint(HeaderMap::new()).await;
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .expect("settings app shell should include a content type")
+        .to_str()
+        .expect("content type should be valid");
+
+    assert!(content_type.starts_with("text/html"), "got: {content_type}");
+}
+
+#[tokio::test]
+async fn settings_section_deep_links_serve_the_app_shell() {
+    for uri in ["/app/settings/accounts/", "/app/settings/agents/"] {
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .expect("app shell should include a content type")
+            .to_str()
+            .expect("content type should be valid");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert!(
+            content_type.starts_with("text/html"),
+            "{uri}: {content_type}"
+        );
+    }
 }
 
 #[tokio::test]

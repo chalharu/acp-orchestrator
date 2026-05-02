@@ -1,12 +1,33 @@
 use super::support::*;
 use acp_mock::MANUAL_FAILURE_TRIGGER;
 
+async fn assert_legacy_session_get_ok(
+    stack: &TestStack,
+    owner: &str,
+    session_id: &str,
+    context: &'static str,
+) -> Result<()> {
+    let response = stack
+        .client
+        .get(format!(
+            "{}/api/v1/sessions/{session_id}",
+            stack.backend_url
+        ))
+        .bearer_auth(owner)
+        .send()
+        .await
+        .context(context)?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
 async fn assert_invalid_rename_title(title: String, expected_message: &str) -> Result<()> {
     let stack = TestStack::spawn(ServerConfig {
         session_cap: 8,
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -43,6 +64,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -62,7 +84,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
 
     let user_message = expect_next_event(&mut events).await?;
     match user_message.payload {
-        StreamEventPayload::ConversationMessage { message } => {
+        StreamEventPayload::ConversationMessage { message, .. } => {
             assert_eq!(message.text, "hello through backend");
             assert!(matches!(message.role, MessageRole::User));
         }
@@ -71,7 +93,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
 
     let assistant_message = expect_next_event(&mut events).await?;
     match assistant_message.payload {
-        StreamEventPayload::ConversationMessage { message } => {
+        StreamEventPayload::ConversationMessage { message, .. } => {
             assert!(matches!(message.role, MessageRole::Assistant));
             assert!(message.text.starts_with("mock assistant:"));
         }
@@ -88,6 +110,7 @@ async fn session_lookup_rejects_different_principal() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -115,6 +138,7 @@ async fn rename_and_delete_reject_different_principal() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -157,6 +181,7 @@ async fn session_creation_enforces_principal_session_cap() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -187,6 +212,7 @@ async fn session_list_is_owner_scoped_and_keeps_retained_closed_sessions() -> Re
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -226,6 +252,7 @@ async fn getting_a_session_does_not_reorder_the_owned_session_list() -> Result<(
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -266,6 +293,7 @@ async fn prompt_submission_moves_session_to_front_of_list() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -295,6 +323,7 @@ async fn session_title_defaults_to_new_chat_and_auto_sets_from_first_prompt() ->
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -332,6 +361,7 @@ async fn session_can_be_renamed_and_title_appears_in_list_and_snapshot() -> Resu
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -367,6 +397,7 @@ async fn manual_rename_prevents_auto_title_from_first_prompt() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -396,6 +427,7 @@ async fn session_can_be_deleted_and_is_no_longer_accessible() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -433,6 +465,7 @@ async fn retention_prunes_oldest_closed_sessions_from_live_cache_only() -> Resul
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -449,31 +482,20 @@ async fn retention_prunes_oldest_closed_sessions_from_live_cache_only() -> Resul
         stack.close_session("alice", &created.session.id).await?;
     }
 
-    let first_session_response = stack
-        .client
-        .get(format!(
-            "{}/api/v1/sessions/{}",
-            stack.backend_url,
-            first_session_id.expect("first session id should exist")
-        ))
-        .bearer_auth("alice")
-        .send()
-        .await
-        .context("loading the oldest closed session")?;
-    assert_eq!(first_session_response.status(), StatusCode::OK);
-
-    let last_session_response = stack
-        .client
-        .get(format!(
-            "{}/api/v1/sessions/{}",
-            stack.backend_url,
-            last_session_id.expect("last session id should exist")
-        ))
-        .bearer_auth("alice")
-        .send()
-        .await
-        .context("loading the newest closed session")?;
-    assert_eq!(last_session_response.status(), StatusCode::OK);
+    assert_legacy_session_get_ok(
+        &stack,
+        "alice",
+        &first_session_id.expect("first session id should exist"),
+        "loading the oldest closed session",
+    )
+    .await?;
+    assert_legacy_session_get_ok(
+        &stack,
+        "alice",
+        &last_session_id.expect("last session id should exist"),
+        "loading the newest closed session",
+    )
+    .await?;
 
     Ok(())
 }
@@ -485,6 +507,7 @@ async fn session_history_returns_messages_after_a_roundtrip() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -519,6 +542,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;
@@ -538,7 +562,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
     let user_message = expect_next_event(&mut events).await?;
     assert!(matches!(
         user_message.payload,
-        StreamEventPayload::ConversationMessage { message }
+        StreamEventPayload::ConversationMessage { message, .. }
             if matches!(message.role, MessageRole::User)
     ));
 

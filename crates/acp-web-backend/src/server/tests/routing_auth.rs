@@ -1,5 +1,6 @@
 use super::*;
 use crate::contract_permissions::{PermissionDecision, ResolvePermissionRequest};
+use crate::contract_sessions::{AgentProfileMode, UpsertAgentProfileRequest};
 
 #[test]
 fn default_server_config_points_to_the_local_acp_server() {
@@ -72,6 +73,229 @@ async fn internal_errors_are_sanitized_in_http_responses() {
         serde_json::from_slice(&body).expect("error payload should decode");
 
     assert_eq!(payload.error, "internal server error");
+}
+
+#[tokio::test]
+async fn agent_profile_api_requires_admin_for_writes_but_allows_signed_in_reads() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    create_member_account(&state, &admin_browser, "member", "password123").await;
+    let member_browser = BrowserAuthContext::spawn().await;
+    sign_in_browser_account(&state, &member_browser, "member", "password123").await;
+
+    assert_member_cannot_write_agent_profiles(&state, &member_browser, agent_profile_request())
+        .await;
+    let saved =
+        save_agent_profile(&state, &admin_browser, "opencode", agent_profile_request()).await;
+    let profiles = list_agent_profiles(State(state), Extension(member_browser.principal))
+        .await
+        .expect("member can list profiles")
+        .0
+        .profiles;
+
+    assert_eq!(saved.id, "opencode");
+    assert_eq!(profiles.len(), 1);
+    assert!(profiles.iter().any(|profile| profile.id == "opencode"));
+}
+
+async fn assert_member_cannot_write_agent_profiles(
+    state: &AppState,
+    member_browser: &BrowserAuthContext,
+    request: UpsertAgentProfileRequest,
+) {
+    let create_error = create_agent_profile(
+        State(state.clone()),
+        Extension(member_browser.principal.clone()),
+        Json(UpsertAgentProfileRequest {
+            name: "Copilot CLI ACP".to_string(),
+            command_argv: vec!["copilot".to_string(), "acp".to_string()],
+            ..request.clone()
+        }),
+    )
+    .await
+    .expect_err("members cannot create profiles");
+    assert!(matches!(create_error, AppError::Forbidden(_)));
+
+    let update_error = upsert_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(member_browser.principal.clone()),
+        Json(request.clone()),
+    )
+    .await
+    .expect_err("members cannot update profiles");
+    assert!(matches!(update_error, AppError::Forbidden(_)));
+
+    let delete_error = delete_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(member_browser.principal.clone()),
+    )
+    .await
+    .expect_err("members cannot delete profiles");
+    assert!(matches!(delete_error, AppError::Forbidden(_)));
+}
+
+async fn save_agent_profile(
+    state: &AppState,
+    admin_browser: &BrowserAuthContext,
+    profile_id: &str,
+    request: UpsertAgentProfileRequest,
+) -> acp_contracts_sessions::AgentProfile {
+    upsert_agent_profile(
+        State(state.clone()),
+        Path(profile_id.to_string()),
+        Extension(admin_browser.principal.clone()),
+        Json(request),
+    )
+    .await
+    .expect("admin can update profile")
+    .0
+    .profile
+}
+
+#[tokio::test]
+async fn agent_profile_create_generates_ids_and_rejects_duplicate_names() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    save_agent_profile(&state, &admin_browser, "opencode", agent_profile_request()).await;
+
+    let created = create_agent_profile(
+        State(state.clone()),
+        Extension(admin_browser.principal.clone()),
+        Json(UpsertAgentProfileRequest {
+            name: "Claude ACP".to_string(),
+            command_argv: vec!["claude".to_string(), "acp".to_string()],
+            ..agent_profile_request()
+        }),
+    )
+    .await
+    .expect("admin can create profile");
+    assert_eq!(created.0, axum::http::StatusCode::CREATED);
+    let created = created.1.0.profile;
+    assert!(created.id.starts_with("profile-"));
+    assert_eq!(created.name, "Claude ACP");
+
+    let duplicate = create_agent_profile(
+        State(state.clone()),
+        Extension(admin_browser.principal.clone()),
+        Json(UpsertAgentProfileRequest {
+            name: "Claude ACP".to_string(),
+            command_argv: vec!["copilot".to_string(), "acp".to_string()],
+            ..agent_profile_request()
+        }),
+    )
+    .await
+    .expect_err("duplicate profile names should fail");
+    assert!(matches!(
+        duplicate,
+        AppError::BadRequest(message) if message == "profile name already exists"
+    ));
+}
+
+#[tokio::test]
+async fn agent_profile_delete_removes_profiles_and_reports_missing() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    save_agent_profile(&state, &admin_browser, "opencode", agent_profile_request()).await;
+
+    let deleted = delete_agent_profile(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        Extension(admin_browser.principal.clone()),
+    )
+    .await
+    .expect("admin can delete profiles");
+    assert!(deleted.0.deleted);
+    assert!(
+        state
+            .agent_profile_store
+            .list_profiles()
+            .expect("profiles should list")
+            .is_empty()
+    );
+
+    let missing = delete_agent_profile(
+        State(state),
+        Path("opencode".to_string()),
+        Extension(admin_browser.principal),
+    )
+    .await
+    .expect_err("missing profile should fail");
+    assert!(matches!(missing, AppError::NotFound(_)));
+}
+
+fn agent_profile_request() -> UpsertAgentProfileRequest {
+    UpsertAgentProfileRequest {
+        name: "OpenCode ACP".to_string(),
+        mode: AgentProfileMode::Chroot,
+        command_argv: vec!["opencode".to_string(), "acp".to_string()],
+        env_allowlist: Vec::new(),
+        timeout_seconds: 30,
+        run_uid: 65_534,
+        run_gid: 65_534,
+    }
+}
+
+#[tokio::test]
+async fn route_handler_adapters_cover_agent_profile_routes() {
+    let state = auth_test_state();
+    let admin_browser = BrowserAuthContext::spawn().await;
+    bootstrap_admin_account(&state, &admin_browser).await;
+    let headers = json_headers();
+
+    let created = route_handlers::create_agent_profile_handler(
+        State(state.clone()),
+        WritePrincipal(admin_browser.principal.clone()),
+        headers.clone(),
+        axum::body::Bytes::from(agent_profile_json("Claude ACP", "claude")),
+    )
+    .await
+    .expect("create-agent-profile route adapter should succeed");
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let upserted = route_handlers::upsert_agent_profile_handler(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        WritePrincipal(admin_browser.principal.clone()),
+        headers,
+        axum::body::Bytes::from(agent_profile_json("OpenCode ACP", "opencode")),
+    )
+    .await
+    .expect("upsert-agent-profile route adapter should succeed");
+    assert_eq!(upserted.status(), StatusCode::OK);
+
+    let deleted = route_handlers::delete_agent_profile_handler(
+        State(state.clone()),
+        Path("opencode".to_string()),
+        WritePrincipal(admin_browser.principal.clone()),
+    )
+    .await
+    .expect("delete-agent-profile route adapter should succeed");
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let listed = route_handlers::list_agent_profiles_handler(
+        State(state),
+        ReadPrincipal(admin_browser.principal),
+    )
+    .await
+    .expect("list-agent-profiles route adapter should succeed");
+    assert_eq!(listed.status(), StatusCode::OK);
+}
+
+fn json_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers
+}
+
+fn agent_profile_json(name: &str, command: &str) -> String {
+    format!(
+        r#"{{"name":"{name}","mode":"chroot","command_argv":["{command}","acp"],"env_allowlist":[],"timeout_seconds":30,"run_uid":65534,"run_gid":65534}}"#
+    )
 }
 
 #[test]

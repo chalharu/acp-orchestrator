@@ -17,12 +17,13 @@ use acp_web::contract_workspaces::{
     UpdateWorkspaceResponse, WorkspaceBranch, WorkspaceListResponse, WorkspaceResponse,
 };
 use acp_web::support::http::{build_http_client_for_url, wait_for_health, wait_for_tcp_connect};
-use acp_web::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
 use acp_web::{
-    DynWorkspaceCheckoutManager, MockClient, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
-    WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
+    AgentProfileStore, AppStateServices, DynWorkspaceCheckoutManager, MockClient,
+    NoopAgentRuntimeManager, PreparedWorkspaceCheckout, WorkspaceCheckoutError,
+    WorkspaceCheckoutLayout, WorkspaceCheckoutManager, workspace_repository::WorkspaceRepository,
     workspace_store::SqliteWorkspaceRepository,
 };
+use acp_web::{AppState, serve_with_shutdown as serve_backend_with_shutdown};
 pub(super) use anyhow::{Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -753,6 +754,7 @@ pub(super) async fn spawn_direct_backend_server(
         acp_server: mock_address,
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .context("building direct backend state")?;
@@ -792,6 +794,7 @@ pub(super) async fn spawn_graceful_backend_server(
         acp_server: mock_address,
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .context("building graceful backend state")?;
@@ -826,14 +829,19 @@ fn build_backend_state(backend_config: ServerConfig) -> Result<AppState> {
     let checkout_manager: DynWorkspaceCheckoutManager = Arc::new(
         IntegrationTestWorkspaceCheckoutManager::new(backend_config.state_dir.clone()),
     );
-    Ok(AppState::with_services(
+    Ok(AppState::with_services(AppStateServices {
         store,
         workspace_repository,
         reply_provider,
         checkout_manager,
-        backend_config.startup_hints,
-        backend_config.frontend_dist,
-    ))
+        agent_runtime_manager: Arc::new(NoopAgentRuntimeManager),
+        agent_profile_store: Arc::new(AgentProfileStore::new(&backend_config.state_dir).map_err(
+            |error| anyhow::anyhow!("building agent profile store: {}", error.message()),
+        )?),
+        default_agent_layout: WorkspaceCheckoutLayout::Standard,
+        startup_hints: backend_config.startup_hints,
+        frontend_dist: backend_config.frontend_dist,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -900,5 +908,9 @@ impl WorkspaceCheckoutManager for IntegrationTestWorkspaceCheckoutManager {
 
     fn resolve_checkout_path(&self, checkout_relpath: &str) -> Option<PathBuf> {
         Some(self.state_dir.join(checkout_relpath))
+    }
+
+    fn checkout_relpath_for_session(&self, session_id: &str) -> Option<String> {
+        Some(Self::checkout_relpath(session_id))
     }
 }

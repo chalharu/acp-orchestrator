@@ -36,6 +36,7 @@ pub enum SessionStoreError {
     NotFound,
     Forbidden,
     Closed,
+    RuntimeUnavailable,
     EmptyPrompt,
     PermissionNotFound,
     SessionCapReached,
@@ -47,6 +48,7 @@ impl SessionStoreError {
             Self::NotFound => "session not found",
             Self::Forbidden => "session owner mismatch",
             Self::Closed => "session already closed",
+            Self::RuntimeUnavailable => "session runtime unavailable",
             Self::EmptyPrompt => "prompt must not be empty",
             Self::PermissionNotFound => "permission request not found",
             Self::SessionCapReached => "session cap reached for principal",
@@ -129,6 +131,20 @@ impl TurnHandle {
         }
         Ok(resolution)
     }
+
+    pub(crate) async fn stream_assistant_chunk(
+        &self,
+        text: String,
+    ) -> Result<(), SessionStoreError> {
+        if let Some(event) = self
+            .handle
+            .stream_assistant_chunk(self.prompt_order, text)
+            .await?
+        {
+            self.handle.broadcast(event);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +169,13 @@ impl PendingPrompt {
         if let Ok(events) = self
             .turn
             .handle
-            .complete_prompt(self.turn.prompt_order, PromptCompletion::Reply(text))
+            .complete_prompt(
+                self.turn.prompt_order,
+                PromptCompletion::Reply {
+                    text,
+                    streamed_message_id: None,
+                },
+            )
             .await
         {
             for event in events {
@@ -168,7 +190,10 @@ impl PendingPrompt {
             .handle
             .complete_prompt(
                 self.turn.prompt_order,
-                PromptCompletion::Status(message.into()),
+                PromptCompletion::Status {
+                    message: message.into(),
+                    streamed_message_id: None,
+                },
             )
             .await
         {
@@ -396,6 +421,16 @@ impl SessionStore {
                 prompt_order,
             },
         })
+    }
+
+    pub async fn mark_runtime_unavailable(
+        &self,
+        owner: &str,
+        session_id: &str,
+        reason: String,
+    ) -> Result<(), SessionStoreError> {
+        let handle = self.authorized_handle(owner, session_id).await?;
+        handle.mark_runtime_unavailable(reason).await
     }
 
     pub async fn resolve_permission(

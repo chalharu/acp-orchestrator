@@ -77,6 +77,7 @@ SELECT
     checkout_relpath,
     checkout_ref,
     checkout_commit_sha,
+    agent_profile_id,
     failure_reason,
     detach_deadline_at,
     restartable_deadline_at,
@@ -426,7 +427,8 @@ fn load_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMetadata
         checkout_relpath: checkout.relpath,
         checkout_ref: checkout.reference,
         checkout_commit_sha: checkout.commit_sha,
-        failure_reason: row.get(8)?,
+        agent_profile_id: row.get(8)?,
+        failure_reason: row.get(9)?,
         detach_deadline_at: timing.detach_deadline_at,
         restartable_deadline_at: timing.restartable_deadline_at,
         created_at: timing.created_at,
@@ -522,8 +524,8 @@ fn load_session_deadline_fields(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<SessionDeadlineFields> {
     Ok(SessionDeadlineFields {
-        detach_deadline_at: parse_optional_timestamp_for_row(row.get(9)?, 9)?,
-        restartable_deadline_at: parse_optional_timestamp_for_row(row.get(10)?, 10)?,
+        detach_deadline_at: parse_optional_timestamp_for_row(row.get(10)?, 10)?,
+        restartable_deadline_at: parse_optional_timestamp_for_row(row.get(11)?, 11)?,
     })
 }
 
@@ -538,9 +540,9 @@ fn load_session_lifecycle_timestamps(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<SessionLifecycleTimestamps> {
     Ok(SessionLifecycleTimestamps {
-        created_at: parse_timestamp_for_row(row.get::<_, String>(11)?, 11)?,
-        last_activity_at: parse_timestamp_for_row(row.get::<_, String>(12)?, 12)?,
-        closed_at: parse_optional_timestamp_for_row(row.get(13)?, 13)?,
-        deleted_at: parse_optional_timestamp_for_row(row.get(14)?, 14)?,
+        created_at: parse_timestamp_for_row(row.get::<_, String>(12)?, 12)?,
+        last_activity_at: parse_timestamp_for_row(row.get::<_, String>(13)?, 13)?,
+        closed_at: parse_optional_timestamp_for_row(row.get(14)?, 14)?,
+        deleted_at: parse_optional_timestamp_for_row(row.get(15)?, 15)?,
     })
 }

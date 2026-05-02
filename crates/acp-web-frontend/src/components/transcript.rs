@@ -1,5 +1,10 @@
 //! Conversation transcript component.
 
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use leptos::{html as leptos_html, prelude::*};
 
 #[cfg(target_family = "wasm")]
@@ -19,7 +24,16 @@ pub(crate) struct TranscriptEntry {
     pub(crate) text: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl TranscriptEntry {
+    fn render_key(&self) -> (String, u64) {
+        let mut hasher = DefaultHasher::new();
+        self.role.hash(&mut hasher);
+        self.text.hash(&mut hasher);
+        (self.id.clone(), hasher.finish())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EntryRole {
     User,
     Assistant,
@@ -117,7 +131,7 @@ fn transcript_content(
             when=move || !entries.get().is_empty()
             fallback=transcript_empty_view
         >
-            <ol class="transcript"><TranscriptSpacer height=top_spacer_height /><For each=move || visible_entries.get() key=|entry| entry.id.clone() children=render_transcript_entry_item /><TranscriptSpacer height=bottom_spacer_height /></ol>
+            <ol class="transcript"><TranscriptSpacer height=top_spacer_height /><For each=move || visible_entries.get() key=|entry| entry.render_key() children=render_transcript_entry_item /><TranscriptSpacer height=bottom_spacer_height /></ol>
         </Show>
     }
 }
@@ -343,6 +357,14 @@ mod tests {
         assert_eq!(transcript_entry.id, "assistant");
         assert_eq!(transcript_entry.role, EntryRole::Assistant);
         assert_eq!(transcript_entry.text, "hello");
+    }
+
+    #[test]
+    fn transcript_entry_render_key_changes_when_streamed_text_changes() {
+        let first = entry("assistant", EntryRole::Assistant, "hel");
+        let updated = entry("assistant", EntryRole::Assistant, "hello");
+
+        assert_ne!(first.render_key(), updated.render_key());
     }
 
     #[test]

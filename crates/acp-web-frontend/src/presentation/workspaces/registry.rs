@@ -1,6 +1,6 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
-use acp_contracts_sessions::SessionListItem;
+use acp_contracts_sessions::{AgentProfile, SessionListItem};
 use acp_contracts_workspaces::{WorkspaceBranch, WorkspaceSummary};
 use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
@@ -404,6 +404,7 @@ fn workspace_start_chat_modal_view(
                         selected_branch,
                         loading_branches,
                     )}
+                    {workspace_start_chat_profile_field(state)}
                     {workspace_start_chat_modal_actions(
                         opening,
                         loading_branches,
@@ -477,6 +478,39 @@ fn workspace_start_chat_branch_field(
     let _ = selected_branch;
     let _ = loading_branches;
     view! { <div class="workspace-branch-select" /> }
+}
+
+#[cfg(target_family = "wasm")]
+fn workspace_start_chat_profile_field(state: WorkspacesPageState) -> impl IntoView {
+    let profiles = Signal::derive(move || state.agent_profiles.get());
+    let selected = Signal::derive(move || state.start_chat_agent_profile_id.get());
+    view! {
+        <label class="account-form__field">
+            <span>"ACP profile"</span>
+            <select
+                prop:value=move || selected.get().unwrap_or_default()
+                on:change=move |event| {
+                    let value = event_target_value(&event);
+                    state.start_chat_agent_profile_id.set((!value.is_empty()).then_some(value));
+                }
+            >
+                <option value="">"Default mock/static ACP"</option>
+                {move || profiles.get().into_iter().map(profile_option_view).collect_view()}
+            </select>
+        </label>
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn workspace_start_chat_profile_field(state: WorkspacesPageState) -> impl IntoView {
+    let _ = state;
+    view! { <div class="workspace-profile-select" /> }
+}
+
+fn profile_option_view(profile: AgentProfile) -> impl IntoView {
+    view! {
+        <option value=profile.id>{profile.name}</option>
+    }
 }
 
 #[cfg(target_family = "wasm")]
@@ -908,6 +942,7 @@ fn workspace_open_chat_handler(
         state.start_chat_workspace_name.set(workspace_name.clone());
         state.start_chat_branches.set(Vec::new());
         state.start_chat_selected_branch.set(String::new());
+        state.start_chat_agent_profile_id.set(None);
         state.start_chat_loading_branches.set(true);
         state.show_start_chat_modal.set(true);
         spawn_workspace_start_chat_branch_load(state, workspace_id.clone());
@@ -956,18 +991,22 @@ fn workspace_start_chat_submit_handler(
 ) -> impl Fn(web_sys::SubmitEvent) + Copy + 'static {
     move |event: web_sys::SubmitEvent| {
         event.prevent_default();
-        let Some((workspace_id, selected_branch)) = workspace_start_chat_request(state) else {
+        let Some((workspace_id, selected_branch, agent_profile_id)) =
+            workspace_start_chat_request(state)
+        else {
             return;
         };
         begin_workspace_start_chat(state, &workspace_id);
         leptos::task::spawn_local(async move {
-            start_workspace_chat(state, workspace_id, selected_branch).await;
+            start_workspace_chat(state, workspace_id, selected_branch, agent_profile_id).await;
         });
     }
 }
 
 #[cfg(target_family = "wasm")]
-fn workspace_start_chat_request(state: WorkspacesPageState) -> Option<(String, String)> {
+fn workspace_start_chat_request(
+    state: WorkspacesPageState,
+) -> Option<(String, String, Option<String>)> {
     if state.opening_chat_workspace_id.get_untracked().is_some() {
         return None;
     }
@@ -985,7 +1024,11 @@ fn workspace_start_chat_request(state: WorkspacesPageState) -> Option<(String, S
             .set(Some("Choose a branch before starting a chat.".to_string()));
         return None;
     }
-    Some((workspace_id, selected_branch))
+    Some((
+        workspace_id,
+        selected_branch,
+        state.start_chat_agent_profile_id.get_untracked(),
+    ))
 }
 
 #[cfg(target_family = "wasm")]
@@ -1002,8 +1045,11 @@ async fn start_workspace_chat(
     state: WorkspacesPageState,
     workspace_id: String,
     selected_branch: String,
+    agent_profile_id: Option<String>,
 ) {
-    match api::create_workspace_session(&workspace_id, Some(selected_branch)).await {
+    match api::create_workspace_session(&workspace_id, Some(selected_branch), agent_profile_id)
+        .await
+    {
         Ok(session_id) => open_started_workspace_chat(state, &workspace_id, &session_id),
         Err(error) => {
             state.opening_chat_workspace_id.set(None);
@@ -1058,6 +1104,7 @@ fn close_workspace_start_chat_modal(state: WorkspacesPageState) {
     state.start_chat_workspace_name.set(String::new());
     state.start_chat_branches.set(Vec::new());
     state.start_chat_selected_branch.set(String::new());
+    state.start_chat_agent_profile_id.set(None);
     state.start_chat_loading_branches.set(false);
     state.error.set(None);
 }
@@ -1228,6 +1275,9 @@ mod tests {
         state
             .start_chat_selected_branch
             .set("refs/heads/feature".to_string());
+        state
+            .start_chat_agent_profile_id
+            .set(Some("opencode".to_string()));
     }
 
     #[test]
@@ -1359,6 +1409,8 @@ mod tests {
                 selected_branch,
                 loading_branches,
             );
+            let _ = workspace_start_chat_profile_field(state);
+            let _ = profile_option_view(sample_agent_profile("claude", "Claude ACP"));
             let _ = workspace_start_chat_modal_actions(
                 opening,
                 loading_branches,
@@ -1369,6 +1421,19 @@ mod tests {
             assert_eq!(title(), "Test Workspace");
             assert_eq!(submit_label(), "New chat");
         });
+    }
+
+    fn sample_agent_profile(id: &str, name: &str) -> AgentProfile {
+        AgentProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            mode: acp_contracts_sessions::AgentProfileMode::Chroot,
+            command_argv: vec!["claude".to_string(), "acp".to_string()],
+            env_allowlist: Vec::new(),
+            timeout_seconds: 30,
+            run_uid: 65_534,
+            run_gid: 65_534,
+        }
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -1386,6 +1451,7 @@ mod tests {
             assert!(state.start_chat_workspace_name.get().is_empty());
             assert!(state.start_chat_branches.get().is_empty());
             assert!(state.start_chat_selected_branch.get().is_empty());
+            assert!(state.start_chat_agent_profile_id.get().is_none());
             assert!(!state.start_chat_loading_branches.get());
             assert!(state.error.get().is_none());
         });

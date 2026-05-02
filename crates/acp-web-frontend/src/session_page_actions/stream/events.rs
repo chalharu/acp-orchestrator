@@ -25,8 +25,8 @@ pub(super) fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
 
     match payload {
         StreamEventPayload::SessionSnapshot { session } => apply_session_snapshot(session, signals),
-        StreamEventPayload::ConversationMessage { message } => {
-            apply_conversation_message(message, signals)
+        StreamEventPayload::ConversationMessage { message, partial } => {
+            apply_conversation_message(message, partial, signals)
         }
         StreamEventPayload::PermissionRequested { request } => {
             apply_permission_request(request, signals)
@@ -60,17 +60,26 @@ fn apply_session_snapshot(session: SessionSnapshot, signals: SessionSignals) {
     signals.entries.set(bootstrap.entries);
 }
 
-fn apply_conversation_message(message: ConversationMessage, signals: SessionSignals) {
+fn apply_conversation_message(
+    message: ConversationMessage,
+    partial: bool,
+    signals: SessionSignals,
+) {
     let is_assistant_message = matches!(message.role, MessageRole::Assistant);
-    let mut appended = false;
     signals.entries.update(|current_entries| {
-        if !current_entries.iter().any(|entry| entry.id == message.id) {
-            appended = true;
+        if let Some(entry) = current_entries
+            .iter_mut()
+            .find(|entry| entry.id == message.id)
+        {
+            if entry.text != message.text {
+                entry.text = message.text;
+            }
+        } else {
             current_entries.push(SessionEntry::from_message(message));
         }
     });
-    if appended
-        && is_assistant_message
+    if is_assistant_message
+        && !partial
         && should_release_turn_state(signals.turn_state.get_untracked())
     {
         signals.turn_state.set(TurnState::Idle);
@@ -313,12 +322,48 @@ mod tests {
                 sequence: 2,
                 payload: StreamEventPayload::ConversationMessage {
                     message: message("assistant-1", MessageRole::Assistant, "hello"),
+                    partial: false,
                 },
             };
             handle_sse_event(event.clone(), signals);
             handle_sse_event(event, signals);
 
             assert_eq!(signals.entries.get().len(), 1);
+            assert_eq!(signals.turn_state.get(), TurnState::Idle);
+        });
+    }
+
+    #[test]
+    fn conversation_message_event_updates_existing_streamed_entries() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            signals.turn_state.set(TurnState::AwaitingReply);
+
+            handle_sse_event(
+                StreamEvent {
+                    sequence: 2,
+                    payload: StreamEventPayload::ConversationMessage {
+                        message: message("assistant-1", MessageRole::Assistant, "hel"),
+                        partial: true,
+                    },
+                },
+                signals,
+            );
+            handle_sse_event(
+                StreamEvent {
+                    sequence: 3,
+                    payload: StreamEventPayload::ConversationMessage {
+                        message: message("assistant-1", MessageRole::Assistant, "hello"),
+                        partial: false,
+                    },
+                },
+                signals,
+            );
+
+            let entries = signals.entries.get();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].text, "hello");
             assert_eq!(signals.turn_state.get(), TurnState::Idle);
         });
     }

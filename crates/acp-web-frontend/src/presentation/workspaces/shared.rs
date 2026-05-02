@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use acp_contracts_sessions::SessionListItem;
+use acp_contracts_sessions::{AgentProfile, SessionListItem};
 use acp_contracts_workspaces::{WorkspaceBranch, WorkspaceSummary};
 use leptos::prelude::*;
 
@@ -39,7 +39,10 @@ pub(super) struct WorkspacesPageState {
     pub(super) start_chat_workspace_name: RwSignal<String>,
     pub(super) start_chat_branches: RwSignal<Vec<WorkspaceBranch>>,
     pub(super) start_chat_selected_branch: RwSignal<String>,
+    pub(super) start_chat_agent_profile_id: RwSignal<Option<String>>,
     pub(super) start_chat_loading_branches: RwSignal<bool>,
+    pub(super) agent_profiles: RwSignal<Vec<AgentProfile>>,
+    pub(super) agent_profiles_loading: RwSignal<bool>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -66,7 +69,10 @@ impl WorkspacesPageState {
             start_chat_workspace_name: RwSignal::new(String::new()),
             start_chat_branches: RwSignal::new(Vec::<WorkspaceBranch>::new()),
             start_chat_selected_branch: RwSignal::new(String::new()),
+            start_chat_agent_profile_id: RwSignal::new(None::<String>),
             start_chat_loading_branches: RwSignal::new(false),
+            agent_profiles: RwSignal::new(Vec::<AgentProfile>::new()),
+            agent_profiles_loading: RwSignal::new(false),
             checked: RwSignal::new(false),
         }
     }
@@ -104,7 +110,7 @@ pub(super) fn initialize_workspaces_page(state: WorkspacesPageState) {
             match api::auth_status().await {
                 Ok(status) => {
                     let access = crate::application::auth::workspaces_route_access(&status);
-                    let should_load = matches!(access, WorkspacesRouteAccess::SignedIn);
+                    let should_load = matches!(access, WorkspacesRouteAccess::SignedIn(_));
                     state.access.set(Some(access));
                     if should_load {
                         spawn_workspace_reload(state);
@@ -169,8 +175,31 @@ fn finish_workspace_reload(state: WorkspacesPageState, workspaces: Vec<Workspace
     for workspace in &workspaces {
         spawn_workspace_sessions_reload(state, workspace);
     }
+    spawn_agent_profiles_reload(state);
     state.workspaces.set(workspaces);
     state.loading.set(false);
+}
+
+#[cfg(target_family = "wasm")]
+pub(super) fn spawn_agent_profiles_reload(state: WorkspacesPageState) {
+    state.agent_profiles_loading.set(true);
+    leptos::task::spawn_local(async move {
+        match api::list_agent_profiles().await {
+            Ok(profiles) => {
+                state.agent_profiles.set(profiles);
+                state.agent_profiles_loading.set(false);
+            }
+            Err(message) => {
+                state.agent_profiles_loading.set(false);
+                state.error.set(Some(message));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn spawn_agent_profiles_reload(state: WorkspacesPageState) {
+    state.agent_profiles_loading.set(false);
 }
 
 #[cfg(target_family = "wasm")]
@@ -242,8 +271,24 @@ mod tests {
             assert!(state.start_chat_workspace_name.get().is_empty());
             assert!(state.start_chat_branches.get().is_empty());
             assert!(state.start_chat_selected_branch.get().is_empty());
+            assert!(state.start_chat_agent_profile_id.get().is_none());
             assert!(!state.start_chat_loading_branches.get());
+            assert!(state.agent_profiles.get().is_empty());
+            assert!(!state.agent_profiles_loading.get());
             assert!(!state.checked.get());
+        });
+    }
+
+    #[test]
+    fn host_agent_profile_reload_clears_loading_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let state = WorkspacesPageState::new();
+            state.agent_profiles_loading.set(true);
+
+            spawn_agent_profiles_reload(state);
+
+            assert!(!state.agent_profiles_loading.get());
         });
     }
 

@@ -8,6 +8,7 @@ async fn workspace_stack() -> Result<TestStack> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await
@@ -170,6 +171,7 @@ async fn workspace_session_creation_accepts_empty_and_override_bodies_over_http(
         .await?;
     let override_request = CreateSessionRequest {
         checkout_ref: Some("HEAD".to_string()),
+        agent_profile_id: None,
     };
     let overridden = stack
         .create_workspace_session_with_request("alice", &workspace_id, Some(&override_request))

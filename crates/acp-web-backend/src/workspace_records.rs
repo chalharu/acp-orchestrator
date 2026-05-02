@@ -40,6 +40,7 @@ pub struct SessionMetadataRecord {
     pub checkout_relpath: Option<String>,
     pub checkout_ref: Option<String>,
     pub checkout_commit_sha: Option<String>,
+    pub agent_profile_id: Option<String>,
     pub failure_reason: Option<String>,
     pub detach_deadline_at: Option<DateTime<Utc>>,
     pub restartable_deadline_at: Option<DateTime<Utc>>,

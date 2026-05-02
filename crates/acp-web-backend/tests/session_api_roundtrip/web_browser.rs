@@ -84,6 +84,7 @@ async fn spawn_browser_test_stack() -> Result<TestStack> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await
@@ -156,7 +157,7 @@ fn assert_snapshot_for_session(event: StreamEvent, session_id: &str) {
 
 fn assert_user_message(event: StreamEvent, expected_text: &str) {
     match event.payload {
-        StreamEventPayload::ConversationMessage { message } => {
+        StreamEventPayload::ConversationMessage { message, .. } => {
             assert!(matches!(message.role, MessageRole::User));
             assert_eq!(message.text, expected_text);
         }
@@ -166,7 +167,7 @@ fn assert_user_message(event: StreamEvent, expected_text: &str) {
 
 fn assert_assistant_message(event: StreamEvent) {
     match event.payload {
-        StreamEventPayload::ConversationMessage { message } => {
+        StreamEventPayload::ConversationMessage { message, .. } => {
             assert!(matches!(message.role, MessageRole::Assistant));
             assert!(message.text.starts_with("mock assistant:"));
         }

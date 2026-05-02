@@ -8,6 +8,7 @@ async fn lagged_event_streams_continue_after_dropping_backlog() -> Result<()> {
         acp_server: String::new(),
         startup_hints: false,
         state_dir: test_state_dir(),
+        agent_launch: None,
         frontend_dist: None,
     })
     .await?;

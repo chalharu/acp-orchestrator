@@ -14,11 +14,24 @@ pub struct StreamEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEventPayload {
-    SessionSnapshot { session: SessionSnapshot },
-    ConversationMessage { message: ConversationMessage },
-    PermissionRequested { request: PermissionRequest },
-    SessionClosed { session_id: String, reason: String },
-    Status { message: String },
+    SessionSnapshot {
+        session: SessionSnapshot,
+    },
+    ConversationMessage {
+        message: ConversationMessage,
+        #[serde(default)]
+        partial: bool,
+    },
+    PermissionRequested {
+        request: PermissionRequest,
+    },
+    SessionClosed {
+        session_id: String,
+        reason: String,
+    },
+    Status {
+        message: String,
+    },
 }
 
 impl StreamEvent {

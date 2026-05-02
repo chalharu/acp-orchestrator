@@ -1,6 +1,7 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
 use acp_contracts_accounts::LocalAccount;
+use acp_contracts_sessions::AgentProfile;
 use leptos::prelude::*;
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::JsCast;
@@ -26,6 +27,13 @@ pub(super) struct AccountsPageState {
     pub(super) create_password: RwSignal<String>,
     pub(super) create_admin: RwSignal<bool>,
     pub(super) creating: RwSignal<bool>,
+    pub(super) agent_profiles: RwSignal<Vec<AgentProfile>>,
+    pub(super) agent_profiles_loading: RwSignal<bool>,
+    pub(super) agent_profile_name: RwSignal<String>,
+    pub(super) agent_profile_command: RwSignal<String>,
+    pub(super) agent_profile_mode: RwSignal<acp_contracts_sessions::AgentProfileMode>,
+    pub(super) agent_profile_saving: RwSignal<bool>,
+    pub(super) deleting_agent_profile_id: RwSignal<Option<String>>,
     pub(super) checked: RwSignal<bool>,
 }
 
@@ -42,6 +50,13 @@ impl AccountsPageState {
             create_password: RwSignal::new(String::new()),
             create_admin: RwSignal::new(false),
             creating: RwSignal::new(false),
+            agent_profiles: RwSignal::new(Vec::<AgentProfile>::new()),
+            agent_profiles_loading: RwSignal::new(false),
+            agent_profile_name: RwSignal::new(String::new()),
+            agent_profile_command: RwSignal::new(String::new()),
+            agent_profile_mode: RwSignal::new(acp_contracts_sessions::AgentProfileMode::Host),
+            agent_profile_saving: RwSignal::new(false),
+            deleting_agent_profile_id: RwSignal::new(None::<String>),
             checked: RwSignal::new(false),
         }
     }
@@ -63,6 +78,7 @@ pub(super) fn initialize_accounts_page(state: AccountsPageState) {
                     state.access.set(Some(access));
                     if should_load_accounts {
                         spawn_account_reload(state);
+                        spawn_agent_profiles_reload(state);
                     } else {
                         state.loading_accounts.set(false);
                     }
@@ -92,7 +108,7 @@ pub(super) fn initialize_accounts_page_host(state: AccountsPageState) {
 }
 
 pub(super) fn accounts_path_with_return_to(return_to_path: &str) -> String {
-    path_with_return_to("/app/accounts/", return_to_path)
+    path_with_return_to("/app/settings/accounts/", return_to_path)
 }
 
 pub(super) fn sign_in_path_with_return_to(return_to_path: &str) -> String {
@@ -232,6 +248,28 @@ pub(super) fn spawn_account_reload(state: AccountsPageState) {
     });
 }
 
+#[cfg(target_family = "wasm")]
+pub(super) fn spawn_agent_profiles_reload(state: AccountsPageState) {
+    state.agent_profiles_loading.set(true);
+    leptos::task::spawn_local(async move {
+        match api::list_agent_profiles().await {
+            Ok(profiles) => {
+                state.agent_profiles.set(profiles);
+                state.agent_profiles_loading.set(false);
+            }
+            Err(message) => {
+                state.agent_profiles_loading.set(false);
+                state.error.set(Some(message));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn spawn_agent_profiles_reload(state: AccountsPageState) {
+    state.agent_profiles_loading.set(false);
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn spawn_account_reload(state: AccountsPageState) {
     state.loading_accounts.set(true);
@@ -260,7 +298,7 @@ mod tests {
     fn accounts_paths_preserve_only_session_routes() {
         assert_eq!(
             accounts_path_with_return_to("/app/sessions/s%2F1"),
-            "/app/accounts/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
+            "/app/settings/accounts/?return_to=%2Fapp%2Fsessions%2Fs%252F1"
         );
         assert_eq!(
             sign_in_path_with_return_to("/app/sessions/s%2F1"),
@@ -322,6 +360,16 @@ mod tests {
             assert!(state.create_password.get().is_empty());
             assert!(!state.create_admin.get());
             assert!(!state.creating.get());
+            assert!(state.agent_profiles.get().is_empty());
+            assert!(!state.agent_profiles_loading.get());
+            assert!(state.agent_profile_name.get().is_empty());
+            assert!(state.agent_profile_command.get().is_empty());
+            assert_eq!(
+                state.agent_profile_mode.get(),
+                acp_contracts_sessions::AgentProfileMode::Host
+            );
+            assert!(!state.agent_profile_saving.get());
+            assert!(state.deleting_agent_profile_id.get().is_none());
             assert!(!state.checked.get());
         });
     }
@@ -358,6 +406,10 @@ mod tests {
             spawn_account_reload(state);
             assert!(!state.loading_accounts.get());
             assert!(state.error.get().is_none());
+
+            state.agent_profiles_loading.set(true);
+            spawn_agent_profiles_reload(state);
+            assert!(!state.agent_profiles_loading.get());
         });
     }
 

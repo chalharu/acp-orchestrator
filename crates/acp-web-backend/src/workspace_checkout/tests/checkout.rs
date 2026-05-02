@@ -1,16 +1,16 @@
 use super::super::{
     CHECKOUTS_DIR_NAME, FsWorkspaceCheckoutManager, GIT_REMOTE_NAME, GitProxyConfig,
-    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutManager,
-    await_checkout_task, build_prepared_checkout, checkout_fetch_head, checkout_head_commit,
-    checkout_parent_dir, clone_local_repository, clone_remote_workspace, current_head_commit,
-    git_fetch_options, git_proxy_config_for_remote, git_proxy_config_for_remote_from_env,
-    git_symbolic_ref, list_local_workspace_branches, list_remote_workspace_branches,
-    local_source_root, local_source_root_from, map_git_error, no_proxy_entry_matches,
-    parse_remote_default_branch_name, prioritize_workspace_branch_ref, proxy_env_names_for_scheme,
-    proxy_options_from_config, reject_git_credentials, resolve_https_checkout_ref,
-    resolve_local_checkout_ref, resolve_remote_head_ref, should_bypass_git_proxy,
-    validate_branch_list_upstream_url, validate_checkout_ref, validate_https_upstream_url,
-    workspace_branches_from_refs,
+    PreparedWorkspaceCheckout, WorkspaceCheckoutError, WorkspaceCheckoutLayout,
+    WorkspaceCheckoutManager, await_checkout_task, build_prepared_checkout, checkout_fetch_head,
+    checkout_head_commit, checkout_parent_dir, clone_local_repository, clone_remote_workspace,
+    current_head_commit, git_fetch_options, git_proxy_config_for_remote,
+    git_proxy_config_for_remote_from_env, git_symbolic_ref, list_local_workspace_branches,
+    list_remote_workspace_branches, local_source_root, local_source_root_from, map_git_error,
+    no_proxy_entry_matches, parse_remote_default_branch_name, prioritize_workspace_branch_ref,
+    proxy_env_names_for_scheme, proxy_options_from_config, reject_git_credentials,
+    resolve_https_checkout_ref, resolve_local_checkout_ref, resolve_remote_head_ref,
+    should_bypass_git_proxy, validate_branch_list_upstream_url, validate_checkout_ref,
+    validate_https_upstream_url, workspace_branches_from_refs,
 };
 use super::*;
 use async_trait::async_trait;
@@ -28,9 +28,9 @@ use std::{
 };
 
 fn test_root_dir() -> PathBuf {
-    let root = std::env::current_dir()
-        .expect("workspace checkout tests should start in a readable directory")
-        .join(".tmp");
+    let root = std::env::temp_dir()
+        .join("acp-orchestrator-tests")
+        .join("workspace-checkout");
     std::fs::create_dir_all(&root).expect("workspace checkout test root should be creatable");
     root
 }
@@ -163,9 +163,33 @@ fn corrupt_head_file(repo_path: &Path, contents: &[u8]) {
     std::fs::write(git_dir.join("HEAD"), contents).expect("HEAD should be writable");
 }
 
-fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
+struct ProbePathOverflowFixture {
+    state_dir: PathBuf,
+    created_dirs: Vec<PathBuf>,
+}
+
+impl ProbePathOverflowFixture {
+    fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+}
+
+impl Drop for ProbePathOverflowFixture {
+    fn drop(&mut self) {
+        if let Some(deepest) = self.created_dirs.last() {
+            let _ = std::fs::remove_dir_all(deepest);
+        }
+        for path in self.created_dirs.iter().rev().skip(1) {
+            let _ = std::fs::remove_dir(path);
+        }
+    }
+}
+
+fn state_dir_with_probe_path_overflow(prefix: &str) -> ProbePathOverflowFixture {
     let mut state_dir = unique_test_dir(prefix);
+    let mut created_dirs = Vec::new();
     std::fs::create_dir_all(&state_dir).expect("long state dir root should be creatable");
+    created_dirs.push(state_dir.clone());
     let segment = "aaaaaaaaaaaaaaaa";
     let probe_suffix = format!("remote-head-{}", "a".repeat(32));
     while state_dir
@@ -177,6 +201,7 @@ fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
     {
         state_dir = state_dir.join(segment);
         std::fs::create_dir_all(&state_dir).expect("long state dirs should be creatable");
+        created_dirs.push(state_dir.clone());
     }
     assert!(
         state_dir.join("git-home").to_string_lossy().len() < 4096,
@@ -191,7 +216,10 @@ fn state_dir_with_probe_path_overflow(prefix: &str) -> PathBuf {
             > 4095,
         "probe path should overflow the platform path limit"
     );
-    state_dir
+    ProbePathOverflowFixture {
+        state_dir,
+        created_dirs,
+    }
 }
 
 fn fetch_checkout_origin_head(checkout_path: &Path) {
@@ -262,7 +290,7 @@ fn checkout_ref_validation_accepts_safe_refs_and_rejects_unsafe_values() {
 }
 
 #[tokio::test]
-async fn workspace_checkout_manager_defaults_to_unresolved_paths() {
+async fn noop_workspace_checkout_manager_leaves_paths_unresolved() {
     #[derive(Debug)]
     struct NoopCheckoutManager;
 
@@ -277,6 +305,10 @@ async fn workspace_checkout_manager_defaults_to_unresolved_paths() {
             Err(WorkspaceCheckoutError::Io(
                 "checkout preparation is intentionally unused".to_string(),
             ))
+        }
+
+        fn checkout_relpath_for_session(&self, _session_id: &str) -> Option<String> {
+            None
         }
     }
 
@@ -557,6 +589,36 @@ fn resolved_checkout_paths_stay_within_the_checkout_root() {
 }
 
 #[test]
+fn checkout_path_resolution_accepts_standard_and_chroot_roots() {
+    let state_dir = unique_test_dir("acp-workspace-checkout-chroot-resolve");
+    let manager = FsWorkspaceCheckoutManager::with_layout(
+        state_dir.clone(),
+        WorkspaceCheckoutLayout::ChrootRuntime,
+    );
+
+    assert_eq!(
+        manager.resolve_checkout_path("agent-runtimes/s_test/root/workspace"),
+        Some(state_dir.join("agent-runtimes/s_test/root/workspace"))
+    );
+    assert_eq!(
+        manager.checkout_relpath_for_session("s_test"),
+        Some("agent-runtimes/s_test/root/workspace".to_string())
+    );
+    assert_eq!(
+        manager.resolve_checkout_path("agent-runtimes/s_test/root/workspace/extra"),
+        None
+    );
+    assert_eq!(
+        manager.resolve_checkout_path("agent-runtimes/s_test/root/../escape"),
+        None
+    );
+    assert_eq!(
+        manager.resolve_checkout_path("session-checkouts/s_test"),
+        Some(state_dir.join("session-checkouts/s_test"))
+    );
+}
+
+#[test]
 fn prepare_checkout_sync_reports_checkout_root_creation_failures() {
     let state_dir = unique_test_dir("acp-workspace-checkout-root-error");
     std::fs::create_dir_all(&state_dir).expect("state dir should be creatable");
@@ -565,7 +627,12 @@ fn prepare_checkout_sync_reports_checkout_root_creation_failures() {
     let manager = FsWorkspaceCheckoutManager::new(state_dir);
 
     let error = manager
-        .prepare_checkout_sync(&sample_workspace_record(None, None), "s_test", None)
+        .prepare_checkout_sync(
+            &sample_workspace_record(None, None),
+            "s_test",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("blocking files should make the checkout root fail");
 
     assert_io_error_contains(error, "creating checkout root failed");
@@ -598,7 +665,12 @@ fn prepare_checkout_sync_reports_stale_checkout_cleanup_failures() {
     let manager = FsWorkspaceCheckoutManager::new(state_dir);
 
     let error = manager
-        .prepare_checkout_sync(&sample_workspace_record(None, None), "s_test", None)
+        .prepare_checkout_sync(
+            &sample_workspace_record(None, None),
+            "s_test",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("file-based stale paths should fail cleanup");
 
     assert_io_error_contains(error, "clearing stale checkout directory failed");
@@ -611,7 +683,12 @@ fn https_checkout_failures_clean_up_partially_initialized_directories() {
     let workspace = sample_workspace_record(Some("https://127.0.0.1:9/repo.git"), None);
 
     let error = manager
-        .prepare_checkout_sync(&workspace, "s_test", None)
+        .prepare_checkout_sync(
+            &workspace,
+            "s_test",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("unreachable https remotes should fail");
 
     assert_git_error(error);
@@ -631,7 +708,12 @@ fn https_checkout_failures_after_fetch_cleanup_checkout_directories() {
     );
 
     let error = manager
-        .prepare_checkout_sync(&workspace, "s_fetch", None)
+        .prepare_checkout_sync(
+            &workspace,
+            "s_fetch",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
         .expect_err("fetch failures should surface through the git2 checkout path");
 
     assert_git_error(error);
@@ -745,9 +827,9 @@ fn parse_remote_default_branch_name_rejects_invalid_utf8() {
 
 #[test]
 fn resolve_remote_head_ref_reports_probe_directory_creation_failures() {
-    let state_dir = state_dir_with_probe_path_overflow("acp-workspace-checkout-probe-overflow");
+    let fixture = state_dir_with_probe_path_overflow("acp-workspace-checkout-probe-overflow");
 
-    let error = resolve_remote_head_ref("file:///unused.git", &state_dir)
+    let error = resolve_remote_head_ref("file:///unused.git", fixture.state_dir())
         .expect_err("overflowed probe paths should fail before remote access");
 
     assert_io_error_contains(error, "creating git home failed");
@@ -1209,6 +1291,64 @@ async fn local_workspace_fallback_prepares_a_checkout_from_the_current_repo() {
     assert_eq!(checkout.checkout_relpath, "session-checkouts/s_test");
     assert!(checkout.checkout_commit_sha.is_some());
     assert!(checkout.working_dir.join("Cargo.toml").exists());
+
+    let chroot_checkout = manager
+        .prepare_checkout_with_layout(
+            &workspace,
+            "s_chroot",
+            None,
+            WorkspaceCheckoutLayout::ChrootRuntime,
+        )
+        .await
+        .expect("chroot-layout local checkout should prepare");
+    assert_eq!(
+        chroot_checkout.checkout_relpath,
+        "agent-runtimes/s_chroot/root/workspace"
+    );
+    assert!(chroot_checkout.working_dir.join("Cargo.toml").exists());
+}
+
+fn maybe_run_detached_head_checkout_child() -> bool {
+    const CHILD_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_CHILD";
+    const SOURCE_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_SOURCE";
+    const EXPECTED_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_EXPECTED";
+
+    if std::env::var_os(CHILD_ENV).is_none() {
+        return false;
+    }
+    let source_root =
+        PathBuf::from(std::env::var(SOURCE_ENV).expect("detached source root env should exist"));
+    let expected_commit =
+        std::env::var(EXPECTED_ENV).expect("detached source commit env should exist");
+    let original_dir = std::env::current_dir().expect("current dir should be readable");
+    std::env::set_current_dir(&source_root)
+        .expect("child should be able to chdir into the detached source");
+    let state_dir = detached_head_child_state_dir(&source_root);
+    let checkout = FsWorkspaceCheckoutManager::new(state_dir)
+        .prepare_checkout_sync(
+            &sample_workspace_record(None, None),
+            "s_detached",
+            None,
+            WorkspaceCheckoutLayout::Standard,
+        )
+        .expect("detached source local checkout should prepare");
+
+    assert_eq!(checkout.checkout_ref, None);
+    assert_eq!(checkout.checkout_commit_sha, Some(expected_commit));
+    assert!(checkout.working_dir.join("detached.txt").exists());
+    std::env::set_current_dir(original_dir)
+        .expect("child should restore the original working directory");
+    true
+}
+
+fn detached_head_child_state_dir(source_root: &Path) -> PathBuf {
+    source_root
+        .parent()
+        .expect("detached source should have a parent")
+        .join(format!(
+            "acp-workspace-checkout-detached-head-state-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
 }
 
 #[test]
@@ -1217,32 +1357,7 @@ fn local_workspace_fallback_prepares_a_checkout_from_detached_head_sources() {
     const SOURCE_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_SOURCE";
     const EXPECTED_ENV: &str = "ACP_WORKSPACE_CHECKOUT_DETACHED_HEAD_EXPECTED";
 
-    if std::env::var_os(CHILD_ENV).is_some() {
-        let source_root = PathBuf::from(
-            std::env::var(SOURCE_ENV).expect("detached source root env should exist"),
-        );
-        let expected_commit =
-            std::env::var(EXPECTED_ENV).expect("detached source commit env should exist");
-        let original_dir = std::env::current_dir().expect("current dir should be readable");
-        std::env::set_current_dir(&source_root)
-            .expect("child should be able to chdir into the detached source");
-        let state_dir = source_root
-            .parent()
-            .expect("detached source should have a parent")
-            .join(format!(
-                "acp-workspace-checkout-detached-head-state-{}",
-                uuid::Uuid::new_v4().simple()
-            ));
-        let manager = FsWorkspaceCheckoutManager::new(state_dir);
-        let checkout = manager
-            .prepare_checkout_sync(&sample_workspace_record(None, None), "s_detached", None)
-            .expect("detached source local checkout should prepare");
-
-        assert_eq!(checkout.checkout_ref, None);
-        assert_eq!(checkout.checkout_commit_sha, Some(expected_commit));
-        assert!(checkout.working_dir.join("detached.txt").exists());
-        std::env::set_current_dir(original_dir)
-            .expect("child should restore the original working directory");
+    if maybe_run_detached_head_checkout_child() {
         return;
     }
 

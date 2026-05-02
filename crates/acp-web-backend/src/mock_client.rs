@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use agent_client_protocol::{self as acp, ConnectTo, schema};
@@ -54,6 +54,8 @@ type ConnectedOperation<T> = Box<
         + Send,
 >;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_RETRY_MAX: Duration = Duration::from_secs(10);
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
 type SessionAcpAddresses = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
@@ -357,6 +359,7 @@ async fn drive_acp_roundtrip(
     mock_address: String,
     working_dir: PathBuf,
     turn: TurnHandle,
+    request_timeout: Duration,
     upstream_sessions: UpstreamSessions,
 ) -> Result<ReplyResult> {
     let backend_session_id = turn.session_id().to_string();
@@ -365,6 +368,7 @@ async fn drive_acp_roundtrip(
     drive_acp_operation(
         mock_address,
         working_dir,
+        request_timeout,
         backend_session_id,
         upstream_sessions,
         client,
@@ -408,11 +412,13 @@ async fn drive_acp_session_prime(
     mock_address: String,
     working_dir: PathBuf,
     backend_session_id: String,
+    request_timeout: Duration,
     upstream_sessions: UpstreamSessions,
 ) -> Result<Option<String>> {
     drive_acp_operation(
         mock_address,
         working_dir,
+        request_timeout,
         backend_session_id,
         upstream_sessions,
         BackendAcpClient::without_turn(),
@@ -442,12 +448,30 @@ async fn drive_acp_session_prime(
     .await
 }
 
-async fn connect_stream(mock_address: &str) -> Result<TcpStream> {
-    TcpStream::connect(mock_address)
-        .await
-        .context(ConnectSnafu {
-            address: mock_address.to_string(),
-        })
+async fn connect_stream(mock_address: &str, retry_for: Duration) -> Result<TcpStream> {
+    let deadline = Instant::now() + retry_for;
+    let source = loop {
+        match TcpStream::connect(mock_address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) if retry_for.is_zero() || Instant::now() >= deadline => break error,
+            Err(_) => {}
+        }
+        tokio::time::sleep(next_connect_retry_delay(deadline)).await;
+    };
+    Err(MockClientError::Connect {
+        source,
+        address: mock_address.to_string(),
+    })
+}
+
+fn next_connect_retry_delay(deadline: Instant) -> Duration {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .min(CONNECT_RETRY_DELAY)
+}
+
+fn connect_retry_budget(request_timeout: Duration) -> Duration {
+    (request_timeout / 2).min(CONNECT_RETRY_MAX)
 }
 
 async fn prompt_session(
@@ -723,7 +747,13 @@ fn drive_acp_roundtrip_blocking(
 ) -> Result<ReplyResult> {
     drive_acp_operation_blocking(
         request_timeout,
-        drive_acp_roundtrip(mock_address, working_dir, turn, upstream_sessions),
+        drive_acp_roundtrip(
+            mock_address,
+            working_dir,
+            turn,
+            request_timeout,
+            upstream_sessions,
+        ),
     )
 }
 
@@ -740,6 +770,7 @@ fn drive_acp_session_prime_blocking(
             mock_address,
             working_dir,
             backend_session_id,
+            request_timeout,
             upstream_sessions,
         ),
     )
@@ -766,12 +797,13 @@ where
 async fn drive_acp_operation<T: 'static>(
     mock_address: String,
     working_dir: PathBuf,
+    request_timeout: Duration,
     backend_session_id: String,
     upstream_sessions: UpstreamSessions,
     client: BackendAcpClient,
     operation: ConnectedOperation<T>,
 ) -> Result<T> {
-    let stream = connect_stream(&mock_address).await?;
+    let stream = connect_stream(&mock_address, connect_retry_budget(request_timeout)).await?;
     let (reader, writer) = stream.into_split();
     let request_client = client.clone();
     let notification_client = client.clone();

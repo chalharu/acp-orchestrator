@@ -255,7 +255,7 @@ async fn request_reply_times_out_for_slow_mock_agents() {
 
 #[tokio::test]
 async fn request_reply_reports_connect_failures() {
-    let client = MockClient::with_timeout("127.0.0.1:9".to_string(), Duration::from_millis(20))
+    let client = MockClient::with_timeout("127.0.0.1:9".to_string(), Duration::from_millis(200))
         .expect("client construction should succeed");
     let pending = test_pending_prompt("alice", "hello").await;
 
@@ -265,6 +265,48 @@ async fn request_reply_reports_connect_failures() {
         .expect_err("unreachable mock transports should fail");
 
     assert!(matches!(error, MockClientError::Connect { .. }));
+}
+
+#[tokio::test]
+async fn request_reply_retries_until_launched_acp_server_is_listening() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("port reservation should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose address");
+    drop(listener);
+    let client = MockClient::with_timeout(address.to_string(), Duration::from_secs(2))
+        .expect("client construction should succeed");
+    let pending = test_pending_prompt("alice", "hello").await;
+    let request_task =
+        tokio::spawn(async move { client.request_reply(pending.turn_handle()).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let listener = TcpListener::bind(address)
+        .await
+        .expect("delayed mock server should bind the reserved address");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    spawn_with_shutdown_task(
+        listener,
+        MockConfig {
+            response_delay: Duration::from_millis(1),
+            ..MockConfig::default()
+        },
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    );
+
+    let reply = request_task
+        .await
+        .expect("request task should join")
+        .expect("late ACP listeners should still receive the request");
+    assert!(matches!(
+        reply,
+        ReplyResult::Reply(text) if text.starts_with("mock assistant:")
+    ));
+    let _ = shutdown_tx.send(());
 }
 
 #[tokio::test]

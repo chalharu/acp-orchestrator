@@ -3,7 +3,7 @@ use std::{
     env,
     fmt::Display,
     fs,
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Condvar, Mutex},
@@ -27,6 +27,7 @@ const ACP_PORT_PLACEHOLDER: &str = "${ACP_PORT}";
 const ACP_ENDPOINT_PLACEHOLDER: &str = "${ACP_ENDPOINT}";
 const ACP_BASE_URL_PLACEHOLDER: &str = "${ACP_BASE_URL}";
 const ACP_HOST_PLACEHOLDER: &str = "${ACP_HOST}";
+const ACP_STARTUP_EXIT_GRACE: Duration = Duration::from_millis(100);
 #[cfg(test)]
 const TEST_FAKE_CGROUP_MARKER: &str = ".acp-test-fake-cgroup-v2";
 #[cfg(test)]
@@ -819,22 +820,21 @@ fn wait_for_acp_readiness(
     let Some(endpoint) = endpoint else {
         return Ok(());
     };
-    let address: SocketAddr = endpoint.address.parse().map_err(|error| {
+    let _address: SocketAddr = endpoint.address.parse().map_err(|error| {
         AgentRuntimeError::Io(format!("parsing ACP endpoint address failed: {error}"))
     })?;
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
-            return Ok(());
-        }
+    let deadline = std::time::Instant::now() + timeout.min(ACP_STARTUP_EXIT_GRACE);
+    loop {
         if let Some(status) = child.child.try_wait().map_err(agent_process_status_error)? {
             return Err(AgentRuntimeError::Io(format!(
                 "agent process exited before ACP endpoint became ready: {status}"
             )));
         }
+        if std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
         std::thread::sleep(Duration::from_millis(25));
     }
-    Err(AgentRuntimeError::LaunchTimedOut(timeout))
 }
 
 fn agent_process_status_error(error: std::io::Error) -> AgentRuntimeError {
@@ -2429,8 +2429,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn wait_for_acp_readiness_handles_ready_exit_and_timeout_paths() {
+    fn wait_for_acp_readiness_is_non_destructive_and_reports_fast_exits() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("listener should become nonblocking");
         let endpoint = AcpEndpoint {
             address: listener.local_addr().expect("listener address").to_string(),
             port: listener.local_addr().expect("listener address").port(),
@@ -2438,6 +2441,10 @@ mod tests {
         let mut child = spawn_sleep_child();
         wait_for_acp_readiness(Some(&endpoint), Duration::from_secs(1), &mut child)
             .expect("listening endpoint should be ready");
+        let accept_error = listener
+            .accept()
+            .expect_err("readiness checks must not consume an ACP connection");
+        assert_eq!(accept_error.kind(), std::io::ErrorKind::WouldBlock);
         terminate_agent_child(&mut child);
 
         let mut exited = spawn_true_child();
@@ -2452,14 +2459,13 @@ mod tests {
         );
 
         let mut sleeping = spawn_sleep_child();
-        let error = wait_for_acp_readiness(
+        wait_for_acp_readiness(
             Some(&closed_endpoint()),
             Duration::from_millis(1),
             &mut sleeping,
         )
-        .expect_err("sleeping child should time out");
+        .expect("readiness should leave TCP retries to the ACP connection");
         terminate_agent_child(&mut sleeping);
-        assert!(matches!(error, AgentRuntimeError::LaunchTimedOut(_)));
     }
 
     #[cfg(unix)]
@@ -3052,7 +3058,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn launch_host_cleans_up_when_endpoint_never_becomes_ready() {
+    fn launch_host_defers_unopened_endpoints_to_acp_connection_retries() {
         let state_dir = temp_state_dir("acp-agent-launch-host-not-ready");
         let session_id = "s_test";
         let checkout = checkout_in_state(&state_dir, session_id);
@@ -3061,25 +3067,29 @@ mod tests {
             FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should build");
         let config = host_never_ready_config();
 
-        let error = manager
+        let metadata = manager
             .launch_session(&AgentSessionLaunch {
                 session_id,
                 workspace_id: "w_test",
                 checkout: &checkout,
                 config: Some(config),
             })
-            .expect_err("host launch should fail when ACP endpoint never opens");
+            .expect("host launch should not consume ACP connections during readiness checks");
 
-        assert!(matches!(error, AgentRuntimeError::LaunchTimedOut(_)));
+        assert!(metadata.acp_address.is_some());
         let child_pid = std::fs::read_to_string(&pid_file)
             .expect("host agent should record its pid")
             .trim()
             .parse::<u32>()
             .expect("agent pid should parse");
+        manager.forget_session(session_id);
         let inactive = process_inactive_or_kill(child_pid);
         let _ = std::fs::remove_dir_all(state_dir);
 
-        assert!(inactive, "failed host launch should kill the agent process");
+        assert!(
+            inactive,
+            "host launch cleanup should kill the agent process"
+        );
     }
 
     #[cfg(target_os = "linux")]

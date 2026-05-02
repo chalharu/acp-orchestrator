@@ -47,6 +47,9 @@ pub enum BackendAppError {
     #[snafu(display("parsing backend CLI arguments failed: {source}"))]
     ParseArgs { source: clap::Error },
 
+    #[snafu(display("resolving backend state directory failed"))]
+    ResolveStateDir { source: std::io::Error },
+
     #[snafu(transparent)]
     Setup { source: ListenerSetupError },
 
@@ -164,10 +167,19 @@ fn resolve_acp_server(
         })
 }
 
+fn absolute_state_dir(state_dir: PathBuf) -> std::io::Result<PathBuf> {
+    if state_dir.is_absolute() {
+        Ok(state_dir)
+    } else {
+        Ok(env::current_dir()?.join(state_dir))
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
     let acp_server = resolve_acp_server(cli.acp_server.clone(), env::var("ACP_MOCK_ADDRESS").ok())
         .context(ParseArgsSnafu)?;
     let agent_launch = agent_launch_config(&cli).context(ParseArgsSnafu)?;
+    let state_dir = absolute_state_dir(cli.state_dir).context(ResolveStateDirSnafu)?;
     let listener = bind_listener(cli.listen.resolved_host(), cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
@@ -178,12 +190,12 @@ async fn run(cli: Cli) -> Result<()> {
         session_cap: cli.session_cap,
         acp_server,
         startup_hints: cli.startup_hints,
-        state_dir: cli.state_dir,
+        state_dir: state_dir.clone(),
         agent_launch,
         frontend_dist: cli.frontend_dist,
     };
     let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
-        SqliteWorkspaceRepository::new(config.state_dir.join("db.sqlite"))
+        SqliteWorkspaceRepository::new(state_dir.join("db.sqlite"))
             .map_err(AppStateBuildError::from)
             .context(BuildStateSnafu)?,
     );
@@ -275,6 +287,22 @@ mod tests {
             resolve_acp_server(cli.acp_server.clone(), Some("127.0.0.1:8090".to_string()))
                 .expect("the legacy ACP server should resolve"),
             "127.0.0.1:8090"
+        );
+    }
+
+    #[test]
+    fn state_dir_resolution_makes_relative_paths_absolute() {
+        let cwd = env::current_dir().expect("current directory should be readable");
+
+        assert_eq!(
+            absolute_state_dir(PathBuf::from(".acp-state"))
+                .expect("relative state directories should resolve"),
+            cwd.join(".acp-state")
+        );
+        assert_eq!(
+            absolute_state_dir(PathBuf::from("/tmp/acp-state"))
+                .expect("absolute state directories should pass through"),
+            PathBuf::from("/tmp/acp-state")
         );
     }
 

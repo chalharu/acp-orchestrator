@@ -22,11 +22,19 @@ use crate::{
     AppState, AppStateBuildError, ServerConfig, serve_with_shutdown,
     workspace_repository::WorkspaceRepository, workspace_store::SqliteWorkspaceRepository,
 };
+use tokio::net::TcpListener;
 
 type Result<T, E = BackendAppError> = std::result::Result<T, E>;
 const READY_CHECK_ATTEMPTS: usize = 50;
 const READY_CHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const READY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+struct RunningBackend {
+    listener: TcpListener,
+    endpoint: String,
+    state: AppState,
+    exit_after_ms: Option<u64>,
+}
 
 async fn wait_for_app_entrypoint(client: &reqwest::Client, base_url: &str) -> Result<(), BoxError> {
     let app_url = format!("{base_url}/app/");
@@ -181,22 +189,42 @@ fn absolute_state_dir(state_dir: PathBuf) -> std::io::Result<PathBuf> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let backend = build_running_backend(&cli).await?;
+    let client = build_http_client_for_url(&backend.endpoint, Some(READY_CHECK_TIMEOUT))
+        .context(BuildHttpClientSnafu)?;
+    run_backend(backend, client).await
+}
+
+async fn build_running_backend(cli: &Cli) -> Result<RunningBackend> {
     let acp_server = resolve_acp_server(cli.acp_server.clone(), env::var("ACP_MOCK_ADDRESS").ok())
         .context(ParseArgsSnafu)?;
-    let agent_launch = agent_launch_config(&cli).context(ParseArgsSnafu)?;
+    let agent_launch = agent_launch_config(cli).context(ParseArgsSnafu)?;
     let state_dir = absolute_state_dir(cli.state_dir.clone()).context(ResolveStateDirSnafu)?;
-    let exit_after_ms = cli.listen.exit_after_ms;
     let listener = bind_listener(cli.listen.resolved_host(), cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
     let endpoint = listener_endpoint(&listener, "web backend", "https://")
         .map_err(|source| BackendAppError::Setup { source })?;
 
-    let config = server_config(&cli, acp_server, state_dir.clone(), agent_launch);
+    let config = server_config(cli, acp_server, state_dir.clone(), agent_launch);
     let workspace_repository = workspace_repository_for_state(&state_dir)?;
     let state = AppState::new(config, workspace_repository).context(BuildStateSnafu)?;
-    let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
-        .context(BuildHttpClientSnafu)?;
+
+    Ok(RunningBackend {
+        listener,
+        endpoint,
+        state,
+        exit_after_ms: cli.listen.exit_after_ms,
+    })
+}
+
+async fn run_backend(backend: RunningBackend, client: reqwest::Client) -> Result<()> {
+    let RunningBackend {
+        listener,
+        endpoint,
+        state,
+        exit_after_ms,
+    } = backend;
     let ready = async {
         wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY).await?;
         wait_for_app_entrypoint(&client, &endpoint).await

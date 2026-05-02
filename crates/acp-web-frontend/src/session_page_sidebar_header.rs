@@ -969,6 +969,33 @@ mod tests {
     }
 
     #[test]
+    fn session_sidebar_agent_profile_load_failure_updates_current_modal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(None::<String>);
+            let state = SessionSidebarNewChatState::new();
+            let _ = session_sidebar_begin_new_chat(
+                Some("workspace-1".to_string()),
+                sidebar_error,
+                state,
+            );
+
+            session_sidebar_finish_agent_profile_load_failure(
+                state,
+                sidebar_error,
+                "workspace-1",
+                "agent profiles unavailable".to_string(),
+            );
+
+            assert!(!state.loading_agent_profiles.get());
+            assert_eq!(
+                sidebar_error.get().as_deref(),
+                Some("agent profiles unavailable")
+            );
+        });
+    }
+
+    #[test]
     fn session_sidebar_begin_new_chat_reports_missing_workspace() {
         let owner = Owner::new();
         owner.with(|| {

@@ -170,6 +170,18 @@ async fn backend_acp_client_collects_agent_message_chunks() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn prompt_response_notification_wait_stops_after_grace_deadline() {
+    let client = BackendAcpClient::without_turn();
+    let expired_deadline = tokio::time::Instant::now()
+        .checked_sub(Duration::from_millis(1))
+        .expect("past instants should be representable");
+
+    client
+        .wait_for_response_notifications_until_for_test(expired_deadline)
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_streams_agent_message_chunks_to_session_events() {
     let (_store, _session_id, pending, mut receiver) =
         pending_permission_context("stream please").await;

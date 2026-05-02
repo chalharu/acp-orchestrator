@@ -2,6 +2,7 @@ use super::*;
 use crate::sessions::{PendingPrompt, SessionStore};
 use crate::support::http::wait_for_tcp_connect;
 use acp_mock::{MockConfig, spawn_with_shutdown_task};
+use tokio::io::AsyncReadExt as TokioAsyncReadExt;
 use tokio::{net::TcpListener, sync::oneshot};
 
 mod backend_client;
@@ -86,4 +87,42 @@ fn create_session_error_includes_acp_source_details() {
     assert!(message.contains("creating an ACP session failed"));
     assert!(message.contains("Invalid params"));
     assert!(message.contains("cwd must be absolute"));
+}
+
+#[tokio::test]
+async fn spawn_stdio_agent_applies_explicit_environment() {
+    let metadata = AgentStdioMetadata {
+        argv: vec!["/usr/bin/env".to_string()],
+        env: vec![(
+            "ACP_TEST_MARKER".to_string(),
+            std::ffi::OsString::from("stdio-env"),
+        )],
+        working_dir: std::env::temp_dir(),
+    };
+    let mut child = spawn_stdio_agent(&metadata).expect("stdio child should spawn");
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout should be piped")
+        .read_to_string(&mut output)
+        .await
+        .expect("stdio child output should be readable");
+    let status = child.wait().await.expect("stdio child should exit");
+
+    assert!(status.success());
+    assert!(output.contains("ACP_TEST_MARKER=stdio-env"));
+}
+
+#[tokio::test]
+async fn terminate_stdio_child_returns_when_child_already_exited() {
+    let metadata = AgentStdioMetadata {
+        argv: vec!["/bin/true".to_string()],
+        env: Vec::new(),
+        working_dir: std::env::temp_dir(),
+    };
+    let mut child = spawn_stdio_agent(&metadata).expect("stdio child should spawn");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    terminate_stdio_child(&mut child).await;
 }

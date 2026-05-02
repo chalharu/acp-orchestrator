@@ -170,6 +170,54 @@ async fn streamed_assistant_chunks_finalize_before_status() {
 }
 
 #[tokio::test]
+async fn empty_streamed_assistant_chunks_are_ignored() {
+    let (_store, _session, mut receiver, _pending, turn) = started_streaming_turn().await;
+
+    turn.stream_assistant_chunk(String::new())
+        .await
+        .expect("empty chunks should be accepted");
+
+    assert_no_follow_up(&mut receiver, "empty chunks should not emit events").await;
+}
+
+#[tokio::test]
+async fn streamed_assistant_chunks_fail_after_session_close() {
+    let (store, session, _receiver, _pending, turn) = started_streaming_turn().await;
+    store
+        .close_session("alice", &session.id)
+        .await
+        .expect("session close should succeed");
+
+    assert_eq!(
+        turn.stream_assistant_chunk("late".to_string()).await,
+        Err(SessionStoreError::Closed)
+    );
+}
+
+#[tokio::test]
+async fn final_reply_creates_fallback_when_streamed_message_is_missing() {
+    let (store, session, mut receiver, pending, turn) = started_streaming_turn().await;
+    let missing_message_id = first_streamed_assistant_message_id(&turn, &mut receiver).await;
+    turn.handle
+        .remove_message_for_test(&missing_message_id)
+        .await;
+
+    pending.complete_with_reply("fallback".to_string()).await;
+    let final_event = next_event(&mut receiver, "fallback reply should arrive").await;
+    assert!(matches!(
+        final_event.payload,
+        StreamEventPayload::ConversationMessage { message, partial }
+            if message.id != missing_message_id && message.text == "fallback" && !partial
+    ));
+
+    let history = store
+        .session_history("alice", &session.id)
+        .await
+        .expect("session history should load");
+    assert_eq!(history[1].text, "fallback");
+}
+
+#[tokio::test]
 async fn final_reply_can_correct_streamed_assistant_text() {
     let store = SessionStore::new(4);
     let session = store

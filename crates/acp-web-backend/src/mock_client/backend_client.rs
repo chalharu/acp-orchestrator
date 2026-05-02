@@ -52,17 +52,26 @@ impl BackendAcpClient {
     }
 
     pub(super) async fn reply_text_after_notifications(&self) -> String {
-        self.wait_for_response_notifications().await;
+        self.wait_for_response_notifications(prompt_response_notification_deadline())
+            .await;
         self.reply_text()
     }
 
     pub(super) async fn take_reply_text_after_notifications(&self) -> String {
-        self.wait_for_response_notifications().await;
+        self.wait_for_response_notifications(prompt_response_notification_deadline())
+            .await;
         self.take_reply_text()
     }
 
-    async fn wait_for_response_notifications(&self) {
-        let deadline = tokio::time::Instant::now() + PROMPT_RESPONSE_NOTIFICATION_GRACE;
+    #[cfg(test)]
+    pub(super) async fn wait_for_response_notifications_until_for_test(
+        &self,
+        deadline: tokio::time::Instant,
+    ) {
+        self.wait_for_response_notifications(deadline).await;
+    }
+
+    async fn wait_for_response_notifications(&self, deadline: tokio::time::Instant) {
         loop {
             let Some(wait_for) = self.next_notification_wait(deadline) else {
                 return;
@@ -134,6 +143,10 @@ impl BackendAcpClient {
         }
         Ok(())
     }
+}
+
+fn prompt_response_notification_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + PROMPT_RESPONSE_NOTIFICATION_GRACE
 }
 
 pub(super) fn content_text(content: schema::ContentBlock) -> String {

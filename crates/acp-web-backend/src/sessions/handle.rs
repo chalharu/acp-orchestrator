@@ -183,6 +183,15 @@ impl SessionHandle {
             .is_some_and(|active_turn| active_turn.prompt_order == prompt_order)
     }
 
+    #[cfg(test)]
+    pub(super) async fn remove_message_for_test(&self, message_id: &str) {
+        self.data
+            .lock()
+            .await
+            .messages
+            .retain(|message| message.id != message_id);
+    }
+
     pub(super) async fn snapshot(&self) -> SessionSnapshot {
         let data = self.data.lock().await;
         SessionSnapshot {

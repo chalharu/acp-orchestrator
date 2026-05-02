@@ -510,6 +510,39 @@ async fn request_reply_services_acp_mock_runtime_tool_requests() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn request_reply_reports_acp_mock_runtime_tools_unavailable_for_standard_checkout() {
+    let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
+    let client = MockClient::with_timeout(mock_address, Duration::from_secs(5))
+        .expect("client construction should succeed");
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let pending = store
+        .submit_prompt(
+            "alice",
+            &session.id,
+            acp_mock::MANUAL_RUNTIME_TOOLS_TRIGGER.to_string(),
+        )
+        .await
+        .expect("runtime tool prompt should submit");
+
+    let reply = client
+        .request_reply(pending.turn_handle())
+        .await
+        .expect("unsupported runtime tool prompt should succeed");
+
+    assert!(matches!(
+        reply,
+        ReplyResult::Reply(text)
+            if text.contains("Runtime tools are unavailable")
+                && !text.contains("Runtime tools verified")
+    ));
+    let _ = shutdown_tx.send(());
+}
+
 #[cfg(unix)]
 async fn approve_runtime_tool_permission(
     store: &SessionStore,

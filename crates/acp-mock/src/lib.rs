@@ -136,6 +136,27 @@ impl MockSessionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ClientRuntimeCapabilities {
+    read_text_file: bool,
+    write_text_file: bool,
+    terminal: bool,
+}
+
+impl ClientRuntimeCapabilities {
+    fn from_client_capabilities(capabilities: &schema::ClientCapabilities) -> Self {
+        Self {
+            read_text_file: capabilities.fs.read_text_file,
+            write_text_file: capabilities.fs.write_text_file,
+            terminal: capabilities.terminal,
+        }
+    }
+
+    fn supports_runtime_tools(self) -> bool {
+        self.read_text_file && self.write_text_file && self.terminal
+    }
+}
+
 #[async_trait::async_trait]
 trait SessionUpdateNotifier {
     async fn send_session_update(
@@ -290,6 +311,7 @@ struct RuntimeTerminalSummary {
 struct MockAgent {
     state: Arc<MockServerState>,
     authenticated: Arc<AtomicBool>,
+    runtime_capabilities: Arc<Mutex<ClientRuntimeCapabilities>>,
 }
 
 impl MockAgent {
@@ -297,6 +319,7 @@ impl MockAgent {
         Self {
             state,
             authenticated: Arc::new(AtomicBool::new(false)),
+            runtime_capabilities: Arc::new(Mutex::new(ClientRuntimeCapabilities::default())),
         }
     }
 
@@ -316,10 +339,27 @@ impl MockAgent {
         }
     }
 
+    fn set_runtime_capabilities(&self, capabilities: ClientRuntimeCapabilities) {
+        *self
+            .runtime_capabilities
+            .lock()
+            .expect("runtime capabilities mutex should not be poisoned") = capabilities;
+    }
+
+    fn supports_runtime_tools(&self) -> bool {
+        self.runtime_capabilities
+            .lock()
+            .expect("runtime capabilities mutex should not be poisoned")
+            .supports_runtime_tools()
+    }
+
     async fn initialize(
         &self,
-        _arguments: schema::InitializeRequest,
+        arguments: schema::InitializeRequest,
     ) -> Result<schema::InitializeResponse, acp::Error> {
+        self.set_runtime_capabilities(ClientRuntimeCapabilities::from_client_capabilities(
+            &arguments.client_capabilities,
+        ));
         let response = schema::InitializeResponse::new(schema::ProtocolVersion::V1)
             .agent_capabilities(schema::AgentCapabilities::new().load_session(true))
             .agent_info(
@@ -349,11 +389,12 @@ impl MockAgent {
         self.ensure_authenticated()?;
         let session_id = self.state.next_session_id();
         if self.state.config.startup_hints {
+            let hint = startup_hint_message(self.supports_runtime_tools());
             notifier
                 .send_session_update(schema::SessionNotification::new(
                     session_id.clone(),
                     schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
-                        startup_hint_message().into(),
+                        hint.into(),
                     )),
                 ))
                 .await?;
@@ -420,13 +461,18 @@ impl MockAgent {
         C: PermissionRequester + RuntimeToolRequester + Sync,
         N: SessionUpdateNotifier + Sync,
     {
-        if prompt_uses_runtime_tools(prompt) {
-            self.execute_runtime_tools_prompt(session_id, notifier, requester)
-                .await
-                .map(Some)
-        } else {
-            Ok(None)
+        if !prompt_uses_runtime_tools(prompt) {
+            return Ok(None);
         }
+        if !self.supports_runtime_tools() {
+            return self
+                .send_runtime_tools_unavailable_reply(notifier, session_id.to_string())
+                .await
+                .map(Some);
+        }
+        self.execute_runtime_tools_prompt(session_id, notifier, requester)
+            .await
+            .map(Some)
     }
 
     async fn execute_runtime_tools_prompt<C, N>(
@@ -564,6 +610,23 @@ impl MockAgent {
                 session_id,
                 schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
                     runtime_tools_reply(summary).into(),
+                )),
+            ))
+            .await?;
+        tokio::time::sleep(SESSION_UPDATE_FLUSH_DELAY).await;
+        Ok(end_turn_prompt_response())
+    }
+
+    async fn send_runtime_tools_unavailable_reply<N: SessionUpdateNotifier + Sync>(
+        &self,
+        notifier: &N,
+        session_id: String,
+    ) -> Result<schema::PromptResponse, acp::Error> {
+        notifier
+            .send_session_update(schema::SessionNotification::new(
+                session_id,
+                schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new(
+                    runtime_tools_unavailable_reply().into(),
                 )),
             ))
             .await?;
@@ -799,10 +862,20 @@ fn runtime_tools_reply(summary: RuntimeToolSummary) -> String {
     )
 }
 
-fn startup_hint_message() -> String {
-    format!(
-        "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request, `{MANUAL_RUNTIME_TOOLS_TRIGGER}` for runtime fs/terminal tools, or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
-    )
+fn runtime_tools_unavailable_reply() -> String {
+    "Runtime tools are unavailable because the connected client did not advertise fs/read_text_file, fs/write_text_file, and terminal capabilities. Start a runtime-tool-capable session or run the acp-mock runtime E2E test to verify this path.".to_string()
+}
+
+fn startup_hint_message(supports_runtime_tools: bool) -> String {
+    if supports_runtime_tools {
+        format!(
+            "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request, `{MANUAL_RUNTIME_TOOLS_TRIGGER}` for runtime fs/terminal tools, or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
+        )
+    } else {
+        format!(
+            "Bundled mock ready.\nTry `{MANUAL_PERMISSION_TRIGGER}` for a permission request or `{MANUAL_CANCEL_TRIGGER}` to test cancellation."
+        )
+    }
 }
 
 fn add_auth_methods(

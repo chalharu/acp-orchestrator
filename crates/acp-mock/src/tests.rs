@@ -341,6 +341,16 @@ fn spawn_cancel_task(agent: MockAgent) -> tokio::task::JoinHandle<()> {
     })
 }
 
+fn runtime_capable_initialize_request() -> schema::InitializeRequest {
+    schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_capabilities(
+        schema::ClientCapabilities::new()
+            .fs(schema::FileSystemCapabilities::new()
+                .read_text_file(true)
+                .write_text_file(true))
+            .terminal(true),
+    )
+}
+
 #[tokio::test]
 async fn mock_agent_supports_control_plane_requests() {
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
@@ -412,6 +422,19 @@ async fn mock_agent_initializes_with_mock_identity() {
     assert!(debug.contains("acp-mock"));
     assert!(debug.contains("ACP Mock"));
     assert!(response.agent_capabilities.load_session);
+    assert!(!agent.supports_runtime_tools());
+}
+
+#[tokio::test]
+async fn mock_agent_records_runtime_tool_client_capabilities() {
+    let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
+
+    agent
+        .initialize(runtime_capable_initialize_request())
+        .await
+        .expect("initialize requests should succeed");
+
+    assert!(agent.supports_runtime_tools());
 }
 
 #[tokio::test]
@@ -512,13 +535,43 @@ async fn mock_agent_emits_startup_hints_when_enabled() {
         schema::SessionUpdate::AgentMessageChunk(chunk) => match chunk.content {
             schema::ContentBlock::Text(text) => {
                 assert!(text.text.contains(MANUAL_PERMISSION_TRIGGER));
-                assert!(text.text.contains(MANUAL_RUNTIME_TOOLS_TRIGGER));
+                assert!(!text.text.contains(MANUAL_RUNTIME_TOOLS_TRIGGER));
                 assert!(text.text.contains(MANUAL_CANCEL_TRIGGER));
             }
             other => panic!("unexpected startup hint content: {other:?}"),
         },
         other => panic!("unexpected startup hint update: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn mock_agent_emits_runtime_tool_startup_hint_when_client_supports_tools() {
+    let notifier = StubSessionUpdateNotifier {
+        should_fail: false,
+        call_count: Arc::new(AtomicUsize::new(0)),
+        last_notification: Arc::new(Mutex::new(None)),
+    };
+    let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig {
+        startup_hints: true,
+        ..MockConfig::default()
+    })));
+    agent
+        .initialize(runtime_capable_initialize_request())
+        .await
+        .expect("initialize requests should succeed");
+
+    agent
+        .new_session(schema::NewSessionRequest::new("/tmp"), &notifier)
+        .await
+        .expect("new sessions should succeed");
+
+    let notification = notifier
+        .last_notification
+        .lock()
+        .expect("last notification mutex should not be poisoned")
+        .clone()
+        .expect("startup hints should be sent");
+    assert!(format!("{notification:?}").contains(MANUAL_RUNTIME_TOOLS_TRIGGER));
 }
 
 #[tokio::test]
@@ -537,6 +590,27 @@ async fn mock_agent_runtime_tool_trigger_exercises_client_tools() {
     assert_eq!(requester.permission_count.load(Ordering::Relaxed), 1);
     assert_runtime_request_sequence(&requester);
     assert_runtime_notifications_completed(&notifications);
+}
+
+#[tokio::test]
+async fn mock_agent_runtime_tool_trigger_reports_unavailable_without_client_capabilities() {
+    let RuntimePromptRun {
+        requester,
+        result,
+        notifications,
+    } = run_runtime_tool_prompt_with_capabilities(StubRuntimeRequester::new(), false).await;
+
+    assert_eq!(
+        result.expect("unsupported runtime tool prompt should resolve"),
+        schema::PromptResponse::new(schema::StopReason::EndTurn)
+    );
+    assert_eq!(requester.permission_count.load(Ordering::Relaxed), 0);
+    assert_eq!(requester.calls(), Vec::<&'static str>::new());
+    assert!(matches!(
+        notifications[0].update,
+        schema::SessionUpdate::AgentMessageChunk(ref chunk)
+            if format!("{:?}", chunk.content).contains("Runtime tools are unavailable")
+    ));
 }
 
 #[tokio::test]
@@ -580,8 +654,21 @@ struct RuntimePromptRun {
 }
 
 async fn run_runtime_tool_prompt(requester: StubRuntimeRequester) -> RuntimePromptRun {
+    run_runtime_tool_prompt_with_capabilities(requester, true).await
+}
+
+async fn run_runtime_tool_prompt_with_capabilities(
+    requester: StubRuntimeRequester,
+    supports_runtime_tools: bool,
+) -> RuntimePromptRun {
     let notifier = RecordingSessionUpdateNotifier::new();
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
+    if supports_runtime_tools {
+        agent
+            .initialize(runtime_capable_initialize_request())
+            .await
+            .expect("initialize requests should succeed");
+    }
 
     let result = agent
         .prompt(

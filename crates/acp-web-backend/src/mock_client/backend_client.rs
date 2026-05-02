@@ -29,7 +29,7 @@ use std::{
 };
 use tokio::{
     io::AsyncReadExt,
-    process::{Child, Command},
+    process::{Child, ChildStderr, ChildStdout, Command},
 };
 
 const PROMPT_RESPONSE_NOTIFICATION_GRACE: Duration = Duration::from_millis(100);
@@ -218,36 +218,49 @@ impl BackendAcpClient {
     ) -> acp::Result<()> {
         match args.update {
             schema::SessionUpdate::AgentMessageChunk(chunk) => {
-                let text = content_text(chunk.content);
-                let streaming_enabled = self.streaming_enabled.load(Ordering::Acquire);
-                if streaming_enabled || self.collect_while_muted {
-                    self.collected
-                        .lock()
-                        .expect("mock reply buffer mutex should not be poisoned")
-                        .push_str(&text);
-                    self.reply_notify.notify_one();
-                }
-                if streaming_enabled && let Some(turn) = self.turn.as_ref() {
-                    turn.stream_assistant_chunk(text)
-                        .await
-                        .map_err(to_acp_error)?;
-                }
+                self.handle_agent_message_chunk(chunk).await?;
             }
-            schema::SessionUpdate::ToolCall(call) => {
-                if let Some(turn) = self.turn.as_ref() {
-                    turn.stream_tool_call(self.tool_call_metadata(&call))
-                        .await
-                        .map_err(to_acp_error)?;
-                }
-            }
+            schema::SessionUpdate::ToolCall(call) => self.forward_tool_call(call).await?,
             schema::SessionUpdate::ToolCallUpdate(update) => {
-                if let Some(turn) = self.turn.as_ref() {
-                    turn.stream_tool_call_update(self.tool_call_update_metadata(&update))
-                        .await
-                        .map_err(to_acp_error)?;
-                }
+                self.forward_tool_call_update(update).await?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_agent_message_chunk(&self, chunk: schema::ContentChunk) -> acp::Result<()> {
+        let text = content_text(chunk.content);
+        let streaming_enabled = self.streaming_enabled.load(Ordering::Acquire);
+        if streaming_enabled || self.collect_while_muted {
+            self.collected
+                .lock()
+                .expect("mock reply buffer mutex should not be poisoned")
+                .push_str(&text);
+            self.reply_notify.notify_one();
+        }
+        if streaming_enabled && let Some(turn) = self.turn.as_ref() {
+            turn.stream_assistant_chunk(text)
+                .await
+                .map_err(to_acp_error)?;
+        }
+        Ok(())
+    }
+
+    async fn forward_tool_call(&self, call: schema::ToolCall) -> acp::Result<()> {
+        if let Some(turn) = self.turn.as_ref() {
+            turn.stream_tool_call(self.tool_call_metadata(&call))
+                .await
+                .map_err(to_acp_error)?;
+        }
+        Ok(())
+    }
+
+    async fn forward_tool_call_update(&self, update: schema::ToolCallUpdate) -> acp::Result<()> {
+        if let Some(turn) = self.turn.as_ref() {
+            turn.stream_tool_call_update(self.tool_call_update_metadata(&update))
+                .await
+                .map_err(to_acp_error)?;
         }
         Ok(())
     }
@@ -400,6 +413,13 @@ struct TerminalEntry {
     exit_status: Option<schema::TerminalExitStatus>,
 }
 
+struct SpawnedTerminal {
+    child: Child,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    child_pid: Option<u32>,
+}
+
 impl RuntimeToolContext {
     fn new(checkout_root: PathBuf) -> Self {
         let terminal_boundary = terminal_boundary_for_checkout(&checkout_root);
@@ -471,62 +491,25 @@ impl RuntimeToolContext {
             .terminal_boundary
             .as_ref()
             .ok_or_else(|| tool_error("terminal runtime is unavailable"))?;
-        if args.command.is_empty() {
-            return Err(tool_error("terminal command is required"));
-        }
-        if args.env.iter().any(|env| !is_safe_env_name(&env.name)) {
-            return Err(tool_error("terminal environment variable name is invalid"));
-        }
+        validate_terminal_request(&args)?;
         let cwd = self.resolve_cwd(args.cwd.as_deref())?;
         let chroot_cwd = self.chroot_path_for_checkout_path(&cwd)?;
-        let output_limit = args
-            .output_byte_limit
-            .map(|limit| (limit as usize).min(MAX_TERMINAL_OUTPUT_BYTE_LIMIT))
-            .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT);
-        let mut command = Command::new(&args.command);
-        command.args(&args.args);
-        command.env_clear();
-        for env in args.env {
-            command.env(env.name, env.value);
-        }
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        configure_chroot_terminal_command(&mut command, boundary, &chroot_cwd)?;
-        let mut child = command
-            .spawn()
-            .map_err(|_| tool_error("spawning terminal command failed"))?;
-        let child_pid = child.id();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let entry = Arc::new(tokio::sync::Mutex::new(TerminalEntry {
-            child: Some(Arc::new(tokio::sync::Mutex::new(child))),
-            child_pid,
-            output_drains: Vec::new(),
-            output: String::new(),
-            truncated: false,
-            output_limit,
-            exit_status: None,
-        }));
-        let mut output_drains = Vec::new();
-        if let Some(stdout) = stdout {
-            output_drains.push(spawn_output_drain(stdout, entry.clone()));
-        }
-        if let Some(stderr) = stderr {
-            output_drains.push(spawn_output_drain(stderr, entry.clone()));
-        }
-        if !output_drains.is_empty() {
-            entry.lock().await.output_drains = output_drains;
-        }
-        let terminal_id = {
-            let mut terminals = self.terminals.lock().await;
-            let id = format!("term_{}", terminals.next_id);
-            terminals.next_id = terminals.next_id.wrapping_add(1);
-            terminals.entries.insert(id.clone(), entry);
-            id
-        };
+        let output_limit = terminal_output_limit(args.output_byte_limit);
+        let process = spawn_terminal_process(args, boundary, &chroot_cwd)?;
+        let entry = terminal_entry_from_process(process, output_limit).await;
+        let terminal_id = self.register_terminal_entry(entry).await;
         Ok(schema::CreateTerminalResponse::new(terminal_id))
+    }
+
+    async fn register_terminal_entry(
+        &self,
+        entry: Arc<tokio::sync::Mutex<TerminalEntry>>,
+    ) -> String {
+        let mut terminals = self.terminals.lock().await;
+        let id = format!("term_{}", terminals.next_id);
+        terminals.next_id = terminals.next_id.wrapping_add(1);
+        terminals.entries.insert(id.clone(), entry);
+        id
     }
 
     async fn terminal_output(
@@ -937,6 +920,80 @@ fn is_chroot_checkout_root(checkout_root: &Path) -> bool {
             && root == OsStr::new("root")
             && agent_runtimes == OsStr::new(AGENT_RUNTIMES_DIR_NAME)
     )
+}
+
+fn validate_terminal_request(args: &schema::CreateTerminalRequest) -> acp::Result<()> {
+    if args.command.is_empty() {
+        return Err(tool_error("terminal command is required"));
+    }
+    if args.env.iter().any(|env| !is_safe_env_name(&env.name)) {
+        return Err(tool_error("terminal environment variable name is invalid"));
+    }
+    Ok(())
+}
+
+fn terminal_output_limit(limit: Option<u64>) -> usize {
+    limit
+        .map(|limit| {
+            usize::try_from(limit)
+                .unwrap_or(usize::MAX)
+                .min(MAX_TERMINAL_OUTPUT_BYTE_LIMIT)
+        })
+        .unwrap_or(DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT)
+}
+
+fn spawn_terminal_process(
+    args: schema::CreateTerminalRequest,
+    boundary: &TerminalBoundary,
+    chroot_cwd: &Path,
+) -> acp::Result<SpawnedTerminal> {
+    let mut command = Command::new(&args.command);
+    command.args(&args.args);
+    command.env_clear();
+    for env in args.env {
+        command.env(env.name, env.value);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_chroot_terminal_command(&mut command, boundary, chroot_cwd)?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| tool_error("spawning terminal command failed"))?;
+    let child_pid = child.id();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    Ok(SpawnedTerminal {
+        child,
+        stdout,
+        stderr,
+        child_pid,
+    })
+}
+
+async fn terminal_entry_from_process(
+    process: SpawnedTerminal,
+    output_limit: usize,
+) -> Arc<tokio::sync::Mutex<TerminalEntry>> {
+    let entry = Arc::new(tokio::sync::Mutex::new(TerminalEntry {
+        child: Some(Arc::new(tokio::sync::Mutex::new(process.child))),
+        child_pid: process.child_pid,
+        output_drains: Vec::new(),
+        output: String::new(),
+        truncated: false,
+        output_limit,
+        exit_status: None,
+    }));
+    let mut output_drains = Vec::new();
+    if let Some(stdout) = process.stdout {
+        output_drains.push(spawn_output_drain(stdout, entry.clone()));
+    }
+    if let Some(stderr) = process.stderr {
+        output_drains.push(spawn_output_drain(stderr, entry.clone()));
+    }
+    entry.lock().await.output_drains = output_drains;
+    entry
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

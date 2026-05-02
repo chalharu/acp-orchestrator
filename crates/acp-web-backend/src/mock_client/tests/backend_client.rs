@@ -1,6 +1,6 @@
 use super::super::backend_client::{BackendAcpClient, content_text, permission_option_ids};
 use super::*;
-use agent_client_protocol::schema;
+use agent_client_protocol::{self as acp, schema};
 use std::{fs, path::PathBuf, time::Duration};
 
 fn permission_options() -> Vec<schema::PermissionOption> {
@@ -79,6 +79,15 @@ fn test_chroot_checkout_dir() -> (PathBuf, PathBuf) {
     fs::write(chroot_root.join(".acp-test-skip-chroot-preexec"), b"")
         .expect("test chroot pre-exec marker should be created");
     (root, checkout)
+}
+
+async fn muted_client_for_checkout(checkout: PathBuf) -> BackendAcpClient {
+    BackendAcpClient::new_muted_with_checkout(
+        test_pending_prompt("alice", "runtime tools")
+            .await
+            .turn_handle(),
+        checkout,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -196,37 +205,57 @@ async fn backend_acp_client_streams_tool_call_events() {
         pending_permission_context("tool events").await;
     let checkout = test_checkout_dir();
     let client = BackendAcpClient::new_muted_with_checkout(pending.turn_handle(), checkout.clone());
-    let title = format!("Read {}", checkout.join("README.md").display());
 
     client
-        .session_notification(schema::SessionNotification::new(
-            "mock_0",
-            schema::SessionUpdate::ToolCall(
-                schema::ToolCall::new("tool_0", title)
-                    .kind(schema::ToolKind::Read)
-                    .status(schema::ToolCallStatus::InProgress)
-                    .raw_input(serde_json::json!({
-                        checkout.join("README.md").display().to_string(): "read"
-                    })),
-            ),
-        ))
+        .session_notification(tool_call_notification(&checkout))
         .await
         .expect("tool call should stream");
     client
-        .session_notification(schema::SessionNotification::new(
-            "mock_0",
-            schema::SessionUpdate::ToolCallUpdate(schema::ToolCallUpdate::new(
-                "tool_0",
-                schema::ToolCallUpdateFields::new().status(schema::ToolCallStatus::Completed),
-            )),
-        ))
+        .session_notification(completed_tool_call_update_notification())
         .await
         .expect("tool update should stream");
 
-    let event = receiver
-        .recv()
-        .await
-        .expect("tool call event should arrive");
+    assert_sanitized_tool_call(
+        receiver
+            .recv()
+            .await
+            .expect("tool call event should arrive"),
+    );
+    assert_completed_tool_update(
+        receiver
+            .recv()
+            .await
+            .expect("tool update event should arrive"),
+    );
+    let _ = fs::remove_dir_all(checkout);
+}
+
+fn tool_call_notification(checkout: &std::path::Path) -> schema::SessionNotification {
+    let title = format!("Read {}", checkout.join("README.md").display());
+    schema::SessionNotification::new(
+        "mock_0",
+        schema::SessionUpdate::ToolCall(
+            schema::ToolCall::new("tool_0", title)
+                .kind(schema::ToolKind::Read)
+                .status(schema::ToolCallStatus::InProgress)
+                .raw_input(serde_json::json!({
+                    checkout.join("README.md").display().to_string(): "read"
+                })),
+        ),
+    )
+}
+
+fn completed_tool_call_update_notification() -> schema::SessionNotification {
+    schema::SessionNotification::new(
+        "mock_0",
+        schema::SessionUpdate::ToolCallUpdate(schema::ToolCallUpdate::new(
+            "tool_0",
+            schema::ToolCallUpdateFields::new().status(schema::ToolCallStatus::Completed),
+        )),
+    )
+}
+
+fn assert_sanitized_tool_call(event: crate::contract_stream::StreamEvent) {
     assert!(matches!(
         event.payload,
         crate::contract_stream::StreamEventPayload::ToolCall { call }
@@ -238,16 +267,14 @@ async fn backend_acp_client_streams_tool_call_events() {
                         .is_some_and(|object| object.contains_key("/workspace/README.md"))
                 })
     ));
-    let event = receiver
-        .recv()
-        .await
-        .expect("tool update event should arrive");
+}
+
+fn assert_completed_tool_update(event: crate::contract_stream::StreamEvent) {
     assert!(matches!(
         event.payload,
         crate::contract_stream::StreamEventPayload::ToolCallUpdate { update }
             if update.tool_call_id == "tool_0" && update.status.as_deref() == Some("completed")
     ));
-    let _ = fs::remove_dir_all(checkout);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -255,12 +282,7 @@ async fn backend_acp_client_read_write_text_files_are_checkout_bounded() {
     let checkout = test_checkout_dir();
     fs::write(checkout.join("README.md"), "one\ntwo\nthree\n").expect("seed file");
     fs::create_dir_all(checkout.join(".git")).expect("git dir");
-    let client = BackendAcpClient::new_muted_with_checkout(
-        test_pending_prompt("alice", "runtime tools")
-            .await
-            .turn_handle(),
-        checkout.clone(),
-    );
+    let client = muted_client_for_checkout(checkout.clone()).await;
 
     let read = client
         .read_text_file(
@@ -285,82 +307,67 @@ async fn backend_acp_client_read_write_text_files_are_checkout_bounded() {
         "created"
     );
 
-    assert!(
-        client
-            .read_text_file(schema::ReadTextFileRequest::new(
-                "mock_0",
-                "/workspace/../etc/passwd"
-            ))
-            .await
-            .is_err()
-    );
-    assert!(
-        client
-            .write_text_file(schema::WriteTextFileRequest::new(
-                "mock_0",
-                "/workspace/.git/config",
-                "bad"
-            ))
-            .await
-            .is_err()
-    );
-
-    #[cfg(unix)]
-    {
-        let outside = test_checkout_dir();
-        std::os::unix::fs::symlink("/etc/passwd", checkout.join("passwd_link"))
-            .expect("symlink should be created");
-        assert!(
-            client
-                .read_text_file(schema::ReadTextFileRequest::new(
-                    "mock_0",
-                    "/workspace/passwd_link",
-                ))
-                .await
-                .is_err()
-        );
-        std::os::unix::fs::symlink(&outside, checkout.join("outside_link"))
-            .expect("directory symlink should be created");
-        assert!(
-            client
-                .write_text_file(schema::WriteTextFileRequest::new(
-                    "mock_0",
-                    "/workspace/outside_link/escape.txt",
-                    "bad",
-                ))
-                .await
-                .is_err()
-        );
-        assert!(!outside.join("escape.txt").exists());
-        std::os::unix::fs::symlink(outside.join("target.txt"), checkout.join("write_link"))
-            .expect("write symlink should be created");
-        assert!(
-            client
-                .write_text_file(schema::WriteTextFileRequest::new(
-                    "mock_0",
-                    "/workspace/write_link",
-                    "bad",
-                ))
-                .await
-                .is_err()
-        );
-        let _ = fs::remove_dir_all(outside);
-    }
+    assert_read_text_file_err(&client, "/workspace/../etc/passwd").await;
+    assert_write_text_file_err(&client, "/workspace/.git/config").await;
 
     let _ = fs::remove_dir_all(checkout);
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+async fn backend_acp_client_rejects_filesystem_symlink_escapes() {
+    let checkout = test_checkout_dir();
+    let outside = test_checkout_dir();
+    let client = muted_client_for_checkout(checkout.clone()).await;
+
+    std::os::unix::fs::symlink("/etc/passwd", checkout.join("passwd_link"))
+        .expect("symlink should be created");
+    assert_read_text_file_err(&client, "/workspace/passwd_link").await;
+    std::os::unix::fs::symlink(&outside, checkout.join("outside_link"))
+        .expect("directory symlink should be created");
+    assert_write_text_file_err(&client, "/workspace/outside_link/escape.txt").await;
+    assert!(!outside.join("escape.txt").exists());
+    std::os::unix::fs::symlink(outside.join("target.txt"), checkout.join("write_link"))
+        .expect("write symlink should be created");
+    assert_write_text_file_err(&client, "/workspace/write_link").await;
+
+    let _ = fs::remove_dir_all(outside);
+    let _ = fs::remove_dir_all(checkout);
+}
+
+async fn assert_read_text_file_err(client: &BackendAcpClient, path: &str) {
+    assert!(
+        client
+            .read_text_file(schema::ReadTextFileRequest::new("mock_0", path))
+            .await
+            .is_err()
+    );
+}
+
+async fn assert_write_text_file_err(client: &BackendAcpClient, path: &str) {
+    assert!(
+        client
+            .write_text_file(schema::WriteTextFileRequest::new("mock_0", path, "bad"))
+            .await
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_terminal_lifecycle_is_checkout_bounded() {
     let (root, checkout) = test_chroot_checkout_dir();
-    let client = BackendAcpClient::new_muted_with_checkout(
-        test_pending_prompt("alice", "runtime tools")
-            .await
-            .turn_handle(),
-        checkout.clone(),
-    );
+    let client = muted_client_for_checkout(checkout).await;
 
+    assert_terminal_output_is_bounded(&client).await;
+    assert_terminal_cwd_escape_rejected(&client).await;
+    assert_terminal_is_killable(&client).await;
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+async fn assert_terminal_output_is_bounded(client: &BackendAcpClient) {
     let created = client
         .create_terminal(
             schema::CreateTerminalRequest::new("mock_0", "/bin/printf")
@@ -392,7 +399,10 @@ async fn backend_acp_client_terminal_lifecycle_is_checkout_bounded() {
         .release_terminal(schema::ReleaseTerminalRequest::new("mock_0", terminal_id))
         .await
         .expect("terminal should release");
+}
 
+#[cfg(unix)]
+async fn assert_terminal_cwd_escape_rejected(client: &BackendAcpClient) {
     assert!(
         client
             .create_terminal(
@@ -402,7 +412,10 @@ async fn backend_acp_client_terminal_lifecycle_is_checkout_bounded() {
             .await
             .is_err()
     );
+}
 
+#[cfg(unix)]
+async fn assert_terminal_is_killable(client: &BackendAcpClient) {
     let sleep = client
         .create_terminal(
             schema::CreateTerminalRequest::new("mock_0", "/bin/sleep")
@@ -418,39 +431,15 @@ async fn backend_acp_client_terminal_lifecycle_is_checkout_bounded() {
         ))
         .await
         .expect("terminal should be killable");
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_terminal_wait_coordinates_with_kill() {
     let (root, checkout) = test_chroot_checkout_dir();
-    let client = BackendAcpClient::new_muted_with_checkout(
-        test_pending_prompt("alice", "runtime tools")
-            .await
-            .turn_handle(),
-        checkout,
-    );
-    let created = client
-        .create_terminal(
-            schema::CreateTerminalRequest::new("mock_0", "/bin/sleep")
-                .args(vec!["5".to_string()])
-                .cwd(PathBuf::from("/workspace")),
-        )
-        .await
-        .expect("sleep terminal should be created");
-    let terminal_id = created.terminal_id.to_string();
-    let waiter_client = client.clone();
-    let waiter_terminal_id = terminal_id.clone();
-    let waiter = tokio::spawn(async move {
-        waiter_client
-            .wait_for_terminal_exit(schema::WaitForTerminalExitRequest::new(
-                "mock_0",
-                waiter_terminal_id,
-            ))
-            .await
-    });
+    let client = muted_client_for_checkout(checkout).await;
+    let terminal_id = create_sleeping_terminal(&client).await;
+    let waiter = spawn_terminal_waiter(client.clone(), terminal_id.clone());
 
     tokio::task::yield_now().await;
     client
@@ -460,11 +449,7 @@ async fn backend_acp_client_terminal_wait_coordinates_with_kill() {
         ))
         .await
         .expect("kill should succeed while wait is pending");
-    let exit = tokio::time::timeout(Duration::from_secs(2), waiter)
-        .await
-        .expect("wait should finish after kill")
-        .expect("wait task should not panic")
-        .expect("terminal wait should succeed");
+    let exit = wait_for_concurrent_terminal_exit(waiter, "kill").await;
     assert_ne!(exit.exit_status.exit_code, Some(0));
     client
         .release_terminal(schema::ReleaseTerminalRequest::new("mock_0", terminal_id))
@@ -478,45 +463,60 @@ async fn backend_acp_client_terminal_wait_coordinates_with_kill() {
 #[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_terminal_wait_coordinates_with_release() {
     let (root, checkout) = test_chroot_checkout_dir();
-    let client = BackendAcpClient::new_muted_with_checkout(
-        test_pending_prompt("alice", "runtime tools")
-            .await
-            .turn_handle(),
-        checkout,
-    );
-    let created = client
-        .create_terminal(
-            schema::CreateTerminalRequest::new("mock_0", "/bin/sleep")
-                .args(vec!["5".to_string()])
-                .cwd(PathBuf::from("/workspace")),
-        )
-        .await
-        .expect("sleep terminal should be created");
-    let terminal_id = created.terminal_id.to_string();
-    let waiter_client = client.clone();
-    let waiter_terminal_id = terminal_id.clone();
-    let waiter = tokio::spawn(async move {
-        waiter_client
-            .wait_for_terminal_exit(schema::WaitForTerminalExitRequest::new(
-                "mock_0",
-                waiter_terminal_id,
-            ))
-            .await
-    });
+    let client = muted_client_for_checkout(checkout).await;
+    let terminal_id = create_sleeping_terminal(&client).await;
+    let waiter = spawn_terminal_waiter(client.clone(), terminal_id.clone());
 
     tokio::task::yield_now().await;
     client
         .release_terminal(schema::ReleaseTerminalRequest::new("mock_0", terminal_id))
         .await
         .expect("release should succeed while wait is pending");
-    let exit = tokio::time::timeout(Duration::from_secs(2), waiter)
-        .await
-        .expect("wait should finish after release")
-        .expect("wait task should not panic")
-        .expect("terminal wait should succeed");
+    let exit = wait_for_concurrent_terminal_exit(waiter, "release").await;
     assert_ne!(exit.exit_status.exit_code, Some(0));
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+async fn create_sleeping_terminal(client: &BackendAcpClient) -> String {
+    client
+        .create_terminal(
+            schema::CreateTerminalRequest::new("mock_0", "/bin/sleep")
+                .args(vec!["5".to_string()])
+                .cwd(PathBuf::from("/workspace")),
+        )
+        .await
+        .expect("sleep terminal should be created")
+        .terminal_id
+        .to_string()
+}
+
+#[cfg(unix)]
+fn spawn_terminal_waiter(
+    client: BackendAcpClient,
+    terminal_id: String,
+) -> tokio::task::JoinHandle<acp::Result<schema::WaitForTerminalExitResponse>> {
+    tokio::spawn(async move {
+        client
+            .wait_for_terminal_exit(schema::WaitForTerminalExitRequest::new(
+                "mock_0",
+                terminal_id,
+            ))
+            .await
+    })
+}
+
+#[cfg(unix)]
+async fn wait_for_concurrent_terminal_exit(
+    waiter: tokio::task::JoinHandle<acp::Result<schema::WaitForTerminalExitResponse>>,
+    action: &str,
+) -> schema::WaitForTerminalExitResponse {
+    tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .unwrap_or_else(|_| panic!("wait should finish after {action}"))
+        .expect("wait task should not panic")
+        .expect("terminal wait should succeed")
 }
 
 #[tokio::test(flavor = "current_thread")]

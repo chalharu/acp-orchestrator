@@ -20,7 +20,7 @@ mod handle;
 #[cfg(test)]
 mod tests;
 
-use handle::{PromptCompletion, SessionHandle};
+use handle::{PermissionRequestRegistration, PromptCompletion, SessionHandle};
 
 #[derive(Debug, Clone)]
 pub struct SessionStore {
@@ -120,13 +120,13 @@ impl TurnHandle {
     ) -> Result<PendingPermissionResolution, SessionStoreError> {
         let (event, resolution) = self
             .handle
-            .register_permission_request(
-                self.prompt_order,
+            .register_permission_request(PermissionRequestRegistration {
+                prompt_order: self.prompt_order,
                 summary,
                 tool_call,
                 approve_option_id,
                 deny_option_id,
-            )
+            })
             .await?;
         if let Some(event) = event {
             self.handle.broadcast(event);

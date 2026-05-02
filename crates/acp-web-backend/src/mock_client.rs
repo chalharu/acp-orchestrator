@@ -819,86 +819,93 @@ async fn run_connected_operation<T: 'static>(
     .await
 }
 
+macro_rules! backend_request_handler {
+    ($client:expr, $request:ty, $handler:ident) => {{
+        let client = $client.clone();
+        async move |args: $request, responder, cx| {
+            $handler(client.clone(), args, responder, cx).await
+        }
+    }};
+}
+
+macro_rules! backend_request_handlers {
+    ($builder:expr, $client:expr) => {
+        $builder
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::RequestPermissionRequest,
+                    respond_permission_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::ReadTextFileRequest,
+                    respond_read_text_file_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::WriteTextFileRequest,
+                    respond_write_text_file_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::CreateTerminalRequest,
+                    respond_create_terminal_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::TerminalOutputRequest,
+                    respond_terminal_output_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::WaitForTerminalExitRequest,
+                    respond_wait_for_terminal_exit_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::KillTerminalRequest,
+                    respond_kill_terminal_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::ReleaseTerminalRequest,
+                    respond_release_terminal_request
+                ),
+                acp::on_receive_request!(),
+            )
+    };
+}
+
 async fn connect_backend_mock_client<T: 'static>(
     io: BackendIo,
     request_client: BackendAcpClient,
     notification_client: BackendAcpClient,
     connected_main: ConnectedMainState<T>,
 ) -> std::result::Result<Result<T>, acp::Error> {
-    let permission_client = request_client.clone();
-    let read_client = request_client.clone();
-    let write_client = request_client.clone();
-    let create_terminal_client = request_client.clone();
-    let output_terminal_client = request_client.clone();
-    let wait_terminal_client = request_client.clone();
-    let kill_terminal_client = request_client.clone();
-    let release_terminal_client = request_client.clone();
-    acp::Client
-        .builder()
-        .name("acp-web-backend-mock-client")
-        .on_receive_request(
-            async move |args: schema::RequestPermissionRequest, responder, cx| {
-                respond_permission_request(permission_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::ReadTextFileRequest, responder, cx| {
-                respond_read_text_file_request(read_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::WriteTextFileRequest, responder, cx| {
-                respond_write_text_file_request(write_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::CreateTerminalRequest, responder, cx| {
-                respond_create_terminal_request(create_terminal_client.clone(), args, responder, cx)
-                    .await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::TerminalOutputRequest, responder, cx| {
-                respond_terminal_output_request(output_terminal_client.clone(), args, responder, cx)
-                    .await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::WaitForTerminalExitRequest, responder, cx| {
-                respond_wait_for_terminal_exit_request(
-                    wait_terminal_client.clone(),
-                    args,
-                    responder,
-                    cx,
-                )
-                .await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::KillTerminalRequest, responder, cx| {
-                respond_kill_terminal_request(kill_terminal_client.clone(), args, responder, cx)
-                    .await
-            },
-            acp::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |args: schema::ReleaseTerminalRequest, responder, cx| {
-                respond_release_terminal_request(
-                    release_terminal_client.clone(),
-                    args,
-                    responder,
-                    cx,
-                )
-                .await
-            },
-            acp::on_receive_request!(),
-        )
+    let builder = acp::Client.builder().name("acp-web-backend-mock-client");
+    backend_request_handlers!(builder, request_client)
         .on_receive_notification(
             async move |args: schema::SessionNotification, _cx| {
                 forward_session_notification(notification_client.clone(), args).await

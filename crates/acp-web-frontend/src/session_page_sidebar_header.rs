@@ -662,35 +662,48 @@ fn session_sidebar_new_chat_submit_handler(
         state.creating.set(true);
         sidebar_error.set(None);
         let agent_profile_id = state.selected_agent_profile_id.get_untracked();
-        leptos::task::spawn_local(async move {
-            match api::create_workspace_session(
-                &workspace_id,
-                Some(selected_branch),
-                agent_profile_id,
-            )
-            .await
-            {
-                Ok(session_id) => {
-                    store_prepared_session_id(&session_id);
-                    if let Err(message) = navigate_to(&app_session_path_for_workspace(
-                        Some(&workspace_id),
-                        &session_id,
-                    )) {
-                        session_sidebar_finish_new_chat_failure(state, sidebar_error, message);
-                        return;
-                    }
-                    session_sidebar_close_new_chat_modal(state, sidebar_error);
-                }
-                Err(create_error) => {
-                    session_sidebar_finish_new_chat_failure(
-                        state,
-                        sidebar_error,
-                        create_error.into_message(),
-                    );
-                }
-            }
-        });
+        session_sidebar_spawn_create_session_request(
+            workspace_id,
+            selected_branch,
+            agent_profile_id,
+            sidebar_error,
+            state,
+        );
     })
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_spawn_create_session_request(
+    workspace_id: String,
+    selected_branch: String,
+    agent_profile_id: Option<String>,
+    sidebar_error: RwSignal<Option<String>>,
+    state: SessionSidebarNewChatState,
+) {
+    leptos::task::spawn_local(async move {
+        match api::create_workspace_session(&workspace_id, Some(selected_branch), agent_profile_id)
+            .await
+        {
+            Ok(session_id) => {
+                store_prepared_session_id(&session_id);
+                if let Err(message) = navigate_to(&app_session_path_for_workspace(
+                    Some(&workspace_id),
+                    &session_id,
+                )) {
+                    session_sidebar_finish_new_chat_failure(state, sidebar_error, message);
+                    return;
+                }
+                session_sidebar_close_new_chat_modal(state, sidebar_error);
+            }
+            Err(create_error) => {
+                session_sidebar_finish_new_chat_failure(
+                    state,
+                    sidebar_error,
+                    create_error.into_message(),
+                );
+            }
+        }
+    });
 }
 
 #[cfg(target_family = "wasm")]

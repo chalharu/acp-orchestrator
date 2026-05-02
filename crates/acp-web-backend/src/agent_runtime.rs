@@ -2164,6 +2164,41 @@ mod tests {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
+    #[cfg(unix)]
+    fn insert_running_sleep_child(
+        manager: &FsAgentRuntimeManager,
+        session_id: &str,
+        metadata: AgentLaunchMetadata,
+    ) {
+        manager
+            .children
+            .lock()
+            .expect("child registry should not poison")
+            .slots
+            .insert(
+                session_id.to_string(),
+                AgentChildSlot::Running(AgentChild {
+                    child: Command::new("/bin/sleep")
+                        .arg("60")
+                        .spawn()
+                        .expect("sleep child should spawn"),
+                    cgroup: None,
+                    metadata,
+                }),
+            );
+    }
+
+    fn sample_chroot_launch_config() -> AgentLaunchConfig {
+        AgentLaunchConfig::chroot(
+            vec!["/bin/true".to_string()],
+            Vec::new(),
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            DEFAULT_AGENT_RUN_UID,
+            DEFAULT_AGENT_RUN_GID,
+        )
+        .expect("config should validate")
+    }
+
     #[cfg(target_os = "linux")]
     fn wait_for_process_inactive(pid: u32) -> bool {
         for _ in 0..20 {
@@ -2248,50 +2283,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn running_launch_returns_existing_metadata() {
-        let manager = FsAgentRuntimeManager::new(
-            std::env::temp_dir().join(format!(
-                "acp-agent-runtime-existing-{}",
-                uuid::Uuid::new_v4().simple()
-            )),
-            None,
-        )
-        .expect("manager should build");
-        let child = Command::new("/bin/sleep")
-            .arg("60")
-            .spawn()
-            .expect("sleep child should spawn");
+        let manager =
+            FsAgentRuntimeManager::new(temp_state_dir("acp-agent-runtime-existing"), None)
+                .expect("manager should build");
         let metadata = AgentLaunchMetadata {
             acp_address: Some("127.0.0.1:49152".to_string()),
             stdio: None,
         };
-        manager
-            .children
-            .lock()
-            .expect("child registry should not poison")
-            .slots
-            .insert(
-                "s_test".to_string(),
-                AgentChildSlot::Running(AgentChild {
-                    child,
-                    cgroup: None,
-                    metadata: metadata.clone(),
-                }),
-            );
-        let config = AgentLaunchConfig::chroot(
-            vec!["/bin/true".to_string()],
-            Vec::new(),
-            DEFAULT_AGENT_LAUNCH_TIMEOUT,
-            DEFAULT_AGENT_RUN_UID,
-            DEFAULT_AGENT_RUN_GID,
-        )
-        .expect("config should validate");
+        insert_running_sleep_child(&manager, "s_test", metadata.clone());
 
         let restored = manager
             .launch_session(&AgentSessionLaunch {
                 session_id: "s_test",
                 workspace_id: "w_test",
                 checkout: &sample_checkout(),
-                config: Some(config),
+                config: Some(sample_chroot_launch_config()),
             })
             .expect("existing launch should return metadata");
         manager.forget_session("s_test");

@@ -536,10 +536,7 @@ mod tests {
             id: "opencode".to_string(),
             name: "OpenCode ACP".to_string(),
             mode,
-            command_argv: vec![
-                "opencode".to_string(),
-                "acp".to_string(),
-            ],
+            command_argv: vec!["opencode".to_string(), "acp".to_string()],
             env_allowlist: Vec::new(),
             timeout_seconds: 30,
             run_uid: 65_534,

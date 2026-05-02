@@ -663,7 +663,13 @@ fn session_sidebar_new_chat_submit_handler(
         sidebar_error.set(None);
         let agent_profile_id = state.selected_agent_profile_id.get_untracked();
         leptos::task::spawn_local(async move {
-            match api::create_workspace_session(&workspace_id, Some(selected_branch), agent_profile_id).await {
+            match api::create_workspace_session(
+                &workspace_id,
+                Some(selected_branch),
+                agent_profile_id,
+            )
+            .await
+            {
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
                     if let Err(message) = navigate_to(&app_session_path_for_workspace(

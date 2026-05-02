@@ -96,10 +96,11 @@ verification, use the built-in mock prompts below:
 - `verify permission`: emits `[permission <request-id>] read_text_file README.md`.
   In the browser, use the chat-area controls. In the CLI, respond with
   `/approve <request-id>` or `/deny <request-id>`.
-- `verify runtime tools`: emits a "Verify ACP runtime tools" tool call, requests
-  permission, then asks the background backend to read `/workspace/README.md`,
-  write `/workspace/acp-mock-runtime-tools.txt`, and run terminal lifecycle
-  commands. Approve the permission request and confirm the final
+- `verify runtime tools`: emits a "Verify ACP runtime tools" tool call and
+  requests permission. It then asks the background backend to read
+  `/workspace/README.md` and write `/workspace/acp-mock-runtime-tools.txt`.
+  The backend also runs terminal lifecycle commands. Approve the permission
+  request and confirm the final
   `Runtime tools verified:` reply.
 - `verify cancel`: starts a delayed mock reply. Run `/cancel` before the
   assistant reply arrives and confirm `[status] turn cancelled`. In the browser,

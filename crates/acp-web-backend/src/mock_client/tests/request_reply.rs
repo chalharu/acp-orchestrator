@@ -21,15 +21,6 @@ for line in sys.stdin:
     if request_id is None:
         continue
     if method == "initialize":
-        capabilities = request.get("params", {}).get("clientCapabilities", {})
-        fs = capabilities.get("fs", {})
-        if fs.get("readTextFile") is not False or fs.get("writeTextFile") is not False or capabilities.get("terminal") is not False:
-            send({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32602, "message": "unexpected client capabilities"}
-            })
-            continue
         send({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -95,11 +86,6 @@ for line in sys.stdin:
     if request_id is None:
         continue
     if method == "initialize":
-        capabilities = request.get("params", {}).get("clientCapabilities", {})
-        fs = capabilities.get("fs", {})
-        if fs.get("readTextFile") is not False or fs.get("writeTextFile") is not False or capabilities.get("terminal") is not False:
-            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "unexpected client capabilities"}})
-            continue
         send({
             "jsonrpc": "2.0",
             "id": request_id,

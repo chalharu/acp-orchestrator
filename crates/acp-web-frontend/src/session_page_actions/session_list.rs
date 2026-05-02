@@ -240,6 +240,7 @@ mod tests {
         PermissionRequest {
             request_id: id.to_string(),
             summary: format!("Permission for {id}"),
+            tool_call: None,
         }
     }
 

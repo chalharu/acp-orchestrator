@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::contract_messages::{ConversationMessage, MessageRole};
 use crate::contract_permissions::{
-    PermissionDecision, PermissionRequest, ResolvePermissionResponse,
+    PermissionDecision, PermissionRequest, ResolvePermissionResponse, ToolCallMetadata,
 };
 use crate::contract_sessions::{SessionListItem, SessionSnapshot};
 use crate::contract_stream::StreamEvent;
@@ -114,6 +114,7 @@ impl TurnHandle {
     pub(crate) async fn register_permission_request(
         &self,
         summary: String,
+        tool_call: Option<ToolCallMetadata>,
         approve_option_id: String,
         deny_option_id: String,
     ) -> Result<PendingPermissionResolution, SessionStoreError> {
@@ -122,6 +123,7 @@ impl TurnHandle {
             .register_permission_request(
                 self.prompt_order,
                 summary,
+                tool_call,
                 approve_option_id,
                 deny_option_id,
             )
@@ -139,6 +141,34 @@ impl TurnHandle {
         if let Some(event) = self
             .handle
             .stream_assistant_chunk(self.prompt_order, text)
+            .await?
+        {
+            self.handle.broadcast(event);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn stream_tool_call(
+        &self,
+        call: ToolCallMetadata,
+    ) -> Result<(), SessionStoreError> {
+        if let Some(event) = self
+            .handle
+            .stream_tool_call(self.prompt_order, call)
+            .await?
+        {
+            self.handle.broadcast(event);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn stream_tool_call_update(
+        &self,
+        update: ToolCallMetadata,
+    ) -> Result<(), SessionStoreError> {
+        if let Some(event) = self
+            .handle
+            .stream_tool_call_update(self.prompt_order, update)
             .await?
         {
             self.handle.broadcast(event);

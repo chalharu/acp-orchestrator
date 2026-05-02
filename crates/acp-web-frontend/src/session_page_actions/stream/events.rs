@@ -31,6 +31,7 @@ pub(super) fn handle_sse_event(event: StreamEvent, signals: SessionSignals) {
         StreamEventPayload::PermissionRequested { request } => {
             apply_permission_request(request, signals)
         }
+        StreamEventPayload::ToolCall { .. } | StreamEventPayload::ToolCallUpdate { .. } => {}
         StreamEventPayload::SessionClosed { session_id, reason } => {
             apply_session_closed(sequence, session_id, reason, signals)
         }
@@ -229,6 +230,7 @@ mod tests {
         PermissionRequest {
             request_id: id.to_string(),
             summary: format!("Permission for {id}"),
+            tool_call: None,
         }
     }
 

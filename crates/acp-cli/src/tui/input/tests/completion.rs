@@ -411,6 +411,7 @@ async fn apply_command_outcome_refreshes_pending_permissions() {
     let (url, request_line_rx) = spawn_session_server(active_session(vec![PermissionRequest {
         request_id: "req_2".to_string(),
         summary: "read_text_file README.md".to_string(),
+        tool_call: None,
     }]))
     .await;
     let client = Client::builder().build().expect("client should build");
@@ -455,6 +456,7 @@ fn refreshed_permissions_app(
             &[PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "old".to_string(),
+                tool_call: None,
             }],
             vec![],
         );

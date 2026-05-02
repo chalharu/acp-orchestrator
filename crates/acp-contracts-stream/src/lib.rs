@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use acp_contracts_messages::ConversationMessage;
-use acp_contracts_permissions::PermissionRequest;
+use acp_contracts_permissions::{PermissionRequest, ToolCallMetadata};
 use acp_contracts_sessions::SessionSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +25,12 @@ pub enum StreamEventPayload {
     PermissionRequested {
         request: PermissionRequest,
     },
+    ToolCall {
+        call: ToolCallMetadata,
+    },
+    ToolCallUpdate {
+        update: ToolCallMetadata,
+    },
     SessionClosed {
         session_id: String,
         reason: String,
@@ -40,6 +46,8 @@ impl StreamEvent {
             StreamEventPayload::SessionSnapshot { .. } => "session.snapshot",
             StreamEventPayload::ConversationMessage { .. } => "conversation.message",
             StreamEventPayload::PermissionRequested { .. } => "tool.permission.requested",
+            StreamEventPayload::ToolCall { .. } => "tool.call",
+            StreamEventPayload::ToolCallUpdate { .. } => "tool.call.update",
             StreamEventPayload::SessionClosed { .. } => "session.closed",
             StreamEventPayload::Status { .. } => "status",
         }
@@ -88,6 +96,7 @@ mod tests {
                 request: PermissionRequest {
                     request_id: "req_1".to_string(),
                     summary: "read_text_file README.md".to_string(),
+                    tool_call: None,
                 },
             },
         };

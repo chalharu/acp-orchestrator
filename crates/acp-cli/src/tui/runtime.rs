@@ -169,6 +169,7 @@ mod tests {
             &[PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
+                tool_call: None,
             }],
             vec![],
         )
@@ -345,6 +346,7 @@ mod tests {
                 crate::events::StreamUpdate::PermissionRequested(PermissionRequest {
                     request_id: "req_2".to_string(),
                     summary: "write_file Cargo.toml".to_string(),
+                    tool_call: None,
                 }),
             ))
             .expect("permission requests should queue");

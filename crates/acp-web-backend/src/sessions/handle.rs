@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::contract_messages::{ConversationMessage, MessageRole};
 use crate::contract_permissions::{
-    PermissionDecision, PermissionRequest, ResolvePermissionResponse,
+    PermissionDecision, PermissionRequest, ResolvePermissionResponse, ToolCallMetadata,
 };
 use crate::contract_sessions::{SessionListItem, SessionSnapshot, SessionStatus};
 use crate::contract_stream::{StreamEvent, StreamEventPayload};
@@ -47,6 +47,7 @@ struct PendingPermission {
     request_order: u64,
     prompt_order: u64,
     summary: String,
+    tool_call: Option<ToolCallMetadata>,
     approve_option_id: String,
     deny_option_id: String,
     outcome_tx: Option<oneshot::Sender<PermissionResolutionOutcome>>,
@@ -329,6 +330,7 @@ impl SessionHandle {
         &self,
         prompt_order: u64,
         summary: String,
+        tool_call: Option<ToolCallMetadata>,
         approve_option_id: String,
         deny_option_id: String,
     ) -> Result<(Option<StreamEvent>, PendingPermissionResolution), SessionStoreError> {
@@ -354,6 +356,7 @@ impl SessionHandle {
                 request_order,
                 prompt_order,
                 summary: summary.clone(),
+                tool_call: tool_call.clone(),
                 approve_option_id,
                 deny_option_id,
                 outcome_tx: Some(outcome_tx),
@@ -368,11 +371,56 @@ impl SessionHandle {
                     request: PermissionRequest {
                         request_id,
                         summary,
+                        tool_call,
                     },
                 },
             }),
             PendingPermissionResolution { outcome_rx },
         ))
+    }
+
+    pub(super) async fn stream_tool_call(
+        &self,
+        prompt_order: u64,
+        call: ToolCallMetadata,
+    ) -> Result<Option<StreamEvent>, SessionStoreError> {
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+        let Some(active_turn) = data.active_turn.as_ref() else {
+            return Ok(None);
+        };
+        if active_turn.prompt_order != prompt_order || active_turn.cancelled {
+            return Ok(None);
+        }
+        data.latest_sequence += 1;
+        Ok(Some(StreamEvent {
+            sequence: data.latest_sequence,
+            payload: StreamEventPayload::ToolCall { call },
+        }))
+    }
+
+    pub(super) async fn stream_tool_call_update(
+        &self,
+        prompt_order: u64,
+        update: ToolCallMetadata,
+    ) -> Result<Option<StreamEvent>, SessionStoreError> {
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+        let Some(active_turn) = data.active_turn.as_ref() else {
+            return Ok(None);
+        };
+        if active_turn.prompt_order != prompt_order || active_turn.cancelled {
+            return Ok(None);
+        }
+        data.latest_sequence += 1;
+        Ok(Some(StreamEvent {
+            sequence: data.latest_sequence,
+            payload: StreamEventPayload::ToolCallUpdate { update },
+        }))
     }
 
     pub(super) async fn resolve_permission(
@@ -754,6 +802,7 @@ fn collect_pending_permissions(data: &SessionData) -> Vec<PermissionRequest> {
                 PermissionRequest {
                     request_id: request_id.clone(),
                     summary: pending.summary.clone(),
+                    tool_call: pending.tool_call.clone(),
                 },
             )
         })

@@ -71,6 +71,7 @@ mod tests {
             let pending_permissions_signal = RwSignal::new(vec![acp_contracts_permissions::PermissionRequest {
                 request_id: "perm-1".to_string(),
                 summary: "Read file".to_string(),
+                tool_call: None,
             }]);
             #[rustfmt::skip]
             let pending_permissions: Signal<Vec<acp_contracts_permissions::PermissionRequest>> = Signal::derive(move || pending_permissions_signal.get());

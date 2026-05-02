@@ -63,6 +63,7 @@ async fn apply_command_outcome_removes_pending_permissions() {
             &[PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "old".to_string(),
+                tool_call: None,
             }],
             vec![],
         );

@@ -84,6 +84,8 @@ impl RuntimeToolRequester for StubPermissionRequester {
 struct StubRuntimeRequester {
     permission_count: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    permission_response: schema::RequestPermissionResponse,
+    fail_on: Option<&'static str>,
 }
 
 impl StubRuntimeRequester {
@@ -91,7 +93,23 @@ impl StubRuntimeRequester {
         Self {
             permission_count: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),
+            permission_response: schema::RequestPermissionResponse::new(
+                schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
+                    "allow_once",
+                )),
+            ),
+            fail_on: None,
         }
+    }
+
+    fn with_permission_outcome(mut self, outcome: schema::RequestPermissionOutcome) -> Self {
+        self.permission_response = schema::RequestPermissionResponse::new(outcome);
+        self
+    }
+
+    fn failing_on(mut self, name: &'static str) -> Self {
+        self.fail_on = Some(name);
+        self
     }
 
     fn calls(&self) -> Vec<&'static str> {
@@ -107,6 +125,14 @@ impl StubRuntimeRequester {
             .expect("runtime call list should not be poisoned")
             .push(name);
     }
+
+    fn fail_if_configured(&self, name: &'static str) -> Result<(), acp::Error> {
+        if self.fail_on == Some(name) {
+            Err(acp::Error::internal_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -120,11 +146,7 @@ impl PermissionRequester for StubRuntimeRequester {
             request.tool_call.fields.title.as_deref(),
             Some("verify runtime tools")
         );
-        Ok(schema::RequestPermissionResponse::new(
-            schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
-                "allow_once",
-            )),
-        ))
+        Ok(self.permission_response.clone())
     }
 }
 
@@ -136,6 +158,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
     ) -> Result<schema::ReadTextFileResponse, acp::Error> {
         self.push_call("read");
         assert_eq!(request.path, std::path::Path::new("/workspace/README.md"));
+        self.fail_if_configured("read")?;
         Ok(schema::ReadTextFileResponse::new("runtime-readme"))
     }
 
@@ -149,6 +172,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
             std::path::Path::new("/workspace/acp-mock-runtime-tools.txt")
         );
         assert_eq!(request.content, "created by acp-mock runtime tools\n");
+        self.fail_if_configured("write")?;
         Ok(schema::WriteTextFileResponse::new())
     }
 
@@ -157,6 +181,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
         request: schema::CreateTerminalRequest,
     ) -> Result<schema::CreateTerminalResponse, acp::Error> {
         self.push_call("create_terminal");
+        self.fail_if_configured("create_terminal")?;
         match request.command.as_str() {
             "/bin/printf" => Ok(schema::CreateTerminalResponse::new("printf")),
             "/bin/sleep" => Ok(schema::CreateTerminalResponse::new("sleep")),
@@ -170,6 +195,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
     ) -> Result<schema::TerminalOutputResponse, acp::Error> {
         self.push_call("terminal_output");
         assert_eq!(request.terminal_id.to_string(), "printf");
+        self.fail_if_configured("terminal_output")?;
         Ok(schema::TerminalOutputResponse::new("terminal-ok", false))
     }
 
@@ -179,6 +205,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
     ) -> Result<schema::WaitForTerminalExitResponse, acp::Error> {
         self.push_call("wait_for_terminal_exit");
         assert_eq!(request.terminal_id.to_string(), "printf");
+        self.fail_if_configured("wait_for_terminal_exit")?;
         Ok(schema::WaitForTerminalExitResponse::new(
             schema::TerminalExitStatus::new().exit_code(0),
         ))
@@ -190,6 +217,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
     ) -> Result<schema::KillTerminalResponse, acp::Error> {
         self.push_call("kill_terminal");
         assert_eq!(request.terminal_id.to_string(), "sleep");
+        self.fail_if_configured("kill_terminal")?;
         Ok(schema::KillTerminalResponse::new())
     }
 
@@ -203,6 +231,7 @@ impl RuntimeToolRequester for StubRuntimeRequester {
             "unexpected terminal id {}",
             request.terminal_id
         );
+        self.fail_if_configured("release_terminal")?;
         Ok(schema::ReleaseTerminalResponse::new())
     }
 }
@@ -494,29 +523,67 @@ async fn mock_agent_emits_startup_hints_when_enabled() {
 
 #[tokio::test]
 async fn mock_agent_runtime_tool_trigger_exercises_client_tools() {
-    let run = run_runtime_tool_prompt().await;
+    let RuntimePromptRun {
+        requester,
+        result,
+        notifications,
+    } = run_runtime_tool_prompt(StubRuntimeRequester::new()).await;
+    let response = result.expect("runtime tool prompt should resolve");
 
     assert_eq!(
-        run.response,
+        response,
         schema::PromptResponse::new(schema::StopReason::EndTurn)
     );
-    assert_eq!(run.requester.permission_count.load(Ordering::Relaxed), 1);
-    assert_runtime_request_sequence(&run.requester);
-    assert_runtime_notifications(&run.notifications);
+    assert_eq!(requester.permission_count.load(Ordering::Relaxed), 1);
+    assert_runtime_request_sequence(&requester);
+    assert_runtime_notifications_completed(&notifications);
+}
+
+#[tokio::test]
+async fn mock_agent_runtime_tool_trigger_marks_failed_when_permission_rejected() {
+    let requester = StubRuntimeRequester::new().with_permission_outcome(
+        schema::RequestPermissionOutcome::Selected(schema::SelectedPermissionOutcome::new(
+            "reject_once",
+        )),
+    );
+    let RuntimePromptRun {
+        requester,
+        result,
+        notifications,
+    } = run_runtime_tool_prompt(requester).await;
+
+    assert_eq!(
+        result.expect("permission rejection should resolve the prompt"),
+        schema::PromptResponse::new(schema::StopReason::EndTurn)
+    );
+    assert_eq!(requester.calls(), Vec::<&'static str>::new());
+    assert_runtime_notifications_failed(&notifications);
+}
+
+#[tokio::test]
+async fn mock_agent_runtime_tool_trigger_marks_failed_when_client_request_errors() {
+    let RuntimePromptRun {
+        requester,
+        result,
+        notifications,
+    } = run_runtime_tool_prompt(StubRuntimeRequester::new().failing_on("read")).await;
+
+    assert!(result.is_err());
+    assert_eq!(requester.calls(), vec!["read"]);
+    assert_runtime_notifications_failed(&notifications);
 }
 
 struct RuntimePromptRun {
     requester: StubRuntimeRequester,
-    response: schema::PromptResponse,
+    result: Result<schema::PromptResponse, acp::Error>,
     notifications: Vec<schema::SessionNotification>,
 }
 
-async fn run_runtime_tool_prompt() -> RuntimePromptRun {
-    let requester = StubRuntimeRequester::new();
+async fn run_runtime_tool_prompt(requester: StubRuntimeRequester) -> RuntimePromptRun {
     let notifier = RecordingSessionUpdateNotifier::new();
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
 
-    let response = agent
+    let result = agent
         .prompt(
             schema::PromptRequest::new(
                 "mock_0",
@@ -527,12 +594,11 @@ async fn run_runtime_tool_prompt() -> RuntimePromptRun {
             &notifier,
             &requester,
         )
-        .await
-        .expect("runtime tool prompt should resolve");
+        .await;
 
     RuntimePromptRun {
         requester,
-        response,
+        result,
         notifications: notifier.notifications(),
     }
 }
@@ -555,13 +621,17 @@ fn assert_runtime_request_sequence(requester: &StubRuntimeRequester) {
     );
 }
 
-fn assert_runtime_notifications(notifications: &[schema::SessionNotification]) {
+fn assert_runtime_tool_started(notifications: &[schema::SessionNotification]) {
     assert!(matches!(
         notifications[0].update,
         schema::SessionUpdate::ToolCall(ref call)
             if call.title == "Verify ACP runtime tools"
                 && call.status == schema::ToolCallStatus::InProgress
     ));
+}
+
+fn assert_runtime_notifications_completed(notifications: &[schema::SessionNotification]) {
+    assert_runtime_tool_started(notifications);
     assert!(matches!(
         notifications[1].update,
         schema::SessionUpdate::ToolCallUpdate(ref update)
@@ -571,6 +641,15 @@ fn assert_runtime_notifications(notifications: &[schema::SessionNotification]) {
         notifications[2].update,
         schema::SessionUpdate::AgentMessageChunk(ref chunk)
             if format!("{:?}", chunk.content).contains("Runtime tools verified")
+    ));
+}
+
+fn assert_runtime_notifications_failed(notifications: &[schema::SessionNotification]) {
+    assert_runtime_tool_started(notifications);
+    assert!(matches!(
+        notifications[1].update,
+        schema::SessionUpdate::ToolCallUpdate(ref update)
+            if update.fields.status == Some(schema::ToolCallStatus::Failed)
     ));
 }
 

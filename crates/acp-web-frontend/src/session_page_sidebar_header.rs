@@ -4,6 +4,8 @@ use crate::components::{
     workspace_branch_status_message,
 };
 #[cfg(any(test, target_family = "wasm"))]
+use acp_contracts_sessions::AgentProfile;
+#[cfg(any(test, target_family = "wasm"))]
 use acp_contracts_workspaces::WorkspaceBranch;
 use leptos::prelude::*;
 
@@ -153,6 +155,9 @@ struct SessionSidebarNewChatState {
     workspace_id: RwSignal<Option<String>>,
     branches: RwSignal<Vec<WorkspaceBranch>>,
     selected_branch: RwSignal<String>,
+    agent_profiles: RwSignal<Vec<AgentProfile>>,
+    selected_agent_profile_id: RwSignal<Option<String>>,
+    loading_agent_profiles: RwSignal<bool>,
     loading_branches: RwSignal<bool>,
     creating: RwSignal<bool>,
 }
@@ -165,6 +170,9 @@ impl SessionSidebarNewChatState {
             workspace_id: RwSignal::new(None::<String>),
             branches: RwSignal::new(Vec::<WorkspaceBranch>::new()),
             selected_branch: RwSignal::new(String::new()),
+            agent_profiles: RwSignal::new(Vec::<AgentProfile>::new()),
+            selected_agent_profile_id: RwSignal::new(None::<String>),
+            loading_agent_profiles: RwSignal::new(false),
             loading_branches: RwSignal::new(false),
             creating: RwSignal::new(false),
         }
@@ -193,6 +201,9 @@ fn session_sidebar_begin_new_chat(
     state.workspace_id.set(Some(workspace_id.clone()));
     state.branches.set(Vec::new());
     state.selected_branch.set(String::new());
+    state.agent_profiles.set(Vec::new());
+    state.selected_agent_profile_id.set(None);
+    state.loading_agent_profiles.set(true);
     state.loading_branches.set(true);
     state.creating.set(false);
     sidebar_error.set(None);
@@ -240,6 +251,33 @@ fn session_sidebar_finish_branch_load_failure(
 }
 
 #[cfg(any(test, target_family = "wasm"))]
+fn session_sidebar_complete_agent_profile_load(
+    state: SessionSidebarNewChatState,
+    workspace_id: &str,
+    profiles: Vec<AgentProfile>,
+) {
+    if state.workspace_id.get_untracked().as_deref() != Some(workspace_id) {
+        return;
+    }
+    state.loading_agent_profiles.set(false);
+    state.agent_profiles.set(profiles);
+}
+
+#[cfg(any(test, target_family = "wasm"))]
+fn session_sidebar_finish_agent_profile_load_failure(
+    state: SessionSidebarNewChatState,
+    sidebar_error: RwSignal<Option<String>>,
+    workspace_id: &str,
+    message: String,
+) {
+    if state.workspace_id.get_untracked().as_deref() != Some(workspace_id) {
+        return;
+    }
+    state.loading_agent_profiles.set(false);
+    sidebar_error.set(Some(message));
+}
+
+#[cfg(any(test, target_family = "wasm"))]
 fn session_sidebar_close_new_chat_modal(
     state: SessionSidebarNewChatState,
     sidebar_error: RwSignal<Option<String>>,
@@ -248,6 +286,9 @@ fn session_sidebar_close_new_chat_modal(
     state.workspace_id.set(None);
     state.branches.set(Vec::new());
     state.selected_branch.set(String::new());
+    state.agent_profiles.set(Vec::new());
+    state.selected_agent_profile_id.set(None);
+    state.loading_agent_profiles.set(false);
     state.loading_branches.set(false);
     state.creating.set(false);
     sidebar_error.set(None);
@@ -425,6 +466,7 @@ fn session_sidebar_new_chat_modal_view(
                         selected_branch,
                         loading_branches,
                     )}
+                    {session_sidebar_new_chat_agent_profile_field(state)}
                     {session_sidebar_new_chat_modal_actions(
                         creating,
                         loading_branches,
@@ -478,7 +520,8 @@ fn session_sidebar_new_chat_click_handler(
             return;
         };
 
-        session_sidebar_spawn_branch_request(workspace_id, sidebar_error, state);
+        session_sidebar_spawn_branch_request(workspace_id.clone(), sidebar_error, state);
+        session_sidebar_spawn_agent_profile_request(workspace_id, sidebar_error, state);
     })
 }
 
@@ -506,6 +549,27 @@ fn session_sidebar_spawn_branch_request(
 }
 
 #[cfg(target_family = "wasm")]
+fn session_sidebar_spawn_agent_profile_request(
+    workspace_id: String,
+    sidebar_error: RwSignal<Option<String>>,
+    state: SessionSidebarNewChatState,
+) {
+    leptos::task::spawn_local(async move {
+        match api::list_agent_profiles().await {
+            Ok(profiles) => {
+                session_sidebar_complete_agent_profile_load(state, &workspace_id, profiles);
+            }
+            Err(message) => session_sidebar_finish_agent_profile_load_failure(
+                state,
+                sidebar_error,
+                &workspace_id,
+                message,
+            ),
+        }
+    });
+}
+
+#[cfg(target_family = "wasm")]
 fn session_sidebar_new_chat_branch_field(
     state: SessionSidebarNewChatState,
     branches: Signal<Vec<WorkspaceBranch>>,
@@ -515,6 +579,43 @@ fn session_sidebar_new_chat_branch_field(
     workspace_branch_select_field(branches, selected_branch, loading_branches, move |event| {
         state.selected_branch.set(event_target_value(&event))
     })
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_new_chat_agent_profile_field(
+    state: SessionSidebarNewChatState,
+) -> impl IntoView {
+    let profiles = Signal::derive(move || state.agent_profiles.get());
+    let selected = Signal::derive(move || state.selected_agent_profile_id.get());
+    let loading = Signal::derive(move || state.loading_agent_profiles.get());
+
+    view! {
+        <label class="account-form__field">
+            <span>"ACP profile"</span>
+            <select
+                prop:value=move || selected.get().unwrap_or_default()
+                prop:disabled=move || loading.get()
+                on:change=move |event| {
+                    let value = event_target_value(&event);
+                    state.selected_agent_profile_id.set((!value.is_empty()).then_some(value));
+                }
+            >
+                <option value="">
+                    {move || if loading.get() {
+                        "Loading ACP profiles..."
+                    } else {
+                        "Default mock/static ACP"
+                    }}
+                </option>
+                {move || profiles.get().into_iter().map(session_sidebar_agent_profile_option).collect_view()}
+            </select>
+        </label>
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn session_sidebar_agent_profile_option(profile: AgentProfile) -> impl IntoView {
+    view! { <option value=profile.id>{profile.name}</option> }
 }
 
 #[cfg(target_family = "wasm")]
@@ -560,8 +661,9 @@ fn session_sidebar_new_chat_submit_handler(
 
         state.creating.set(true);
         sidebar_error.set(None);
+        let agent_profile_id = state.selected_agent_profile_id.get_untracked();
         leptos::task::spawn_local(async move {
-            match api::create_workspace_session(&workspace_id, Some(selected_branch), None).await {
+            match api::create_workspace_session(&workspace_id, Some(selected_branch), agent_profile_id).await {
                 Ok(session_id) => {
                     store_prepared_session_id(&session_id);
                     if let Err(message) = navigate_to(&app_session_path_for_workspace(
@@ -626,6 +728,19 @@ mod tests {
         WorkspaceBranch {
             name: "main".to_string(),
             ref_name: "refs/heads/main".to_string(),
+        }
+    }
+
+    fn sample_sidebar_agent_profile() -> AgentProfile {
+        AgentProfile {
+            id: "copilot".to_string(),
+            name: "Copilot CLI".to_string(),
+            mode: acp_contracts_sessions::AgentProfileMode::Host,
+            command_argv: vec!["copilot".to_string(), "--acp".to_string()],
+            env_allowlist: Vec::new(),
+            timeout_seconds: 30,
+            run_uid: 65_534,
+            run_gid: 65_534,
         }
     }
 
@@ -730,6 +845,7 @@ mod tests {
             assert!(state.show_modal.get());
             assert_eq!(state.workspace_id.get(), Some("workspace-1".to_string()));
             assert!(state.loading_branches.get());
+            assert!(state.loading_agent_profiles.get());
             assert_eq!(sidebar_error.get(), None);
 
             session_sidebar_complete_branch_load(
@@ -740,6 +856,33 @@ mod tests {
             assert!(!state.loading_branches.get());
             assert_eq!(state.selected_branch.get(), "refs/heads/main");
             assert_eq!(state.branches.get().len(), 1);
+        });
+    }
+
+    #[test]
+    fn session_sidebar_agent_profile_state_resets_with_modal() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(None::<String>);
+            let state = SessionSidebarNewChatState::new();
+            let _ = session_sidebar_begin_new_chat(
+                Some("workspace-1".to_string()),
+                sidebar_error,
+                state,
+            );
+
+            state
+                .agent_profiles
+                .set(vec![sample_sidebar_agent_profile()]);
+            state
+                .selected_agent_profile_id
+                .set(Some("copilot".to_string()));
+
+            session_sidebar_close_new_chat_modal(state, sidebar_error);
+
+            assert!(state.agent_profiles.get().is_empty());
+            assert!(state.selected_agent_profile_id.get().is_none());
+            assert!(!state.loading_agent_profiles.get());
         });
     }
 
@@ -764,6 +907,45 @@ mod tests {
             assert!(state.loading_branches.get());
             assert!(state.selected_branch.get().is_empty());
             assert!(state.branches.get().is_empty());
+        });
+    }
+
+    #[test]
+    fn session_sidebar_agent_profile_load_ignores_stale_modal_updates() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let sidebar_error = RwSignal::new(None::<String>);
+            let state = SessionSidebarNewChatState::new();
+            let _ = session_sidebar_begin_new_chat(
+                Some("workspace-1".to_string()),
+                sidebar_error,
+                state,
+            );
+
+            session_sidebar_complete_agent_profile_load(
+                state,
+                "workspace-2",
+                vec![sample_sidebar_agent_profile()],
+            );
+            assert!(state.loading_agent_profiles.get());
+            assert!(state.agent_profiles.get().is_empty());
+
+            session_sidebar_finish_agent_profile_load_failure(
+                state,
+                sidebar_error,
+                "workspace-2",
+                "stale failure".to_string(),
+            );
+            assert!(state.loading_agent_profiles.get());
+            assert!(sidebar_error.get().is_none());
+
+            session_sidebar_complete_agent_profile_load(
+                state,
+                "workspace-1",
+                vec![sample_sidebar_agent_profile()],
+            );
+            assert!(!state.loading_agent_profiles.get());
+            assert_eq!(state.agent_profiles.get().len(), 1);
         });
     }
 
@@ -814,6 +996,9 @@ mod tests {
             assert!(state.branches.get().is_empty());
             assert!(state.selected_branch.get().is_empty());
             assert!(!state.loading_branches.get());
+            assert!(state.agent_profiles.get().is_empty());
+            assert!(state.selected_agent_profile_id.get().is_none());
+            assert!(!state.loading_agent_profiles.get());
             assert!(sidebar_error.get().is_none());
         });
     }

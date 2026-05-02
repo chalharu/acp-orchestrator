@@ -123,8 +123,12 @@ New Chat modal では既定の mock/static ACP transport か、設定済み prof
 未選択時は従来どおり bundled/static `--acp-server` を使う。既存の global CLI
 `--agent-launch-mode chroot ...` 設定も引き続き default launch として動作する。
 
-OpenCode や llama.cpp のように session ごとの ACP listener port が必要な agent では、
-argv に `${ACP_PORT}`、`${ACP_ENDPOINT}`、`${ACP_BASE_URL}`、`${ACP_HOST}` を含める。
+agent command に ACP placeholder がない場合、backend は stdio ACP subprocess として
+実行する。OpenCode の標準 ACP command はこの形で、profile の launch command は
+`opencode acp` とする。
+
+Copilot CLI など session ごとの ACP listener port が必要な agent では、argv に
+`${ACP_PORT}`、`${ACP_ENDPOINT}`、`${ACP_BASE_URL}`、`${ACP_HOST}` を含める。
 backend は launch ごとに localhost port を割り当て、shell を介さず argv 文字列内の
 placeholder だけを置換する。あわせて `ACP_HOST=127.0.0.1`、`ACP_PORT`、
 `ACP_ENDPOINT=127.0.0.1:<port>`、`ACP_BASE_URL=http://127.0.0.1:<port>` を structured env
@@ -143,7 +147,7 @@ OpenCode と local llama.cpp を使う典型 flow は次のとおり。
 6. ACP settings で profile name に `OpenCode ACP`、ACP launch command に次を保存する。
 
    ```text
-   opencode acp --hostname 0.0.0.0 --port ${ACP_PORT}
+   opencode acp
    ```
 
 7. New Chat で OpenCode ACP profile を選択する。

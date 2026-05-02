@@ -1,7 +1,61 @@
 use super::*;
+use crate::agent_runtime::{AgentLaunchMetadata, AgentStdioMetadata};
 use crate::contract_permissions::PermissionDecision;
 use crate::contract_stream::StreamEventPayload;
 use crate::sessions::TurnHandle;
+use std::path::PathBuf;
+
+const FAKE_STDIO_AGENT_SCRIPT: &str = r#"
+import json
+import sys
+
+session_id = "stdio_0"
+
+def send(message):
+    print(json.dumps(message), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    request_id = request.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": {"loadSession": False},
+                "agentInfo": {
+                    "name": "stdio-test",
+                    "title": "Stdio Test",
+                    "version": "0"
+                }
+            }
+        })
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"sessionId": session_id}})
+    elif method == "session/prompt":
+        send({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "stdio reply"}
+                }
+            }
+        })
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+    else:
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": "method not found"}
+        })
+"#;
 
 async fn permission_roundtrip_context() -> (
     MockClient,
@@ -64,6 +118,18 @@ async fn approve_permission_request(
         .expect("permission snapshots should be published");
 }
 
+fn temp_stdio_working_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("acp-stdio-agent-{}", uuid::Uuid::new_v4().simple()))
+}
+
+fn python3_path() -> String {
+    ["/usr/bin/python3", "/usr/local/bin/python3"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .unwrap_or("python3")
+        .to_string()
+}
+
 #[tokio::test]
 async fn request_reply_collects_text_from_acp_mock() {
     let (mock_address, shutdown_tx) = spawn_mock_server(Duration::from_millis(1)).await;
@@ -81,6 +147,54 @@ async fn request_reply_collects_text_from_acp_mock() {
     ));
 
     let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn request_reply_can_drive_stdio_acp_agents() {
+    let client = MockClient::with_timeout("127.0.0.1:9".to_string(), Duration::from_secs(3))
+        .expect("client construction should succeed");
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let working_dir = temp_stdio_working_dir();
+    std::fs::create_dir_all(&working_dir).expect("stdio working dir should be created");
+    client
+        .bind_session(&session.id, working_dir.clone())
+        .await
+        .expect("working dir bind should succeed");
+    client
+        .bind_session_launch_metadata(
+            &session.id,
+            AgentLaunchMetadata {
+                acp_address: None,
+                stdio: Some(AgentStdioMetadata {
+                    argv: vec![
+                        python3_path(),
+                        "-u".to_string(),
+                        "-c".to_string(),
+                        FAKE_STDIO_AGENT_SCRIPT.to_string(),
+                    ],
+                    env: Vec::new(),
+                    working_dir: working_dir.clone(),
+                }),
+            },
+        )
+        .await
+        .expect("stdio metadata bind should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "hello".to_string())
+        .await
+        .expect("prompt submission should succeed");
+
+    let reply = client
+        .request_reply(pending.turn_handle())
+        .await
+        .expect("stdio ACP replies should succeed");
+
+    assert_eq!(reply, ReplyResult::Reply("stdio reply".to_string()));
+    let _ = std::fs::remove_dir_all(working_dir);
 }
 
 #[tokio::test]

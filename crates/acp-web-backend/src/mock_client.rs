@@ -4,6 +4,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -27,7 +28,10 @@ mod backend_client;
 #[cfg(test)]
 mod tests;
 
-use crate::{agent_runtime::AgentLaunchMetadata, sessions::TurnHandle};
+use crate::{
+    agent_runtime::{AgentLaunchMetadata, AgentStdioMetadata},
+    sessions::TurnHandle,
+};
 use backend_client::BackendAcpClient;
 
 type Result<T, E = MockClientError> = std::result::Result<T, E>;
@@ -59,8 +63,15 @@ const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
 type SessionAcpAddresses = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
+type SessionStdioMetadata = Arc<tokio::sync::Mutex<HashMap<String, AgentStdioMetadata>>>;
 type SessionLock = Arc<tokio::sync::Mutex<()>>;
 type SessionLocks = Arc<tokio::sync::Mutex<HashMap<String, SessionLock>>>;
+
+#[derive(Debug, Clone)]
+enum SessionTransport {
+    Tcp(String),
+    Stdio(AgentStdioMetadata),
+}
 
 struct ConnectedMainState<T> {
     working_dir: PathBuf,
@@ -115,6 +126,7 @@ pub struct MockClient {
     default_working_dir: PathBuf,
     session_working_dirs: SessionWorkingDirs,
     session_acp_addresses: SessionAcpAddresses,
+    session_stdio_metadata: SessionStdioMetadata,
     upstream_sessions: UpstreamSessions,
     session_locks: SessionLocks,
 }
@@ -129,6 +141,12 @@ pub enum MockClientError {
         source: std::io::Error,
         address: String,
     },
+
+    #[snafu(display("spawning the ACP stdio agent failed"))]
+    SpawnStdio { source: std::io::Error },
+
+    #[snafu(display("opening the ACP stdio agent {pipe} pipe failed"))]
+    StdioPipe { pipe: &'static str },
 
     #[snafu(display("initializing the ACP client failed: {source}"))]
     Initialize { source: acp::Error },
@@ -180,6 +198,7 @@ impl MockClient {
             default_working_dir: working_dir,
             session_working_dirs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_acp_addresses: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_stdio_metadata: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             upstream_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -191,9 +210,9 @@ impl MockClient {
         let result = self
             .run_locked_operation(
                 backend_session_id.clone(),
-                move |mock_address, working_dir, request_timeout, upstream_sessions| {
+                move |transport, working_dir, request_timeout, upstream_sessions| {
                     drive_acp_roundtrip_blocking(
-                        mock_address,
+                        transport,
                         working_dir,
                         turn,
                         request_timeout,
@@ -214,9 +233,9 @@ impl MockClient {
         let backend_session_id = backend_session_id.to_string();
         self.run_locked_operation(
             backend_session_id.clone(),
-            move |mock_address, working_dir, request_timeout, upstream_sessions| {
+            move |transport, working_dir, request_timeout, upstream_sessions| {
                 drive_acp_session_prime_blocking(
-                    mock_address,
+                    transport,
                     working_dir,
                     backend_session_id,
                     request_timeout,
@@ -240,6 +259,10 @@ impl MockClient {
             .lock()
             .await
             .remove(backend_session_id);
+        self.session_stdio_metadata
+            .lock()
+            .await
+            .remove(backend_session_id);
         self.session_locks.lock().await.remove(backend_session_id);
     }
 
@@ -258,9 +281,11 @@ impl MockClient {
     ) -> Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(String, PathBuf, Duration, UpstreamSessions) -> Result<T> + Send + 'static,
+        F: FnOnce(SessionTransport, PathBuf, Duration, UpstreamSessions) -> Result<T>
+            + Send
+            + 'static,
     {
-        let mock_address = self.session_acp_address(&backend_session_id).await;
+        let transport = self.session_transport(&backend_session_id).await;
         let working_dir = self.session_working_dir(&backend_session_id).await;
         let request_timeout = self.request_timeout;
         let upstream_sessions = self.upstream_sessions.clone();
@@ -268,12 +293,7 @@ impl MockClient {
         let _serial = session_lock.lock().await;
 
         tokio::task::spawn_blocking(move || {
-            operation(
-                mock_address,
-                working_dir,
-                request_timeout,
-                upstream_sessions,
-            )
+            operation(transport, working_dir, request_timeout, upstream_sessions)
         })
         .await
         .context(JoinTaskSnafu)?
@@ -304,6 +324,19 @@ impl MockClient {
             .get(backend_session_id)
             .cloned()
             .unwrap_or_else(|| self.mock_address.clone())
+    }
+
+    async fn session_transport(&self, backend_session_id: &str) -> SessionTransport {
+        if let Some(metadata) = self
+            .session_stdio_metadata
+            .lock()
+            .await
+            .get(backend_session_id)
+            .cloned()
+        {
+            return SessionTransport::Stdio(metadata);
+        }
+        SessionTransport::Tcp(self.session_acp_address(backend_session_id).await)
     }
 }
 
@@ -342,6 +375,12 @@ impl ReplyProvider for MockClient {
                     .await
                     .insert(session_id.to_string(), address);
             }
+            if let Some(stdio) = metadata.stdio {
+                self.session_stdio_metadata
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), stdio);
+            }
             Ok(())
         })
     }
@@ -356,7 +395,7 @@ impl ReplyProvider for MockClient {
 }
 
 async fn drive_acp_roundtrip(
-    mock_address: String,
+    transport: SessionTransport,
     working_dir: PathBuf,
     turn: TurnHandle,
     request_timeout: Duration,
@@ -367,7 +406,7 @@ async fn drive_acp_roundtrip(
     let operation = roundtrip_operation(turn);
 
     drive_acp_operation(
-        mock_address,
+        transport,
         working_dir,
         request_timeout,
         backend_session_id,
@@ -426,14 +465,14 @@ async fn run_prompt_roundtrip(
 }
 
 async fn drive_acp_session_prime(
-    mock_address: String,
+    transport: SessionTransport,
     working_dir: PathBuf,
     backend_session_id: String,
     request_timeout: Duration,
     upstream_sessions: UpstreamSessions,
 ) -> Result<Option<String>> {
     drive_acp_operation(
-        mock_address,
+        transport,
         working_dir,
         request_timeout,
         backend_session_id,
@@ -594,6 +633,14 @@ struct BackendIo {
 
 impl BackendIo {
     fn new(reader: OwnedReadHalf, writer: OwnedWriteHalf) -> Self {
+        Self::from_tokio(reader, writer)
+    }
+
+    fn from_tokio<R, W>(reader: R, writer: W) -> Self
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
         Self {
             outgoing: Box::new(writer.compat_write()) as DynWr,
             incoming: Box::new(reader.compat()) as DynRd,
@@ -741,22 +788,20 @@ async fn run_connected_operation<T: 'static>(
 }
 
 async fn connect_backend_mock_client<T: 'static>(
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
+    io: BackendIo,
     request_client: BackendAcpClient,
     notification_client: BackendAcpClient,
     connected_main: ConnectedMainState<T>,
 ) -> std::result::Result<Result<T>, acp::Error> {
     build_backend_client_builder(request_client, notification_client)
-        .connect_with(
-            acp::DynConnectTo::new(BackendIo::new(reader, writer)),
-            move |conn| run_connected_main(conn, connected_main),
-        )
+        .connect_with(acp::DynConnectTo::new(io), move |conn| {
+            run_connected_main(conn, connected_main)
+        })
         .await
 }
 
 fn drive_acp_roundtrip_blocking(
-    mock_address: String,
+    transport: SessionTransport,
     working_dir: PathBuf,
     turn: TurnHandle,
     request_timeout: Duration,
@@ -765,7 +810,7 @@ fn drive_acp_roundtrip_blocking(
     drive_acp_operation_blocking(
         request_timeout,
         drive_acp_roundtrip(
-            mock_address,
+            transport,
             working_dir,
             turn,
             request_timeout,
@@ -775,7 +820,7 @@ fn drive_acp_roundtrip_blocking(
 }
 
 fn drive_acp_session_prime_blocking(
-    mock_address: String,
+    transport: SessionTransport,
     working_dir: PathBuf,
     backend_session_id: String,
     request_timeout: Duration,
@@ -784,7 +829,7 @@ fn drive_acp_session_prime_blocking(
     drive_acp_operation_blocking(
         request_timeout,
         drive_acp_session_prime(
-            mock_address,
+            transport,
             working_dir,
             backend_session_id,
             request_timeout,
@@ -812,6 +857,42 @@ where
 }
 
 async fn drive_acp_operation<T: 'static>(
+    transport: SessionTransport,
+    working_dir: PathBuf,
+    request_timeout: Duration,
+    backend_session_id: String,
+    upstream_sessions: UpstreamSessions,
+    client: BackendAcpClient,
+    operation: ConnectedOperation<T>,
+) -> Result<T> {
+    match transport {
+        SessionTransport::Tcp(address) => {
+            drive_acp_tcp_operation(
+                address,
+                working_dir,
+                request_timeout,
+                backend_session_id,
+                upstream_sessions,
+                client,
+                operation,
+            )
+            .await
+        }
+        SessionTransport::Stdio(metadata) => {
+            drive_acp_stdio_operation(
+                metadata,
+                working_dir,
+                backend_session_id,
+                upstream_sessions,
+                client,
+                operation,
+            )
+            .await
+        }
+    }
+}
+
+async fn drive_acp_tcp_operation<T: 'static>(
     mock_address: String,
     working_dir: PathBuf,
     request_timeout: Duration,
@@ -834,14 +915,74 @@ async fn drive_acp_operation<T: 'static>(
     };
 
     connect_backend_mock_client(
-        reader,
-        writer,
+        BackendIo::new(reader, writer),
         request_client,
         notification_client,
         connected_main,
     )
     .await
     .context(ConnectionClosedSnafu)?
+}
+
+async fn drive_acp_stdio_operation<T: 'static>(
+    metadata: AgentStdioMetadata,
+    _working_dir: PathBuf,
+    backend_session_id: String,
+    upstream_sessions: UpstreamSessions,
+    client: BackendAcpClient,
+    operation: ConnectedOperation<T>,
+) -> Result<T> {
+    let mut child = spawn_stdio_agent(&metadata)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(MockClientError::StdioPipe { pipe: "stdout" })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or(MockClientError::StdioPipe { pipe: "stdin" })?;
+    let request_client = client.clone();
+    let notification_client = client.clone();
+    let connected_main = ConnectedMainState {
+        working_dir: metadata.working_dir,
+        backend_session_id,
+        client,
+        upstream_sessions,
+        operation,
+    };
+    let result = connect_backend_mock_client(
+        BackendIo::from_tokio(stdout, stdin),
+        request_client,
+        notification_client,
+        connected_main,
+    )
+    .await
+    .context(ConnectionClosedSnafu);
+    terminate_stdio_child(&mut child).await;
+    result?
+}
+
+fn spawn_stdio_agent(metadata: &AgentStdioMetadata) -> Result<tokio::process::Child> {
+    let mut command = tokio::process::Command::new(&metadata.argv[0]);
+    command.args(&metadata.argv[1..]);
+    command.env_clear();
+    for (name, value) in &metadata.env {
+        command.env(name, value);
+    }
+    command.current_dir(&metadata.working_dir);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
+    command.kill_on_drop(true);
+    command.spawn().context(SpawnStdioSnafu)
+}
+
+async fn terminate_stdio_child(child: &mut tokio::process::Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 async fn run_connected_main<T: 'static>(

@@ -77,10 +77,16 @@ impl BackendAcpClient {
         args: schema::SessionNotification,
     ) -> acp::Result<()> {
         if let schema::SessionUpdate::AgentMessageChunk(chunk) = args.update {
+            let text = content_text(chunk.content);
             self.collected
                 .lock()
                 .expect("mock reply buffer mutex should not be poisoned")
-                .push_str(&content_text(chunk.content));
+                .push_str(&text);
+            if let Some(turn) = self.turn.as_ref() {
+                turn.stream_assistant_chunk(text)
+                    .await
+                    .map_err(to_acp_error)?;
+            }
         }
         Ok(())
     }

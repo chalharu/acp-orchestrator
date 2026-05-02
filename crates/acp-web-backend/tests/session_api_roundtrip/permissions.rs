@@ -173,7 +173,7 @@ fn assert_snapshot_without_pending_permissions(event: StreamEvent) {
 fn assert_user_message(event: StreamEvent) {
     assert!(matches!(
         event.payload,
-        StreamEventPayload::ConversationMessage { message }
+        StreamEventPayload::ConversationMessage { message, .. }
             if matches!(message.role, MessageRole::User)
     ));
 }
@@ -181,7 +181,7 @@ fn assert_user_message(event: StreamEvent) {
 fn assert_assistant_message(event: StreamEvent) {
     assert!(matches!(
         event.payload,
-        StreamEventPayload::ConversationMessage { message }
+        StreamEventPayload::ConversationMessage { message, .. }
             if matches!(message.role, MessageRole::Assistant)
                 && message.text.starts_with("mock assistant:")
     ));

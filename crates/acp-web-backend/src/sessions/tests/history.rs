@@ -37,6 +37,101 @@ async fn session_history_includes_completed_replies() {
 }
 
 #[tokio::test]
+async fn streamed_assistant_chunks_update_one_message_until_completion() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let (_snapshot, mut receiver) = store
+        .session_events("alice", &session.id)
+        .await
+        .expect("subscribing should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "hello".to_string())
+        .await
+        .expect("prompt submission should succeed");
+    let turn = pending.turn_handle();
+    let _cancel_rx = turn.start_turn().await.expect("turn start should succeed");
+    let _ = next_event(&mut receiver, "user event should arrive").await;
+
+    turn.stream_assistant_chunk("hel".to_string())
+        .await
+        .expect("first chunk should stream");
+    let first_chunk = next_event(&mut receiver, "first chunk should arrive").await;
+    let message_id = match first_chunk.payload {
+        StreamEventPayload::ConversationMessage { message, partial } => {
+            assert!(matches!(message.role, MessageRole::Assistant));
+            assert_eq!(message.text, "hel");
+            assert!(partial);
+            message.id
+        }
+        other => panic!("unexpected first chunk event: {other:?}"),
+    };
+
+    turn.stream_assistant_chunk("lo".to_string())
+        .await
+        .expect("second chunk should stream");
+    let second_chunk = next_event(&mut receiver, "second chunk should arrive").await;
+    assert!(matches!(
+        second_chunk.payload,
+        StreamEventPayload::ConversationMessage { message, partial }
+            if message.id == message_id && message.text == "hello" && partial
+    ));
+
+    pending.complete_with_reply("hello".to_string()).await;
+    let final_event = next_event(&mut receiver, "final reply marker should arrive").await;
+    assert!(matches!(
+        final_event.payload,
+        StreamEventPayload::ConversationMessage { message, partial }
+            if message.id == message_id && message.text == "hello" && !partial
+    ));
+
+    let history = store
+        .session_history("alice", &session.id)
+        .await
+        .expect("session history should load");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].id, message_id);
+    assert_eq!(history[1].text, "hello");
+}
+
+#[tokio::test]
+async fn final_reply_can_correct_streamed_assistant_text() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let (_snapshot, mut receiver) = store
+        .session_events("alice", &session.id)
+        .await
+        .expect("subscribing should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "hello".to_string())
+        .await
+        .expect("prompt submission should succeed");
+    let turn = pending.turn_handle();
+    let _cancel_rx = turn.start_turn().await.expect("turn start should succeed");
+    let _ = next_event(&mut receiver, "user event should arrive").await;
+
+    turn.stream_assistant_chunk("draft".to_string())
+        .await
+        .expect("draft chunk should stream");
+    let _ = next_event(&mut receiver, "draft chunk should arrive").await;
+    pending.complete_with_reply("final".to_string()).await;
+
+    let final_event = next_event(&mut receiver, "final correction should arrive").await;
+    assert!(matches!(
+        final_event.payload,
+        StreamEventPayload::ConversationMessage { message, partial }
+            if matches!(message.role, MessageRole::Assistant)
+                && message.text == "final"
+                && !partial
+    ));
+}
+
+#[tokio::test]
 async fn pending_prompts_expose_session_prompt_and_turn_handles() {
     let store = SessionStore::new(4);
     let session = store
@@ -144,7 +239,7 @@ async fn complete_without_output_releases_queued_follow_up_events() {
         next_event(&mut receiver, "queued assistant reply should be broadcast").await;
     assert!(matches!(
         assistant_event.payload,
-        StreamEventPayload::ConversationMessage { message }
+        StreamEventPayload::ConversationMessage { message, .. }
             if matches!(message.role, MessageRole::Assistant)
                 && message.text == "reply for second"
     ));
@@ -314,7 +409,7 @@ async fn pending_prompts_can_broadcast_status_updates() {
     let user_event = next_event(&mut receiver, "user event should arrive").await;
     assert!(matches!(
         user_event.payload,
-        StreamEventPayload::ConversationMessage { message }
+        StreamEventPayload::ConversationMessage { message, .. }
             if matches!(message.role, MessageRole::User)
     ));
 

@@ -172,8 +172,12 @@ fn event_updates(event: StreamEvent) -> Vec<StreamUpdate> {
         StreamEventPayload::SessionSnapshot { session } => {
             resume_state_updates(&session.messages, &session.pending_permissions)
         }
-        StreamEventPayload::ConversationMessage { message } => {
-            vec![StreamUpdate::ConversationMessage(message)]
+        StreamEventPayload::ConversationMessage { message, partial } => {
+            if partial {
+                Vec::new()
+            } else {
+                vec![StreamUpdate::ConversationMessage(message)]
+            }
         }
         StreamEventPayload::PermissionRequested { request } => {
             vec![StreamUpdate::PermissionRequested(request)]
@@ -334,6 +338,33 @@ mod tests {
                 StreamUpdate::ConversationMessage(session.messages[1].clone()),
                 StreamUpdate::PermissionRequested(session.pending_permissions[1].clone()),
             ]
+        );
+    }
+
+    #[test]
+    fn event_updates_suppress_partial_messages_until_final_update() {
+        let partial = StreamEvent {
+            sequence: 1,
+            payload: StreamEventPayload::ConversationMessage {
+                message: assistant_message("m_streamed", "hel"),
+                partial: true,
+            },
+        };
+        let final_update = StreamEvent {
+            sequence: 2,
+            payload: StreamEventPayload::ConversationMessage {
+                message: assistant_message("m_streamed", "hello"),
+                partial: false,
+            },
+        };
+
+        assert!(event_updates(partial).is_empty());
+        assert_eq!(
+            event_updates(final_update),
+            vec![StreamUpdate::ConversationMessage(assistant_message(
+                "m_streamed",
+                "hello"
+            ))]
         );
     }
 }

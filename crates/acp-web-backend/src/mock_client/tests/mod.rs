@@ -57,6 +57,7 @@ async fn mock_client_uses_session_acp_address_override() {
             "s_test",
             crate::agent_runtime::AgentLaunchMetadata {
                 acp_address: Some("127.0.0.1:2".to_string()),
+                stdio: None,
             },
         )
         .await

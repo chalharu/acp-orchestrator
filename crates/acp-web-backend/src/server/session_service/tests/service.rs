@@ -580,6 +580,7 @@ async fn launch_metadata_binding_failures_clean_up_and_roll_back_live_sessions()
         &checkout,
         crate::agent_runtime::AgentLaunchMetadata {
             acp_address: Some("127.0.0.1:12345".to_string()),
+            stdio: None,
         },
     )
     .await

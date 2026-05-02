@@ -84,7 +84,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
 
     let user_message = expect_next_event(&mut events).await?;
     match user_message.payload {
-        StreamEventPayload::ConversationMessage { message } => {
+        StreamEventPayload::ConversationMessage { message, .. } => {
             assert_eq!(message.text, "hello through backend");
             assert!(matches!(message.role, MessageRole::User));
         }
@@ -93,7 +93,7 @@ async fn prompt_submission_streams_snapshot_user_and_assistant_messages() -> Res
 
     let assistant_message = expect_next_event(&mut events).await?;
     match assistant_message.payload {
-        StreamEventPayload::ConversationMessage { message } => {
+        StreamEventPayload::ConversationMessage { message, .. } => {
             assert!(matches!(message.role, MessageRole::Assistant));
             assert!(message.text.starts_with("mock assistant:"));
         }
@@ -562,7 +562,7 @@ async fn prompt_submission_streams_mock_failures_as_status_messages() -> Result<
     let user_message = expect_next_event(&mut events).await?;
     assert!(matches!(
         user_message.payload,
-        StreamEventPayload::ConversationMessage { message }
+        StreamEventPayload::ConversationMessage { message, .. }
             if matches!(message.role, MessageRole::User)
     ));
 

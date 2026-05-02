@@ -131,6 +131,20 @@ impl TurnHandle {
         }
         Ok(resolution)
     }
+
+    pub(crate) async fn stream_assistant_chunk(
+        &self,
+        text: String,
+    ) -> Result<(), SessionStoreError> {
+        if let Some(event) = self
+            .handle
+            .stream_assistant_chunk(self.prompt_order, text)
+            .await?
+        {
+            self.handle.broadcast(event);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -155,7 +169,13 @@ impl PendingPrompt {
         if let Ok(events) = self
             .turn
             .handle
-            .complete_prompt(self.turn.prompt_order, PromptCompletion::Reply(text))
+            .complete_prompt(
+                self.turn.prompt_order,
+                PromptCompletion::Reply {
+                    text,
+                    streamed_message_id: None,
+                },
+            )
             .await
         {
             for event in events {

@@ -13,6 +13,8 @@ use crate::contract_stream::{StreamEvent, StreamEventPayload};
 
 use super::{PendingPermissionResolution, PermissionResolutionOutcome, SessionStoreError};
 
+const SESSION_EVENT_BUFFER_CAPACITY: usize = 1024;
+
 #[derive(Debug)]
 pub(super) struct SessionHandle {
     sender: broadcast::Sender<StreamEvent>,
@@ -24,11 +26,15 @@ struct ActiveTurn {
     prompt_order: u64,
     cancel_tx: watch::Sender<bool>,
     cancelled: bool,
+    assistant_message_id: Option<String>,
 }
 
 #[derive(Debug)]
 pub(super) enum PromptCompletion {
-    Reply(String),
+    Reply {
+        text: String,
+        streamed_message_id: Option<String>,
+    },
     Status(String),
     None,
 }
@@ -81,7 +87,7 @@ impl SessionHandle {
         last_activity_at: DateTime<Utc>,
         recent_order: u64,
     ) -> Self {
-        let (sender, _) = broadcast::channel(64);
+        let (sender, _) = broadcast::channel(SESSION_EVENT_BUFFER_CAPACITY);
         Self {
             sender,
             data: Mutex::new(SessionData {
@@ -113,7 +119,7 @@ impl SessionHandle {
         last_activity_at: DateTime<Utc>,
         recent_order: u64,
     ) -> Self {
-        let (sender, _) = broadcast::channel(64);
+        let (sender, _) = broadcast::channel(SESSION_EVENT_BUFFER_CAPACITY);
         let closed_at = if snapshot.status == SessionStatus::Closed {
             Some(last_activity_at)
         } else {
@@ -282,8 +288,29 @@ impl SessionHandle {
             prompt_order,
             cancel_tx,
             cancelled: false,
+            assistant_message_id: None,
         });
         Ok(cancel_rx)
+    }
+
+    pub(super) async fn stream_assistant_chunk(
+        &self,
+        prompt_order: u64,
+        text: String,
+    ) -> Result<Option<StreamEvent>, SessionStoreError> {
+        if text.is_empty() {
+            return Ok(None);
+        }
+
+        let mut data = self.data.lock().await;
+        if data.status == SessionStatus::Closed {
+            return Err(SessionStoreError::Closed);
+        }
+        Ok(Self::stream_assistant_chunk_locked(
+            &mut data,
+            prompt_order,
+            text,
+        ))
     }
 
     pub(super) async fn register_permission_request(
@@ -380,7 +407,15 @@ impl SessionHandle {
             return Err(SessionStoreError::Closed);
         }
 
+        let streamed_message_id = Self::streamed_message_id_for_prompt(&data, prompt_order);
         Self::clear_turn_state_locked(&mut data, prompt_order);
+        let completion = match completion {
+            PromptCompletion::Reply { text, .. } => PromptCompletion::Reply {
+                text,
+                streamed_message_id,
+            },
+            completion => completion,
+        };
         data.pending_completions.insert(prompt_order, completion);
         let mut events = Vec::new();
         loop {
@@ -390,9 +425,14 @@ impl SessionHandle {
             };
             data.next_completion_order += 1;
             match completion {
-                PromptCompletion::Reply(text) => {
-                    events.push(Self::message_event(&mut data, MessageRole::Assistant, text));
-                }
+                PromptCompletion::Reply {
+                    text,
+                    streamed_message_id,
+                } => events.extend(Self::complete_reply_events(
+                    &mut data,
+                    text,
+                    streamed_message_id,
+                )),
                 PromptCompletion::Status(message) => {
                     events.push(Self::status_event(&mut data, message));
                 }
@@ -428,8 +468,92 @@ impl SessionHandle {
 
         StreamEvent {
             sequence: data.latest_sequence,
-            payload: StreamEventPayload::ConversationMessage { message },
+            payload: StreamEventPayload::ConversationMessage {
+                message,
+                partial: false,
+            },
         }
+    }
+
+    fn stream_assistant_chunk_locked(
+        data: &mut SessionData,
+        prompt_order: u64,
+        text: String,
+    ) -> Option<StreamEvent> {
+        let active_turn = data.active_turn.as_ref()?;
+        if active_turn.prompt_order != prompt_order || active_turn.cancelled {
+            return None;
+        }
+
+        let streamed_message_id = active_turn.assistant_message_id.clone();
+        let message = match Self::assistant_message_mut(data, streamed_message_id.as_deref()) {
+            Some(message) => {
+                message.text.push_str(&text);
+                message.clone()
+            }
+            None => {
+                let message = ConversationMessage {
+                    id: format!("m_{}", Uuid::new_v4().simple()),
+                    role: MessageRole::Assistant,
+                    text,
+                    created_at: Utc::now(),
+                };
+                let message_id = message.id.clone();
+                data.messages.push(message.clone());
+                if let Some(active_turn) = data.active_turn.as_mut() {
+                    active_turn.assistant_message_id = Some(message_id);
+                }
+                message
+            }
+        };
+        Some(Self::conversation_message_event(data, message, true))
+    }
+
+    fn complete_reply_events(
+        data: &mut SessionData,
+        text: String,
+        streamed_message_id: Option<String>,
+    ) -> Vec<StreamEvent> {
+        let Some(message_id) = streamed_message_id else {
+            return vec![Self::message_event(data, MessageRole::Assistant, text)];
+        };
+        let Some(message) = Self::assistant_message_mut(data, Some(&message_id)) else {
+            return vec![Self::message_event(data, MessageRole::Assistant, text)];
+        };
+        if !text.is_empty() && message.text != text {
+            message.text = text;
+        }
+        let message = message.clone();
+        vec![Self::conversation_message_event(data, message, false)]
+    }
+
+    fn assistant_message_mut<'a>(
+        data: &'a mut SessionData,
+        message_id: Option<&str>,
+    ) -> Option<&'a mut ConversationMessage> {
+        let message_id = message_id?;
+        data.messages.iter_mut().find(|message| {
+            message.id == message_id && matches!(message.role, MessageRole::Assistant)
+        })
+    }
+
+    fn conversation_message_event(
+        data: &mut SessionData,
+        message: ConversationMessage,
+        partial: bool,
+    ) -> StreamEvent {
+        data.latest_sequence += 1;
+        StreamEvent {
+            sequence: data.latest_sequence,
+            payload: StreamEventPayload::ConversationMessage { message, partial },
+        }
+    }
+
+    fn streamed_message_id_for_prompt(data: &SessionData, prompt_order: u64) -> Option<String> {
+        data.active_turn
+            .as_ref()
+            .filter(|active_turn| active_turn.prompt_order == prompt_order)
+            .and_then(|active_turn| active_turn.assistant_message_id.clone())
     }
 
     fn status_event(data: &mut SessionData, message: String) -> StreamEvent {

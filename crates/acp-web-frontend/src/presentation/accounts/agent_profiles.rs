@@ -11,7 +11,7 @@ use super::shared::AccountsPageState;
 #[cfg(target_family = "wasm")]
 use super::shared::spawn_agent_profiles_reload;
 
-const PROFILE_COMMAND_PLACEHOLDER: &str = "opencode acp --host 127.0.0.1 --port ${ACP_PORT}";
+const PROFILE_COMMAND_PLACEHOLDER: &str = "opencode acp";
 
 #[component]
 pub(super) fn AgentProfilesSection(state: AccountsPageState) -> impl IntoView {
@@ -72,9 +72,9 @@ fn agent_profile_create_form(state: AccountsPageState) -> AnyView {
             </button>
         </form>
         <p class="muted">
-            "Host process is the default for rootless local ACP servers. Use chroot only when the host is privileged and configured for isolation. "
+            "Host process is the default for rootless local ACP servers. Commands without ACP placeholders use stdio. Use chroot only when the host is privileged and configured for isolation. "
             <code>"${ACP_PORT}"</code>
-            " and related ACP placeholders are expanded by the backend."
+            " and related ACP placeholders are expanded by the backend for TCP-based ACP servers."
         </p>
     }
     .into_any()
@@ -539,8 +539,6 @@ mod tests {
             command_argv: vec![
                 "opencode".to_string(),
                 "acp".to_string(),
-                "--port".to_string(),
-                "${ACP_PORT}".to_string(),
             ],
             env_allowlist: Vec::new(),
             timeout_seconds: 30,

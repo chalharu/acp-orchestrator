@@ -170,6 +170,31 @@ async fn backend_acp_client_collects_agent_message_chunks() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn backend_acp_client_streams_agent_message_chunks_to_session_events() {
+    let (_store, _session_id, pending, mut receiver) =
+        pending_permission_context("stream please").await;
+    let client = BackendAcpClient::new(pending.turn_handle());
+
+    client
+        .session_notification(schema::SessionNotification::new(
+            "mock_0",
+            schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new("chunk".into())),
+        ))
+        .await
+        .expect("session updates should stream");
+
+    let event = receiver
+        .recv()
+        .await
+        .expect("assistant chunk should be published");
+    assert!(matches!(
+        event.payload,
+        crate::contract_stream::StreamEventPayload::ConversationMessage { message, .. }
+            if message.text == "chunk"
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn backend_acp_client_waits_for_permission_decisions() {
     let (store, session_id, pending, _receiver) =
         pending_permission_context("permission please").await;

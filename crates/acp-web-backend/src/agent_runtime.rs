@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    ffi::OsString,
     fmt::Display,
     fs,
     net::{SocketAddr, TcpListener},
@@ -215,6 +216,14 @@ pub struct AgentSessionLaunch<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentLaunchMetadata {
     pub acp_address: Option<String>,
+    pub stdio: Option<AgentStdioMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStdioMetadata {
+    pub argv: Vec<String>,
+    pub env: Vec<(String, OsString)>,
+    pub working_dir: PathBuf,
 }
 
 pub trait AgentRuntimeManager: Send + Sync + std::fmt::Debug {
@@ -307,6 +316,11 @@ struct PreparedHostLaunch {
     port_reservation: Option<TcpListener>,
 }
 
+enum LaunchOutcome {
+    Running(AgentChild, AgentLaunchMetadata),
+    Stdio(AgentLaunchMetadata),
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 struct AgentCgroup {
@@ -382,6 +396,7 @@ impl FsAgentRuntimeManager {
         }
         let metadata = AgentLaunchMetadata {
             acp_address: acp_endpoint.map(|endpoint| endpoint.address),
+            stdio: None,
         };
         child.metadata = metadata.clone();
         Ok((child, metadata))
@@ -391,12 +406,15 @@ impl FsAgentRuntimeManager {
         &self,
         config: &AgentLaunchConfig,
         launch: &AgentSessionLaunch<'_>,
-    ) -> Result<(AgentChild, AgentLaunchMetadata), AgentRuntimeError> {
+    ) -> Result<LaunchOutcome, AgentRuntimeError> {
         let PreparedHostLaunch {
             command,
             acp_endpoint,
             port_reservation,
         } = prepare_host_launch(config, launch)?;
+        if acp_endpoint.is_none() {
+            return Ok(LaunchOutcome::Stdio(agent_stdio_metadata(config, launch)));
+        }
         let mut child = spawn_with_timeout(command, config.timeout, None, port_reservation)?;
         if let Err(error) =
             wait_for_acp_readiness(acp_endpoint.as_ref(), config.timeout, &mut child)
@@ -406,9 +424,10 @@ impl FsAgentRuntimeManager {
         }
         let metadata = AgentLaunchMetadata {
             acp_address: acp_endpoint.map(|endpoint| endpoint.address),
+            stdio: None,
         };
         child.metadata = metadata.clone();
-        Ok((child, metadata))
+        Ok(LaunchOutcome::Running(child, metadata))
     }
 
     fn prepare_chroot_launch(
@@ -569,18 +588,28 @@ impl AgentRuntimeManager for FsAgentRuntimeManager {
             Err(error) => return Err(error),
         };
         let launched = match config.mode {
-            AgentLaunchMode::Chroot => self.launch_chroot(config, launch),
+            AgentLaunchMode::Chroot => self
+                .launch_chroot(config, launch)
+                .map(|(child, metadata)| LaunchOutcome::Running(child, metadata)),
             AgentLaunchMode::Host => self.launch_host(config, launch),
         };
-        let (child, metadata) = match launched {
+        let launched = match launched {
             Ok(launched) => launched,
             Err(error) => {
                 self.clear_launch_reservation(launch.session_id, launch_id);
                 return Err(error);
             }
         };
-        self.store_launched_child(launch.session_id, launch_id, child)?;
-        Ok(metadata)
+        match launched {
+            LaunchOutcome::Running(child, metadata) => {
+                self.store_launched_child(launch.session_id, launch_id, child)?;
+                Ok(metadata)
+            }
+            LaunchOutcome::Stdio(metadata) => {
+                self.clear_launch_reservation(launch.session_id, launch_id);
+                Ok(metadata)
+            }
+        }
     }
 
     fn forget_session(&self, session_id: &str) {
@@ -757,16 +786,28 @@ fn build_agent_command(
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
     command.env_clear();
-    for name in &config.env_allowlist {
-        if let Some(value) = env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    apply_structured_agent_env(&mut command, launch, config.mode, endpoint);
+    apply_agent_env(
+        &mut command,
+        &agent_env(config, launch, config.mode, endpoint),
+    );
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
     command
+}
+
+fn agent_stdio_metadata(
+    config: &AgentLaunchConfig,
+    launch: &AgentSessionLaunch<'_>,
+) -> AgentLaunchMetadata {
+    AgentLaunchMetadata {
+        acp_address: None,
+        stdio: Some(AgentStdioMetadata {
+            argv: expand_agent_argv(&config.command, None),
+            env: agent_env(config, launch, config.mode, None),
+            working_dir: launch.checkout.working_dir.clone(),
+        }),
+    }
 }
 
 fn expand_agent_arg(arg: &str, endpoint: Option<&AcpEndpoint>) -> String {
@@ -779,22 +820,41 @@ fn expand_agent_arg(arg: &str, endpoint: Option<&AcpEndpoint>) -> String {
         .replace(ACP_HOST_PLACEHOLDER, ACP_HOST)
 }
 
-fn apply_structured_agent_env(
-    command: &mut Command,
+fn agent_env(
+    config: &AgentLaunchConfig,
     launch: &AgentSessionLaunch<'_>,
     mode: AgentLaunchMode,
     endpoint: Option<&AcpEndpoint>,
-) {
-    command.env("ACP_SESSION_ID", launch.session_id);
-    command.env("ACP_WORKSPACE_ID", launch.workspace_id);
-    command.env("ACP_CHECKOUT_ROOT", checkout_root_for_mode(launch, mode));
-    command.env("ACP_CHECKOUT_RELPATH", checkout_relpath_for_mode(mode));
-    command.env("ACP_AGENT_LAUNCH_MODE", mode.as_str());
+) -> Vec<(String, OsString)> {
+    let mut envs = Vec::new();
+    for name in &config.env_allowlist {
+        if let Some(value) = env::var_os(name) {
+            envs.push((name.clone(), value));
+        }
+    }
+    envs.push(("ACP_SESSION_ID".to_string(), launch.session_id.into()));
+    envs.push(("ACP_WORKSPACE_ID".to_string(), launch.workspace_id.into()));
+    envs.push((
+        "ACP_CHECKOUT_ROOT".to_string(),
+        checkout_root_for_mode(launch, mode).into(),
+    ));
+    envs.push((
+        "ACP_CHECKOUT_RELPATH".to_string(),
+        checkout_relpath_for_mode(mode).into(),
+    ));
+    envs.push(("ACP_AGENT_LAUNCH_MODE".to_string(), mode.as_str().into()));
     if let Some(endpoint) = endpoint {
-        command.env("ACP_HOST", ACP_HOST);
-        command.env("ACP_PORT", endpoint.port.to_string());
-        command.env("ACP_ENDPOINT", &endpoint.address);
-        command.env("ACP_BASE_URL", endpoint.base_url());
+        envs.push(("ACP_HOST".to_string(), ACP_HOST.into()));
+        envs.push(("ACP_PORT".to_string(), endpoint.port.to_string().into()));
+        envs.push(("ACP_ENDPOINT".to_string(), endpoint.address.clone().into()));
+        envs.push(("ACP_BASE_URL".to_string(), endpoint.base_url().into()));
+    }
+    envs
+}
+
+fn apply_agent_env(command: &mut Command, envs: &[(String, OsString)]) {
+    for (name, value) in envs {
+        command.env(name, value);
     }
 }
 
@@ -1722,6 +1782,7 @@ mod tests {
         ) -> Result<AgentLaunchMetadata, AgentRuntimeError> {
             Ok(AgentLaunchMetadata {
                 acp_address: Some("127.0.0.1:4567".to_string()),
+                stdio: None,
             })
         }
 
@@ -1916,6 +1977,45 @@ mod tests {
             envs.get("ACP_AGENT_LAUNCH_MODE")
                 .and_then(|value| value.as_deref()),
             Some(std::ffi::OsStr::new("host"))
+        );
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn host_launch_without_acp_placeholder_returns_stdio_metadata() {
+        let state_dir = temp_state_dir("acp-agent-host-stdio");
+        let checkout = checkout_in_state(&state_dir, "s_stdio");
+        let manager =
+            FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should be created");
+        let config = AgentLaunchConfig::host(
+            vec!["opencode".to_string(), "acp".to_string()],
+            Vec::new(),
+            DEFAULT_AGENT_LAUNCH_TIMEOUT,
+            0,
+            0,
+        )
+        .expect("host config should validate");
+
+        let metadata = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id: "s_stdio",
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect("stdio host metadata should be returned");
+
+        let stdio = metadata.stdio.expect("stdio metadata should be present");
+        assert_eq!(metadata.acp_address, None);
+        assert_eq!(stdio.argv, vec!["opencode", "acp"]);
+        assert_eq!(stdio.working_dir, checkout.working_dir);
+        assert!(
+            manager
+                .children
+                .lock()
+                .expect("child registry should not poison")
+                .slots
+                .is_empty()
         );
         let _ = std::fs::remove_dir_all(state_dir);
     }
@@ -2162,6 +2262,7 @@ mod tests {
             .expect("sleep child should spawn");
         let metadata = AgentLaunchMetadata {
             acp_address: Some("127.0.0.1:49152".to_string()),
+            stdio: None,
         };
         manager
             .children

@@ -180,6 +180,38 @@ fn python3_path() -> String {
         .to_string()
 }
 
+#[tokio::test]
+async fn drain_stdio_agent_stderr_handles_missing_and_available_pipes() {
+    let mut without_stderr = tokio::process::Command::new(python3_path())
+        .arg("-c")
+        .arg("print('stdout only')")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("stderr-less child should spawn");
+    assert!(drain_stdio_agent_stderr(&mut without_stderr).is_none());
+    without_stderr
+        .wait()
+        .await
+        .expect("stderr-less child should exit");
+
+    let mut with_stderr = tokio::process::Command::new(python3_path())
+        .arg("-c")
+        .arg("import sys; print('diagnostic', file=sys.stderr, flush=True)")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("stderr child should spawn");
+    let stderr_task =
+        drain_stdio_agent_stderr(&mut with_stderr).expect("stderr pipes should spawn a drain task");
+    with_stderr.wait().await.expect("stderr child should exit");
+    stderr_task
+        .await
+        .expect("stderr drain task should complete");
+}
+
 async fn bind_stdio_script(
     client: &MockClient,
     session_id: &str,

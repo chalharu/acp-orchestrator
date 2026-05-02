@@ -813,10 +813,11 @@ fn log_agent_launch(
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let acp_address = endpoint.map(|endpoint| endpoint.address.as_str());
+    let mode_name = mode.as_str();
     tracing::info!(
         session_id = launch.session_id,
         workspace_id = launch.workspace_id,
-        mode = mode.as_str(),
+        mode = mode_name,
         program,
         ?args,
         acp_address,
@@ -835,13 +836,15 @@ fn log_stdio_agent_launch(
     let Some((program, args)) = stdio.argv.split_first() else {
         return;
     };
+    let mode_name = mode.as_str();
+    let working_dir = stdio.working_dir.display().to_string();
     tracing::info!(
         session_id = launch.session_id,
         workspace_id = launch.workspace_id,
-        mode = mode.as_str(),
+        mode = mode_name,
         program,
         ?args,
-        working_dir = %stdio.working_dir.display(),
+        working_dir,
         "prepared ACP stdio agent launch"
     );
 }
@@ -1395,8 +1398,10 @@ fn spawn_agent_child(
     drop(port_reservation);
     match spawn_result {
         Ok(mut child) => {
-            drain_agent_process_output(child.id(), "stdout", child.stdout.take(), false);
-            drain_agent_process_output(child.id(), "stderr", child.stderr.take(), true);
+            let _stdout_thread =
+                drain_agent_process_output(child.id(), "stdout", child.stdout.take(), false);
+            let _stderr_thread =
+                drain_agent_process_output(child.id(), "stderr", child.stderr.take(), true);
             Ok(AgentChild {
                 child,
                 cgroup,
@@ -1412,14 +1417,17 @@ fn spawn_agent_child(
     }
 }
 
-fn drain_agent_process_output<R>(pid: u32, stream_name: &'static str, stream: Option<R>, warn: bool)
+fn drain_agent_process_output<R>(
+    pid: u32,
+    stream_name: &'static str,
+    stream: Option<R>,
+    warn: bool,
+) -> Option<std::thread::JoinHandle<()>>
 where
     R: Read + Send + 'static,
 {
-    let Some(stream) = stream else {
-        return;
-    };
-    let _output_thread = std::thread::spawn(move || {
+    let stream = stream?;
+    Some(std::thread::spawn(move || {
         for line in std::io::BufReader::new(stream)
             .lines()
             .map_while(Result::ok)
@@ -1430,7 +1438,7 @@ where
                 tracing::debug!(pid, stream = stream_name, output = %line, "ACP agent process output");
             }
         }
-    });
+    }))
 }
 
 fn cleanup_unsent_spawn_result(result: std::io::Result<AgentChild>, cgroup: Option<&AgentCgroup>) {
@@ -2139,6 +2147,70 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn launch_logging_helpers_accept_all_metadata_shapes() {
+        let checkout = sample_checkout();
+        let launch = AgentSessionLaunch {
+            session_id: "s_log",
+            workspace_id: "w_log",
+            checkout: &checkout,
+            config: None,
+        };
+        let mut command = Command::new("agent");
+        command.arg("acp");
+
+        log_agent_launch(
+            AgentLaunchMode::Host,
+            &launch,
+            &command,
+            Some(&endpoint_fixture()),
+        );
+        log_stdio_agent_launch(
+            AgentLaunchMode::Host,
+            &launch,
+            &AgentLaunchMetadata::default(),
+        );
+        log_stdio_agent_launch(
+            AgentLaunchMode::Host,
+            &launch,
+            &AgentLaunchMetadata {
+                acp_address: None,
+                stdio: Some(AgentStdioMetadata {
+                    argv: Vec::new(),
+                    env: Vec::new(),
+                    working_dir: PathBuf::from("/workspace"),
+                }),
+            },
+        );
+        log_stdio_agent_launch(
+            AgentLaunchMode::Host,
+            &launch,
+            &AgentLaunchMetadata {
+                acp_address: None,
+                stdio: Some(AgentStdioMetadata {
+                    argv: vec!["agent".to_string(), "acp".to_string()],
+                    env: Vec::new(),
+                    working_dir: PathBuf::from("/workspace"),
+                }),
+            },
+        );
+    }
+
+    #[test]
+    fn drain_agent_process_output_handles_missing_and_available_streams() {
+        assert!(
+            drain_agent_process_output(7, "stdout", None::<std::io::Cursor<Vec<u8>>>, false,)
+                .is_none()
+        );
+
+        for warn in [false, true] {
+            let output = std::io::Cursor::new(b"diagnostic\n".to_vec());
+            let handle = drain_agent_process_output(7, "stderr", Some(output), warn)
+                .expect("available streams should spawn a drain thread");
+            handle.join().expect("drain thread should complete");
+        }
     }
 
     #[test]

@@ -921,28 +921,26 @@ fn spawn_stdio_agent(metadata: &AgentStdioMetadata) -> Result<tokio::process::Ch
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.kill_on_drop(true);
-    tracing::info!(
-        program = %metadata.argv[0],
-        args = ?&metadata.argv[1..],
-        working_dir = %metadata.working_dir.display(),
-        "spawning ACP stdio agent"
-    );
+    let program = metadata.argv[0].as_str();
+    let args = &metadata.argv[1..];
+    let working_dir = metadata.working_dir.display().to_string();
+    tracing::info!(program, ?args, working_dir, "spawning ACP stdio agent");
     let mut child = command.spawn().context(SpawnStdioSnafu)?;
-    drain_stdio_agent_stderr(&mut child);
+    let _stderr_task = drain_stdio_agent_stderr(&mut child);
     Ok(child)
 }
 
-fn drain_stdio_agent_stderr(child: &mut tokio::process::Child) {
-    let Some(stderr) = child.stderr.take() else {
-        return;
-    };
+fn drain_stdio_agent_stderr(
+    child: &mut tokio::process::Child,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let stderr = child.stderr.take()?;
     let pid = child.id();
-    let _stderr_task = tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::warn!(pid, stderr = %line, "ACP stdio agent stderr");
         }
-    });
+    }))
 }
 
 async fn terminate_stdio_child(child: &mut tokio::process::Child) {

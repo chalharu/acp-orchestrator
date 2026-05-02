@@ -1,4 +1,9 @@
-use std::{env, ffi::OsString, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -179,26 +184,16 @@ async fn run(cli: Cli) -> Result<()> {
     let acp_server = resolve_acp_server(cli.acp_server.clone(), env::var("ACP_MOCK_ADDRESS").ok())
         .context(ParseArgsSnafu)?;
     let agent_launch = agent_launch_config(&cli).context(ParseArgsSnafu)?;
-    let state_dir = absolute_state_dir(cli.state_dir).context(ResolveStateDirSnafu)?;
+    let state_dir = absolute_state_dir(cli.state_dir.clone()).context(ResolveStateDirSnafu)?;
+    let exit_after_ms = cli.listen.exit_after_ms;
     let listener = bind_listener(cli.listen.resolved_host(), cli.port, "web backend")
         .await
         .map_err(|source| BackendAppError::Setup { source })?;
     let endpoint = listener_endpoint(&listener, "web backend", "https://")
         .map_err(|source| BackendAppError::Setup { source })?;
 
-    let config = ServerConfig {
-        session_cap: cli.session_cap,
-        acp_server,
-        startup_hints: cli.startup_hints,
-        state_dir: state_dir.clone(),
-        agent_launch,
-        frontend_dist: cli.frontend_dist,
-    };
-    let workspace_repository: Arc<dyn WorkspaceRepository> = Arc::new(
-        SqliteWorkspaceRepository::new(state_dir.join("db.sqlite"))
-            .map_err(AppStateBuildError::from)
-            .context(BuildStateSnafu)?,
-    );
+    let config = server_config(&cli, acp_server, state_dir.clone(), agent_launch);
+    let workspace_repository = workspace_repository_for_state(&state_dir)?;
     let state = AppState::new(config, workspace_repository).context(BuildStateSnafu)?;
     let client = build_http_client_for_url(&endpoint, Some(READY_CHECK_TIMEOUT))
         .context(BuildHttpClientSnafu)?;
@@ -206,13 +201,36 @@ async fn run(cli: Cli) -> Result<()> {
         wait_for_health(&client, &endpoint, READY_CHECK_ATTEMPTS, READY_CHECK_DELAY).await?;
         wait_for_app_entrypoint(&client, &endpoint).await
     };
-    let serve = serve_with_shutdown(listener, state, shutdown_signal(cli.listen.exit_after_ms));
+    let serve = serve_with_shutdown(listener, state, shutdown_signal(exit_after_ms));
 
     run_service_with_readiness(ready, serve, || {
         print_startup_line("web backend", &endpoint)
     })
     .await
     .map_err(map_service_readiness_error)
+}
+
+fn server_config(
+    cli: &Cli,
+    acp_server: String,
+    state_dir: PathBuf,
+    agent_launch: Option<AgentLaunchConfig>,
+) -> ServerConfig {
+    ServerConfig {
+        session_cap: cli.session_cap,
+        acp_server,
+        startup_hints: cli.startup_hints,
+        state_dir,
+        agent_launch,
+        frontend_dist: cli.frontend_dist.clone(),
+    }
+}
+
+fn workspace_repository_for_state(state_dir: &Path) -> Result<Arc<dyn WorkspaceRepository>> {
+    SqliteWorkspaceRepository::new(state_dir.join("db.sqlite"))
+        .map(|repository| Arc::new(repository) as Arc<dyn WorkspaceRepository>)
+        .map_err(AppStateBuildError::from)
+        .context(BuildStateSnafu)
 }
 
 pub async fn run_with_args<I, T>(args: I) -> Result<()>

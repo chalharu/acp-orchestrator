@@ -364,6 +364,7 @@ async fn drive_acp_roundtrip(
 ) -> Result<ReplyResult> {
     let backend_session_id = turn.session_id().to_string();
     let client = BackendAcpClient::new(turn.clone());
+    let operation = roundtrip_operation(turn);
 
     drive_acp_operation(
         mock_address,
@@ -372,38 +373,54 @@ async fn drive_acp_roundtrip(
         backend_session_id,
         upstream_sessions,
         client,
-        Box::new(
-            move |conn,
-                  working_dir,
-                  backend_session_id,
-                  client,
-                  upstream_sessions,
-                  capabilities| {
-                Box::pin(async move {
-                    let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
-                    let session_id = load_or_create_session(
-                        &conn,
-                        &working_dir,
-                        &backend_session_id,
-                        &upstream_sessions,
-                        capabilities.load_session,
-                    )
-                    .await?;
-                    if *cancel_rx.borrow() {
-                        return Ok(ReplyResult::Status("turn cancelled".to_string()));
-                    }
+        operation,
+    )
+    .await
+}
 
-                    prompt_session(
-                        &conn,
-                        &client,
-                        &mut cancel_rx,
-                        session_id,
-                        turn.prompt_text(),
-                    )
-                    .await
-                })
-            },
-        ),
+fn roundtrip_operation(turn: TurnHandle) -> ConnectedOperation<ReplyResult> {
+    Box::new(
+        move |conn, working_dir, backend_session_id, client, upstream_sessions, capabilities| {
+            Box::pin(run_prompt_roundtrip(
+                conn,
+                working_dir,
+                backend_session_id,
+                client,
+                upstream_sessions,
+                capabilities,
+                turn,
+            ))
+        },
+    )
+}
+
+async fn run_prompt_roundtrip(
+    conn: acp::ConnectionTo<acp::Agent>,
+    working_dir: PathBuf,
+    backend_session_id: String,
+    client: BackendAcpClient,
+    upstream_sessions: UpstreamSessions,
+    capabilities: AgentConnectionCapabilities,
+    turn: TurnHandle,
+) -> Result<ReplyResult> {
+    let mut cancel_rx = turn.start_turn().await.map_err(session_runtime_error)?;
+    let session_id = load_or_create_session(
+        &conn,
+        &working_dir,
+        &backend_session_id,
+        &upstream_sessions,
+        capabilities.load_session,
+    )
+    .await?;
+    if *cancel_rx.borrow() {
+        return Ok(ReplyResult::Status("turn cancelled".to_string()));
+    }
+    prompt_session(
+        &conn,
+        &client,
+        &mut cancel_rx,
+        session_id,
+        turn.prompt_text(),
     )
     .await
 }

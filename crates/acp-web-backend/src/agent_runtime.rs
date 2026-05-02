@@ -3058,6 +3058,38 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn launch_host_cleans_up_when_process_exits_before_readiness() {
+        let state_dir = temp_state_dir("acp-agent-launch-host-exits");
+        let session_id = "s_test";
+        let checkout = checkout_in_state(&state_dir, session_id);
+        let manager =
+            FsAgentRuntimeManager::new(state_dir.clone(), None).expect("manager should build");
+        let config = AgentLaunchConfig::host(
+            vec!["/bin/true".to_string(), "${ACP_PORT}".to_string()],
+            Vec::new(),
+            Duration::from_secs(1),
+            0,
+            0,
+        )
+        .expect("host config should validate");
+
+        let error = manager
+            .launch_session(&AgentSessionLaunch {
+                session_id,
+                workspace_id: "w_test",
+                checkout: &checkout,
+                config: Some(config),
+            })
+            .expect_err("host launch should fail when the process exits before readiness");
+        let _ = std::fs::remove_dir_all(state_dir);
+
+        assert!(
+            matches!(error, AgentRuntimeError::Io(message) if message.contains("exited before ACP endpoint"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn launch_host_defers_unopened_endpoints_to_acp_connection_retries() {
         let state_dir = temp_state_dir("acp-agent-launch-host-not-ready");
         let session_id = "s_test";

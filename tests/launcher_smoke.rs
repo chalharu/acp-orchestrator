@@ -1,13 +1,9 @@
 use std::{io, path::PathBuf, process::Stdio, time::Duration};
 
-use acp_app_support_http::wait_for_tcp_connect;
 use acp_app_support_temp::unique_temp_json_path;
-use acp_mock::{MockConfig, spawn_with_shutdown_task};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::TcpListener,
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::oneshot,
     time::sleep,
 };
 
@@ -27,25 +23,25 @@ async fn launcher_starts_the_full_stack_and_proxies_cli_io_with_proxy_env() -> R
 
 #[tokio::test]
 async fn launcher_connects_to_an_existing_acp_server() -> Result<()> {
-    let (acp_server, mock_shutdown) = spawn_mock_server().await?;
+    let mock_server = spawn_mock_server().await?;
     let result = assert_launcher_roundtrip_with_args(
         "launcher-existing-acp",
         false,
-        &["--acp-server", acp_server.as_str()],
+        &["--acp-server", mock_server.address.as_str()],
     )
     .await;
-    let _ = mock_shutdown.send(());
+    drop(mock_server);
     result
 }
 
 #[tokio::test]
 async fn launcher_connects_to_an_existing_acp_server_with_equals_syntax() -> Result<()> {
-    let (acp_server, mock_shutdown) = spawn_mock_server().await?;
-    let arg = format!("--acp-server={acp_server}");
+    let mock_server = spawn_mock_server().await?;
+    let arg = format!("--acp-server={}", mock_server.address);
     let result =
         assert_launcher_roundtrip_with_args("launcher-existing-acp-equals", false, &[arg.as_str()])
             .await;
-    let _ = mock_shutdown.send(());
+    drop(mock_server);
     result
 }
 
@@ -117,7 +113,7 @@ fn spawn_launcher(
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     command.args(launcher_args);
     if use_broken_proxy_env {
         configure_broken_proxy_env(&mut command);
@@ -215,9 +211,12 @@ async fn read_until_output(reader: &mut BufReader<ChildStdout>, needle: &str) ->
 }
 
 fn assert_launcher_output(output: &str) {
-    assert!(output.contains("session: s_"));
-    assert!(output.contains("connected to backend: https://127.0.0.1:"));
-    assert!(output.contains("[assistant] mock assistant:"));
+    assert!(output.contains("session: s_"), "{output}");
+    assert!(
+        output.contains("connected to backend: https://127.0.0.1:"),
+        "{output}"
+    );
+    assert!(output.contains("[assistant] mock assistant:"), "{output}");
 }
 
 async fn read_session_connection(
@@ -302,16 +301,44 @@ async fn wait_for_listed_session(
     .into())
 }
 
-async fn spawn_mock_server() -> Result<(String, oneshot::Sender<()>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+#[derive(Debug)]
+struct MockServer {
+    address: String,
+    _child: Child,
+}
 
-    spawn_with_shutdown_task(listener, MockConfig::default(), async move {
-        let _ = shutdown_rx.await;
-    });
+async fn spawn_mock_server() -> Result<MockServer> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_acp"));
+    child
+        .arg("__internal-role")
+        .arg("mock")
+        .arg("--port")
+        .arg("0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = child.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("missing mock stdout"))?;
+    let address = read_mock_server_address(BufReader::new(stdout)).await?;
 
-    wait_for_tcp_connect(&address.to_string(), 100, Duration::from_millis(20)).await?;
+    Ok(MockServer {
+        address,
+        _child: child,
+    })
+}
 
-    Ok((address.to_string(), shutdown_tx))
+async fn read_mock_server_address(mut reader: BufReader<ChildStdout>) -> Result<String> {
+    let mut line = String::new();
+    let bytes = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
+    if bytes == 0 {
+        return Err(io::Error::other("mock server exited before printing its address").into());
+    }
+    line.trim()
+        .rsplit_once(' ')
+        .map(|(_, address)| address.to_string())
+        .ok_or_else(|| io::Error::other(format!("invalid mock startup line: {line:?}")).into())
 }

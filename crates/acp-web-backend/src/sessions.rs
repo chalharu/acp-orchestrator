@@ -190,7 +190,10 @@ impl PendingPrompt {
             .handle
             .complete_prompt(
                 self.turn.prompt_order,
-                PromptCompletion::Status(message.into()),
+                PromptCompletion::Status {
+                    message: message.into(),
+                    streamed_message_id: None,
+                },
             )
             .await
         {

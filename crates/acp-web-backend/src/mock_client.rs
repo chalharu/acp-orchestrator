@@ -495,7 +495,7 @@ async fn drive_acp_session_prime(
                     )
                     .await?;
                     let _ = session_id;
-                    let reply = client.take_reply_text();
+                    let reply = client.take_reply_text_after_notifications().await;
                     Ok((!reply.is_empty()).then_some(reply))
                 })
             },
@@ -567,7 +567,7 @@ where
 {
     tokio::pin!(prompt_future);
     tokio::select! {
-        response = &mut prompt_future => reply_from_prompt_response(response, client),
+        response = &mut prompt_future => reply_from_prompt_response(response, client).await,
         changed = cancel_rx.changed() => {
             let cancelled = changed.is_ok() && *cancel_rx.borrow();
             handle_cancelled_prompt(cancelled, &mut prompt_future, cancel_request, send_cancel, client).await
@@ -575,13 +575,14 @@ where
     }
 }
 
-fn reply_from_prompt_response(
+async fn reply_from_prompt_response(
     response: acp::Result<schema::PromptResponse>,
     client: &BackendAcpClient,
 ) -> Result<ReplyResult> {
+    let stop_reason = response.context(SendPromptSnafu)?.stop_reason;
     Ok(reply_from_stop_reason(
-        response.context(SendPromptSnafu)?.stop_reason,
-        client.reply_text(),
+        stop_reason,
+        client.reply_text_after_notifications().await,
     ))
 }
 
@@ -602,7 +603,7 @@ where
         return Ok(ReplyResult::Status("turn cancelled".to_string()));
     }
 
-    reply_from_prompt_response(prompt_future.await, client)
+    reply_from_prompt_response(prompt_future.await, client).await
 }
 
 async fn respond_permission_request(
@@ -682,91 +683,6 @@ impl<R: acp::Role> ConnectTo<R> for BackendIo {
     }
 }
 
-#[derive(Clone)]
-struct BackendDispatchHandler {
-    request_client: BackendAcpClient,
-    notification_client: BackendAcpClient,
-}
-
-impl BackendDispatchHandler {
-    fn new(request_client: BackendAcpClient, notification_client: BackendAcpClient) -> Self {
-        Self {
-            request_client,
-            notification_client,
-        }
-    }
-
-    async fn handle_permission_request(
-        &self,
-        dispatch: acp::Dispatch,
-        connection: acp::ConnectionTo<acp::Agent>,
-    ) -> std::result::Result<Option<acp::Dispatch>, acp::Error> {
-        match dispatch.into_request::<schema::RequestPermissionRequest>()? {
-            Ok((args, responder)) => {
-                respond_permission_request(
-                    self.request_client.clone(),
-                    args,
-                    responder,
-                    connection,
-                )
-                .await?;
-                Ok(None)
-            }
-            Err(dispatch) => Ok(Some(dispatch)),
-        }
-    }
-
-    async fn handle_session_notification(
-        &self,
-        dispatch: acp::Dispatch,
-    ) -> std::result::Result<Option<acp::Dispatch>, acp::Error> {
-        match dispatch.into_notification::<schema::SessionNotification>()? {
-            Ok(args) => {
-                forward_session_notification(self.notification_client.clone(), args).await?;
-                Ok(None)
-            }
-            Err(dispatch) => Ok(Some(dispatch)),
-        }
-    }
-}
-
-impl acp::HandleDispatchFrom<acp::Agent> for BackendDispatchHandler {
-    fn describe_chain(&self) -> impl std::fmt::Debug {
-        "BackendDispatchHandler"
-    }
-
-    async fn handle_dispatch_from(
-        &mut self,
-        dispatch: acp::Dispatch,
-        connection: acp::ConnectionTo<acp::Agent>,
-    ) -> std::result::Result<acp::Handled<acp::Dispatch>, acp::Error> {
-        let Some(dispatch) = self
-            .handle_permission_request(dispatch, connection.clone())
-            .await?
-        else {
-            return Ok(acp::Handled::Yes);
-        };
-        let Some(dispatch) = self.handle_session_notification(dispatch).await? else {
-            return Ok(acp::Handled::Yes);
-        };
-        Ok(acp::Handled::No {
-            message: dispatch,
-            retry: false,
-        })
-    }
-}
-
-fn build_backend_client_builder(
-    request_client: BackendAcpClient,
-    notification_client: BackendAcpClient,
-) -> acp::Builder<acp::Client, BackendDispatchHandler, acp::NullRun> {
-    acp::Builder::new_with(
-        acp::Client,
-        BackendDispatchHandler::new(request_client, notification_client),
-    )
-    .name("acp-web-backend-mock-client")
-}
-
 async fn run_connected_operation<T: 'static>(
     conn: acp::ConnectionTo<acp::Agent>,
     working_dir: PathBuf,
@@ -793,7 +709,21 @@ async fn connect_backend_mock_client<T: 'static>(
     notification_client: BackendAcpClient,
     connected_main: ConnectedMainState<T>,
 ) -> std::result::Result<Result<T>, acp::Error> {
-    build_backend_client_builder(request_client, notification_client)
+    acp::Client
+        .builder()
+        .name("acp-web-backend-mock-client")
+        .on_receive_request(
+            async move |args: schema::RequestPermissionRequest, responder, cx| {
+                respond_permission_request(request_client.clone(), args, responder, cx).await
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |args: schema::SessionNotification, _cx| {
+                forward_session_notification(notification_client.clone(), args).await
+            },
+            acp::on_receive_notification!(),
+        )
         .connect_with(acp::DynConnectTo::new(io), move |conn| {
             run_connected_main(conn, connected_main)
         })

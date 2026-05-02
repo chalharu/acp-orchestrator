@@ -123,6 +123,53 @@ async fn streamed_assistant_chunks_update_one_message_until_completion() {
 }
 
 #[tokio::test]
+async fn streamed_assistant_chunks_finalize_without_reply_text() {
+    let (store, session, mut receiver, pending, turn) = started_streaming_turn().await;
+    let message_id = first_streamed_assistant_message_id(&turn, &mut receiver).await;
+
+    pending.complete_without_output().await;
+    let final_event = next_event(&mut receiver, "final reply marker should arrive").await;
+    assert!(matches!(
+        final_event.payload,
+        StreamEventPayload::ConversationMessage { message, partial }
+            if message.id == message_id && message.text == "hel" && !partial
+    ));
+
+    let history = store
+        .session_history("alice", &session.id)
+        .await
+        .expect("session history should load");
+    assert_eq!(history[1].id, message_id);
+    assert_eq!(history[1].text, "hel");
+}
+
+#[tokio::test]
+async fn streamed_assistant_chunks_finalize_before_status() {
+    let (store, session, mut receiver, pending, turn) = started_streaming_turn().await;
+    let message_id = first_streamed_assistant_message_id(&turn, &mut receiver).await;
+
+    pending.complete_with_status("turn cancelled").await;
+    let final_event = next_event(&mut receiver, "final reply marker should arrive").await;
+    assert!(matches!(
+        final_event.payload,
+        StreamEventPayload::ConversationMessage { message, partial }
+            if message.id == message_id && message.text == "hel" && !partial
+    ));
+    let status_event = next_event(&mut receiver, "status event should arrive").await;
+    assert!(matches!(
+        status_event.payload,
+        StreamEventPayload::Status { message } if message == "turn cancelled"
+    ));
+
+    let history = store
+        .session_history("alice", &session.id)
+        .await
+        .expect("session history should load");
+    assert_eq!(history[1].id, message_id);
+    assert_eq!(history[1].text, "hel");
+}
+
+#[tokio::test]
 async fn final_reply_can_correct_streamed_assistant_text() {
     let store = SessionStore::new(4);
     let session = store

@@ -56,21 +56,32 @@ async fn read_prompt_line() -> Result<Option<String>> {
     tokio::task::spawn_blocking(|| -> Result<Option<String>> {
         let stdin = io::stdin();
         let stdout = io::stdout();
+        {
+            let mut stdout = stdout.lock();
+            write_prompt(&mut stdout)?;
+        }
         let mut stdin = stdin.lock();
-        let mut stdout = stdout.lock();
-        read_prompt_line_from(&mut stdin, &mut stdout)
+        read_line_from(&mut stdin)
     })
     .await
     .context(JoinPromptReaderSnafu)?
 }
 
+#[cfg(test)]
 fn read_prompt_line_from<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
 ) -> Result<Option<String>> {
-    write!(writer, "> ").context(FlushPromptSnafu)?;
-    writer.flush().context(FlushPromptSnafu)?;
+    write_prompt(writer)?;
+    read_line_from(reader)
+}
 
+fn write_prompt<W: Write>(writer: &mut W) -> Result<()> {
+    write!(writer, "> ").context(FlushPromptSnafu)?;
+    writer.flush().context(FlushPromptSnafu)
+}
+
+fn read_line_from<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
     let mut buffer = String::new();
     let bytes_read = reader.read_line(&mut buffer).context(ReadPromptLineSnafu)?;
 

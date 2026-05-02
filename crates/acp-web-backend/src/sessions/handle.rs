@@ -35,7 +35,10 @@ pub(super) enum PromptCompletion {
         text: String,
         streamed_message_id: Option<String>,
     },
-    Status(String),
+    Status {
+        message: String,
+        streamed_message_id: Option<String>,
+    },
     None,
 }
 
@@ -409,38 +412,80 @@ impl SessionHandle {
 
         let streamed_message_id = Self::streamed_message_id_for_prompt(&data, prompt_order);
         Self::clear_turn_state_locked(&mut data, prompt_order);
-        let completion = match completion {
+        let completion = Self::completion_with_streamed_message(completion, streamed_message_id);
+        data.pending_completions.insert(prompt_order, completion);
+
+        Ok(Self::drain_pending_completion_events(&mut data))
+    }
+
+    fn completion_with_streamed_message(
+        completion: PromptCompletion,
+        streamed_message_id: Option<String>,
+    ) -> PromptCompletion {
+        match completion {
             PromptCompletion::Reply { text, .. } => PromptCompletion::Reply {
                 text,
                 streamed_message_id,
             },
+            PromptCompletion::None if streamed_message_id.is_some() => PromptCompletion::Reply {
+                text: String::new(),
+                streamed_message_id,
+            },
+            PromptCompletion::Status { message, .. } => PromptCompletion::Status {
+                message,
+                streamed_message_id,
+            },
             completion => completion,
-        };
-        data.pending_completions.insert(prompt_order, completion);
-        let mut events = Vec::new();
-        loop {
-            let next_completion_order = data.next_completion_order;
-            let Some(completion) = data.pending_completions.remove(&next_completion_order) else {
-                break;
-            };
-            data.next_completion_order += 1;
-            match completion {
-                PromptCompletion::Reply {
-                    text,
-                    streamed_message_id,
-                } => events.extend(Self::complete_reply_events(
-                    &mut data,
-                    text,
-                    streamed_message_id,
-                )),
-                PromptCompletion::Status(message) => {
-                    events.push(Self::status_event(&mut data, message));
-                }
-                PromptCompletion::None => {}
-            }
         }
+    }
 
-        Ok(events)
+    fn drain_pending_completion_events(data: &mut SessionData) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        while let Some(completion) = Self::next_pending_completion(data) {
+            Self::push_completion_events(data, completion, &mut events);
+        }
+        events
+    }
+
+    fn next_pending_completion(data: &mut SessionData) -> Option<PromptCompletion> {
+        let next_completion_order = data.next_completion_order;
+        let completion = data.pending_completions.remove(&next_completion_order)?;
+        data.next_completion_order += 1;
+        Some(completion)
+    }
+
+    fn push_completion_events(
+        data: &mut SessionData,
+        completion: PromptCompletion,
+        events: &mut Vec<StreamEvent>,
+    ) {
+        match completion {
+            PromptCompletion::Reply {
+                text,
+                streamed_message_id,
+            } => events.extend(Self::complete_reply_events(data, text, streamed_message_id)),
+            PromptCompletion::Status {
+                message,
+                streamed_message_id,
+            } => Self::push_status_completion_events(data, events, message, streamed_message_id),
+            PromptCompletion::None => {}
+        }
+    }
+
+    fn push_status_completion_events(
+        data: &mut SessionData,
+        events: &mut Vec<StreamEvent>,
+        message: String,
+        streamed_message_id: Option<String>,
+    ) {
+        if streamed_message_id.is_some() {
+            events.extend(Self::complete_reply_events(
+                data,
+                String::new(),
+                streamed_message_id,
+            ));
+        }
+        events.push(Self::status_event(data, message));
     }
 
     pub(super) async fn mark_runtime_unavailable(

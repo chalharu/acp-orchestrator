@@ -3,12 +3,19 @@ use super::{
 };
 use crate::sessions::{PermissionResolutionOutcome, TurnHandle};
 use agent_client_protocol::{self as acp, schema};
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+const PROMPT_RESPONSE_NOTIFICATION_GRACE: Duration = Duration::from_millis(100);
+const PROMPT_RESPONSE_NOTIFICATION_IDLE: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub(super) struct BackendAcpClient {
     turn: Option<TurnHandle>,
     collected: Arc<Mutex<String>>,
+    reply_notify: Arc<tokio::sync::Notify>,
 }
 
 impl BackendAcpClient {
@@ -16,6 +23,7 @@ impl BackendAcpClient {
         Self {
             turn: Some(turn),
             collected: Arc::new(Mutex::new(String::new())),
+            reply_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -23,6 +31,7 @@ impl BackendAcpClient {
         Self {
             turn: None,
             collected: Arc::new(Mutex::new(String::new())),
+            reply_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -40,6 +49,40 @@ impl BackendAcpClient {
                 .lock()
                 .expect("mock reply buffer mutex should not be poisoned"),
         )
+    }
+
+    pub(super) async fn reply_text_after_notifications(&self) -> String {
+        self.wait_for_response_notifications().await;
+        self.reply_text()
+    }
+
+    pub(super) async fn take_reply_text_after_notifications(&self) -> String {
+        self.wait_for_response_notifications().await;
+        self.take_reply_text()
+    }
+
+    async fn wait_for_response_notifications(&self) {
+        let deadline = tokio::time::Instant::now() + PROMPT_RESPONSE_NOTIFICATION_GRACE;
+        loop {
+            let Some(wait_for) = self.next_notification_wait(deadline) else {
+                return;
+            };
+            if tokio::time::timeout(wait_for, self.reply_notify.notified())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    fn next_notification_wait(&self, deadline: tokio::time::Instant) -> Option<Duration> {
+        let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
+        Some(if self.reply_text().is_empty() {
+            remaining
+        } else {
+            remaining.min(PROMPT_RESPONSE_NOTIFICATION_IDLE)
+        })
     }
 
     pub(super) async fn request_permission(
@@ -87,6 +130,7 @@ impl BackendAcpClient {
                     .await
                     .map_err(to_acp_error)?;
             }
+            self.reply_notify.notify_one();
         }
         Ok(())
     }

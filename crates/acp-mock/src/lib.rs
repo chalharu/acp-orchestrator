@@ -40,6 +40,8 @@ use tracing::{error, info};
 pub use prompt::{MANUAL_CANCEL_TRIGGER, MANUAL_FAILURE_TRIGGER, MANUAL_PERMISSION_TRIGGER};
 pub use runtime::{MockAppError, run_with_args};
 
+const SESSION_UPDATE_FLUSH_DELAY: Duration = Duration::from_millis(10);
+
 #[derive(Debug, Clone)]
 pub struct MockConfig {
     pub response_delay: Duration,
@@ -248,6 +250,7 @@ impl MockAgent {
                     )),
                 ))
                 .await?;
+            tokio::time::sleep(SESSION_UPDATE_FLUSH_DELAY).await;
         }
         Ok(schema::NewSessionResponse::new(session_id))
     }
@@ -295,6 +298,7 @@ impl MockAgent {
                 )),
             ))
             .await?;
+        tokio::time::sleep(SESSION_UPDATE_FLUSH_DELAY).await;
         Ok(end_turn_prompt_response())
     }
 

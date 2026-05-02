@@ -280,6 +280,12 @@ struct RuntimeToolSummary {
     terminal_exit_code: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeTerminalSummary {
+    output: String,
+    exit_code: Option<u32>,
+}
+
 #[derive(Clone)]
 struct MockAgent {
     state: Arc<MockServerState>,
@@ -414,20 +420,30 @@ impl MockAgent {
         C: PermissionRequester + RuntimeToolRequester + Sync,
         N: SessionUpdateNotifier + Sync,
     {
-        if !prompt_uses_runtime_tools(prompt) {
-            return Ok(None);
+        if prompt_uses_runtime_tools(prompt) {
+            self.execute_runtime_tools_prompt(session_id, notifier, requester)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
         }
+    }
 
+    async fn execute_runtime_tools_prompt<C, N>(
+        &self,
+        session_id: &str,
+        notifier: &N,
+        requester: &C,
+    ) -> Result<schema::PromptResponse, acp::Error>
+    where
+        C: PermissionRequester + RuntimeToolRequester + Sync,
+        N: SessionUpdateNotifier + Sync,
+    {
         let tool_call_id = self.state.next_tool_call_id();
         self.send_runtime_tool_call(notifier, session_id, &tool_call_id)
             .await?;
-        let permission_outcome = requester
-            .request_permission(runtime_tools_permission_request(
-                session_id.to_string(),
-                tool_call_id.clone(),
-            ))
-            .await?
-            .outcome;
+        let permission_outcome =
+            request_runtime_tools_permission(requester, session_id, &tool_call_id).await?;
         if let Some(response) = prompt_response_for_permission_outcome(permission_outcome) {
             self.send_runtime_tool_status(
                 notifier,
@@ -436,22 +452,12 @@ impl MockAgent {
                 schema::ToolCallStatus::Failed,
             )
             .await?;
-            return Ok(Some(response));
+            return Ok(response);
         }
 
-        let summary = match self.run_runtime_tools(session_id, requester).await {
-            Ok(summary) => summary,
-            Err(error) => {
-                self.send_runtime_tool_status(
-                    notifier,
-                    session_id,
-                    &tool_call_id,
-                    schema::ToolCallStatus::Failed,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
+        let summary = self
+            .run_runtime_tools_or_fail(session_id, notifier, requester, &tool_call_id)
+            .await?;
         self.send_runtime_tool_status(
             notifier,
             session_id,
@@ -461,7 +467,6 @@ impl MockAgent {
         .await?;
         self.send_runtime_tool_reply(notifier, session_id.to_string(), summary)
             .await
-            .map(Some)
     }
 
     async fn send_runtime_tool_call<N: SessionUpdateNotifier + Sync>(
@@ -510,73 +515,42 @@ impl MockAgent {
         session_id: &str,
         requester: &C,
     ) -> Result<RuntimeToolSummary, acp::Error> {
-        let read = requester
-            .read_text_file(
-                schema::ReadTextFileRequest::new(session_id.to_string(), "/workspace/README.md")
-                    .line(1)
-                    .limit(1),
-            )
-            .await?;
-        requester
-            .write_text_file(schema::WriteTextFileRequest::new(
-                session_id.to_string(),
-                "/workspace/acp-mock-runtime-tools.txt",
-                "created by acp-mock runtime tools\n",
-            ))
-            .await?;
-        let terminal = requester
-            .create_terminal(
-                schema::CreateTerminalRequest::new(session_id.to_string(), "/bin/printf")
-                    .args(vec!["terminal-ok".to_string()])
-                    .cwd(PathBuf::from("/workspace"))
-                    .output_byte_limit(64),
-            )
-            .await?;
-        let terminal_id = terminal.terminal_id.to_string();
-        let exit = requester
-            .wait_for_terminal_exit(schema::WaitForTerminalExitRequest::new(
-                session_id.to_string(),
-                terminal_id.clone(),
-            ))
-            .await?;
-        let output = requester
-            .terminal_output(schema::TerminalOutputRequest::new(
-                session_id.to_string(),
-                terminal_id.clone(),
-            ))
-            .await?;
-        requester
-            .release_terminal(schema::ReleaseTerminalRequest::new(
-                session_id.to_string(),
-                terminal_id,
-            ))
-            .await?;
-        let sleep = requester
-            .create_terminal(
-                schema::CreateTerminalRequest::new(session_id.to_string(), "/bin/sleep")
-                    .args(vec!["5".to_string()])
-                    .cwd(PathBuf::from("/workspace")),
-            )
-            .await?;
-        let sleep_id = sleep.terminal_id.to_string();
-        requester
-            .kill_terminal(schema::KillTerminalRequest::new(
-                session_id.to_string(),
-                sleep_id.clone(),
-            ))
-            .await?;
-        requester
-            .release_terminal(schema::ReleaseTerminalRequest::new(
-                session_id.to_string(),
-                sleep_id,
-            ))
-            .await?;
+        let read_content = read_runtime_fixture(session_id, requester).await?;
+        write_runtime_fixture(session_id, requester).await?;
+        let terminal = run_runtime_printf(session_id, requester).await?;
+        kill_runtime_sleep(session_id, requester).await?;
 
         Ok(RuntimeToolSummary {
-            read_content: read.content,
-            terminal_output: output.output,
-            terminal_exit_code: exit.exit_status.exit_code,
+            read_content,
+            terminal_output: terminal.output,
+            terminal_exit_code: terminal.exit_code,
         })
+    }
+
+    async fn run_runtime_tools_or_fail<C, N>(
+        &self,
+        session_id: &str,
+        notifier: &N,
+        requester: &C,
+        tool_call_id: &str,
+    ) -> Result<RuntimeToolSummary, acp::Error>
+    where
+        C: RuntimeToolRequester + Sync,
+        N: SessionUpdateNotifier + Sync,
+    {
+        match self.run_runtime_tools(session_id, requester).await {
+            Ok(summary) => Ok(summary),
+            Err(error) => {
+                self.send_runtime_tool_status(
+                    notifier,
+                    session_id,
+                    tool_call_id,
+                    schema::ToolCallStatus::Failed,
+                )
+                .await?;
+                Err(error)
+            }
+        }
     }
 
     async fn send_runtime_tool_reply<N: SessionUpdateNotifier + Sync>(
@@ -687,6 +661,115 @@ fn runtime_tools_permission_request(
         ),
         permission_options(),
     )
+}
+
+async fn request_runtime_tools_permission<C: PermissionRequester + Sync>(
+    requester: &C,
+    session_id: &str,
+    tool_call_id: &str,
+) -> Result<schema::RequestPermissionOutcome, acp::Error> {
+    Ok(requester
+        .request_permission(runtime_tools_permission_request(
+            session_id.to_string(),
+            tool_call_id.to_string(),
+        ))
+        .await?
+        .outcome)
+}
+
+async fn read_runtime_fixture<C: RuntimeToolRequester + Sync>(
+    session_id: &str,
+    requester: &C,
+) -> Result<String, acp::Error> {
+    let response = requester
+        .read_text_file(
+            schema::ReadTextFileRequest::new(session_id.to_string(), "/workspace/README.md")
+                .line(1)
+                .limit(1),
+        )
+        .await?;
+    Ok(response.content)
+}
+
+async fn write_runtime_fixture<C: RuntimeToolRequester + Sync>(
+    session_id: &str,
+    requester: &C,
+) -> Result<(), acp::Error> {
+    requester
+        .write_text_file(schema::WriteTextFileRequest::new(
+            session_id.to_string(),
+            "/workspace/acp-mock-runtime-tools.txt",
+            "created by acp-mock runtime tools\n",
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn run_runtime_printf<C: RuntimeToolRequester + Sync>(
+    session_id: &str,
+    requester: &C,
+) -> Result<RuntimeTerminalSummary, acp::Error> {
+    let terminal = requester
+        .create_terminal(
+            schema::CreateTerminalRequest::new(session_id.to_string(), "/bin/printf")
+                .args(vec!["terminal-ok".to_string()])
+                .cwd(PathBuf::from("/workspace"))
+                .output_byte_limit(64),
+        )
+        .await?;
+    let terminal_id = terminal.terminal_id.to_string();
+    let exit = requester
+        .wait_for_terminal_exit(schema::WaitForTerminalExitRequest::new(
+            session_id.to_string(),
+            terminal_id.clone(),
+        ))
+        .await?;
+    let output = requester
+        .terminal_output(schema::TerminalOutputRequest::new(
+            session_id.to_string(),
+            terminal_id.clone(),
+        ))
+        .await?;
+    release_runtime_terminal(session_id, requester, terminal_id).await?;
+    Ok(RuntimeTerminalSummary {
+        output: output.output,
+        exit_code: exit.exit_status.exit_code,
+    })
+}
+
+async fn kill_runtime_sleep<C: RuntimeToolRequester + Sync>(
+    session_id: &str,
+    requester: &C,
+) -> Result<(), acp::Error> {
+    let sleep = requester
+        .create_terminal(
+            schema::CreateTerminalRequest::new(session_id.to_string(), "/bin/sleep")
+                .args(vec!["5".to_string()])
+                .cwd(PathBuf::from("/workspace")),
+        )
+        .await?;
+    let sleep_id = sleep.terminal_id.to_string();
+    requester
+        .kill_terminal(schema::KillTerminalRequest::new(
+            session_id.to_string(),
+            sleep_id.clone(),
+        ))
+        .await?;
+    release_runtime_terminal(session_id, requester, sleep_id).await
+}
+
+async fn release_runtime_terminal<C: RuntimeToolRequester + Sync>(
+    session_id: &str,
+    requester: &C,
+    terminal_id: String,
+) -> Result<(), acp::Error> {
+    requester
+        .release_terminal(schema::ReleaseTerminalRequest::new(
+            session_id.to_string(),
+            terminal_id,
+        ))
+        .await?;
+    Ok(())
 }
 
 fn permission_options() -> Vec<schema::PermissionOption> {

@@ -494,6 +494,24 @@ async fn mock_agent_emits_startup_hints_when_enabled() {
 
 #[tokio::test]
 async fn mock_agent_runtime_tool_trigger_exercises_client_tools() {
+    let run = run_runtime_tool_prompt().await;
+
+    assert_eq!(
+        run.response,
+        schema::PromptResponse::new(schema::StopReason::EndTurn)
+    );
+    assert_eq!(run.requester.permission_count.load(Ordering::Relaxed), 1);
+    assert_runtime_request_sequence(&run.requester);
+    assert_runtime_notifications(&run.notifications);
+}
+
+struct RuntimePromptRun {
+    requester: StubRuntimeRequester,
+    response: schema::PromptResponse,
+    notifications: Vec<schema::SessionNotification>,
+}
+
+async fn run_runtime_tool_prompt() -> RuntimePromptRun {
     let requester = StubRuntimeRequester::new();
     let notifier = RecordingSessionUpdateNotifier::new();
     let agent = MockAgent::new(Arc::new(MockServerState::new(MockConfig::default())));
@@ -512,13 +530,16 @@ async fn mock_agent_runtime_tool_trigger_exercises_client_tools() {
         .await
         .expect("runtime tool prompt should resolve");
 
-    assert_eq!(
+    RuntimePromptRun {
+        requester,
         response,
-        schema::PromptResponse::new(schema::StopReason::EndTurn)
-    );
-    assert_eq!(requester.permission_count.load(Ordering::Relaxed), 1);
+        notifications: notifier.notifications(),
+    }
+}
+
+fn assert_runtime_request_sequence(requester: &StubRuntimeRequester) {
     assert_eq!(
-        requester.calls(),
+        requester.calls().as_slice(),
         vec![
             "read",
             "write",
@@ -530,8 +551,11 @@ async fn mock_agent_runtime_tool_trigger_exercises_client_tools() {
             "kill_terminal",
             "release_terminal",
         ]
+        .as_slice()
     );
-    let notifications = notifier.notifications();
+}
+
+fn assert_runtime_notifications(notifications: &[schema::SessionNotification]) {
     assert!(matches!(
         notifications[0].update,
         schema::SessionUpdate::ToolCall(ref call)

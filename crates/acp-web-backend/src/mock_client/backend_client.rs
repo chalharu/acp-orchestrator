@@ -1078,16 +1078,17 @@ fn prepare_chroot_terminal_child(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_nonnegative_syscall(result: libc::c_int) -> std::io::Result<()> {
-    if result >= 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+    check_syscall(result >= 0)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_zero_syscall(result: libc::c_int) -> std::io::Result<()> {
-    if result == 0 {
+    check_syscall(result == 0)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn check_syscall(success: bool) -> std::io::Result<()> {
+    if success {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())

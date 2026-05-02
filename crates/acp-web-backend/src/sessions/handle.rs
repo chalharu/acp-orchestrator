@@ -407,27 +407,23 @@ impl SessionHandle {
         prompt_order: u64,
         call: ToolCallMetadata,
     ) -> Result<Option<StreamEvent>, SessionStoreError> {
-        let mut data = self.data.lock().await;
-        if data.status == SessionStatus::Closed {
-            return Err(SessionStoreError::Closed);
-        }
-        let Some(active_turn) = data.active_turn.as_ref() else {
-            return Ok(None);
-        };
-        if active_turn.prompt_order != prompt_order || active_turn.cancelled {
-            return Ok(None);
-        }
-        data.latest_sequence += 1;
-        Ok(Some(StreamEvent {
-            sequence: data.latest_sequence,
-            payload: StreamEventPayload::ToolCall { call },
-        }))
+        self.stream_active_turn_event(prompt_order, StreamEventPayload::ToolCall { call })
+            .await
     }
 
     pub(super) async fn stream_tool_call_update(
         &self,
         prompt_order: u64,
         update: ToolCallMetadata,
+    ) -> Result<Option<StreamEvent>, SessionStoreError> {
+        self.stream_active_turn_event(prompt_order, StreamEventPayload::ToolCallUpdate { update })
+            .await
+    }
+
+    async fn stream_active_turn_event(
+        &self,
+        prompt_order: u64,
+        payload: StreamEventPayload,
     ) -> Result<Option<StreamEvent>, SessionStoreError> {
         let mut data = self.data.lock().await;
         if data.status == SessionStatus::Closed {
@@ -442,7 +438,7 @@ impl SessionHandle {
         data.latest_sequence += 1;
         Ok(Some(StreamEvent {
             sequence: data.latest_sequence,
-            payload: StreamEventPayload::ToolCallUpdate { update },
+            payload,
         }))
     }
 

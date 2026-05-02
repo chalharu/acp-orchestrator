@@ -1,4 +1,5 @@
 use super::*;
+use crate::contract_permissions::ToolCallMetadata;
 
 async fn register_readme_permission(
     pending: &PendingPrompt,
@@ -42,6 +43,17 @@ async fn expect_snapshot_without_pending_permissions(
         snapshot_event.payload,
         StreamEventPayload::SessionSnapshot { session } if session.pending_permissions.is_empty()
     ));
+}
+
+fn tool_call_metadata(id: &str) -> ToolCallMetadata {
+    ToolCallMetadata {
+        tool_call_id: id.to_string(),
+        title: Some(format!("Tool {id}")),
+        kind: Some("read".to_string()),
+        status: Some("pending".to_string()),
+        raw_input: None,
+        raw_output: None,
+    }
 }
 
 #[tokio::test]
@@ -170,6 +182,55 @@ async fn permission_requests_for_non_active_prompts_are_cancelled() {
 }
 
 #[tokio::test]
+async fn tool_call_events_without_active_turns_are_ignored() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "tool please".to_string())
+        .await
+        .expect("prompt submission should succeed");
+
+    pending
+        .turn_handle()
+        .stream_tool_call(tool_call_metadata("tool_1"))
+        .await
+        .expect("inactive turns should ignore tool events without failing");
+}
+
+#[tokio::test]
+async fn tool_call_events_for_cancelled_turns_are_ignored() {
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let pending = store
+        .submit_prompt("alice", &session.id, "tool please".to_string())
+        .await
+        .expect("prompt submission should succeed");
+    let _cancel_rx = pending
+        .turn_handle()
+        .start_turn()
+        .await
+        .expect("starting the turn should succeed");
+
+    assert!(
+        store
+            .cancel_active_turn("alice", &session.id)
+            .await
+            .expect("cancelling should succeed")
+    );
+    pending
+        .turn_handle()
+        .stream_tool_call_update(tool_call_metadata("tool_1"))
+        .await
+        .expect("cancelled turns should ignore tool events without failing");
+}
+
+#[tokio::test]
 async fn cancelling_the_active_turn_cancels_pending_permissions() {
     let store = SessionStore::new(4);
     let session = store
@@ -282,6 +343,13 @@ async fn closed_sessions_reject_permission_registration_resolution_and_cancellat
         .await
         .expect_err("closed sessions should reject turn cancellation");
     assert_eq!(cancel_error, SessionStoreError::Closed);
+
+    let tool_error = pending
+        .turn_handle()
+        .stream_tool_call(tool_call_metadata("tool_1"))
+        .await
+        .expect_err("closed sessions should reject tool events");
+    assert_eq!(tool_error, SessionStoreError::Closed);
 }
 
 #[tokio::test]

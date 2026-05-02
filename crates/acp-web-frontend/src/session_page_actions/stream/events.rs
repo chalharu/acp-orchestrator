@@ -204,7 +204,7 @@ fn mark_session_closed(sessions: &mut [acp_contracts_sessions::SessionListItem],
 #[cfg(test)]
 mod tests {
     use acp_contracts_messages::{ConversationMessage, MessageRole};
-    use acp_contracts_permissions::PermissionRequest;
+    use acp_contracts_permissions::{PermissionRequest, ToolCallMetadata};
     use acp_contracts_sessions::{SessionListItem, SessionSnapshot, SessionStatus};
     use acp_contracts_slash::{CompletionCandidate, CompletionKind};
     use acp_contracts_stream::{StreamEvent, StreamEventPayload};
@@ -406,6 +406,42 @@ mod tests {
                 signals,
             );
             assert_eq!(signals.entries.get().len(), 2);
+        });
+    }
+
+    #[test]
+    fn tool_call_events_do_not_mutate_visible_session_state() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let signals = session_signals();
+            let tool_call = ToolCallMetadata {
+                tool_call_id: "tool_1".to_string(),
+                title: Some("Read".to_string()),
+                kind: Some("read".to_string()),
+                status: Some("pending".to_string()),
+                raw_input: None,
+                raw_output: None,
+            };
+
+            handle_sse_event(
+                StreamEvent {
+                    sequence: 5,
+                    payload: StreamEventPayload::ToolCall {
+                        call: tool_call.clone(),
+                    },
+                },
+                signals,
+            );
+            handle_sse_event(
+                StreamEvent {
+                    sequence: 6,
+                    payload: StreamEventPayload::ToolCallUpdate { update: tool_call },
+                },
+                signals,
+            );
+
+            assert!(signals.entries.get().is_empty());
+            assert!(signals.pending_permissions.get().is_empty());
         });
     }
 

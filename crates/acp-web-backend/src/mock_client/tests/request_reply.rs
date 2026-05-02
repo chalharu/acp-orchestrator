@@ -121,6 +121,105 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}})
 "#;
 
+const FAKE_STDIO_RUNTIME_TOOLS_SCRIPT: &str = r#"
+import json
+import sys
+
+session_id = "stdio_0"
+next_request_id = 1
+
+def send(message):
+    print(json.dumps(message), flush=True)
+
+def request_client(method, params):
+    global next_request_id
+    request_id = f"client_{next_request_id}"
+    next_request_id += 1
+    send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    while True:
+        response = json.loads(sys.stdin.readline())
+        if response.get("id") != request_id:
+            continue
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        return response.get("result", {})
+
+def send_chunk(text):
+    send({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}
+            }
+        }
+    })
+
+def run_runtime_tools():
+    read = request_client("fs/read_text_file", {
+        "sessionId": session_id,
+        "path": "/workspace/README.md",
+        "line": 1,
+        "limit": 1
+    })
+    request_client("fs/write_text_file", {
+        "sessionId": session_id,
+        "path": "/workspace/new.txt",
+        "content": "created by runtime tool"
+    })
+    terminal = request_client("terminal/create", {
+        "sessionId": session_id,
+        "command": "/bin/printf",
+        "args": ["terminal-ok"],
+        "cwd": "/workspace",
+        "outputByteLimit": 64
+    })
+    terminal_id = terminal["terminalId"]
+    request_client("terminal/wait_for_exit", {"sessionId": session_id, "terminalId": terminal_id})
+    output = request_client("terminal/output", {"sessionId": session_id, "terminalId": terminal_id})
+    request_client("terminal/release", {"sessionId": session_id, "terminalId": terminal_id})
+    sleeping = request_client("terminal/create", {
+        "sessionId": session_id,
+        "command": "/bin/sleep",
+        "args": ["5"],
+        "cwd": "/workspace"
+    })
+    request_client("terminal/kill", {"sessionId": session_id, "terminalId": sleeping["terminalId"]})
+    request_client("terminal/release", {"sessionId": session_id, "terminalId": sleeping["terminalId"]})
+    return f"runtime tools: {read['content']} / {output['output']}"
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    request_id = request.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        capabilities = request.get("params", {}).get("clientCapabilities", {})
+        fs = capabilities.get("fs", {})
+        if fs.get("readTextFile") is not True or fs.get("writeTextFile") is not True or capabilities.get("terminal") is not True:
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "missing runtime capabilities"}})
+            continue
+        send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": {"loadSession": False},
+                "agentInfo": {"name": "stdio-runtime-test", "title": "Runtime Test", "version": "0"}
+            }
+        })
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"sessionId": session_id}})
+    elif method == "session/prompt":
+        send_chunk(run_runtime_tools())
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+    else:
+        send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}})
+"#;
+
 async fn permission_roundtrip_context() -> (
     MockClient,
     SessionStore,
@@ -184,6 +283,20 @@ async fn approve_permission_request(
 
 fn temp_stdio_working_dir() -> PathBuf {
     std::env::temp_dir().join(format!("acp-stdio-agent-{}", uuid::Uuid::new_v4().simple()))
+}
+
+#[cfg(unix)]
+fn temp_stdio_chroot_checkout() -> (PathBuf, PathBuf) {
+    let root = temp_stdio_working_dir();
+    let chroot_root = root
+        .join(crate::agent_runtime::AGENT_RUNTIMES_DIR_NAME)
+        .join("session_0")
+        .join("root");
+    let checkout = chroot_root.join("workspace");
+    std::fs::create_dir_all(&checkout).expect("stdio chroot checkout should be created");
+    std::fs::write(chroot_root.join(".acp-test-skip-chroot-preexec"), b"")
+        .expect("test chroot pre-exec marker should be created");
+    (root, checkout)
 }
 
 fn python3_path() -> String {
@@ -301,6 +414,42 @@ async fn request_reply_can_drive_stdio_acp_agents() {
 
     assert_eq!(reply, ReplyResult::Reply("stdio reply".to_string()));
     let _ = std::fs::remove_dir_all(working_dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn request_reply_services_stdio_runtime_tool_requests() {
+    let client = MockClient::with_timeout("127.0.0.1:9".to_string(), Duration::from_secs(5))
+        .expect("client construction should succeed");
+    let store = SessionStore::new(4);
+    let session = store
+        .create_session("alice", "w_test")
+        .await
+        .expect("session creation should succeed");
+    let (root, checkout) = temp_stdio_chroot_checkout();
+    std::fs::write(checkout.join("README.md"), "checkout-read\nsecond")
+        .expect("runtime tool read target should be seeded");
+    bind_stdio_script(
+        &client,
+        &session.id,
+        &checkout,
+        FAKE_STDIO_RUNTIME_TOOLS_SCRIPT,
+    )
+    .await;
+
+    let reply = request_stdio_reply(&client, &store, &session.id, "use runtime tools")
+        .await
+        .expect("runtime tool stdio prompt should succeed");
+
+    assert_eq!(
+        reply,
+        ReplyResult::Reply("runtime tools: checkout-read / terminal-ok".to_string())
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("new.txt")).expect("runtime write should persist"),
+        "created by runtime tool"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

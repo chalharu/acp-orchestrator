@@ -266,11 +266,7 @@ async fn sidebar_shows_current_workspace_label() -> Result<()> {
             .open_app_and_start_chat(BROWSER_WORKSPACE_NAME)
             .await?;
         browser.ensure_sidebar_visible().await?;
-
-        assert_eq!(
-            browser.session_sidebar_workspace_label().await?,
-            format!("Workspace: {BROWSER_WORKSPACE_NAME}")
-        );
+        assert_session_sidebar_workspace(&browser, BROWSER_WORKSPACE_NAME).await?;
 
         Ok(())
     }

@@ -374,4 +374,33 @@ mod tests {
             ))]
         );
     }
+
+    #[test]
+    fn event_updates_ignore_tool_call_progress_events() {
+        let tool_call = acp_contracts_permissions::ToolCallMetadata {
+            tool_call_id: "tool_1".to_string(),
+            title: Some("Read".to_string()),
+            kind: Some("read".to_string()),
+            status: Some("pending".to_string()),
+            raw_input: None,
+            raw_output: None,
+        };
+
+        assert!(
+            event_updates(StreamEvent {
+                sequence: 3,
+                payload: StreamEventPayload::ToolCall {
+                    call: tool_call.clone(),
+                },
+            })
+            .is_empty()
+        );
+        assert!(
+            event_updates(StreamEvent {
+                sequence: 4,
+                payload: StreamEventPayload::ToolCallUpdate { update: tool_call },
+            })
+            .is_empty()
+        );
+    }
 }

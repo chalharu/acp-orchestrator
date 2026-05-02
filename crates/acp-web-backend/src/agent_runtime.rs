@@ -4,6 +4,7 @@ use std::{
     ffi::OsString,
     fmt::Display,
     fs,
+    io::{BufRead, Read},
     net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -386,6 +387,7 @@ impl FsAgentRuntimeManager {
             acp_endpoint,
             port_reservation,
         } = self.prepare_chroot_launch(config, launch)?;
+        log_agent_launch(config.mode, launch, &command, acp_endpoint.as_ref());
         let mut child =
             spawn_with_timeout(command, config.timeout, Some(cgroup), port_reservation)?;
         if let Err(error) =
@@ -413,8 +415,11 @@ impl FsAgentRuntimeManager {
             port_reservation,
         } = prepare_host_launch(config, launch)?;
         if acp_endpoint.is_none() {
-            return Ok(LaunchOutcome::Stdio(agent_stdio_metadata(config, launch)));
+            let metadata = agent_stdio_metadata(config, launch);
+            log_stdio_agent_launch(config.mode, launch, &metadata);
+            return Ok(LaunchOutcome::Stdio(metadata));
         }
+        log_agent_launch(config.mode, launch, &command, acp_endpoint.as_ref());
         let mut child = spawn_with_timeout(command, config.timeout, None, port_reservation)?;
         if let Err(error) =
             wait_for_acp_readiness(acp_endpoint.as_ref(), config.timeout, &mut child)
@@ -791,9 +796,54 @@ fn build_agent_command(
         &agent_env(config, launch, config.mode, endpoint),
     );
     command.stdin(Stdio::null());
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
     command
+}
+
+fn log_agent_launch(
+    mode: AgentLaunchMode,
+    launch: &AgentSessionLaunch<'_>,
+    command: &Command,
+    endpoint: Option<&AcpEndpoint>,
+) {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let acp_address = endpoint.map(|endpoint| endpoint.address.as_str());
+    tracing::info!(
+        session_id = launch.session_id,
+        workspace_id = launch.workspace_id,
+        mode = mode.as_str(),
+        program,
+        ?args,
+        acp_address,
+        "launching ACP agent process"
+    );
+}
+
+fn log_stdio_agent_launch(
+    mode: AgentLaunchMode,
+    launch: &AgentSessionLaunch<'_>,
+    metadata: &AgentLaunchMetadata,
+) {
+    let Some(stdio) = metadata.stdio.as_ref() else {
+        return;
+    };
+    let Some((program, args)) = stdio.argv.split_first() else {
+        return;
+    };
+    tracing::info!(
+        session_id = launch.session_id,
+        workspace_id = launch.workspace_id,
+        mode = mode.as_str(),
+        program,
+        ?args,
+        working_dir = %stdio.working_dir.display(),
+        "prepared ACP stdio agent launch"
+    );
 }
 
 fn agent_stdio_metadata(
@@ -1344,11 +1394,15 @@ fn spawn_agent_child(
     let spawn_result = command.spawn();
     drop(port_reservation);
     match spawn_result {
-        Ok(child) => Ok(AgentChild {
-            child,
-            cgroup,
-            metadata: AgentLaunchMetadata::default(),
-        }),
+        Ok(mut child) => {
+            drain_agent_process_output(child.id(), "stdout", child.stdout.take(), false);
+            drain_agent_process_output(child.id(), "stderr", child.stderr.take(), true);
+            Ok(AgentChild {
+                child,
+                cgroup,
+                metadata: AgentLaunchMetadata::default(),
+            })
+        }
         Err(error) => {
             if let Some(cgroup) = cgroup.as_ref() {
                 cgroup.remove();
@@ -1356,6 +1410,27 @@ fn spawn_agent_child(
             Err(error)
         }
     }
+}
+
+fn drain_agent_process_output<R>(pid: u32, stream_name: &'static str, stream: Option<R>, warn: bool)
+where
+    R: Read + Send + 'static,
+{
+    let Some(stream) = stream else {
+        return;
+    };
+    let _output_thread = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stream)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if warn {
+                tracing::warn!(pid, stream = stream_name, output = %line, "ACP agent process output");
+            } else {
+                tracing::debug!(pid, stream = stream_name, output = %line, "ACP agent process output");
+            }
+        }
+    });
 }
 
 fn cleanup_unsent_spawn_result(result: std::io::Result<AgentChild>, cgroup: Option<&AgentCgroup>) {

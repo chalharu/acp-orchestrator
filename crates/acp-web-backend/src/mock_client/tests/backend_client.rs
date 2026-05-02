@@ -170,6 +170,40 @@ async fn backend_acp_client_collects_agent_message_chunks() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn muted_backend_acp_client_discards_chunks_until_streaming_starts() {
+    let (_store, _session_id, pending, mut receiver) =
+        pending_permission_context("stream please").await;
+    let client = BackendAcpClient::new_muted(pending.turn_handle());
+
+    client
+        .session_notification(schema::SessionNotification::new(
+            "mock_0",
+            schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new("replay".into())),
+        ))
+        .await
+        .expect("muted session updates should be accepted");
+    client.enable_streaming();
+    client
+        .session_notification(schema::SessionNotification::new(
+            "mock_0",
+            schema::SessionUpdate::AgentMessageChunk(schema::ContentChunk::new("fresh".into())),
+        ))
+        .await
+        .expect("streaming session updates should be accepted");
+
+    assert_eq!(client.reply_text(), "fresh");
+    let event = receiver
+        .recv()
+        .await
+        .expect("fresh assistant chunk should be published");
+    assert!(matches!(
+        event.payload,
+        crate::contract_stream::StreamEventPayload::ConversationMessage { message, .. }
+            if message.text == "fresh"
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn prompt_response_notification_wait_stops_after_grace_deadline() {
     let client = BackendAcpClient::without_turn();
     let expired_deadline = tokio::time::Instant::now()

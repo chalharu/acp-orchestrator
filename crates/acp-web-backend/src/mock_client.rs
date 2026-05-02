@@ -17,6 +17,7 @@ use futures_util::{
     sink::unfold,
 };
 use snafu::prelude::*;
+use tokio::io::AsyncBufReadExt as TokioAsyncBufReadExt;
 use tokio::net::{
     TcpStream,
     tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -58,7 +59,7 @@ type ConnectedOperation<T> = Box<
         + Send,
 >;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const CONNECT_RETRY_MAX: Duration = Duration::from_secs(10);
+const CONNECT_RETRY_MAX: Duration = Duration::from_secs(30);
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 type UpstreamSessions = Arc<tokio::sync::Mutex<HashMap<String, String>>>;
 type SessionWorkingDirs = Arc<tokio::sync::Mutex<HashMap<String, PathBuf>>>;
@@ -136,7 +137,9 @@ pub enum MockClientError {
     #[snafu(display("reading the current working directory failed"))]
     ReadCurrentDirectory { source: std::io::Error },
 
-    #[snafu(display("connecting to the ACP server at {address} failed"))]
+    #[snafu(display(
+        "connecting to the ACP server at {address} failed: {source}. If this agent uses stdio ACP, remove ACP port placeholders from the profile command."
+    ))]
     Connect {
         source: std::io::Error,
         address: String,
@@ -402,7 +405,7 @@ async fn drive_acp_roundtrip(
     upstream_sessions: UpstreamSessions,
 ) -> Result<ReplyResult> {
     let backend_session_id = turn.session_id().to_string();
-    let client = BackendAcpClient::new(turn.clone());
+    let client = BackendAcpClient::new_muted(turn.clone());
     let operation = roundtrip_operation(turn);
 
     drive_acp_operation(
@@ -451,9 +454,11 @@ async fn run_prompt_roundtrip(
         capabilities.load_session,
     )
     .await?;
+    let _ = client.take_reply_text_after_notifications().await;
     if *cancel_rx.borrow() {
         return Ok(ReplyResult::Status("turn cancelled".to_string()));
     }
+    client.enable_streaming();
     prompt_session(
         &conn,
         &client,
@@ -506,6 +511,11 @@ async fn drive_acp_session_prime(
 
 async fn connect_stream(mock_address: &str, retry_for: Duration) -> Result<TcpStream> {
     let deadline = Instant::now() + retry_for;
+    tracing::debug!(
+        address = mock_address,
+        ?retry_for,
+        "connecting to ACP server"
+    );
     let source = loop {
         match TcpStream::connect(mock_address).await {
             Ok(stream) => return Ok(stream),
@@ -514,6 +524,11 @@ async fn connect_stream(mock_address: &str, retry_for: Duration) -> Result<TcpSt
         }
         tokio::time::sleep(next_connect_retry_delay(deadline)).await;
     };
+    tracing::warn!(
+        address = mock_address,
+        %source,
+        "ACP server connection attempts exhausted"
+    );
     Err(MockClientError::Connect {
         source,
         address: mock_address.to_string(),
@@ -527,7 +542,9 @@ fn next_connect_retry_delay(deadline: Instant) -> Duration {
 }
 
 fn connect_retry_budget(request_timeout: Duration) -> Duration {
-    (request_timeout / 2).min(CONNECT_RETRY_MAX)
+    request_timeout
+        .saturating_sub(CONNECT_RETRY_DELAY)
+        .min(CONNECT_RETRY_MAX)
 }
 
 async fn prompt_session(
@@ -902,9 +919,30 @@ fn spawn_stdio_agent(metadata: &AgentStdioMetadata) -> Result<tokio::process::Ch
     command.current_dir(&metadata.working_dir);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::piped());
     command.kill_on_drop(true);
-    command.spawn().context(SpawnStdioSnafu)
+    tracing::info!(
+        program = %metadata.argv[0],
+        args = ?&metadata.argv[1..],
+        working_dir = %metadata.working_dir.display(),
+        "spawning ACP stdio agent"
+    );
+    let mut child = command.spawn().context(SpawnStdioSnafu)?;
+    drain_stdio_agent_stderr(&mut child);
+    Ok(child)
+}
+
+fn drain_stdio_agent_stderr(child: &mut tokio::process::Child) {
+    let Some(stderr) = child.stderr.take() else {
+        return;
+    };
+    let pid = child.id();
+    let _stderr_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::warn!(pid, stderr = %line, "ACP stdio agent stderr");
+        }
+    });
 }
 
 async fn terminate_stdio_child(child: &mut tokio::process::Child) {

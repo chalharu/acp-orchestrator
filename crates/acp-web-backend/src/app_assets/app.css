@@ -1181,7 +1181,7 @@ textarea:focus-visible {
 }
 
 .agent-profile-form {
-  grid-template-columns: minmax(12rem, 0.9fr) minmax(18rem, 1.6fr) minmax(10rem, 0.7fr) auto;
+  grid-template-columns: minmax(10rem, 0.9fr) minmax(14rem, 1.6fr) minmax(9rem, 0.7fr) max-content;
   align-items: start;
 }
 
@@ -1258,6 +1258,20 @@ textarea:focus-visible {
 
 .agent-profile-table td {
   vertical-align: top;
+}
+
+.agent-profile-table .account-form__field--compact {
+  min-width: 0;
+}
+
+.agent-profile-table input,
+.agent-profile-table select,
+.agent-profile-table textarea {
+  max-width: 100%;
+}
+
+.agent-profile-table .account-row__actions-toolbar {
+  flex-wrap: nowrap;
 }
 
 .account-table th {
@@ -1628,6 +1642,10 @@ select {
 @media (max-width: 960px) {
   .account-form--create {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .agent-profile-form__command {
+    grid-column: 1 / -1;
   }
 
   .settings-layout {

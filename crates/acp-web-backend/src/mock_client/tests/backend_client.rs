@@ -383,8 +383,8 @@ async fn backend_acp_client_terminal_lifecycle_works_for_standard_checkout() {
 async fn assert_terminal_output_is_bounded(client: &BackendAcpClient) {
     let created = client
         .create_terminal(
-            schema::CreateTerminalRequest::new("mock_0", "/bin/printf")
-                .args(vec!["abcdef".to_string()])
+            schema::CreateTerminalRequest::new("mock_0", "/bin/sh")
+                .args(vec!["-c".to_string(), "printf abcdef".to_string()])
                 .cwd(PathBuf::from("/workspace"))
                 .output_byte_limit(3),
         )
@@ -419,7 +419,7 @@ async fn assert_terminal_cwd_escape_rejected(client: &BackendAcpClient) {
     assert!(
         client
             .create_terminal(
-                schema::CreateTerminalRequest::new("mock_0", "/bin/printf")
+                schema::CreateTerminalRequest::new("mock_0", "/bin/sh")
                     .cwd(PathBuf::from("/workspace/../"))
             )
             .await
@@ -431,8 +431,8 @@ async fn assert_terminal_cwd_escape_rejected(client: &BackendAcpClient) {
 async fn assert_terminal_is_killable(client: &BackendAcpClient) {
     let sleep = client
         .create_terminal(
-            schema::CreateTerminalRequest::new("mock_0", "/bin/sleep")
-                .args(vec!["5".to_string()])
+            schema::CreateTerminalRequest::new("mock_0", "/bin/sh")
+                .args(vec!["-c".to_string(), "sleep 5".to_string()])
                 .cwd(PathBuf::from("/workspace")),
         )
         .await
@@ -495,8 +495,8 @@ async fn backend_acp_client_terminal_wait_coordinates_with_release() {
 async fn create_sleeping_terminal(client: &BackendAcpClient) -> String {
     client
         .create_terminal(
-            schema::CreateTerminalRequest::new("mock_0", "/bin/sleep")
-                .args(vec!["5".to_string()])
+            schema::CreateTerminalRequest::new("mock_0", "/bin/sh")
+                .args(vec!["-c".to_string(), "sleep 5".to_string()])
                 .cwd(PathBuf::from("/workspace")),
         )
         .await

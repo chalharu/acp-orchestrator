@@ -157,8 +157,8 @@ def run_runtime_tools():
     })
     terminal = request_client("terminal/create", {
         "sessionId": session_id,
-        "command": "/bin/printf",
-        "args": ["terminal-ok"],
+        "command": "/bin/sh",
+        "args": ["-c", "printf terminal-ok"],
         "cwd": "/workspace",
         "outputByteLimit": 64
     })
@@ -168,8 +168,8 @@ def run_runtime_tools():
     request_client("terminal/release", {"sessionId": session_id, "terminalId": terminal_id})
     sleeping = request_client("terminal/create", {
         "sessionId": session_id,
-        "command": "/bin/sleep",
-        "args": ["5"],
+        "command": "/bin/sh",
+        "args": ["-c", "sleep 5"],
         "cwd": "/workspace"
     })
     request_client("terminal/kill", {"sessionId": session_id, "terminalId": sleeping["terminalId"]})

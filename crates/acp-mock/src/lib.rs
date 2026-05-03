@@ -45,6 +45,9 @@ pub use prompt::{
 pub use runtime::{MockAppError, run_with_args};
 
 const SESSION_UPDATE_FLUSH_DELAY: Duration = Duration::from_millis(10);
+const RUNTIME_TERMINAL_COMMAND: &str = "/bin/sh";
+const RUNTIME_TERMINAL_PRINTF_SCRIPT: &str = "printf terminal-ok";
+const RUNTIME_TERMINAL_SLEEP_SCRIPT: &str = "sleep 5";
 
 #[derive(Debug, Clone)]
 pub struct MockConfig {
@@ -531,7 +534,7 @@ impl MockAgent {
                         .raw_input(serde_json::json!({
                             "read": "/workspace/README.md",
                             "write": "/workspace/acp-mock-runtime-tools.txt",
-                            "terminal": "/bin/printf",
+                            "terminal": format!("{RUNTIME_TERMINAL_COMMAND} -c '{RUNTIME_TERMINAL_PRINTF_SCRIPT}'"),
                         })),
                 ),
             ))
@@ -774,8 +777,8 @@ async fn run_runtime_printf<C: RuntimeToolRequester + Sync>(
 ) -> Result<RuntimeTerminalSummary, acp::Error> {
     let terminal = requester
         .create_terminal(
-            schema::CreateTerminalRequest::new(session_id.to_string(), "/bin/printf")
-                .args(vec!["terminal-ok".to_string()])
+            schema::CreateTerminalRequest::new(session_id.to_string(), RUNTIME_TERMINAL_COMMAND)
+                .args(runtime_terminal_args(RUNTIME_TERMINAL_PRINTF_SCRIPT))
                 .cwd(PathBuf::from("/workspace"))
                 .output_byte_limit(64),
         )
@@ -806,8 +809,8 @@ async fn kill_runtime_sleep<C: RuntimeToolRequester + Sync>(
 ) -> Result<(), acp::Error> {
     let sleep = requester
         .create_terminal(
-            schema::CreateTerminalRequest::new(session_id.to_string(), "/bin/sleep")
-                .args(vec!["5".to_string()])
+            schema::CreateTerminalRequest::new(session_id.to_string(), RUNTIME_TERMINAL_COMMAND)
+                .args(runtime_terminal_args(RUNTIME_TERMINAL_SLEEP_SCRIPT))
                 .cwd(PathBuf::from("/workspace")),
         )
         .await?;
@@ -819,6 +822,10 @@ async fn kill_runtime_sleep<C: RuntimeToolRequester + Sync>(
         ))
         .await?;
     release_runtime_terminal(session_id, requester, sleep_id).await
+}
+
+fn runtime_terminal_args(script: &str) -> Vec<String> {
+    vec!["-c".to_string(), script.to_string()]
 }
 
 async fn release_runtime_terminal<C: RuntimeToolRequester + Sync>(

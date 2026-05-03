@@ -182,9 +182,16 @@ impl RuntimeToolRequester for StubRuntimeRequester {
     ) -> Result<schema::CreateTerminalResponse, acp::Error> {
         self.push_call("create_terminal");
         self.fail_if_configured("create_terminal")?;
-        match request.command.as_str() {
-            "/bin/printf" => Ok(schema::CreateTerminalResponse::new("printf")),
-            "/bin/sleep" => Ok(schema::CreateTerminalResponse::new("sleep")),
+        if request.command != "/bin/sh" {
+            return Err(acp::Error::invalid_params());
+        }
+        match request.args.as_slice() {
+            [flag, script] if flag == "-c" && script == "printf terminal-ok" => {
+                Ok(schema::CreateTerminalResponse::new("printf"))
+            }
+            [flag, script] if flag == "-c" && script == "sleep 5" => {
+                Ok(schema::CreateTerminalResponse::new("sleep"))
+            }
             _ => Err(acp::Error::invalid_params()),
         }
     }

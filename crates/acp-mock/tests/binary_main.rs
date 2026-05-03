@@ -89,9 +89,16 @@ impl TestClient {
         &self,
         args: schema::CreateTerminalRequest,
     ) -> acp::Result<schema::CreateTerminalResponse> {
-        match args.command.as_str() {
-            "/bin/printf" => Ok(schema::CreateTerminalResponse::new("printf")),
-            "/bin/sleep" => Ok(schema::CreateTerminalResponse::new("sleep")),
+        if args.command != "/bin/sh" {
+            return Err(acp::Error::invalid_params());
+        }
+        match args.args.as_slice() {
+            [flag, script] if flag == "-c" && script == "printf terminal-ok" => {
+                Ok(schema::CreateTerminalResponse::new("printf"))
+            }
+            [flag, script] if flag == "-c" && script == "sleep 5" => {
+                Ok(schema::CreateTerminalResponse::new("sleep"))
+            }
             _ => Err(acp::Error::invalid_params()),
         }
     }

@@ -1050,6 +1050,7 @@ fn configure_chroot_terminal_command(
         if let Ok(relative_cwd) = cwd.strip_prefix(Path::new("/")) {
             command.current_dir(root_dir.join(relative_cwd));
         }
+        configure_host_terminal_process_group(command);
         return Ok(());
     }
 

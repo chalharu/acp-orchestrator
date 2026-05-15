@@ -47,6 +47,7 @@ fn resumed_chat_session() -> ChatSession {
             pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
+                tool_call: None,
             }],
             active_turn: false,
         },

@@ -207,6 +207,7 @@ mod tests {
             pending_permissions: vec![PermissionRequest {
                 request_id: "perm-1".to_string(),
                 summary: "Read README".to_string(),
+                tool_call: None,
             }],
             active_turn: false,
         }

@@ -40,6 +40,7 @@ fn chat_app_updates_pending_permissions_and_connection_state() {
     app.apply_stream_update(StreamUpdate::PermissionRequested(PermissionRequest {
         request_id: "req_1".to_string(),
         summary: "read_text_file README.md".to_string(),
+        tool_call: None,
     }));
     app.apply_stream_update(StreamUpdate::Status("working".to_string()));
     app.apply_stream_update(StreamUpdate::SessionClosed {
@@ -89,6 +90,7 @@ fn chat_app_manages_editor_state_and_permission_updates() {
         &[PermissionRequest {
             request_id: "req_1".to_string(),
             summary: "old request".to_string(),
+            tool_call: None,
         }],
         vec![command_candidate("/help", "Show available slash commands")],
     );
@@ -114,6 +116,7 @@ fn chat_app_manages_editor_state_and_permission_updates() {
     app.replace_pending_permissions(vec![PermissionRequest {
         request_id: "req_2".to_string(),
         summary: "new request".to_string(),
+        tool_call: None,
     }]);
     app.remove_pending_permission("req_missing");
     app.remove_pending_permission("req_2");
@@ -218,10 +221,12 @@ fn chat_app_handles_noop_paths_and_duplicate_permission_events() {
     app.apply_stream_update(StreamUpdate::PermissionRequested(PermissionRequest {
         request_id: "req_1".to_string(),
         summary: "read_text_file README.md".to_string(),
+        tool_call: None,
     }));
     app.apply_stream_update(StreamUpdate::PermissionRequested(PermissionRequest {
         request_id: "req_1".to_string(),
         summary: "read_text_file README.md".to_string(),
+        tool_call: None,
     }));
 
     assert_eq!(app.connection().detail(), None);

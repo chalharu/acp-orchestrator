@@ -102,6 +102,7 @@ mod tests {
         let _resolution = turn
             .register_permission_request(
                 "read_text_file README.md".to_string(),
+                None,
                 "allow_once".to_string(),
                 "reject_once".to_string(),
             )

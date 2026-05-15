@@ -98,6 +98,7 @@ mod tests {
                 pending_permissions: vec![PermissionRequest {
                     request_id: "req_1".to_string(),
                     summary: "read README.md".to_string(),
+                    tool_call: None,
                 }],
                 active_turn: false,
             },
@@ -128,6 +129,7 @@ mod tests {
             vec![PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read README.md".to_string(),
+                tool_call: None,
             }]
         );
         assert_eq!(bootstrap.workspace_id, "w_test");
@@ -139,12 +141,14 @@ mod tests {
         let pending_permissions = vec![PermissionRequest {
             request_id: "req_2".to_string(),
             summary: "inspect src".to_string(),
+            tool_call: None,
         }];
         assert_eq!(
             pending_permissions_to_items(pending_permissions),
             vec![PermissionRequest {
                 request_id: "req_2".to_string(),
                 summary: "inspect src".to_string(),
+                tool_call: None,
             }]
         );
 

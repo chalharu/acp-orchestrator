@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use acp_contracts_messages::ConversationMessage;
-use acp_contracts_permissions::PermissionRequest;
+use acp_contracts_permissions::{PermissionRequest, ToolCallMetadata};
 use acp_contracts_sessions::SessionSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +25,12 @@ pub enum StreamEventPayload {
     PermissionRequested {
         request: PermissionRequest,
     },
+    ToolCall {
+        call: ToolCallMetadata,
+    },
+    ToolCallUpdate {
+        update: ToolCallMetadata,
+    },
     SessionClosed {
         session_id: String,
         reason: String,
@@ -40,6 +46,8 @@ impl StreamEvent {
             StreamEventPayload::SessionSnapshot { .. } => "session.snapshot",
             StreamEventPayload::ConversationMessage { .. } => "conversation.message",
             StreamEventPayload::PermissionRequested { .. } => "tool.permission.requested",
+            StreamEventPayload::ToolCall { .. } => "tool.call",
+            StreamEventPayload::ToolCallUpdate { .. } => "tool.call.update",
             StreamEventPayload::SessionClosed { .. } => "session.closed",
             StreamEventPayload::Status { .. } => "status",
         }
@@ -65,7 +73,7 @@ impl StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::{StreamEvent, StreamEventPayload};
-    use acp_contracts_permissions::PermissionRequest;
+    use acp_contracts_permissions::{PermissionRequest, ToolCallMetadata};
 
     #[test]
     fn session_closed_events_use_the_closed_event_name() {
@@ -88,11 +96,41 @@ mod tests {
                 request: PermissionRequest {
                     request_id: "req_1".to_string(),
                     summary: "read_text_file README.md".to_string(),
+                    tool_call: None,
                 },
             },
         };
 
         assert_eq!(event.event_name(), "tool.permission.requested");
+    }
+
+    #[test]
+    fn tool_events_use_tool_event_names() {
+        let call = ToolCallMetadata {
+            tool_call_id: "tool_1".to_string(),
+            title: Some("Read".to_string()),
+            kind: Some("read".to_string()),
+            status: Some("pending".to_string()),
+            raw_input: None,
+            raw_output: None,
+        };
+
+        assert_eq!(
+            StreamEvent {
+                sequence: 9,
+                payload: StreamEventPayload::ToolCall { call: call.clone() },
+            }
+            .event_name(),
+            "tool.call"
+        );
+        assert_eq!(
+            StreamEvent {
+                sequence: 10,
+                payload: StreamEventPayload::ToolCallUpdate { update: call },
+            }
+            .event_name(),
+            "tool.call.update"
+        );
     }
 
     #[test]

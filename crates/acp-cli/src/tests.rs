@@ -200,6 +200,7 @@ async fn stream_events_renders_new_pending_permissions_from_an_initial_snapshot_
             &[crate::contract_permissions::PermissionRequest {
                 request_id: "req_old".to_string(),
                 summary: "read_text_file Cargo.toml".to_string(),
+                tool_call: None,
             }],
         )),
     )
@@ -256,6 +257,7 @@ fn render_event_covers_all_display_variants() {
         pending_permissions: vec![crate::contract_permissions::PermissionRequest {
             request_id: "req_1".to_string(),
             summary: "read_text_file README.md".to_string(),
+            tool_call: None,
         }],
         active_turn: false,
     };
@@ -277,6 +279,7 @@ fn render_event_covers_all_display_variants() {
             request: crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
+                tool_call: None,
             },
         },
     });
@@ -305,6 +308,7 @@ fn render_resume_history_uses_loaded_history_messages_and_latest_permissions() {
             pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
+                tool_call: None,
             }],
             active_turn: false,
         },
@@ -339,6 +343,7 @@ fn print_chat_status_handles_pending_permissions() {
             pending_permissions: vec![crate::contract_permissions::PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
+                tool_call: None,
             }],
             active_turn: false,
         },

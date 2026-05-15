@@ -119,6 +119,7 @@ mod tests {
         PermissionRequest {
             request_id: id.to_string(),
             summary: format!("summary for {id}"),
+            tool_call: None,
         }
     }
 

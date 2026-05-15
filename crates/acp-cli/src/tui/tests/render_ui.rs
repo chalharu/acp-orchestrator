@@ -10,6 +10,7 @@ fn render_draws_the_slice5_panes() {
         &[PermissionRequest {
             request_id: "req_1".to_string(),
             summary: "read_text_file README.md".to_string(),
+            tool_call: None,
         }],
         vec![
             command_candidate("/help", "Show available slash commands"),

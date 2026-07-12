@@ -1,6 +1,6 @@
 [toolchain]
 # renovate: datasource=github-tags depName=rust-lang/rust versioning=semver
-channel = "1.96.1"
+channel = "1.97.0"
 components = ["clippy", "llvm-tools-preview", "rustfmt"]
 profile = "minimal"
 targets = ["wasm32-unknown-unknown"]

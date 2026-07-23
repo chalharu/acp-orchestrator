@@ -24,8 +24,8 @@ acp-contracts-slash = { path = "../acp-contracts-slash", version = "=0.1.0" }
 acp-contracts-stream = { path = "../acp-contracts-stream", version = "=0.1.0" }
 acp-contracts-workspaces = { path = "../acp-contracts-workspaces", version = "=0.1.0" }
 console_error_panic_hook = "=0.1.7"
-futures-channel = "=0.3.32"
-futures-util = "=0.3.32"
+futures-channel = "=0.3.33"
+futures-util = "=0.3.33"
 gloo-net = { version = "=0.7.0", features = ["http", "json"] }
 icondata = { version = "=0.7.0", default-features = false, features = [
   "font-awesome",

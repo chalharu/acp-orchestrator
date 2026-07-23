@@ -405,7 +405,7 @@ async fn drive_acp_roundtrip(
     upstream_sessions: UpstreamSessions,
 ) -> Result<ReplyResult> {
     let backend_session_id = turn.session_id().to_string();
-    let client = BackendAcpClient::new_muted(turn.clone());
+    let client = BackendAcpClient::new_muted_with_checkout(turn.clone(), working_dir.clone());
     let operation = roundtrip_operation(turn);
 
     drive_acp_operation(
@@ -476,13 +476,14 @@ async fn drive_acp_session_prime(
     request_timeout: Duration,
     upstream_sessions: UpstreamSessions,
 ) -> Result<Option<String>> {
+    let client = BackendAcpClient::without_turn_with_checkout(working_dir.clone());
     drive_acp_operation(
         transport,
         working_dir,
         request_timeout,
         backend_session_id,
         upstream_sessions,
-        BackendAcpClient::without_turn(),
+        client,
         Box::new(
             move |conn,
                   working_dir,
@@ -637,6 +638,104 @@ async fn respond_permission_request(
     Ok(())
 }
 
+async fn respond_read_text_file_request(
+    client: BackendAcpClient,
+    args: schema::ReadTextFileRequest,
+    responder: acp::Responder<schema::ReadTextFileResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.read_text_file(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_write_text_file_request(
+    client: BackendAcpClient,
+    args: schema::WriteTextFileRequest,
+    responder: acp::Responder<schema::WriteTextFileResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.write_text_file(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_create_terminal_request(
+    client: BackendAcpClient,
+    args: schema::CreateTerminalRequest,
+    responder: acp::Responder<schema::CreateTerminalResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.create_terminal(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_terminal_output_request(
+    client: BackendAcpClient,
+    args: schema::TerminalOutputRequest,
+    responder: acp::Responder<schema::TerminalOutputResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.terminal_output(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_wait_for_terminal_exit_request(
+    client: BackendAcpClient,
+    args: schema::WaitForTerminalExitRequest,
+    responder: acp::Responder<schema::WaitForTerminalExitResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.wait_for_terminal_exit(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_kill_terminal_request(
+    client: BackendAcpClient,
+    args: schema::KillTerminalRequest,
+    responder: acp::Responder<schema::KillTerminalResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.kill_terminal(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn respond_release_terminal_request(
+    client: BackendAcpClient,
+    args: schema::ReleaseTerminalRequest,
+    responder: acp::Responder<schema::ReleaseTerminalResponse>,
+    connection: acp::ConnectionTo<acp::Agent>,
+) -> std::result::Result<(), acp::Error> {
+    connection.spawn(async move {
+        let result = client.release_terminal(args).await;
+        responder.respond_with_result(result)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
 async fn forward_session_notification(
     client: BackendAcpClient,
     args: schema::SessionNotification,
@@ -708,7 +807,7 @@ async fn run_connected_operation<T: 'static>(
     upstream_sessions: UpstreamSessions,
     operation: ConnectedOperation<T>,
 ) -> Result<T> {
-    let capabilities = initialize_connection(&conn).await?;
+    let capabilities = initialize_connection(&conn, &working_dir).await?;
     operation(
         conn,
         working_dir,
@@ -720,21 +819,93 @@ async fn run_connected_operation<T: 'static>(
     .await
 }
 
+macro_rules! backend_request_handler {
+    ($client:expr, $request:ty, $handler:ident) => {{
+        let client = $client.clone();
+        async move |args: $request, responder, cx| {
+            $handler(client.clone(), args, responder, cx).await
+        }
+    }};
+}
+
+macro_rules! backend_request_handlers {
+    ($builder:expr, $client:expr) => {
+        $builder
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::RequestPermissionRequest,
+                    respond_permission_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::ReadTextFileRequest,
+                    respond_read_text_file_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::WriteTextFileRequest,
+                    respond_write_text_file_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::CreateTerminalRequest,
+                    respond_create_terminal_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::TerminalOutputRequest,
+                    respond_terminal_output_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::WaitForTerminalExitRequest,
+                    respond_wait_for_terminal_exit_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::KillTerminalRequest,
+                    respond_kill_terminal_request
+                ),
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                backend_request_handler!(
+                    $client,
+                    schema::ReleaseTerminalRequest,
+                    respond_release_terminal_request
+                ),
+                acp::on_receive_request!(),
+            )
+    };
+}
+
 async fn connect_backend_mock_client<T: 'static>(
     io: BackendIo,
     request_client: BackendAcpClient,
     notification_client: BackendAcpClient,
     connected_main: ConnectedMainState<T>,
 ) -> std::result::Result<Result<T>, acp::Error> {
-    acp::Client
-        .builder()
-        .name("acp-web-backend-mock-client")
-        .on_receive_request(
-            async move |args: schema::RequestPermissionRequest, responder, cx| {
-                respond_permission_request(request_client.clone(), args, responder, cx).await
-            },
-            acp::on_receive_request!(),
-        )
+    let builder = acp::Client.builder().name("acp-web-backend-mock-client");
+    backend_request_handlers!(builder, request_client)
         .on_receive_notification(
             async move |args: schema::SessionNotification, _cx| {
                 forward_session_notification(notification_client.clone(), args).await
@@ -976,13 +1147,24 @@ async fn run_connected_main<T: 'static>(
 
 async fn initialize_connection(
     conn: &acp::ConnectionTo<acp::Agent>,
+    working_dir: &Path,
 ) -> Result<AgentConnectionCapabilities> {
+    let supports_filesystem_tools =
+        BackendAcpClient::supports_filesystem_tools_for_checkout(working_dir);
+    let supports_terminal_tools = BackendAcpClient::supports_terminal_for_checkout(working_dir);
+    let client_capabilities = schema::ClientCapabilities::new()
+        .fs(schema::FileSystemCapabilities::new()
+            .read_text_file(supports_filesystem_tools)
+            .write_text_file(supports_filesystem_tools))
+        .terminal(supports_terminal_tools);
     let response = conn
         .send_request(
-            schema::InitializeRequest::new(schema::ProtocolVersion::V1).client_info(
-                schema::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
-                    .title("ACP Web Backend"),
-            ),
+            schema::InitializeRequest::new(schema::ProtocolVersion::V1)
+                .client_capabilities(client_capabilities)
+                .client_info(
+                    schema::Implementation::new("acp-web-backend", env!("CARGO_PKG_VERSION"))
+                        .title("ACP Web Backend"),
+                ),
         )
         .block_task()
         .await

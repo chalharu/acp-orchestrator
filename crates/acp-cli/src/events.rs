@@ -182,6 +182,9 @@ fn event_updates(event: StreamEvent) -> Vec<StreamUpdate> {
         StreamEventPayload::PermissionRequested { request } => {
             vec![StreamUpdate::PermissionRequested(request)]
         }
+        StreamEventPayload::ToolCall { .. } | StreamEventPayload::ToolCallUpdate { .. } => {
+            Vec::new()
+        }
         StreamEventPayload::SessionClosed { session_id, reason } => {
             vec![StreamUpdate::SessionClosed { session_id, reason }]
         }
@@ -285,6 +288,7 @@ mod tests {
             pending_permissions: vec![PermissionRequest {
                 request_id: "req_1".to_string(),
                 summary: "read_text_file README.md".to_string(),
+                tool_call: None,
             }],
             active_turn: false,
         };
@@ -316,10 +320,12 @@ mod tests {
                 PermissionRequest {
                     request_id: "req_known".to_string(),
                     summary: "known".to_string(),
+                    tool_call: None,
                 },
                 PermissionRequest {
                     request_id: "req_new".to_string(),
                     summary: "new".to_string(),
+                    tool_call: None,
                 },
             ],
             active_turn: false,
@@ -329,6 +335,7 @@ mod tests {
             &[PermissionRequest {
                 request_id: "req_known".to_string(),
                 summary: "known".to_string(),
+                tool_call: None,
             }],
         );
 
@@ -365,6 +372,35 @@ mod tests {
                 "m_streamed",
                 "hello"
             ))]
+        );
+    }
+
+    #[test]
+    fn event_updates_ignore_tool_call_progress_events() {
+        let tool_call = acp_contracts_permissions::ToolCallMetadata {
+            tool_call_id: "tool_1".to_string(),
+            title: Some("Read".to_string()),
+            kind: Some("read".to_string()),
+            status: Some("pending".to_string()),
+            raw_input: None,
+            raw_output: None,
+        };
+
+        assert!(
+            event_updates(StreamEvent {
+                sequence: 3,
+                payload: StreamEventPayload::ToolCall {
+                    call: tool_call.clone(),
+                },
+            })
+            .is_empty()
+        );
+        assert!(
+            event_updates(StreamEvent {
+                sequence: 4,
+                payload: StreamEventPayload::ToolCallUpdate { update: tool_call },
+            })
+            .is_empty()
         );
     }
 }

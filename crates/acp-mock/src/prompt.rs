@@ -5,6 +5,7 @@ use tokio::{sync::watch, time::sleep};
 pub const MANUAL_PERMISSION_TRIGGER: &str = "verify permission";
 pub const MANUAL_CANCEL_TRIGGER: &str = "verify cancel";
 pub const MANUAL_FAILURE_TRIGGER: &str = "this will fail";
+pub const MANUAL_RUNTIME_TOOLS_TRIGGER: &str = "verify runtime tools";
 const MANUAL_CANCEL_RESPONSE_DELAY: Duration = Duration::from_secs(10);
 
 pub(super) fn prompt_text(prompt: &[schema::ContentBlock]) -> String {
@@ -44,6 +45,10 @@ pub(super) fn prompt_requires_permission(prompt: &str) -> bool {
 
 pub(super) fn prompt_should_fail(prompt: &str) -> bool {
     normalized_prompt(prompt) == MANUAL_FAILURE_TRIGGER
+}
+
+pub(super) fn prompt_uses_runtime_tools(prompt: &str) -> bool {
+    normalized_prompt(prompt) == MANUAL_RUNTIME_TOOLS_TRIGGER
 }
 
 pub(crate) fn response_delay_for(prompt: &str, default_delay: Duration) -> Duration {

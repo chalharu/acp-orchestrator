@@ -148,6 +148,7 @@ mod tests {
                 &[PermissionRequest {
                     request_id: "req_1".to_string(),
                     summary: "read README.md".to_string(),
+                    tool_call: None,
                 }],
                 true,
             ),

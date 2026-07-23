@@ -151,6 +151,7 @@ name = "acp-contracts-permissions"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -205,6 +206,7 @@ dependencies = [
  "async-trait",
  "clap",
  "futures-util",
+ "serde_json",
  "snafu",
  "tokio",
  "tokio-util",

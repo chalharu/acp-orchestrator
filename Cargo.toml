@@ -71,7 +71,7 @@ hyper-util = { version = "=0.1.20", features = [
   "service",
   "tokio",
 ] }
-libc = "=0.2.186"
+libc = "=0.2.189"
 open = "=5.3.5"
 ratatui = "=0.30.1"
 rcgen = "=0.14.8"

@@ -34,8 +34,8 @@ leptos = { version = "=0.8.19", features = ["csr"] }
 leptos_icons = "=0.7.1"
 pulldown-cmark = "=0.13.3"
 serde_json = "=1.0.149"
-wasm-bindgen = "=0.2.118"
-web-sys = { version = "=0.3.95", features = [
+wasm-bindgen = "=0.2.126"
+web-sys = { version = "=0.3.103", features = [
   "Document",
   "Element",
   "Event",
@@ -57,7 +57,7 @@ web-sys = { version = "=0.3.95", features = [
 
 [dev-dependencies]
 chrono = { version = "=0.4.44", features = ["serde"] }
-wasm-bindgen-test = "=0.3.68"
+wasm-bindgen-test = "=0.3.76"
 
 [profile.release]
 opt-level = "z"
